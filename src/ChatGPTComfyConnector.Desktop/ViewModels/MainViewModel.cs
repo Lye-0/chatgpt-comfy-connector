@@ -26,6 +26,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _isBusy;
     private bool _isSlotLoading;
     private bool _isDirty;
+    private bool _isWorkflowEditorVisible;
     private string _commandText = string.Empty;
     private string _idea = string.Empty;
     private string? _slotLoadError;
@@ -77,6 +78,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
     public string StatusMessage { get => _statusMessage; set { _statusMessage = value; OnPropertyChanged(); } }
     public bool IsSetupVisible { get => _isSetupVisible; private set { _isSetupVisible = value; OnPropertyChanged(); } }
+    public bool IsWorkflowEditorVisible { get => _isWorkflowEditorVisible; private set { _isWorkflowEditorVisible = value; OnPropertyChanged(); } }
     public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
@@ -180,6 +182,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     public void ShowSetup() => IsSetupVisible = true;
+
+    public void ShowWorkflowEditor() => IsWorkflowEditorVisible = true;
+
+    public void HideWorkflowEditor() => IsWorkflowEditorVisible = false;
 
     public async Task ConnectAsync()
     {

@@ -37,6 +37,8 @@ public partial class MainWindow : Window
 
     private async void SaveSetup_Click(object sender, RoutedEventArgs e) => await Run("設定保存", ViewModel.SaveSetupAsync);
     private void Setup_Click(object sender, RoutedEventArgs e) => ViewModel.ShowSetup();
+    private void OpenWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.ShowWorkflowEditor();
+    private void CloseWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.HideWorkflowEditor();
     private async void Connect_Click(object sender, RoutedEventArgs e) => await Run("MCP接続", ViewModel.ConnectAsync);
     private void StartComfy_Click(object sender, RoutedEventArgs e) => RunSync("ComfyUI起動", ViewModel.StartComfyUi);
     private void Refresh_Click(object sender, RoutedEventArgs e) => ViewModel.RefreshWorkflowTree();
@@ -71,6 +73,7 @@ public partial class MainWindow : Window
     private async void ApplyCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド適用", () => ViewModel.ApplyCommandAsync(false));
     private async void ApplyGenerateCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド適用 + 生成", () => ViewModel.ApplyCommandAsync(true));
     private async void CopyBootstrap_Click(object sender, RoutedEventArgs e) { await ViewModel.SaveSessionAsync(); Clipboard.SetText(ViewModel.BuildBootstrapContext()); ViewModel.StatusMessage = "Bootstrap Contextをクリップボードへコピーしました。"; }
+    private void CopyIdea_Click(object sender, RoutedEventArgs e) { Clipboard.SetText(ViewModel.Idea ?? string.Empty); ViewModel.StatusMessage = "制作アイデアをクリップボードへコピーしました。ChatGPTへ貼り付けてください。"; }
     private void CopyResult_Click(object sender, RoutedEventArgs e) { Clipboard.SetText(ViewModel.BuildResultContext()); ViewModel.StatusMessage = "Result Contextをクリップボードへコピーしました。動画・画像は手動添付してください。"; }
     private void OpenOutput_Click(object sender, RoutedEventArgs e)
     {

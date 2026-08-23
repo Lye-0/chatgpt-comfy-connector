@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using System.Runtime.CompilerServices;
 
 namespace ChatGPTComfyConnector.Core.Models;
@@ -229,16 +230,50 @@ public sealed class JobSnapshot
     public List<OutputArtifact> Outputs { get; set; } = [];
 }
 
-public sealed class SessionIteration
+public sealed class SessionIteration : INotifyPropertyChanged
 {
+    private List<OutputArtifact> _outputs = [];
+    private JobStatus _status = JobStatus.Queued;
+    private string? _error;
     public int Number { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public string Prompt { get; set; } = string.Empty;
     public Dictionary<string, JsonNode?> Parameters { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-    public JobStatus Status { get; set; } = JobStatus.Queued;
+    public JobStatus Status
+    {
+        get => _status;
+        set
+        {
+            if (_status == value) return;
+            _status = value;
+            PropertyChanged?.Invoke(this, new(nameof(Status)));
+        }
+    }
     public string? JobId { get; set; }
-    public string? Error { get; set; }
-    public List<OutputArtifact> Outputs { get; set; } = [];
+    public string? Error
+    {
+        get => _error;
+        set
+        {
+            if (string.Equals(_error, value, StringComparison.Ordinal)) return;
+            _error = value;
+            PropertyChanged?.Invoke(this, new(nameof(Error)));
+        }
+    }
+    public List<OutputArtifact> Outputs
+    {
+        get => _outputs;
+        set
+        {
+            _outputs = value ?? [];
+            PropertyChanged?.Invoke(this, new(nameof(Outputs)));
+            PropertyChanged?.Invoke(this, new(nameof(HasOutputs)));
+        }
+    }
+    [JsonIgnore]
+    public bool HasOutputs => Outputs.Count > 0;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 public sealed class CreationSession

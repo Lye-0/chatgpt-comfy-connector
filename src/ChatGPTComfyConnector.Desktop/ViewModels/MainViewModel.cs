@@ -36,6 +36,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _commandReceived;
     private bool _workflowPrepared;
     private GenerationHistoryItem? _selectedHistoryItem;
+    private bool _isWorkflowRenameVisible;
+    private string _workflowRenameText = string.Empty;
 
     public MainViewModel(string applicationDirectory)
     {
@@ -60,6 +62,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         LatestOutputs = [];
         HistoryItems = [];
         PipelineStages = [];
+        Settings.PropertyChanged += Settings_PropertyChanged;
         RefreshPipeline();
     }
 
@@ -76,7 +79,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<GenerationHistoryItem> HistoryItems { get; }
     public ObservableCollection<CreationPipelineStage> PipelineStages { get; }
     public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); NotifyPipelineStateChanged(); } }
-    public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
+    public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
     public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
     public string StatusMessage { get => _statusMessage; set { _statusMessage = value; OnPropertyChanged(); } }
@@ -85,6 +88,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
+    public bool IsWorkflowRenameVisible { get => _isWorkflowRenameVisible; private set { _isWorkflowRenameVisible = value; OnPropertyChanged(); } }
+    public string WorkflowRenameText { get => _workflowRenameText; set { _workflowRenameText = value; OnPropertyChanged(); } }
     public string CommandText
     {
         get => _commandText;
@@ -116,6 +121,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(ViewingIterationText));
             OnPropertyChanged(nameof(IsViewingLatest));
             OnPropertyChanged(nameof(ViewingStateText));
+            OnPropertyChanged(nameof(CurrentOutputFolderPath));
         }
     }
     public OutputArtifact? SelectedPreviewOutput => SelectedHistoryItem?.PrimaryOutput;
@@ -179,6 +185,24 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsJobActive => CurrentJob is { Status: JobStatus.Queued or JobStatus.Running };
     public string WorkflowRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "user", "default", "workflows");
     public string OutputRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "output");
+    public string VideoOutputRoot => Path.Combine(OutputRoot, "video");
+    public string CurrentOutputFolderPath
+    {
+        get
+        {
+            var outputPath = SelectedPreviewOutput?.FullPath;
+            if (!string.IsNullOrWhiteSpace(outputPath))
+            {
+                var fullOutputPath = Path.GetFullPath(outputPath);
+                if (PathSafety.IsWithin(OutputRoot, fullOutputPath))
+                {
+                    var outputFolder = Directory.Exists(fullOutputPath) ? fullOutputPath : Path.GetDirectoryName(fullOutputPath);
+                    if (!string.IsNullOrWhiteSpace(outputFolder) && PathSafety.IsWithin(OutputRoot, outputFolder)) return outputFolder;
+                }
+            }
+            return OutputRoot;
+        }
+    }
 
     public async Task InitializeAsync()
     {
@@ -226,6 +250,28 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void ShowWorkflowEditor() => IsWorkflowEditorVisible = true;
 
     public void HideWorkflowEditor() => IsWorkflowEditorVisible = false;
+
+    public void BeginWorkflowRename()
+    {
+        if (SelectedWorkflow is null) return;
+        WorkflowRenameText = SelectedWorkflowName;
+        IsWorkflowRenameVisible = true;
+        StatusMessage = "Workflow名を入力してEnterで確定、Escでキャンセルしてください。";
+    }
+
+    public void CancelWorkflowRename()
+    {
+        IsWorkflowRenameVisible = false;
+        WorkflowRenameText = string.Empty;
+    }
+
+    public async Task CommitWorkflowRenameAsync()
+    {
+        if (!IsWorkflowRenameVisible) return;
+        await RenameWorkflowAsync(WorkflowRenameText);
+        IsWorkflowRenameVisible = false;
+        WorkflowRenameText = string.Empty;
+    }
 
     public async Task ConnectAsync()
     {
@@ -368,6 +414,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RefreshWorkflowTree();
         await SelectWorkflowAsync(Path.GetRelativePath(WorkflowRoot, destination).Replace('\\', '/'));
         StatusMessage = $"Workflowを複製しました: {safeName}";
+    }
+
+    public async Task DuplicateWorkflowAndBeginRenameAsync()
+    {
+        if (SelectedWorkflow is null) throw new InvalidOperationException("Workflowを選択してください。");
+        var source = SelectedWorkflow.ToAbsolute(WorkflowRoot);
+        var directory = Path.GetDirectoryName(source) ?? WorkflowRoot;
+        var stem = Path.GetFileNameWithoutExtension(source);
+        var baseName = NormalizeWorkflowName($"{stem} - コピー");
+        var safeName = baseName;
+        var suffix = 2;
+        while (File.Exists(Path.Combine(directory, safeName + ".json"))) safeName = $"{baseName} {suffix++}";
+        var destination = Path.Combine(directory, safeName + ".json");
+        PathSafety.RequireWithin(WorkflowRoot, destination);
+        File.Copy(source, destination);
+        RefreshWorkflowTree();
+        await SelectWorkflowAsync(Path.GetRelativePath(WorkflowRoot, destination).Replace('\\', '/'));
+        WorkflowRenameText = safeName;
+        IsWorkflowRenameVisible = true;
+        StatusMessage = "Workflowを複製しました。新しい名前を入力してEnterで確定してください。";
     }
 
     public async Task RenameWorkflowAsync(string name)
@@ -634,6 +700,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ViewingIterationText));
         OnPropertyChanged(nameof(IsViewingLatest));
         OnPropertyChanged(nameof(ViewingStateText));
+        OnPropertyChanged(nameof(CurrentOutputFolderPath));
     }
 
     private Dictionary<string, JsonNode?> BuildChanges() => Slots.ToDictionary(x => x.Address, x => x.ToJsonNode(), StringComparer.OrdinalIgnoreCase);
@@ -789,6 +856,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void OpenOutputFile(string path)
     {
+        EnsurePortableRootConfigured();
         var fullPath = Path.GetFullPath(path);
         PathSafety.RequireWithin(OutputRoot, fullPath);
         if (!File.Exists(fullPath)) throw new FileNotFoundException("出力ファイルが見つかりません。", fullPath);
@@ -797,12 +865,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void OpenOutputFolder(string path)
     {
+        EnsurePortableRootConfigured();
         var fullPath = Path.GetFullPath(path);
         PathSafety.RequireWithin(OutputRoot, fullPath);
         var folder = Directory.Exists(fullPath) ? fullPath : Path.GetDirectoryName(fullPath);
         if (string.IsNullOrWhiteSpace(folder)) throw new DirectoryNotFoundException("出力フォルダを特定できません。");
         Directory.CreateDirectory(folder);
         Process.Start(new ProcessStartInfo("explorer.exe", $"\"{folder}\"") { UseShellExecute = true });
+    }
+
+    private void EnsurePortableRootConfigured()
+    {
+        if (string.IsNullOrWhiteSpace(Settings.PortableRoot)) throw new InvalidOperationException("先にSETUPでComfyUI Portableの場所を指定してください。");
+    }
+
+    private void Settings_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(AppSettings.PortableRoot) or null)
+        {
+            OnPropertyChanged(nameof(WorkflowRoot));
+            OnPropertyChanged(nameof(OutputRoot));
+            OnPropertyChanged(nameof(VideoOutputRoot));
+            OnPropertyChanged(nameof(CurrentOutputFolderPath));
+        }
     }
 
     private void ValidateSettings()

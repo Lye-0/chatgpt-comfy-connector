@@ -548,20 +548,37 @@
                                    FontSize="18"
                                    FontWeight="SemiBold"
                                    Margin="0,4,0,9" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <Button Content="REFRESH"
-                                    ToolTip="Workflow一覧を再読み込み"
+                        <StackPanel Orientation="Horizontal">
+                            <Button Style="{StaticResource IconButtonStyle}"
+                                    Content="&#xE72C;"
+                                    ToolTip="ワークフロー一覧を更新"
+                                    AutomationProperties.Name="ワークフロー一覧を更新"
                                     Click="Refresh_Click" />
-                            <Button Grid.Column="1"
-                                    Content="フォルダ"
-                                    ToolTip="Workflowフォルダを開く"
-                                    Click="OpenWorkflowFolder_Click"
-                                    Margin="6,0,0,0" />
-                        </Grid>
+                            <Button Style="{StaticResource IconButtonStyle}"
+                                    Content="&#xE838;"
+                                    ToolTip="ワークフローフォルダを開く"
+                                    AutomationProperties.Name="ワークフローフォルダを開く"
+                                    Click="OpenWorkflowFolder_Click" />
+                            <Button Style="{StaticResource IconButtonStyle}"
+                                    Content="&#xE8C8;"
+                                    ToolTip="選択中のワークフローを複製"
+                                    AutomationProperties.Name="選択中のワークフローを複製"
+                                    Click="Duplicate_Click"
+                                    IsEnabled="{Binding HasSelectedWorkflow}" />
+                            <Button Style="{StaticResource IconButtonStyle}"
+                                    Content="&#xE70F;"
+                                    ToolTip="選択中のワークフロー名を変更"
+                                    AutomationProperties.Name="選択中のワークフロー名を変更"
+                                    Click="Rename_Click"
+                                    IsEnabled="{Binding HasSelectedWorkflow}" />
+                            <Button Style="{StaticResource IconButtonStyle}"
+                                    Content="&#xE713;"
+                                    ToolTip="選択中ワークフローの設定を開く"
+                                    AutomationProperties.Name="選択中ワークフローの設定を開く"
+                                    Click="OpenWorkflowEditor_Click"
+                                    IsEnabled="{Binding HasSelectedWorkflow}"
+                                    Margin="0" />
+                        </StackPanel>
                     </StackPanel>
                     <Border Grid.Row="1"
                             Background="#0A101C"
@@ -572,7 +589,8 @@
                         <Grid>
                             <ScrollViewer VerticalScrollBarVisibility="Auto"
                                           HorizontalScrollBarVisibility="Disabled">
-                                <TreeView ItemsSource="{Binding TreeNodes}"
+                                <TreeView x:Name="WorkflowTree"
+                                          ItemsSource="{Binding TreeNodes}"
                                           SelectedItemChanged="WorkflowTree_SelectedItemChanged">
                                     <TreeView.ItemTemplate>
                                         <HierarchicalDataTemplate ItemsSource="{Binding Children}">
@@ -602,52 +620,48 @@
                     <Border Grid.Row="2"
                             Background="{StaticResource PanelSoftBrush}"
                             CornerRadius="10"
-                            Padding="11"
-                            Margin="0,11,0,0"
+                            Padding="9"
+                            Margin="0,10,0,0"
                             BorderBrush="{StaticResource LineBrush}"
                             BorderThickness="1">
                         <StackPanel>
-                            <TextBlock Text="選択中のWorkflow"
-                                       FontSize="11"
-                                       Foreground="{StaticResource AccentBrush}"
-                                       FontWeight="SemiBold" />
-                            <TextBlock Text="{Binding SelectedWorkflowText}"
-                                       Foreground="{StaticResource WarmBrush}"
-                                       TextWrapping="Wrap"
-                                       TextTrimming="CharacterEllipsis"
-                                       MaxHeight="36"
-                                       Margin="0,4,0,3" />
-                            <TextBlock Text="{Binding WorkflowSlotSummaryText}"
-                                       Foreground="{StaticResource MutedTextBrush}"
-                                       FontSize="10"
-                                       TextWrapping="Wrap"
-                                       Margin="0,0,0,9" />
-                            <Button Content="設定を編集"
-                                    ToolTip="主要設定・詳細設定・Backup / Restoreを開く"
-                                    Click="OpenWorkflowEditor_Click"
-                                    Background="{StaticResource AccentBrush}"
-                                    Foreground="#071117"
-                                    FontWeight="SemiBold"
-                                    IsEnabled="{Binding HasSelectedWorkflow}"
-                                    Margin="0,0,0,8" />
-                            <TextBox x:Name="WorkflowNameBox"
-                                     ToolTip="拡張子を除いた新しいWorkflow名"
-                                     Margin="0,0,0,8" />
                             <Grid>
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
-                                <Button Content="複製"
-                                        ToolTip="選択中Workflowを複製"
-                                        Click="Duplicate_Click"
-                                        IsEnabled="{Binding HasSelectedWorkflow}" />
-                                <Button Grid.Column="1"
-                                        Content="名前変更"
-                                        ToolTip="選択中Workflowの名前を変更"
-                                        Click="Rename_Click"
-                                        IsEnabled="{Binding HasSelectedWorkflow}"
-                                        Margin="6,0,0,0" />
+                                <TextBlock Text="選択中"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontSize="10"
+                                           FontWeight="SemiBold"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding SelectedWorkflowName}"
+                                           Foreground="{StaticResource WarmBrush}"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding SelectedWorkflowText}"
+                                           Margin="8,0,0,0" />
+                            </Grid>
+                            <Grid Margin="0,6,0,0">
+                                <TextBlock Text="{Binding WorkflowSlotSummaryText}"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="10"
+                                           TextWrapping="Wrap"
+                                           Visibility="{Binding IsWorkflowRenameVisible, Converter={StaticResource InverseBoolToVisibility}}" />
+                                <StackPanel Orientation="Horizontal"
+                                            Visibility="{Binding IsWorkflowRenameVisible, Converter={StaticResource BoolToVisibility}}">
+                                    <TextBox x:Name="WorkflowRenameBox"
+                                             Text="{Binding WorkflowRenameText, UpdateSourceTrigger=PropertyChanged}"
+                                             ToolTip="Enterで確定 / Escでキャンセル（拡張子は不要）"
+                                             KeyDown="WorkflowRenameBox_KeyDown"
+                                             MinWidth="150"
+                                             Padding="7,5" />
+                                    <TextBlock Text="Enterで確定 · Escでキャンセル"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="9"
+                                               VerticalAlignment="Center"
+                                               Margin="7,0,0,0" />
+                                </StackPanel>
                             </Grid>
                         </StackPanel>
                     </Border>
@@ -797,25 +811,39 @@
                                                    VerticalAlignment="Center" />
                                     </StackPanel>
                                 </StackPanel>
-                                <Border Grid.Column="1"
-                                        Background="#162A3A"
-                                        BorderBrush="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
-                                        BorderThickness="1"
-                                        CornerRadius="7"
-                                        Padding="8,5"
-                                        VerticalAlignment="Center">
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="{Binding ViewingStateText}"
-                                                   Foreground="{StaticResource AccentStrongBrush}"
-                                                   FontSize="9"
-                                                   FontWeight="SemiBold"
-                                                   Margin="0,0,9,0" />
-                                        <TextBlock Text="{Binding JobStatusText}"
-                                                   Foreground="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
-                                                   FontSize="9"
-                                                   FontWeight="SemiBold" />
-                                    </StackPanel>
-                                </Border>
+                                <StackPanel Grid.Column="1"
+                                            Orientation="Horizontal"
+                                            VerticalAlignment="Center">
+                                    <Button Style="{StaticResource IconButtonStyle}"
+                                            Content="&#xE838;"
+                                            ToolTip="生成物の保存フォルダを開く（未生成時はComfyUI output）"
+                                            AutomationProperties.Name="生成物の保存フォルダを開く"
+                                            Tag="{Binding CurrentOutputFolderPath}"
+                                            Click="OpenOutputFolder_Click" />
+                                    <Button Style="{StaticResource IconButtonStyle}"
+                                            Content="&#xE714;"
+                                            ToolTip="動画出力フォルダを開く（ComfyUI output video）"
+                                            AutomationProperties.Name="動画出力フォルダを開く"
+                                            Tag="{Binding VideoOutputRoot}"
+                                            Click="OpenOutputFolder_Click" />
+                                    <Border Background="#162A3A"
+                                            BorderBrush="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
+                                            BorderThickness="1"
+                                            CornerRadius="7"
+                                            Padding="8,5">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding ViewingStateText}"
+                                                       Foreground="{StaticResource AccentStrongBrush}"
+                                                       FontSize="9"
+                                                       FontWeight="SemiBold"
+                                                       Margin="0,0,9,0" />
+                                            <TextBlock Text="{Binding JobStatusText}"
+                                                       Foreground="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
+                                                       FontSize="9"
+                                                       FontWeight="SemiBold" />
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
                             </Grid>
 
                             <Grid Grid.Row="1" Margin="0,10,0,10">
@@ -1464,6 +1492,101 @@
                         <Label Content="最大反復回数" />
                         <TextBox Text="{Binding Settings.MaximumIterations, UpdateSourceTrigger=PropertyChanged}"
                                  Margin="0,4,0,20" />
+                        <Border Background="{StaticResource PanelSoftBrush}"
+                                BorderBrush="{StaticResource LineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="9"
+                                Padding="12"
+                                Margin="0,0,0,18">
+                            <StackPanel>
+                                <TextBlock Text="主要パス"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontSize="11"
+                                           FontWeight="SemiBold" />
+                                <TextBlock Text="Portable Rootから解決した保存先を確認できます。"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="10"
+                                           Margin="0,3,0,10"
+                                           TextWrapping="Wrap" />
+                                <Grid Margin="0,0,0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Workflow"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               VerticalAlignment="Center"
+                                               Width="82" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding WorkflowRoot}"
+                                               Foreground="{StaticResource TextBrush}"
+                                               FontSize="10"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding WorkflowRoot}"
+                                               VerticalAlignment="Center" />
+                                    <Button Grid.Column="2"
+                                            Content="開く"
+                                            ToolTip="Workflow保存フォルダを開く"
+                                            Click="OpenWorkflowFolder_Click"
+                                            Padding="8,4"
+                                            Margin="8,0,0,0" />
+                                </Grid>
+                                <Grid Margin="0,0,0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Output"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               VerticalAlignment="Center"
+                                               Width="82" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding OutputRoot}"
+                                               Foreground="{StaticResource TextBrush}"
+                                               FontSize="10"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding OutputRoot}"
+                                               VerticalAlignment="Center" />
+                                    <Button Grid.Column="2"
+                                            Content="開く"
+                                            ToolTip="生成出力フォルダを開く"
+                                            Tag="{Binding OutputRoot}"
+                                            Click="OpenOutputFolder_Click"
+                                            Padding="8,4"
+                                            Margin="8,0,0,0" />
+                                </Grid>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Video"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               VerticalAlignment="Center"
+                                               Width="82" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding VideoOutputRoot}"
+                                               Foreground="{StaticResource TextBrush}"
+                                               FontSize="10"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding VideoOutputRoot}"
+                                               VerticalAlignment="Center" />
+                                    <Button Grid.Column="2"
+                                            Content="開く"
+                                            ToolTip="動画出力フォルダを開く"
+                                            Tag="{Binding VideoOutputRoot}"
+                                            Click="OpenOutputFolder_Click"
+                                            Padding="8,4"
+                                            Margin="8,0,0,0" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
                         <StackPanel Orientation="Horizontal">
                             <Button Content="設定を保存"
                                     Background="{StaticResource AccentBrush}"

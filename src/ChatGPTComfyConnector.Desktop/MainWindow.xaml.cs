@@ -2,6 +2,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Input;
+using System.Windows.Threading;
 using ChatGPTComfyConnector.Core.Models;
 using ChatGPTComfyConnector.Desktop.ViewModels;
 
@@ -65,8 +67,33 @@ public partial class MainWindow : Window
     private async void Generate_Click(object sender, RoutedEventArgs e) => await Run("生成", () => ViewModel.GenerateAsync());
     private async void CancelJob_Click(object sender, RoutedEventArgs e) => await Run("JobのCANCEL", ViewModel.CancelJobAsync);
     private async void Restore_Click(object sender, RoutedEventArgs e) { if (BackupCombo.SelectedItem is string path) await Run("復元", () => ViewModel.RestoreBackupAsync(path)); }
-    private async void Duplicate_Click(object sender, RoutedEventArgs e) => await Run("Workflow複製", () => ViewModel.DuplicateWorkflowAsync(WorkflowNameBox.Text));
-    private async void Rename_Click(object sender, RoutedEventArgs e) => await Run("Workflow名前変更", () => ViewModel.RenameWorkflowAsync(WorkflowNameBox.Text));
+    private async void Duplicate_Click(object sender, RoutedEventArgs e)
+    {
+        await Run("Workflow複製", ViewModel.DuplicateWorkflowAndBeginRenameAsync);
+        if (ViewModel.IsWorkflowRenameVisible) FocusWorkflowRenameBox();
+    }
+
+    private void Rename_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.BeginWorkflowRename();
+        if (ViewModel.IsWorkflowRenameVisible) FocusWorkflowRenameBox();
+    }
+
+    private async void WorkflowRenameBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            ViewModel.CancelWorkflowRename();
+            e.Handled = true;
+            return;
+        }
+        if (e.Key == Key.Enter)
+        {
+            e.Handled = true;
+            await Run("Workflow名前変更", ViewModel.CommitWorkflowRenameAsync);
+            if (!ViewModel.IsWorkflowRenameVisible) WorkflowTree.Focus();
+        }
+    }
     private void NewSession_Click(object sender, RoutedEventArgs e) => ViewModel.CreateNewSession();
     private async void Resume_Click(object sender, RoutedEventArgs e) => await Run("セッション再開", ViewModel.ResumeSessionAsync);
     private async void ImportCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド検証", ViewModel.ImportCommandAsync);
@@ -92,6 +119,15 @@ public partial class MainWindow : Window
         => ViewModel.StatusMessage = "動画プレビューに対応していません。OPENでOSの既定アプリを使用できます。";
 
     private void OpenLogs_Click(object sender, RoutedEventArgs e) => OpenFolder(Path.Combine(AppContext.BaseDirectory, "logs"));
+
+    private void FocusWorkflowRenameBox()
+    {
+        Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+        {
+            WorkflowRenameBox.Focus();
+            WorkflowRenameBox.SelectAll();
+        }));
+    }
 
     private async Task Run(string title, Func<Task> operation)
     {

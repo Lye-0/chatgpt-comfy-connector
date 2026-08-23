@@ -11,6 +11,8 @@ namespace ChatGPTComfyConnector.Desktop;
 
 public partial class MainWindow : Window
 {
+    private readonly DispatcherTimer _comfyUiStatusTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    private bool _refreshingComfyUiStatus;
     private bool _closeAfterDisconnect;
     private bool _disconnectingForClose;
     private MainViewModel ViewModel => (MainViewModel)DataContext;
@@ -19,13 +21,22 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = new MainViewModel(AppContext.BaseDirectory);
+        _comfyUiStatusTimer.Tick += ComfyUiStatusTimer_Tick;
     }
 
-    private async void Window_Loaded(object sender, RoutedEventArgs e) => await ViewModel.InitializeAsync();
+    private async void Window_Loaded(object sender, RoutedEventArgs e)
+    {
+        _comfyUiStatusTimer.Start();
+        await ViewModel.InitializeAsync();
+    }
 
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
-        if (_closeAfterDisconnect) return;
+        if (_closeAfterDisconnect)
+        {
+            _comfyUiStatusTimer.Stop();
+            return;
+        }
         if (ViewModel.IsDirty)
         {
             MessageBox.Show("未保存のWorkflow変更があります。保存してから終了してください。", "未保存変更", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -37,6 +48,7 @@ public partial class MainWindow : Window
             e.Cancel = true;
             return;
         }
+        _comfyUiStatusTimer.Stop();
         e.Cancel = true;
         if (_disconnectingForClose) return;
         _disconnectingForClose = true;
@@ -58,7 +70,7 @@ public partial class MainWindow : Window
     private void OpenWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.ShowWorkflowEditor();
     private void CloseWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.HideWorkflowEditor();
     private async void Connect_Click(object sender, RoutedEventArgs e) => await Run("MCP接続", ViewModel.ConnectAsync);
-    private void StartComfy_Click(object sender, RoutedEventArgs e) => RunSync("ComfyUI起動", ViewModel.StartComfyUi);
+    private async void StartComfy_Click(object sender, RoutedEventArgs e) => await Run("ComfyUI起動", ViewModel.StartComfyUiAsync);
     private void Refresh_Click(object sender, RoutedEventArgs e) => ViewModel.RefreshWorkflowTree();
     private void OpenWorkflowFolder_Click(object sender, RoutedEventArgs e) => OpenFolder(ViewModel.WorkflowRoot);
     private async void RetryWorkflow_Click(object sender, RoutedEventArgs e)
@@ -178,6 +190,29 @@ public partial class MainWindow : Window
         => ViewModel.StatusMessage = "動画プレビューに対応していません。OPENでOSの既定アプリを使用できます。";
 
     private void OpenLogs_Click(object sender, RoutedEventArgs e) => OpenFolder(Path.Combine(AppContext.BaseDirectory, "logs"));
+
+    private async void ComfyUiStatusTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_refreshingComfyUiStatus || !ViewModel.IsConnected || ViewModel.IsComfyUiReachable) return;
+        _refreshingComfyUiStatus = true;
+        try
+        {
+            // A user may start ComfyUI from its own terminal or browser rather
+            // than through START COMFYUI. Keep the header from retaining an
+            // old STOPPED value by retrying while the last known state is not
+            // ready. Generate still performs its own immediate preflight.
+            await ViewModel.RefreshComfyUiStatusAsync();
+        }
+        catch
+        {
+            // The next tick will retry. Connection failures are handled by the
+            // ViewModel and should not surface as an unhandled async-void error.
+        }
+        finally
+        {
+            _refreshingComfyUiStatus = false;
+        }
+    }
 
     private void FocusWorkflowRenameBox()
     {

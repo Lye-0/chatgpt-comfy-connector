@@ -18,6 +18,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly PortableStore _store;
     private readonly ComfyMcpClientProxy _mcp;
     private readonly WorkflowCatalog _catalog;
+    private readonly SemaphoreSlim _comfyUiStatusGate = new(1, 1);
     private CreationSession? _currentSession;
     private WorkflowIdentity? _selectedWorkflow;
     private JobSnapshot? _currentJob;
@@ -971,12 +972,40 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StatusMessage = "現在のWorkflowをbackupした後、選択した世代を復元しました。";
     }
 
-    public void StartComfyUi()
+    public async Task StartComfyUiAsync()
     {
         var batch = Path.Combine(Settings.PortableRoot, "run_nvidia_gpu.bat");
         if (!File.Exists(batch)) throw new FileNotFoundException("ComfyUI起動batchが見つかりません。", batch);
         Process.Start(new ProcessStartInfo(batch) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(batch) });
-        StatusMessage = "ComfyUIの起動を要求しました。ConnectorはComfyUIを終了しません。";
+        StatusMessage = "ComfyUIの起動を要求しました。起動状態を確認しています…";
+
+        // START COMFYUI can be pressed after MCP is already connected.  The
+        // batch file starts ComfyUI asynchronously, so refresh the same live
+        // status used by Generate instead of leaving the header at a stale
+        // STOPPED snapshot from ConnectAsync.
+        if (!IsConnected)
+        {
+            StatusMessage = "ComfyUIの起動を要求しました。ConnectorはComfyUIを終了しません。";
+            return;
+        }
+
+        // Do a few immediate checks for the normal startup path. The window
+        // timer continues retrying after this method returns, so a slow model
+        // load does not keep the command handler waiting indefinitely.
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            if (await RefreshComfyUiStatusAsync())
+            {
+                StatusMessage = "ComfyUIが起動しました。生成を実行できます。";
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(2));
+        }
+
+        StatusMessage = IsComfyUiReachable
+            ? "ComfyUIが起動しました。生成を実行できます。"
+            : "ComfyUIの起動を要求しましたが、まだ応答を確認できません。";
     }
 
     private async Task MonitorJobAsync(SessionIteration iteration)
@@ -1545,9 +1574,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private async Task<bool> RefreshComfyUiStatusAsync()
+    public async Task<bool> RefreshComfyUiStatusAsync()
     {
         if (!IsConnected) return false;
+        await _comfyUiStatusGate.WaitAsync();
         try
         {
             _serverInfo = await _mcp.CallAsync("server_info", new Dictionary<string, object?>());
@@ -1562,6 +1592,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
             await _store.LogAsync("connection", $"ComfyUI状態確認を延期しました: {ex.Message}", ex);
             NotifyConnectionStateChanged();
             return false;
+        }
+        finally
+        {
+            _comfyUiStatusGate.Release();
         }
     }
 

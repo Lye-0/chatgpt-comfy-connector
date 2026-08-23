@@ -96,6 +96,11 @@ ComfyUI readiness is checked immediately before operations that need it, through
 stage becomes `WaitingUser`; Context, Idea, and Manual Handoff remain usable while the
 user starts ComfyUI. CONNECT itself is never downgraded merely because ComfyUI is stopped.
 
+The Desktop header refreshes this live ComfyUI status after `START COMFYUI` and while a
+connected session still reports a non-ready state. This also covers starting ComfyUI
+outside Connector. The header therefore does not treat the one-time `ConnectAsync`
+snapshot as permanent; Generate retains its immediate preflight as the final gate.
+
 ## Manual Handoff and timeline
 
 v0.1 uses a manual clipboard transport: Connector creates a self-contained Bootstrap

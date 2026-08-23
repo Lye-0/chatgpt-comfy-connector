@@ -48,6 +48,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _projectValidationMessage = string.Empty;
     private string _chatValidationMessage = string.Empty;
     private int _sessionMaximumIterations = 10;
+    // A persisted session may be loaded for history, but it is not the new
+    // creation draft until the user explicitly starts or resumes it.
+    private bool _isCurrentSessionActivated;
 
     public MainViewModel(string applicationDirectory)
     {
@@ -238,8 +241,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string CurrentCreationStageText => GetCurrentPipelineStage().Label;
     public string CurrentCreationStageDescription => GetCurrentPipelineStage().Description;
     public string CurrentCreationStageState => GetCurrentPipelineStage().State;
-    public string CurrentIterationLabel => CurrentSession is null || CurrentSession.Pipeline.IterationNumber == 0 ? "ITERATION —" : CurrentSession.Pipeline.IterationNumber > CurrentSession.CurrentIteration ? $"ITERATION {CurrentSession.Pipeline.IterationNumber:00} · PREP" : $"ITERATION {CurrentSession.CurrentIteration:00}";
-    public string PipelineLoopText => CurrentSession?.Status == SessionStatus.Completed ? "SESSION COMPLETE" : HasIterationSafetyStop ? "SAFETY STOP · USER DECISION" : "REVIEW → NEXT ITERATION / COMPLETE";
+    public string CurrentIterationLabel => !_isCurrentSessionActivated || CurrentSession is null || CurrentSession.Pipeline.IterationNumber == 0 ? "ITERATION —" : CurrentSession.Pipeline.IterationNumber > CurrentSession.CurrentIteration ? $"ITERATION {CurrentSession.Pipeline.IterationNumber:00} · PREP" : $"ITERATION {CurrentSession.CurrentIteration:00}";
+    public string PipelineLoopText => !_isCurrentSessionActivated ? "CONTEXT → 新しい制作を開始" : CurrentSession?.Status == SessionStatus.Completed ? "SESSION COMPLETE" : HasIterationSafetyStop ? "SAFETY STOP · USER DECISION" : "REVIEW → NEXT ITERATION / COMPLETE";
     public string SessionStatusText => CurrentSession?.Status.ToString().ToUpperInvariant() ?? "NEW";
     public string JobStatusText => CurrentJob is null ? "IDLE" : CurrentJob.Status.ToString().ToUpperInvariant();
     public string JobStatusDetailText => CurrentJob is null ? "生成待機中" : IsJobActive ? "ComfyUIで生成を実行中" : CurrentJob.Status switch { JobStatus.Completed => "生成が完了しました", JobStatus.Failed => "生成に失敗しました", JobStatus.Cancelled => "生成をキャンセルしました", _ => "Jobを確認してください" };
@@ -273,16 +276,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasChatValidationMessage => !string.IsNullOrWhiteSpace(ChatValidationMessage);
     public bool CanStartNewCreation => HasSelectedWorkflow && HasSelectedProject && HasSelectedChat && SessionMaximumIterations is >= 1 and <= 1000 && !IsJobActive;
     public bool CanResumeSession => CurrentSession?.Status is SessionStatus.Completed or SessionStatus.Paused or SessionStatus.Stopped or SessionStatus.Error;
-    public bool CanApplyCommand => _pendingValidation is { IsValid: true, Command: not null } command && command.Command.Action == "generate" && !HasIterationSafetyStop;
+    public bool CanApplyCommand => _isCurrentSessionActivated && _pendingValidation is { IsValid: true, Command: not null } command && command.Command.Action == "generate" && !HasIterationSafetyStop;
     public bool ShowWorkflowEmptyState => !HasSelectedWorkflow;
     public bool ShowDisconnectedState => HasSelectedWorkflow && !IsConnected;
     public bool ShowSlotLoadingState => HasSelectedWorkflow && IsConnected && IsSlotLoading;
     public bool ShowSlotErrorState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && HasSlotLoadError;
     public bool ShowNoSlotState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && !HasSlots;
     public bool ShowReadyState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && HasSlots;
-    public bool CanRunWorkflow => HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && CurrentSession is not null && CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Generate).State is CreationStageState.Current or CreationStageState.Error or CreationStageState.Cancelled;
-    public bool HasIterationSafetyStop => CurrentSession?.Pipeline.MaximumIterationSafetyStop == true;
-    public bool HasPendingContextChange => CurrentSession?.Pipeline.ContextBound == true &&
+    public bool CanRunWorkflow => _isCurrentSessionActivated && HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && CurrentSession is not null && CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Generate).State is CreationStageState.Current or CreationStageState.Error or CreationStageState.Cancelled;
+    public bool HasIterationSafetyStop => _isCurrentSessionActivated && CurrentSession?.Pipeline.MaximumIterationSafetyStop == true;
+    public bool HasPendingContextChange => _isCurrentSessionActivated && CurrentSession?.Pipeline.ContextBound == true &&
         (SelectedWorkflow?.RelativePath != CurrentSession.BoundWorkflow?.RelativePath || SelectedProject?.Id != CurrentSession.LocalProjectContextId || SelectedChat?.Id != CurrentSession.LocalChatContextId || SessionMaximumIterations != CurrentSession.MaximumIterations);
     public bool IsJobActive => CurrentJob is { Status: JobStatus.Queued or JobStatus.Running };
     public string WorkflowRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "user", "default", "workflows");
@@ -321,6 +324,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Sessions.Clear();
         foreach (var session in await _store.LoadSessionsAsync()) Sessions.Add(session);
         CurrentSession = Sessions.FirstOrDefault() ?? NewSessionInternal();
+        // Loading a persisted session is not the same as starting a new creation.
+        // Keep its history available, while the setup screen remains at CONTEXT
+        // until the user explicitly activates the session.
+        _isCurrentSessionActivated = false;
+        NotifyPipelineStateChanged();
         CreationPipelineStateMachine.EnsureInitialized(CurrentSession);
         await InitializeLocalContextsAsync();
         SessionMaximumIterations = CurrentSession.MaximumIterations;
@@ -639,8 +647,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Sessions.Insert(0, session);
         CurrentSession = session;
         CreationPipelineStateMachine.BindContext(session);
+        _isCurrentSessionActivated = true;
         ResetSessionWorkspace(session);
         await _store.SaveSessionAsync(session);
+        NotifyPipelineStateChanged();
         StatusMessage = "新しい制作を開始しました。中央の制作アイデアから進めてください。";
     }
 
@@ -658,6 +668,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CurrentSession.MaximumIterations = SessionMaximumIterations;
         CurrentSession.Title = $"{SelectedProject.DisplayName} / {SelectedChat.DisplayName}";
         CreationPipelineStateMachine.BindContext(CurrentSession);
+        _isCurrentSessionActivated = true;
         await _store.SaveSessionAsync(CurrentSession);
         OnPropertyChanged(nameof(CurrentSessionContextText));
         OnPropertyChanged(nameof(SessionTitle));
@@ -846,6 +857,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task ResumeSessionAsync()
     {
         if (CurrentSession is null) return;
+        _isCurrentSessionActivated = true;
         CreationPipelineStateMachine.Resume(CurrentSession);
         RefreshHistoryFlags();
         await _store.SaveSessionAsync(CurrentSession);
@@ -1272,7 +1284,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         for (var index = 0; index < CreationPipelineStateMachine.OrderedStages.Length; index++)
         {
             var stage = CreationPipelineStateMachine.OrderedStages[index];
-            var status = CreationPipelineStateMachine.Get(CurrentSession, stage);
+            var status = _isCurrentSessionActivated
+                ? CreationPipelineStateMachine.Get(CurrentSession, stage)
+                : new CreationStageStatus
+                {
+                    Stage = stage,
+                    State = stage == CreationStage.Context ? CreationStageState.Current : CreationStageState.NotReached,
+                    Detail = stage == CreationStage.Context
+                        ? "Workflow / Project / Chat / Maximum Iterations / Session Bindingを確認して新しい制作を開始してください"
+                        : string.Empty,
+                };
             var definition = definitions[stage];
             var state = status.State.ToString().ToUpperInvariant();
             var stateLabel = status.State switch

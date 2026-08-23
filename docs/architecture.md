@@ -12,6 +12,20 @@ WPF Desktop
        └─ ComfyMcpClient: official C# SDK StdioClientTransport
 ```
 
+## Project / Chat context providers
+
+Project and Chat selection is provider-neutral at the UI and Session boundaries.
+`IProjectChatProvider` supplies a `ProjectChatCatalog` made of `ProjectContextOption`
+and `ChatContextOption` values. The current `LocalProjectChatProvider` is one
+implementation backed by `chatgpt-contexts.json`; future Browser Extension or
+Handoff providers can be injected into `MainViewModel` without changing the
+selection UI or the creation flow.
+
+`CreationSession` persists `ContextProviderId`, `ProjectContextKey`, and
+`ChatContextKey` as the canonical binding. The older `LocalProjectContextId` and
+`LocalChatContextId` fields remain only as a compatibility fallback for existing
+session JSON and are populated for the local provider.
+
 The UI never accepts an absolute Workflow path from a ChatGPT command. A GUI-selected `WorkflowIdentity` is the authority. Every operation resolves a relative path beneath the configured Workflow root and rejects traversal or overwrite.
 
 ## Save and generation sequence

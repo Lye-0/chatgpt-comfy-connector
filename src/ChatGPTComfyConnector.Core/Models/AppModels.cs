@@ -42,6 +42,11 @@ public enum ContextBindingMode
     External,
 }
 
+public static class ContextProviderIds
+{
+    public const string LocalJson = "local-json";
+}
+
 public enum HandoffDirection
 {
     ChatGptToComfy,
@@ -277,6 +282,49 @@ public sealed class JobSnapshot
     public List<OutputArtifact> Outputs { get; set; } = [];
 }
 
+public sealed class ProjectChatBindingSnapshot
+{
+    public string ProviderId { get; init; } = string.Empty;
+    public string? ProjectKey { get; init; }
+    public string? ChatKey { get; init; }
+    public string? ProjectExternalId { get; init; }
+    public string? ChatExternalId { get; init; }
+    public string ProjectLabel { get; init; } = string.Empty;
+    public string ChatLabel { get; init; } = string.Empty;
+}
+
+public sealed class ChatContextOption
+{
+    public string ProviderId { get; set; } = string.Empty;
+    public string ProjectKey { get; set; } = string.Empty;
+    public string Key { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string? ExternalId { get; set; }
+    public ContextBindingMode Mode { get; set; } = ContextBindingMode.Local;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    [JsonIgnore]
+    public bool IsCreateAction { get; set; }
+}
+
+public sealed class ProjectContextOption
+{
+    public string ProviderId { get; set; } = string.Empty;
+    public string Key { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string? ExternalId { get; set; }
+    public ContextBindingMode Mode { get; set; } = ContextBindingMode.Local;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public List<ChatContextOption> Chats { get; set; } = [];
+    [JsonIgnore]
+    public bool IsCreateAction { get; set; }
+}
+
+public sealed class ProjectChatCatalog
+{
+    public string ProviderId { get; set; } = string.Empty;
+    public List<ProjectContextOption> Projects { get; set; } = [];
+}
+
 public sealed class LocalChatContext
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -392,6 +440,9 @@ public sealed class CreationSession
     public string OriginalIdea { get; set; } = string.Empty;
     public string ProjectLabel { get; set; } = string.Empty;
     public string ChatLabel { get; set; } = string.Empty;
+    public string? ContextProviderId { get; set; }
+    public string? ProjectContextKey { get; set; }
+    public string? ChatContextKey { get; set; }
     public string? LocalProjectContextId { get; set; }
     public string? LocalChatContextId { get; set; }
     public string? ProjectId { get; set; }
@@ -406,6 +457,26 @@ public sealed class CreationSession
     public string? LastError { get; set; }
     public string? PauseReason { get; set; }
     public string? CompletionReason { get; set; }
+
+    [JsonIgnore]
+    public string EffectiveContextProviderId => string.IsNullOrWhiteSpace(ContextProviderId) ? ContextProviderIds.LocalJson : ContextProviderId;
+    [JsonIgnore]
+    public string? EffectiveProjectContextKey => string.IsNullOrWhiteSpace(ProjectContextKey) ? LocalProjectContextId : ProjectContextKey;
+    [JsonIgnore]
+    public string? EffectiveChatContextKey => string.IsNullOrWhiteSpace(ChatContextKey) ? LocalChatContextId : ChatContextKey;
+    [JsonIgnore]
+    public bool HasBoundProjectChat => !string.IsNullOrWhiteSpace(EffectiveProjectContextKey) && !string.IsNullOrWhiteSpace(EffectiveChatContextKey);
+
+    public ProjectChatBindingSnapshot ToProjectChatBindingSnapshot() => new()
+    {
+        ProviderId = EffectiveContextProviderId,
+        ProjectKey = EffectiveProjectContextKey,
+        ChatKey = EffectiveChatContextKey,
+        ProjectExternalId = ProjectId,
+        ChatExternalId = ConversationId,
+        ProjectLabel = ProjectLabel,
+        ChatLabel = ChatLabel,
+    };
 
     public bool CanGenerate => Status is SessionStatus.New or SessionStatus.Active or SessionStatus.Paused or SessionStatus.Error;
     public bool AtIterationLimit => CurrentIteration >= MaximumIterations;

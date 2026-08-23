@@ -54,7 +54,7 @@ public static class CreationPipelineStateMachine
 
     public static void BindContext(CreationSession session)
     {
-        if (session.BoundWorkflow is null || string.IsNullOrWhiteSpace(session.LocalProjectContextId) || string.IsNullOrWhiteSpace(session.LocalChatContextId) || session.MaximumIterations < 1)
+        if (session.BoundWorkflow is null || !session.HasBoundProjectChat || session.MaximumIterations < 1)
         {
             throw new InvalidOperationException("Workflow・Project・Chat・Maximum Iterationsをすべて設定してください。");
         }
@@ -260,7 +260,7 @@ public static class CreationPipelineStateMachine
 
     private static void InferLegacyState(CreationSession session)
     {
-        var bound = session.BoundWorkflow is not null && !string.IsNullOrWhiteSpace(session.LocalProjectContextId) && !string.IsNullOrWhiteSpace(session.LocalChatContextId) && session.MaximumIterations > 0;
+        var bound = session.BoundWorkflow is not null && session.HasBoundProjectChat && session.MaximumIterations > 0;
         if (!bound)
         {
             Set(session, CreationStage.Context, CreationStageState.Current, "Workflow / Project / Chatを設定してください");

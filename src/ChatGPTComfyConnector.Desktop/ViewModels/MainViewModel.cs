@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using ChatGPTComfyConnector.Core.Models;
 using ChatGPTComfyConnector.Core.Services;
+using ChatGPTComfyConnector.Infrastructure.Contexts;
 using ChatGPTComfyConnector.Infrastructure.Storage;
 using ChatGPTComfyConnector.Infrastructure.Workflows;
 
@@ -36,11 +37,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private GenerationHistoryItem? _selectedHistoryItem;
     private bool _isWorkflowRenameVisible;
     private string _workflowRenameText = string.Empty;
-    private LocalContextCatalog _localContexts = new();
-    private readonly LocalProjectContext _createProjectOption = new() { Id = "__create_project__", DisplayName = "＋ 新しいProjectを作成", IsCreateAction = true };
-    private readonly LocalChatContext _createChatOption = new() { Id = "__create_chat__", DisplayName = "＋ 新しいChatを作成", IsCreateAction = true };
-    private LocalProjectContext? _selectedProject;
-    private LocalChatContext? _selectedChat;
+    private readonly IProjectChatProvider _contextProvider;
+    private ProjectChatCatalog _contextCatalog = new();
+    private readonly ProjectContextOption _createProjectOption = new() { Key = "__create_project__", DisplayName = "＋ 新しいProjectを作成", IsCreateAction = true };
+    private readonly ChatContextOption _createChatOption = new() { Key = "__create_chat__", DisplayName = "＋ 新しいChatを作成", IsCreateAction = true };
+    private ProjectContextOption? _selectedProject;
+    private ChatContextOption? _selectedChat;
     private bool _isProjectCreateVisible;
     private bool _isChatCreateVisible;
     private string _newProjectName = string.Empty;
@@ -52,10 +54,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // creation draft until the user explicitly starts or resumes it.
     private bool _isCurrentSessionActivated;
 
-    public MainViewModel(string applicationDirectory)
+    public MainViewModel(string applicationDirectory, IProjectChatProvider? contextProvider = null)
     {
         _layout = new PortableLayout(applicationDirectory);
         _store = new PortableStore(_layout);
+        _contextProvider = contextProvider ?? new LocalProjectChatProvider(_store);
         _mcp = new ComfyMcpClientProxy(_store);
         _catalog = new WorkflowCatalog(_mcp, _store);
         Settings = new AppSettings
@@ -94,8 +97,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<OutputArtifact> LatestOutputs { get; }
     public ObservableCollection<GenerationHistoryItem> HistoryItems { get; }
     public ObservableCollection<CreationPipelineStage> PipelineStages { get; }
-    public ObservableCollection<LocalProjectContext> ProjectOptions { get; }
-    public ObservableCollection<LocalChatContext> ChatOptions { get; }
+    public ObservableCollection<ProjectContextOption> ProjectOptions { get; }
+    public ObservableCollection<ChatContextOption> ChatOptions { get; }
     public ObservableCollection<HandoffTimelineItem> HandoffItems { get; }
     public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); NotifyPipelineStateChanged(); } }
     public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); NotifyContextSelectionChanged(); } }
@@ -109,7 +112,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
     public bool IsWorkflowRenameVisible { get => _isWorkflowRenameVisible; private set { _isWorkflowRenameVisible = value; OnPropertyChanged(); } }
     public string WorkflowRenameText { get => _workflowRenameText; set { _workflowRenameText = value; OnPropertyChanged(); } }
-    public LocalProjectContext? SelectedProject
+    public ProjectContextOption? SelectedProject
     {
         get => _selectedProject;
         set
@@ -140,7 +143,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             NotifyContextSelectionChanged();
         }
     }
-    public LocalChatContext? SelectedChat
+    public ChatContextOption? SelectedChat
     {
         get => _selectedChat;
         set
@@ -286,7 +289,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool CanRunWorkflow => _isCurrentSessionActivated && HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && CurrentSession is not null && CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Generate).State is CreationStageState.Current or CreationStageState.Error or CreationStageState.Cancelled;
     public bool HasIterationSafetyStop => _isCurrentSessionActivated && CurrentSession?.Pipeline.MaximumIterationSafetyStop == true;
     public bool HasPendingContextChange => _isCurrentSessionActivated && CurrentSession?.Pipeline.ContextBound == true &&
-        (SelectedWorkflow?.RelativePath != CurrentSession.BoundWorkflow?.RelativePath || SelectedProject?.Id != CurrentSession.LocalProjectContextId || SelectedChat?.Id != CurrentSession.LocalChatContextId || SessionMaximumIterations != CurrentSession.MaximumIterations);
+        (SelectedWorkflow?.RelativePath != CurrentSession.BoundWorkflow?.RelativePath || SelectedProject?.ProviderId != CurrentSession.EffectiveContextProviderId || SelectedProject?.Key != CurrentSession.EffectiveProjectContextKey || SelectedChat?.ProviderId != CurrentSession.EffectiveContextProviderId || SelectedChat?.Key != CurrentSession.EffectiveChatContextKey || SessionMaximumIterations != CurrentSession.MaximumIterations);
     public bool IsJobActive => CurrentJob is { Status: JobStatus.Queued or JobStatus.Running };
     public string WorkflowRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "user", "default", "workflows");
     public string OutputRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "output");
@@ -330,7 +333,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _isCurrentSessionActivated = false;
         NotifyPipelineStateChanged();
         CreationPipelineStateMachine.EnsureInitialized(CurrentSession);
-        await InitializeLocalContextsAsync();
+        await InitializeContextProviderAsync();
         SessionMaximumIterations = CurrentSession.MaximumIterations;
         Idea = CurrentSession.OriginalIdea;
         Iterations.Clear();
@@ -581,18 +584,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task CreateProjectAsync()
     {
         var name = NormalizeContextName(NewProjectName, "Project");
-        if (_localContexts.Projects.Any(project => string.Equals(project.DisplayName, name, StringComparison.OrdinalIgnoreCase)))
+        if (ProjectOptions.Any(project => !project.IsCreateAction && string.Equals(project.DisplayName, name, StringComparison.OrdinalIgnoreCase)))
         {
             ProjectValidationMessage = "同名のProjectが既にあります。";
             throw new InvalidOperationException(ProjectValidationMessage);
         }
-        var project = new LocalProjectContext { DisplayName = name };
-        _localContexts.Projects.Add(project);
-        await _store.SaveLocalContextsAsync(_localContexts);
-        RefreshProjectOptions(project.Id);
+        var project = await _contextProvider.CreateProjectAsync(name);
+        await ReloadContextOptionsAsync(project.Key);
         IsProjectCreateVisible = false;
         NewProjectName = string.Empty;
-        StatusMessage = $"ローカルProjectを作成しました: {name}";
+        StatusMessage = $"Projectを作成しました ({_contextProvider.ProviderId}): {name}";
     }
 
     public async Task CreateChatAsync()
@@ -604,13 +605,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ChatValidationMessage = "同名のChatがこのProjectに既にあります。";
             throw new InvalidOperationException(ChatValidationMessage);
         }
-        var chat = new LocalChatContext { DisplayName = name };
-        SelectedProject.Chats.Add(chat);
-        await _store.SaveLocalContextsAsync(_localContexts);
-        RefreshChatOptions(chat.Id);
+        var chat = await _contextProvider.CreateChatAsync(SelectedProject, name);
+        await ReloadContextOptionsAsync(SelectedProject.Key, chat.Key);
         IsChatCreateVisible = false;
         NewChatName = string.Empty;
-        StatusMessage = $"ローカルChatを作成しました: {name}";
+        StatusMessage = $"Chatを作成しました ({_contextProvider.ProviderId}): {name}";
     }
 
     public void CancelProjectCreation()
@@ -637,13 +636,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Title = $"{SelectedProject!.DisplayName} / {SelectedChat!.DisplayName}",
             ProjectLabel = SelectedProject.DisplayName,
             ChatLabel = SelectedChat.DisplayName,
-            LocalProjectContextId = SelectedProject.Id,
-            LocalChatContextId = SelectedChat.Id,
             ProjectId = SelectedProject.ExternalId,
             ConversationId = SelectedChat.ExternalId,
             MaximumIterations = SessionMaximumIterations,
             BoundWorkflow = SelectedWorkflow,
         };
+        BindSessionContext(session, SelectedProject, SelectedChat);
         Sessions.Insert(0, session);
         CurrentSession = session;
         CreationPipelineStateMachine.BindContext(session);
@@ -660,13 +658,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (CurrentSession is null) throw new InvalidOperationException("現在の制作セッションがありません。");
         CurrentSession.ProjectLabel = SelectedProject!.DisplayName;
         CurrentSession.ChatLabel = SelectedChat!.DisplayName;
-        CurrentSession.LocalProjectContextId = SelectedProject.Id;
-        CurrentSession.LocalChatContextId = SelectedChat.Id;
         CurrentSession.ProjectId = SelectedProject.ExternalId;
         CurrentSession.ConversationId = SelectedChat.ExternalId;
         CurrentSession.BoundWorkflow = SelectedWorkflow;
         CurrentSession.MaximumIterations = SessionMaximumIterations;
         CurrentSession.Title = $"{SelectedProject.DisplayName} / {SelectedChat.DisplayName}";
+        BindSessionContext(CurrentSession, SelectedProject, SelectedChat);
         CreationPipelineStateMachine.BindContext(CurrentSession);
         _isCurrentSessionActivated = true;
         await _store.SaveSessionAsync(CurrentSession);
@@ -996,91 +993,58 @@ public sealed class MainViewModel : INotifyPropertyChanged
         return session;
     }
 
-    private async Task InitializeLocalContextsAsync()
+    private async Task InitializeContextProviderAsync()
     {
-        _localContexts = await _store.LoadLocalContextsAsync() ?? new LocalContextCatalog();
-        var changed = false;
-        if (_localContexts.Version < 2)
-        {
-            var legacyDefault = _localContexts.Projects.Count == 1
-                ? _localContexts.Projects[0]
-                : null;
-            if (legacyDefault is not null
-                && string.Equals(legacyDefault.DisplayName, "ComfyUI × ChatGPT", StringComparison.Ordinal)
-                && legacyDefault.Chats.Count == 1
-                && string.Equals(legacyDefault.Chats[0].DisplayName, "新しい制作", StringComparison.Ordinal)
-                && Sessions.All(session => session.LocalProjectContextId != legacyDefault.Id))
-            {
-                _localContexts.Projects.Clear();
-            }
-            _localContexts.Version = 2;
-            changed = true;
-        }
-
+        _contextCatalog = await _contextProvider.LoadAsync(Sessions.Select(session => session.ToProjectChatBindingSnapshot()).ToArray());
         if (CurrentSession is not null)
         {
-            var project = _localContexts.Projects.FirstOrDefault(item => item.Id == CurrentSession.LocalProjectContextId);
-            if (project is null && !string.IsNullOrWhiteSpace(CurrentSession.ProjectLabel))
+            var project = FindProjectForSession(CurrentSession);
+            var chat = project is null ? null : FindChatForSession(project, CurrentSession);
+            if (project is not null && chat is not null)
             {
-                project = _localContexts.Projects.FirstOrDefault(item => string.Equals(item.DisplayName, CurrentSession.ProjectLabel, StringComparison.OrdinalIgnoreCase));
-                if (project is null)
-                {
-                    project = new LocalProjectContext { DisplayName = CurrentSession.ProjectLabel.Trim(), ExternalId = CurrentSession.ProjectId };
-                    _localContexts.Projects.Add(project);
-                }
-                CurrentSession.LocalProjectContextId = project.Id;
-                changed = true;
-            }
-
-            if (project is not null && !string.IsNullOrWhiteSpace(CurrentSession.ChatLabel))
-            {
-                var chat = project.Chats.FirstOrDefault(item => item.Id == CurrentSession.LocalChatContextId)
-                    ?? project.Chats.FirstOrDefault(item => string.Equals(item.DisplayName, CurrentSession.ChatLabel, StringComparison.OrdinalIgnoreCase));
-                if (chat is null)
-                {
-                    chat = new LocalChatContext { DisplayName = CurrentSession.ChatLabel.Trim(), ExternalId = CurrentSession.ConversationId };
-                    project.Chats.Add(chat);
-                }
-                CurrentSession.LocalChatContextId = chat.Id;
-                changed = true;
+                var before = CurrentSession.ToProjectChatBindingSnapshot();
+                BindSessionContext(CurrentSession, project, chat);
+                var after = CurrentSession.ToProjectChatBindingSnapshot();
+                if (!BindingEquals(before, after)) await _store.SaveSessionAsync(CurrentSession);
             }
         }
 
-        if (changed)
-        {
-            await _store.SaveLocalContextsAsync(_localContexts);
-            if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
-        }
-        RefreshProjectOptions(CurrentSession?.LocalProjectContextId);
-        RefreshChatOptions(CurrentSession?.LocalChatContextId);
+        RefreshProjectOptions(CurrentSession?.EffectiveProjectContextKey, CurrentSession?.EffectiveChatContextKey);
     }
 
-    private void RefreshProjectOptions(string? preferredId = null)
+    private async Task ReloadContextOptionsAsync(string? preferredProjectKey = null, string? preferredChatKey = null)
     {
-        var targetId = preferredId ?? _selectedProject?.Id;
+        _contextCatalog = await _contextProvider.LoadAsync(Sessions.Select(session => session.ToProjectChatBindingSnapshot()).ToArray());
+        RefreshProjectOptions(preferredProjectKey ?? CurrentSession?.EffectiveProjectContextKey, preferredChatKey ?? CurrentSession?.EffectiveChatContextKey);
+    }
+
+    private void RefreshProjectOptions(string? preferredProjectKey = null, string? preferredChatKey = null)
+    {
+        var targetKey = preferredProjectKey ?? _selectedProject?.Key;
         ProjectOptions.Clear();
-        foreach (var project in _localContexts.Projects.OrderBy(item => item.CreatedAt)) ProjectOptions.Add(project);
+        foreach (var project in _contextCatalog.Projects.OrderBy(item => item.CreatedAt)) ProjectOptions.Add(project);
         ProjectOptions.Add(_createProjectOption);
-        _selectedProject = ProjectOptions.FirstOrDefault(item => !item.IsCreateAction && item.Id == targetId)
+        _selectedProject = ProjectOptions.FirstOrDefault(item => !item.IsCreateAction && string.Equals(item.ProviderId, _contextProvider.ProviderId, StringComparison.OrdinalIgnoreCase) && item.Key == targetKey)
             ?? null;
         OnPropertyChanged(nameof(SelectedProject));
         OnPropertyChanged(nameof(HasSelectedProject));
         OnPropertyChanged(nameof(CanCreateChat));
         OnPropertyChanged(nameof(CanStartNewCreation));
-        RefreshChatOptions(_selectedProject?.Id == CurrentSession?.LocalProjectContextId ? CurrentSession?.LocalChatContextId : null);
+        RefreshChatOptions(_selectedProject?.Key, preferredChatKey);
         NotifyContextSelectionChanged();
     }
 
-    private void RefreshChatOptions(string? preferredId = null)
+    private void RefreshChatOptions(string? preferredProjectKey = null, string? preferredChatKey = null)
     {
-        var targetId = preferredId ?? _selectedChat?.Id;
+        var targetProjectKey = preferredProjectKey ?? _selectedProject?.Key;
+        var targetChatKey = preferredChatKey ?? _selectedChat?.Key;
         ChatOptions.Clear();
-        if (_selectedProject is not null)
+        if (_selectedProject is not null && string.Equals(_selectedProject.Key, targetProjectKey, StringComparison.OrdinalIgnoreCase))
         {
             foreach (var chat in _selectedProject.Chats.OrderBy(item => item.CreatedAt)) ChatOptions.Add(chat);
             ChatOptions.Add(_createChatOption);
         }
-        _selectedChat = ChatOptions.FirstOrDefault(item => !item.IsCreateAction && item.Id == targetId)
+        _selectedChat = ChatOptions.FirstOrDefault(item => !item.IsCreateAction && string.Equals(item.ProviderId, _contextProvider.ProviderId, StringComparison.OrdinalIgnoreCase) && item.Key == targetChatKey)
             ?? null;
         OnPropertyChanged(nameof(SelectedChat));
         OnPropertyChanged(nameof(HasSelectedChat));
@@ -1105,6 +1069,53 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CurrentSessionContextText));
         NotifyPipelineStateChanged();
     }
+
+    private ProjectContextOption? FindProjectForSession(CreationSession session)
+    {
+        var providerId = session.EffectiveContextProviderId;
+        return _contextCatalog.Projects.FirstOrDefault(project =>
+                   string.Equals(project.ProviderId, providerId, StringComparison.OrdinalIgnoreCase)
+                   && string.Equals(project.Key, session.EffectiveProjectContextKey, StringComparison.OrdinalIgnoreCase))
+            ?? _contextCatalog.Projects.FirstOrDefault(project =>
+                string.Equals(project.ProviderId, providerId, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(project.DisplayName, session.ProjectLabel, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static ChatContextOption? FindChatForSession(ProjectContextOption project, CreationSession session)
+        => project.Chats.FirstOrDefault(chat => string.Equals(chat.Key, session.EffectiveChatContextKey, StringComparison.OrdinalIgnoreCase))
+            ?? project.Chats.FirstOrDefault(chat => string.Equals(chat.DisplayName, session.ChatLabel, StringComparison.OrdinalIgnoreCase));
+
+    private static void BindSessionContext(CreationSession session, ProjectContextOption project, ChatContextOption chat)
+    {
+        if (!string.Equals(project.ProviderId, chat.ProviderId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(project.Key, chat.ProjectKey, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("ProjectとChatのProvider参照が一致しません。");
+        }
+
+        session.ContextProviderId = project.ProviderId;
+        session.ProjectContextKey = project.Key;
+        session.ChatContextKey = chat.Key;
+        session.ProjectId = project.ExternalId;
+        session.ConversationId = chat.ExternalId;
+        if (string.Equals(project.ProviderId, ContextProviderIds.LocalJson, StringComparison.OrdinalIgnoreCase))
+        {
+            session.LocalProjectContextId = project.Key;
+            session.LocalChatContextId = chat.Key;
+        }
+        else
+        {
+            session.LocalProjectContextId = null;
+            session.LocalChatContextId = null;
+        }
+    }
+
+    private static bool BindingEquals(ProjectChatBindingSnapshot left, ProjectChatBindingSnapshot right)
+        => string.Equals(left.ProviderId, right.ProviderId, StringComparison.Ordinal)
+            && string.Equals(left.ProjectKey, right.ProjectKey, StringComparison.Ordinal)
+            && string.Equals(left.ChatKey, right.ChatKey, StringComparison.Ordinal)
+            && string.Equals(left.ProjectExternalId, right.ProjectExternalId, StringComparison.Ordinal)
+            && string.Equals(left.ChatExternalId, right.ChatExternalId, StringComparison.Ordinal);
 
     private void ValidateNewCreationSetup()
     {

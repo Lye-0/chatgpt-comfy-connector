@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
 using ChatGPTComfyConnector.Core.Models;
+using ChatGPTComfyConnector.Core.Services;
+using ChatGPTComfyConnector.Infrastructure.Contexts;
 using ChatGPTComfyConnector.Infrastructure.Storage;
 
 namespace ChatGPTComfyConnector.Tests;
@@ -93,5 +95,52 @@ public sealed class SessionAndStorageTests
             Assert.Equal(HandoffTransportState.Copied, Assert.Single(loadedSession.HandoffMessages).State);
         }
         finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
+    }
+
+    [Fact]
+    public async Task LocalJsonProviderExposesProviderNeutralProjectAndChatOptions()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "connector-provider-tests-" + Guid.NewGuid().ToString("N"));
+        var store = new PortableStore(new PortableLayout(temp));
+        var provider = new LocalProjectChatProvider(store);
+        try
+        {
+            var project = await provider.CreateProjectAsync("Film Project");
+            var chat = await provider.CreateChatAsync(project, "Scene 01");
+
+            var catalog = await provider.LoadAsync([]);
+            var loadedProject = Assert.Single(catalog.Projects);
+            var loadedChat = Assert.Single(loadedProject.Chats);
+
+            Assert.Equal(ContextProviderIds.LocalJson, catalog.ProviderId);
+            Assert.Equal(ContextProviderIds.LocalJson, loadedProject.ProviderId);
+            Assert.Equal(project.Key, loadedProject.Key);
+            Assert.Equal(loadedProject.Key, loadedChat.ProjectKey);
+            Assert.Equal(chat.Key, loadedChat.Key);
+            Assert.Equal("Scene 01", loadedChat.DisplayName);
+        }
+        finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
+    }
+
+    [Fact]
+    public void SessionBindingSupportsNonLocalProviderReferences()
+    {
+        var session = new CreationSession
+        {
+            BoundWorkflow = WorkflowIdentity.Create("test.json"),
+            ContextProviderId = "browser-extension",
+            ProjectContextKey = "project-42",
+            ChatContextKey = "chat-7",
+            ProjectLabel = "Remote Project",
+            ChatLabel = "Scene 07",
+            MaximumIterations = 10,
+        };
+
+        CreationPipelineStateMachine.BindContext(session);
+
+        Assert.True(session.HasBoundProjectChat);
+        Assert.Equal("browser-extension", session.EffectiveContextProviderId);
+        Assert.Equal("project-42", session.EffectiveProjectContextKey);
+        Assert.Equal(CreationStageState.Completed, CreationPipelineStateMachine.Get(session, CreationStage.Context).State);
     }
 }

@@ -17,6 +17,14 @@ public interface IPortableStore
     Task LogAsync(string category, string message, Exception? exception = null, CancellationToken cancellationToken = default);
 }
 
+public interface IProjectChatProvider
+{
+    string ProviderId { get; }
+    Task<ProjectChatCatalog> LoadAsync(IReadOnlyCollection<ProjectChatBindingSnapshot> existingBindings, CancellationToken cancellationToken = default);
+    Task<ProjectContextOption> CreateProjectAsync(string displayName, CancellationToken cancellationToken = default);
+    Task<ChatContextOption> CreateChatAsync(ProjectContextOption project, string displayName, CancellationToken cancellationToken = default);
+}
+
 public interface IComfyMcpClient : IAsyncDisposable
 {
     bool IsConnected { get; }

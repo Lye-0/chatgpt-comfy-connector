@@ -641,16 +641,28 @@
                                     IsEnabled="{Binding HasSelectedWorkflow}">
                                 <Viewbox Width="16" Height="16" Stretch="Uniform">
                                     <Canvas Width="24" Height="24">
-                                        <Rectangle Width="12" Height="12"
-                                                   Canvas.Left="6" Canvas.Top="3"
+                                        <Rectangle Width="13" Height="14"
+                                                   Canvas.Left="8" Canvas.Top="3"
+                                                   RadiusX="1.5" RadiusY="1.5"
                                                    Fill="Transparent"
                                                    Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                                                    StrokeThickness="1.8" />
-                                        <Rectangle Width="12" Height="12"
-                                                   Canvas.Left="2" Canvas.Top="8"
+                                        <Rectangle Width="13" Height="14"
+                                                   Canvas.Left="3" Canvas.Top="7"
+                                                   RadiusX="1.5" RadiusY="1.5"
                                                    Fill="Transparent"
                                                    Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                                                    StrokeThickness="1.8" />
+                                        <Line X1="6.5" Y1="14" X2="12.5" Y2="14"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                              StrokeThickness="1.8"
+                                              StrokeStartLineCap="Round"
+                                              StrokeEndLineCap="Round" />
+                                        <Line X1="9.5" Y1="11" X2="9.5" Y2="17"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                              StrokeThickness="1.8"
+                                              StrokeStartLineCap="Round"
+                                              StrokeEndLineCap="Round" />
                                     </Canvas>
                                 </Viewbox>
                             </Button>

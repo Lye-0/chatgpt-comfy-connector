@@ -85,6 +85,7 @@ public static partial class ConnectorProtocol
         foreach (var property in slots)
         {
             if (!schema.TryGetValue(property.Key, out var slot)) { errors.Add($"現在のHandoffに存在しないslotです: {property.Key}"); continue; }
+            if (!slot.IsWritableByChatGpt) { errors.Add($"slot {property.Key} は現在のHandoffでChatGPTから変更できません。"); continue; }
             if (property.Value is null) { errors.Add($"slot値をnullにはできません: {property.Key}"); continue; }
 
             JsonNode? value;
@@ -131,7 +132,12 @@ public static partial class ConnectorProtocol
             _ => value is JsonValue,
         };
         if (!valid) { errors.Add($"slot {slot.Address} の型が不正です。期待型: {slot.Type}"); return false; }
-        if (slot.Kind == WorkflowSlotType.Enum && slot.Choices is { Count: > 0 } && !slot.Choices.Any(choice => JsonNode.DeepEquals(choice, value)))
+        if (slot.Kind == WorkflowSlotType.Enum && slot.Choices is not { Count: > 0 })
+        {
+            errors.Add($"slot {slot.Address} は許可されたchoicesを取得できないため変更できません。");
+            return false;
+        }
+        if (slot.Kind == WorkflowSlotType.Enum && !slot.Choices!.Any(choice => JsonNode.DeepEquals(choice, value)))
         {
             errors.Add($"slot {slot.Address} の値は許可されたchoicesに含まれていません。");
             return false;
@@ -280,13 +286,56 @@ public static class PendingHandoffFactory
             WorkflowIdentity = session.BoundWorkflow?.RelativePath ?? string.Empty,
             Iteration = session.CurrentIteration,
             AllowedActions = allowedActions.Distinct(StringComparer.Ordinal).ToList(),
-            Slots = slots.Select(slot => new HandoffSlotSnapshot
-            {
-                Address = slot.Address, Label = slot.Label, Type = slot.Type, CurrentValue = slot.CurrentValue?.DeepClone(),
-                Choices = slot.Choices?.DeepClone() as JsonArray, Minimum = slot.Minimum, Maximum = slot.Maximum,
-                Transport = slot.Kind is WorkflowSlotType.String or WorkflowSlotType.File or WorkflowSlotType.Unknown ? SlotValueTransport.Payload : SlotValueTransport.Json,
-            }).ToList(),
+            Slots = slots.Select(ChatGptSlotPolicy.CreateSnapshot).ToList(),
         };
+}
+
+public static class ChatGptSlotPolicy
+{
+    private static readonly string[] CreativeTokens =
+    [
+        "prompt", "seed", "duration", "length", "fps", "width", "height", "aspectratio", "megapixel", "steps", "denoise",
+    ];
+
+    private static readonly string[] ProtectedTokens =
+    [
+        "filename", "filepath", "outputpath", "directory", "folder", "checkpoint", "ckpt", "model", "unet", "vae", "clipname",
+        "weightdtype", "device", "expression", "formula",
+    ];
+
+    public static HandoffSlotSnapshot CreateSnapshot(WorkflowSlot slot)
+    {
+        var transport = slot.Kind is WorkflowSlotType.String or WorkflowSlotType.File or WorkflowSlotType.Unknown
+            ? SlotValueTransport.Payload
+            : SlotValueTransport.Json;
+        var (exposure, reason) = Evaluate(slot);
+        return new HandoffSlotSnapshot
+        {
+            Address = slot.Address,
+            Label = slot.Label,
+            Type = slot.Type,
+            CurrentValue = slot.CurrentValue?.DeepClone(),
+            Choices = slot.Choices?.DeepClone() as JsonArray,
+            Minimum = slot.Minimum,
+            Maximum = slot.Maximum,
+            Transport = transport,
+            Exposure = exposure,
+            PolicyReason = reason,
+        };
+    }
+
+    public static (ChatGptSlotExposure Exposure, string Reason) Evaluate(WorkflowSlot slot)
+    {
+        var semantic = Normalize($"{slot.Label} {slot.Address.Split('.').LastOrDefault()}");
+        if (ProtectedTokens.Any(semantic.Contains)) return (ChatGptSlotExposure.Hidden, "workflow implementation or filesystem setting");
+        if (!CreativeTokens.Any(semantic.Contains)) return (ChatGptSlotExposure.Hidden, "not recognized as a creative control");
+        if (slot.Kind == WorkflowSlotType.Enum && slot.Choices is not { Count: > 0 }) return (ChatGptSlotExposure.ReadOnly, "allowed choices unavailable");
+        if (slot.Kind is WorkflowSlotType.Unknown or WorkflowSlotType.File) return (ChatGptSlotExposure.Hidden, "unsupported or unsafe value type");
+        return (ChatGptSlotExposure.Writable, "recognized creative control");
+    }
+
+    private static string Normalize(string value)
+        => new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 }
 
 public static class ConnectorContextBuilder
@@ -310,22 +359,28 @@ public static class ConnectorContextBuilder
         sb.AppendLine($"boundary_id: {handoff.BoundaryId}");
         sb.AppendLine($"Payload boundary: {handoff.BoundaryId}");
         sb.AppendLine($"Allowed actions for this Handoff: {string.Join(", ", handoff.AllowedActions)}");
-        sb.AppendLine("Echo handoff_id and session_id exactly. Use only listed slot addresses and include only changed slots.");
+        sb.AppendLine("Echo handoff_id and session_id exactly. Use only slot addresses explicitly listed as writable and include only changed slots.");
         sb.AppendLine("Never invent slot addresses or filesystem paths. Connector owns Workflow, Session, Project, Chat and iteration state.");
         sb.AppendLine("String/free-form/multiline slots must use payload_id. Number, boolean and enum slots use direct JSON values.");
         sb.AppendLine("Every referenced payload must have exactly one block; do not add unreferenced blocks. Preserve the exact boundary_id.");
         sb.AppendLine();
-        sb.AppendLine("Generate response grammar:");
-        sb.AppendLine("```connector-command");
-        sb.AppendLine($"{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"generate\",\"handoff_id\":\"<echo supplied handoff_id>\",\"session_id\":\"<echo supplied session_id>\",\"slots\":{{\"<payload-string-slot-address>\":{{\"payload_id\":\"prompt-main\"}},\"<numeric-slot-address>\":5}}}}");
-        sb.AppendLine("```");
-        sb.AppendLine("<<<COMFY_PAYLOAD:prompt-main:<supplied-boundary>>>");
-        sb.AppendLine("<raw UTF-8 text>");
-        sb.AppendLine("<<<END_COMFY_PAYLOAD:prompt-main:<supplied-boundary>>>");
-        sb.AppendLine("Complete response grammar:");
-        sb.AppendLine("```connector-command");
-        sb.AppendLine($"{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"complete\",\"handoff_id\":\"<echo supplied handoff_id>\",\"session_id\":\"<echo supplied session_id>\",\"reason\":\"<concise reason>\"}}");
-        sb.AppendLine("```");
+        if (handoff.AllowedActions.Contains("generate", StringComparer.Ordinal))
+        {
+            sb.AppendLine("Generate response grammar:");
+            sb.AppendLine("```connector-command");
+            sb.AppendLine($"{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"generate\",\"handoff_id\":\"<echo supplied handoff_id>\",\"session_id\":\"<echo supplied session_id>\",\"slots\":{{\"<payload-string-slot-address>\":{{\"payload_id\":\"prompt-main\"}},\"<numeric-slot-address>\":5}}}}");
+            sb.AppendLine("```");
+            sb.AppendLine("<<<COMFY_PAYLOAD:prompt-main:<supplied-boundary>>>");
+            sb.AppendLine("<raw UTF-8 text>");
+            sb.AppendLine("<<<END_COMFY_PAYLOAD:prompt-main:<supplied-boundary>>>");
+        }
+        if (handoff.AllowedActions.Contains("complete", StringComparer.Ordinal))
+        {
+            sb.AppendLine("Complete response grammar:");
+            sb.AppendLine("```connector-command");
+            sb.AppendLine($"{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"complete\",\"handoff_id\":\"<echo supplied handoff_id>\",\"session_id\":\"<echo supplied session_id>\",\"reason\":\"<concise reason>\"}}");
+            sb.AppendLine("```");
+        }
         sb.AppendLine();
         sb.AppendLine("## Current creation context");
         sb.AppendLine($"Project: {session.ProjectLabel}");
@@ -347,14 +402,44 @@ public static class ConnectorContextBuilder
             sb.AppendLine("Evaluate user-attached media. Use generate for a changed next iteration, or complete only if allowed and the goal is met.");
         }
         sb.AppendLine();
-        sb.AppendLine("## Available slot schema snapshot");
-        if (handoff.Slots.Count == 0) sb.AppendLine("(Successfully loaded: 0 slots. A generate response must use an empty slots object.)");
-        foreach (var slot in handoff.Slots)
+        sb.AppendLine("## Available writable slot schema");
+        var writableSlots = handoff.Slots.Where(slot => slot.IsWritableByChatGpt).ToArray();
+        if (writableSlots.Length == 0) sb.AppendLine("(No writable creative slots are available. A generate response must use an empty slots object.)");
+        foreach (var slot in writableSlots)
         {
-            var choices = slot.Choices is null ? string.Empty : $" | choices={slot.Choices.ToJsonString()}";
+            var choices = slot.Choices is null ? string.Empty : $" | choices={ToHandoffJson(slot.Choices)}";
             var range = slot.Minimum is null && slot.Maximum is null ? string.Empty : $" | range={slot.Minimum?.ToString(CultureInfo.InvariantCulture) ?? "-∞"}..{slot.Maximum?.ToString(CultureInfo.InvariantCulture) ?? "+∞"}";
-            sb.AppendLine($"- {slot.Address} | label={slot.Label} | type={slot.Type} | current={slot.CurrentValue?.ToJsonString() ?? "null"} | transport={slot.Transport.ToString().ToLowerInvariant()}{choices}{range}");
+            sb.AppendLine($"- {slot.Address} | label={slot.Label} | type={slot.Type} | current={ToHandoffJson(slot.CurrentValue)} | transport={slot.Transport.ToString().ToLowerInvariant()} | writable=true{choices}{range}");
         }
         return sb.ToString();
+    }
+
+    private static string ToHandoffJson(JsonNode? node)
+    {
+        if (node is null) return "null";
+        if (node is JsonValue value && value.TryGetValue<string>(out var text)) return QuoteHumanReadableJsonString(text);
+        if (node is JsonArray array) return $"[{string.Join(",", array.Select(ToHandoffJson))}]";
+        return node.ToJsonString();
+    }
+
+    private static string QuoteHumanReadableJsonString(string value)
+    {
+        var sb = new StringBuilder(value.Length + 2).Append('"');
+        foreach (var character in value)
+        {
+            _ = character switch
+            {
+                '"' => sb.Append("\\\""),
+                '\\' => sb.Append("\\\\"),
+                '\b' => sb.Append("\\b"),
+                '\f' => sb.Append("\\f"),
+                '\n' => sb.Append("\\n"),
+                '\r' => sb.Append("\\r"),
+                '\t' => sb.Append("\\t"),
+                < ' ' => sb.Append($"\\u{(int)character:x4}"),
+                _ => sb.Append(character),
+            };
+        }
+        return sb.Append('"').ToString();
     }
 }

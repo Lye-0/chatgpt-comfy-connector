@@ -33,7 +33,7 @@ Connector Response
 }
 ```
 
-必須fieldは `protocol`、`action`、`handoff_id`、`session_id`、`slots`。`slots` はHandoff時に固定したschema snapshotに存在するaddressだけを含み、意図して変更する値だけを送る。Connectorは現在値と同一のslot、未知のslot、`null`、型・choice・range違反を拒否する。
+必須fieldは `protocol`、`action`、`handoff_id`、`session_id`、`slots`。`slots` はHandoff時に固定したschema snapshotで `Writable` と判定されたaddressだけを含み、意図して変更する値だけを送る。ConnectorはReadOnly / Hidden、現在値と同一のslot、未知のslot、`null`、型・choice・range違反を拒否する。
 
 ### complete
 
@@ -63,19 +63,26 @@ Start / End markerは完全一致する独立行である。`payload_id` は `[A
 
 同じPayloadを複数slotから参照してよいが、Payload blockはResponse内に1つだけ置く。参照欠落、重複ID、無効ID、boundary違い、終端欠落、orphan marker、未参照block、nested / overlapping blockを拒否する。
 
-## Slot transport
+## Slot exposure policyとtransport
 
-Handoff時のslot schema snapshotが、各slotのTransportを決める。
+MCPが発見したslot、Connector UIでユーザーが編集できるslot、ChatGPTがCreative Commandで変更できるslotは別の概念である。`ChatGptSlotPolicy` はaddress固有のallowlistではなく、label、type、choices等のmetadataから `Writable` / `ReadOnly` / `Hidden` を判定する。
+
+- prompt、negative / motion / audio prompt、seed、duration / length、fps、width / height、aspect ratio、megapixels、steps、denoise等、明確なCreative ControlだけをWritable候補とする。
+- filename / output path、model / checkpoint / UNet / VAE / CLIP、device、internal expression / formula等はHiddenとする。
+- 未知・曖昧なslotはHiddenとする。
+- COMBO / enum / dynamic comboはchoicesを取得できた場合だけWritableになり得る。choices不明ならReadOnlyであり、現在値をallowed choiceの代用にしない。
+
+ExposureとTransportは独立している。たとえば `filename_prefix` はpayload transport可能でもChatGPT writableではない。Handoff時のslot schema snapshotが、各slotのExposure、理由、Transport、current、choices、rangeを固定する。
 
 | Slot | Transport | JSON表現 |
 |---|---|---|
 | 自由入力 `STRING` / `TEXT` | `payload` | `{ "payload_id": "..." }` |
-| file / unknown string-like | `payload`（安全側fallback） | `{ "payload_id": "..." }` |
+| file / unknown string-like | `payload`（Transport上のfallback） | `{ "payload_id": "..." }`。通常はHidden |
 | integer / number | `json` | JSON number |
 | boolean | `json` | JSON boolean |
 | enum / choice | `json` | choices内のJSON string |
 
-H3固有addressはProtocolへハードコードしない。`list_workflow_slots` から得たaddress、label、type、current、choices、取得可能なrangeをsnapshotし、Response検証にも同じsnapshotを使用する。
+H3固有addressはProtocolへハードコードしない。`list_workflow_slots` から得たaddress、label、type、current、choices、取得可能なrangeへPolicyを適用してsnapshotし、Response検証にも同じsnapshotを使用する。Handoff本文にはWritable schemaだけを掲載するが、Pending Handoffは発見slotのPolicy結果を保持し、手書きされたHidden / ReadOnly addressも拒否する。
 
 Slot discoveryは `NotLoaded`、`Loading`、`Loaded`、`Failed` を区別する。MCP未接続や取得失敗は空schemaとして送らず、Handoff作成を停止する。正常に `Loaded` となった0 slot Workflowだけは、明示的な0件schemaとして扱える。
 
@@ -88,7 +95,7 @@ ChatGPTへ渡す各Handoffは次を永続化する。
 - `BoundaryId`
 - `AllowedActions`
 - `WorkflowIdentity`
-- Available slot schema
+- Slot schemaとChatGPT exposure / writable policy
 - `Iteration`
 - `CreatedAt`
 
@@ -103,7 +110,7 @@ Importerは次の順序を保つ。
 3. `System.Text.Json` でJSONをparseする
 4. `protocol`、`action`、`handoff_id`、`session_id`、`AllowedActions` を検証する
 5. payload referenceを収集し、supplied boundaryでRaw blockを解析する
-6. Pending Handoffのslot schemaに対してaddress、transport、type、choice、range、changed-onlyを検証する
+6. Pending Handoffのslot schemaに対してwritable、address、transport、type、choice、range、changed-onlyを検証する
 7. payloadを解決した `ResolvedSlots` を内部Preview modelへ渡す
 8. 全検証成功後だけCOMMAND stageをCompletedへ進める
 
@@ -111,7 +118,7 @@ Importerは次の順序を保つ。
 
 ## Handoff ContextとTimeline
 
-BootstrapとReviewの各Handoffは、それ1件だけで新しいChatGPTが応答できるよう、role、response grammar、IDs、boundary、AllowedActions、Project / Chat / Workflow、Iteration、idea、該当Output、完全なslot schemaを含む。
+BootstrapとReviewの各Handoffは、それ1件だけで新しいChatGPTが応答できるよう、role、そのHandoffで許可されたactionだけのresponse grammar、IDs、boundary、AllowedActions、Project / Chat / Workflow、Iteration、idea、該当Output、Writable slot schemaを含む。説明用current / choicesは人間とLLMが読めるUnicodeのまま出力し、JSON / HTML / Markdown escapeを重ねない。Protocol fenceとPayload markerは実Clipboard上でもescapeしない。
 
 Timelineは `CONNECTOR → CHATGPT`、`CHATGPT → COMFY`、`COMFY → CHATGPT` を維持する。ChatGPT → COMFYカードは解決済みPromptを主表示へ使い、Raw JSONを主役にしない。表示を短縮しても `HandoffMessage.Payload` と `ProtocolValidationResult.RawResponse` は破壊せず、Copyはconnector-commandと全Payloadを含むResponse全文を使う。
 

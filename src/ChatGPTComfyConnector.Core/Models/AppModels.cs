@@ -252,6 +252,13 @@ public enum SlotValueTransport
     Payload,
 }
 
+public enum ChatGptSlotExposure
+{
+    Hidden,
+    ReadOnly,
+    Writable,
+}
+
 public enum SlotDiscoveryState
 {
     NotLoaded,
@@ -271,16 +278,7 @@ public sealed class WorkflowSlot
     public double? Maximum { get; set; }
     public bool PairingSuspect { get; set; }
 
-    public WorkflowSlotType Kind => Type.ToUpperInvariant() switch
-    {
-        "STRING" or "TEXT" => WorkflowSlotType.String,
-        "INT" or "INTEGER" => WorkflowSlotType.Integer,
-        "FLOAT" or "NUMBER" => WorkflowSlotType.Number,
-        "BOOLEAN" or "BOOL" => WorkflowSlotType.Boolean,
-        "COMBO" or "ENUM" or "CHOICE" => WorkflowSlotType.Enum,
-        "IMAGE" or "FILE" => WorkflowSlotType.File,
-        _ => WorkflowSlotType.Unknown,
-    };
+    public WorkflowSlotType Kind => WorkflowSlotTypeClassifier.Classify(Type);
 
     public string CurrentText => CurrentValue?.ToJsonString(new JsonSerializerOptions { WriteIndented = false }) ?? string.Empty;
 }
@@ -295,18 +293,32 @@ public sealed class HandoffSlotSnapshot
     public double? Minimum { get; set; }
     public double? Maximum { get; set; }
     public SlotValueTransport Transport { get; set; }
+    public ChatGptSlotExposure Exposure { get; set; }
+    public string PolicyReason { get; set; } = string.Empty;
 
     [JsonIgnore]
-    public WorkflowSlotType Kind => Type.ToUpperInvariant() switch
+    public bool IsWritableByChatGpt => Exposure == ChatGptSlotExposure.Writable;
+
+    [JsonIgnore]
+    public WorkflowSlotType Kind => WorkflowSlotTypeClassifier.Classify(Type);
+}
+
+public static class WorkflowSlotTypeClassifier
+{
+    public static WorkflowSlotType Classify(string? type)
     {
-        "STRING" or "TEXT" => WorkflowSlotType.String,
-        "INT" or "INTEGER" => WorkflowSlotType.Integer,
-        "FLOAT" or "NUMBER" => WorkflowSlotType.Number,
-        "BOOLEAN" or "BOOL" => WorkflowSlotType.Boolean,
-        "COMBO" or "ENUM" or "CHOICE" => WorkflowSlotType.Enum,
-        "IMAGE" or "FILE" => WorkflowSlotType.File,
-        _ => WorkflowSlotType.Unknown,
-    };
+        var normalized = (type ?? string.Empty).Trim().ToUpperInvariant();
+        if (normalized.Contains("COMBO", StringComparison.Ordinal) || normalized is "ENUM" or "CHOICE") return WorkflowSlotType.Enum;
+        return normalized switch
+        {
+            "STRING" or "TEXT" => WorkflowSlotType.String,
+            "INT" or "INTEGER" => WorkflowSlotType.Integer,
+            "FLOAT" or "NUMBER" => WorkflowSlotType.Number,
+            "BOOLEAN" or "BOOL" => WorkflowSlotType.Boolean,
+            "IMAGE" or "FILE" => WorkflowSlotType.File,
+            _ => WorkflowSlotType.Unknown,
+        };
+    }
 }
 
 public sealed class PendingHandoffSnapshot

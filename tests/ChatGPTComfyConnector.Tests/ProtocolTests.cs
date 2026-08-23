@@ -162,9 +162,106 @@ public sealed class ProtocolTests
         var text = ConnectorContextBuilder.BuildBootstrap(session, pending);
         Assert.Contains(pending.HandoffId, text);
         Assert.Contains(pending.BoundaryId, text);
-        Assert.Contains("Available slot schema snapshot", text);
+        Assert.Contains("Available writable slot schema", text);
         Assert.Contains("transport=payload", text);
         Assert.Contains("do not rely on earlier chat context", text);
+        Assert.DoesNotContain("Complete response grammar", text);
+        Assert.DoesNotContain("\\# ChatGPT", text);
+        Assert.Contains("```connector-command", text);
+    }
+
+    [Theory]
+    [InlineData("prompt", "STRING", true)]
+    [InlineData("seed", "INT", true)]
+    [InlineData("duration", "FLOAT", true)]
+    [InlineData("filename_prefix", "STRING", false)]
+    [InlineData("unet_name", "COMBO", false)]
+    [InlineData("vae_name", "COMBO", false)]
+    [InlineData("clip_name", "COMBO", false)]
+    [InlineData("expression", "STRING", false)]
+    [InlineData("mystery_setting", "STRING", false)]
+    public void SlotPolicyUsesSafeCreativeAllowList(string label, string type, bool expectedWritable)
+    {
+        var snapshot = ChatGptSlotPolicy.CreateSnapshot(new WorkflowSlot
+        {
+            Address = $"1.{label}", Label = label, Type = type, CurrentValue = JsonValue.Create("value"),
+            Choices = type == "COMBO" ? ["value", "other"] : null,
+        });
+
+        Assert.Equal(expectedWritable, snapshot.IsWritableByChatGpt);
+    }
+
+    [Fact]
+    public void ComboRequiresKnownChoicesAndDynamicComboIsRecognized()
+    {
+        var unknownChoices = ChatGptSlotPolicy.CreateSnapshot(new WorkflowSlot
+        {
+            Address = "1.aspect_ratio", Label = "aspect_ratio", Type = "COMFY_DYNAMICCOMBO_V3", CurrentValue = JsonValue.Create("16:9"), Choices = [],
+        });
+        var knownChoices = ChatGptSlotPolicy.CreateSnapshot(new WorkflowSlot
+        {
+            Address = "2.aspect_ratio", Label = "aspect_ratio", Type = "COMBO", CurrentValue = JsonValue.Create("16:9"), Choices = ["16:9", "9:16"],
+        });
+
+        Assert.Equal(WorkflowSlotType.Enum, unknownChoices.Kind);
+        Assert.Equal(ChatGptSlotExposure.ReadOnly, unknownChoices.Exposure);
+        Assert.True(knownChoices.IsWritableByChatGpt);
+    }
+
+    [Fact]
+    public void ValidatorRejectsReadOnlyAndChoiceOutsideSnapshot()
+    {
+        var pending = Pending();
+        pending.Slots.Add(new HandoffSlotSnapshot
+        {
+            Address = "20.filename_prefix", Label = "filename_prefix", Type = "STRING", CurrentValue = JsonValue.Create("video/current"),
+            Transport = SlotValueTransport.Payload, Exposure = ChatGptSlotExposure.Hidden,
+        });
+        var hiddenResponse = Generate(pending, "{\"20.filename_prefix\":{\"payload_id\":\"path\"}}")
+            + $"\n<<<COMFY_PAYLOAD:path:{pending.BoundaryId}>>>\nvideo/changed\n<<<END_COMFY_PAYLOAD:path:{pending.BoundaryId}>>>";
+        var invalidChoice = Generate(pending, "{\"12.mode\":\"cinematic\"}");
+
+        Assert.False(ConnectorProtocol.Parse(hiddenResponse, pending).IsValid);
+        Assert.False(ConnectorProtocol.Parse(invalidChoice, pending).IsValid);
+    }
+
+    [Fact]
+    public void ValidationUsesIssuedSnapshotAfterDiscoveredSlotChanges()
+    {
+        var session = new CreationSession { Id = "session-1", BoundWorkflow = WorkflowIdentity.Create("folder/test.json") };
+        var discovered = new WorkflowSlot
+        {
+            Address = "12.aspect_ratio", Label = "aspect_ratio", Type = "COMBO", CurrentValue = JsonValue.Create("16:9"), Choices = ["16:9", "9:16"],
+        };
+        var pending = PendingHandoffFactory.Create(session, [discovered], "generate");
+        discovered.Choices = ["1:1"];
+
+        var issuedChoice = ConnectorProtocol.Parse(Generate(pending, "{\"12.aspect_ratio\":\"9:16\"}"), pending);
+        var laterChoice = ConnectorProtocol.Parse(Generate(pending, "{\"12.aspect_ratio\":\"1:1\"}"), pending);
+
+        Assert.True(issuedChoice.IsValid, string.Join(" | ", issuedChoice.Errors));
+        Assert.False(laterChoice.IsValid);
+    }
+
+    [Fact]
+    public void HandoffKeepsReadableUnicodeSymbolsAndExactMarkers()
+    {
+        var session = new CreationSession
+        {
+            Id = "session-1", ProjectLabel = "映像 + Project 🚗", ChatLabel = "新しい制作", OriginalIdea = "夜の東京 + 雨 🚗",
+            BoundWorkflow = WorkflowIdentity.Create("folder/workflow.json"),
+        };
+        var pending = PendingHandoffFactory.Create(session,
+        [
+            new WorkflowSlot { Address = "6.prompt", Label = "prompt", Type = "STRING", CurrentValue = JsonValue.Create("夜の東京 + 雨 🚗") },
+        ], "generate");
+
+        var text = ConnectorContextBuilder.BuildBootstrap(session, pending);
+
+        Assert.Contains("current=\"夜の東京 + 雨 🚗\"", text);
+        Assert.DoesNotContain("\\u", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("<<<COMFY_PAYLOAD:prompt-main:<supplied-boundary>>>", text);
+        Assert.DoesNotContain("\\<<<COMFY_PAYLOAD", text);
     }
 
     [Fact]
@@ -188,11 +285,11 @@ public sealed class ProtocolTests
             AllowedActions = (actions.Length == 0 ? ["generate"] : actions).ToList(),
             Slots =
             [
-                new() { Address = "6.text", Label = "Prompt", Type = "STRING", CurrentValue = JsonValue.Create("old"), Transport = SlotValueTransport.Payload },
-                new() { Address = "7.text", Label = "Negative", Type = "STRING", CurrentValue = JsonValue.Create("old negative"), Transport = SlotValueTransport.Payload },
-                new() { Address = "10.steps", Label = "Steps", Type = "INT", CurrentValue = JsonValue.Create(20), Minimum = 1, Maximum = 100, Transport = SlotValueTransport.Json },
-                new() { Address = "11.enabled", Label = "Enabled", Type = "BOOLEAN", CurrentValue = JsonValue.Create(true), Transport = SlotValueTransport.Json },
-                new() { Address = "12.mode", Label = "Mode", Type = "COMBO", CurrentValue = JsonValue.Create("fast"), Choices = ["fast", "quality"], Transport = SlotValueTransport.Json },
+                new() { Address = "6.text", Label = "Prompt", Type = "STRING", CurrentValue = JsonValue.Create("old"), Transport = SlotValueTransport.Payload, Exposure = ChatGptSlotExposure.Writable },
+                new() { Address = "7.text", Label = "Negative", Type = "STRING", CurrentValue = JsonValue.Create("old negative"), Transport = SlotValueTransport.Payload, Exposure = ChatGptSlotExposure.Writable },
+                new() { Address = "10.steps", Label = "Steps", Type = "INT", CurrentValue = JsonValue.Create(20), Minimum = 1, Maximum = 100, Transport = SlotValueTransport.Json, Exposure = ChatGptSlotExposure.Writable },
+                new() { Address = "11.enabled", Label = "Enabled", Type = "BOOLEAN", CurrentValue = JsonValue.Create(true), Transport = SlotValueTransport.Json, Exposure = ChatGptSlotExposure.Writable },
+                new() { Address = "12.mode", Label = "Mode", Type = "COMBO", CurrentValue = JsonValue.Create("fast"), Choices = ["fast", "quality"], Transport = SlotValueTransport.Json, Exposure = ChatGptSlotExposure.Writable },
             ],
         };
 

@@ -80,11 +80,17 @@ v0.1 uses a manual clipboard transport: Connector creates a self-contained Boots
 contains exactly one small `connector-command` JSON block and zero or more referenced
 raw `COMFY_PAYLOAD` blocks. Connector-generated `handoff_id`, `session_id`, and
 `boundary_id` bind the response to a persisted Pending Handoff snapshot containing
-AllowedActions, Workflow identity, Iteration, and the MCP-discovered slot schema.
+AllowedActions, Workflow identity, Iteration, and the MCP-discovered slot schema plus
+its ChatGPT exposure policy.
 Validation therefore does not trust stale clipboard text or transient UI state.
 
 Free-form string slots use payload references; numeric, boolean, and choice values
-remain direct JSON. Slot discovery distinguishes NotLoaded, Loading, Loaded, and
+remain direct JSON, but transport capability does not imply ChatGPT writability.
+`ChatGptSlotPolicy` exposes only recognized creative controls, hides filesystem,
+model, and internal-expression settings, defaults unknown slots to Hidden, and makes
+enum/dynamic-combo slots ReadOnly when allowed choices are unavailable. The Pending
+Handoff snapshot—not the current editor state—is the validation source of truth.
+Slot discovery distinguishes NotLoaded, Loading, Loaded, and
 Failed, so an unavailable schema is never silently exported as an empty slot list.
 The detailed grammar and validation invariants are canonicalized in
 `docs/connector-protocol-v1.md`. Clipboard is only the current transport boundary;

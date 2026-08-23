@@ -550,34 +550,88 @@
                                    Margin="0,4,0,9" />
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{StaticResource IconButtonStyle}"
-                                    Content="&#xE72C;"
                                     ToolTip="ワークフロー一覧を更新"
                                     AutomationProperties.Name="ワークフロー一覧を更新"
-                                    Click="Refresh_Click" />
+                                    Click="Refresh_Click">
+                                <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                    <Canvas Width="24" Height="24">
+                                        <Ellipse Width="15" Height="15"
+                                                 Canvas.Left="4.5"
+                                                 Canvas.Top="4.5"
+                                                 Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                                 StrokeThickness="1.8"
+                                                 StrokeDashArray="14,5" />
+                                        <Polygon Points="17,3 21,3 21,7"
+                                                 Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
                             <Button Style="{StaticResource IconButtonStyle}"
-                                    Content="&#xE838;"
                                     ToolTip="ワークフローフォルダを開く"
                                     AutomationProperties.Name="ワークフローフォルダを開く"
-                                    Click="OpenWorkflowFolder_Click" />
+                                    Click="OpenWorkflowFolder_Click">
+                                <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                    <Path Data="M2,5 L9,5 L11,7 L22,7 L22,19 L2,19 Z"
+                                          Fill="Transparent"
+                                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                          StrokeThickness="1.8"
+                                          StrokeLineJoin="Round" />
+                                </Viewbox>
+                            </Button>
                             <Button Style="{StaticResource IconButtonStyle}"
-                                    Content="&#xE8C8;"
                                     ToolTip="選択中のワークフローを複製"
                                     AutomationProperties.Name="選択中のワークフローを複製"
                                     Click="Duplicate_Click"
-                                    IsEnabled="{Binding HasSelectedWorkflow}" />
+                                    IsEnabled="{Binding HasSelectedWorkflow}">
+                                <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                    <Canvas Width="24" Height="24">
+                                        <Rectangle Width="12" Height="12"
+                                                   Canvas.Left="6" Canvas.Top="3"
+                                                   Fill="Transparent"
+                                                   Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                                   StrokeThickness="1.8" />
+                                        <Rectangle Width="12" Height="12"
+                                                   Canvas.Left="2" Canvas.Top="8"
+                                                   Fill="Transparent"
+                                                   Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                                   StrokeThickness="1.8" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
                             <Button Style="{StaticResource IconButtonStyle}"
-                                    Content="&#xE70F;"
                                     ToolTip="選択中のワークフロー名を変更"
                                     AutomationProperties.Name="選択中のワークフロー名を変更"
                                     Click="Rename_Click"
-                                    IsEnabled="{Binding HasSelectedWorkflow}" />
+                                    IsEnabled="{Binding HasSelectedWorkflow}">
+                                <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                    <Path Data="M4,17 L5,20 L8,19 L19,8 L15,4 Z M13.5,5.5 L17.5,9.5"
+                                          Fill="Transparent"
+                                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                          StrokeThickness="1.8"
+                                          StrokeLineJoin="Round" />
+                                </Viewbox>
+                            </Button>
                             <Button Style="{StaticResource IconButtonStyle}"
-                                    Content="&#xE713;"
                                     ToolTip="選択中ワークフローの設定を開く"
                                     AutomationProperties.Name="選択中ワークフローの設定を開く"
                                     Click="OpenWorkflowEditor_Click"
                                     IsEnabled="{Binding HasSelectedWorkflow}"
-                                    Margin="0" />
+                                    Margin="0">
+                                <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                    <Canvas Width="24" Height="24">
+                                        <Ellipse Width="8" Height="8"
+                                                 Canvas.Left="8" Canvas.Top="8"
+                                                 Fill="Transparent"
+                                                 Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                                 StrokeThickness="1.8" />
+                                        <Path Data="M12,2 L12,6 M12,18 L12,22 M2,12 L6,12 M18,12 L22,12 M4.9,4.9 L7.8,7.8 M16.2,16.2 L19.1,19.1 M19.1,4.9 L16.2,7.8 M7.8,16.2 L4.9,19.1"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                              StrokeThickness="1.8"
+                                              StrokeStartLineCap="Round"
+                                              StrokeEndLineCap="Round" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
                         </StackPanel>
                     </StackPanel>
                     <Border Grid.Row="1"
@@ -815,17 +869,35 @@
                                             Orientation="Horizontal"
                                             VerticalAlignment="Center">
                                     <Button Style="{StaticResource IconButtonStyle}"
-                                            Content="&#xE838;"
                                             ToolTip="生成物の保存フォルダを開く（未生成時はComfyUI output）"
                                             AutomationProperties.Name="生成物の保存フォルダを開く"
                                             Tag="{Binding CurrentOutputFolderPath}"
-                                            Click="OpenOutputFolder_Click" />
+                                            Click="OpenOutputFolder_Click">
+                                        <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                            <Path Data="M2,5 L9,5 L11,7 L22,7 L22,19 L2,19 Z"
+                                                  Fill="Transparent"
+                                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                                  StrokeThickness="1.8"
+                                                  StrokeLineJoin="Round" />
+                                        </Viewbox>
+                                    </Button>
                                     <Button Style="{StaticResource IconButtonStyle}"
-                                            Content="&#xE714;"
                                             ToolTip="動画出力フォルダを開く（ComfyUI output video）"
                                             AutomationProperties.Name="動画出力フォルダを開く"
                                             Tag="{Binding VideoOutputRoot}"
-                                            Click="OpenOutputFolder_Click" />
+                                            Click="OpenOutputFolder_Click">
+                                        <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                            <Canvas Width="24" Height="24">
+                                                <Path Data="M2,5 L9,5 L11,7 L22,7 L22,19 L2,19 Z"
+                                                      Fill="Transparent"
+                                                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                                      StrokeThickness="1.8"
+                                                      StrokeLineJoin="Round" />
+                                                <Polygon Points="10,9 10,15 16,12"
+                                                         Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" />
+                                            </Canvas>
+                                        </Viewbox>
+                                    </Button>
                                     <Border Background="#162A3A"
                                             BorderBrush="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
                                             BorderThickness="1"

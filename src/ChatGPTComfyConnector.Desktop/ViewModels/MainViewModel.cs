@@ -35,6 +35,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private JsonNode? _serverInfo;
     private bool _commandReceived;
     private bool _workflowPrepared;
+    private GenerationHistoryItem? _selectedHistoryItem;
 
     public MainViewModel(string applicationDirectory)
     {
@@ -57,6 +58,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Iterations = [];
         Backups = [];
         LatestOutputs = [];
+        HistoryItems = [];
         PipelineStages = [];
         RefreshPipeline();
     }
@@ -71,6 +73,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<SessionIteration> Iterations { get; }
     public ObservableCollection<string> Backups { get; }
     public ObservableCollection<OutputArtifact> LatestOutputs { get; }
+    public ObservableCollection<GenerationHistoryItem> HistoryItems { get; }
     public ObservableCollection<CreationPipelineStage> PipelineStages { get; }
     public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); NotifyPipelineStateChanged(); } }
     public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
@@ -88,6 +91,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string ProjectLabel { get => CurrentSession?.ProjectLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ProjectLabel = value; OnPropertyChanged(); } }
     public string ChatLabel { get => CurrentSession?.ChatLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ChatLabel = value; OnPropertyChanged(); } }
     public string SessionTitle { get => CurrentSession?.Title ?? "セッションなし"; set { if (CurrentSession is null) return; CurrentSession.Title = value; OnPropertyChanged(); } }
+    public GenerationHistoryItem? SelectedHistoryItem
+    {
+        get => _selectedHistoryItem;
+        set
+        {
+            if (ReferenceEquals(_selectedHistoryItem, value)) return;
+            _selectedHistoryItem = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(SelectedPreviewOutput));
+            OnPropertyChanged(nameof(HasSelectedPreviewOutput));
+            OnPropertyChanged(nameof(IsSelectedPreviewMissing));
+            OnPropertyChanged(nameof(ViewingIterationText));
+            OnPropertyChanged(nameof(IsViewingLatest));
+            OnPropertyChanged(nameof(ViewingStateText));
+        }
+    }
+    public OutputArtifact? SelectedPreviewOutput => SelectedHistoryItem?.PrimaryOutput;
+    public bool HasSelectedPreviewOutput => SelectedPreviewOutput is not null;
+    public bool IsSelectedPreviewMissing => SelectedPreviewOutput?.IsMissing == true;
+    public string ViewingIterationText => SelectedHistoryItem is null ? "VIEWING —" : $"VIEWING ITERATION {SelectedHistoryItem.Number:00}";
+    public string LatestIterationText => HistoryItems.LastOrDefault() is { } latest ? $"LATEST ITERATION {latest.Number:00}" : "LATEST —";
+    public bool IsViewingLatest => SelectedHistoryItem is not null && ReferenceEquals(SelectedHistoryItem, HistoryItems.LastOrDefault());
+    public string ViewingStateText => IsViewingLatest ? "VIEWING LATEST" : SelectedHistoryItem is null ? "NO OUTPUT" : "VIEWING HISTORY";
     public string SelectedWorkflowText => SelectedWorkflow?.RelativePath ?? "Workflow未選択";
     public string SelectedWorkflowName => SelectedWorkflow is null ? "Workflow未選択" : Path.GetFileNameWithoutExtension(SelectedWorkflow.RelativePath);
     public string ConnectionStateText => ConnectionState switch { ConnectionState.Connected => "CONNECTED", ConnectionState.Connecting => "CONNECTING", ConnectionState.Error => "ERROR", _ => "DISCONNECTED" };
@@ -130,6 +156,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasAdvancedSlots => AdvancedSlots.Count > 0;
     public bool HasIterations => Iterations.Count > 0;
     public bool HasLatestOutputs => LatestOutputs.Count > 0;
+    public bool HasHistoryItems => HistoryItems.Count > 0;
     public bool ShowWorkflowEmptyState => !HasSelectedWorkflow;
     public bool ShowDisconnectedState => HasSelectedWorkflow && !IsConnected;
     public bool ShowSlotLoadingState => HasSelectedWorkflow && IsConnected && IsSlotLoading;
@@ -161,6 +188,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         foreach (var iteration in CurrentSession.Iterations) Iterations.Add(iteration);
         LatestOutputs.Clear();
         foreach (var output in CurrentSession.Iterations.LastOrDefault()?.Outputs ?? []) LatestOutputs.Add(output);
+        RebuildHistoryItems();
         _commandReceived = !string.IsNullOrWhiteSpace(CommandText);
         _workflowPrepared = CurrentSession.BoundWorkflow is not null;
         RefreshWorkflowTree();
@@ -357,8 +385,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _workflowPrepared = false;
         Iterations.Clear();
         LatestOutputs.Clear();
+        HistoryItems.Clear();
+        SelectedHistoryItem = null;
         OnPropertyChanged(nameof(HasIterations));
         OnPropertyChanged(nameof(HasLatestOutputs));
+        NotifyHistoryChanged();
         OnPropertyChanged(nameof(SessionProgressText));
         NotifyPipelineStateChanged();
         StatusMessage = "新しい制作セッションを作成しました。";
@@ -392,7 +423,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(SessionStatusText));
         OnPropertyChanged(nameof(SessionProgressText));
         Iterations.Add(iteration);
+        var historyItem = new GenerationHistoryItem(iteration);
+        HistoryItems.Add(historyItem);
+        RefreshHistoryFlags();
+        SelectedHistoryItem = historyItem;
         OnPropertyChanged(nameof(HasIterations));
+        NotifyHistoryChanged();
         NotifyPipelineStateChanged();
         IsBusy = true;
         try
@@ -412,6 +448,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             CurrentSession.LastError = ex.Message;
             CurrentJob = null;
             await _store.SaveSessionAsync(CurrentSession);
+            RefreshHistoryFlags();
+            NotifySelectedPreviewChanged();
             OnPropertyChanged(nameof(SessionStatusText));
             NotifyPipelineStateChanged();
             StatusMessage = $"生成に失敗しました: {ex.Message}";
@@ -450,6 +488,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         if (CurrentSession is null) return;
         CurrentSession.Complete(reason);
+        RefreshHistoryFlags();
         OnPropertyChanged(nameof(SessionStatusText));
         NotifyPipelineStateChanged();
         StatusMessage = "セッションをCOMPLETEDにしました。履歴と出力は保持されています。必要ならRESUMEできます。";
@@ -460,6 +499,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         if (CurrentSession is null) return;
         CurrentSession.Resume();
+        RefreshHistoryFlags();
         await _store.SaveSessionAsync(CurrentSession);
         OnPropertyChanged(nameof(SessionStatusText));
         NotifyPipelineStateChanged();
@@ -473,6 +513,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CurrentJob.Status = JobStatus.Cancelled;
         var iteration = CurrentSession?.Iterations.LastOrDefault(i => i.JobId == CurrentJob.JobId);
         if (iteration is not null) iteration.Status = JobStatus.Cancelled;
+        RefreshHistoryFlags();
+        NotifySelectedPreviewChanged();
         if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
         StatusMessage = "Connectorが投入したJobへCANCELを要求しました。";
         OnPropertyChanged(nameof(JobStatusText));
@@ -512,6 +554,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 LatestOutputs.Clear();
                 foreach (var output in iteration.Outputs) LatestOutputs.Add(output);
                 OnPropertyChanged(nameof(HasLatestOutputs));
+                SelectedHistoryItem = HistoryItems.FirstOrDefault(item => ReferenceEquals(item.Iteration, iteration)) ?? SelectedHistoryItem;
+                RefreshHistoryFlags();
+                NotifySelectedPreviewChanged();
                 CurrentJob.CompletedAt = DateTimeOffset.UtcNow;
                 StatusMessage = $"Iteration {iteration.Number} が完了しました。出力 {iteration.Outputs.Count} 件。";
                 await _store.SaveSessionAsync(CurrentSession!);
@@ -521,6 +566,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (CurrentJob.Status is JobStatus.Failed or JobStatus.Cancelled)
             {
                 iteration.Error = CurrentJob.Message;
+                RefreshHistoryFlags();
+                NotifySelectedPreviewChanged();
                 StatusMessage = $"Job {CurrentJob.Status}。";
                 await _store.SaveSessionAsync(CurrentSession!);
                 NotifyPipelineStateChanged();
@@ -534,6 +581,46 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var session = new CreationSession { Title = "新しい制作", MaximumIterations = Settings.MaximumIterations, BoundWorkflow = SelectedWorkflow };
         Sessions.Add(session);
         return session;
+    }
+
+    private void RebuildHistoryItems()
+    {
+        HistoryItems.Clear();
+        foreach (var iteration in Iterations) HistoryItems.Add(new GenerationHistoryItem(iteration));
+        RefreshHistoryFlags();
+        SelectedHistoryItem = HistoryItems.LastOrDefault(item => item.HasOutput) ?? HistoryItems.LastOrDefault();
+        NotifyHistoryChanged();
+    }
+
+    private void RefreshHistoryFlags()
+    {
+        var latest = HistoryItems.LastOrDefault();
+        var isComplete = CurrentSession?.Status == SessionStatus.Completed;
+        foreach (var item in HistoryItems)
+        {
+            var isLatest = ReferenceEquals(item, latest);
+            item.UpdateFlags(isLatest, isComplete && isLatest);
+        }
+        OnPropertyChanged(nameof(LatestIterationText));
+        OnPropertyChanged(nameof(IsViewingLatest));
+        OnPropertyChanged(nameof(ViewingStateText));
+    }
+
+    private void NotifyHistoryChanged()
+    {
+        OnPropertyChanged(nameof(HasHistoryItems));
+        OnPropertyChanged(nameof(LatestIterationText));
+        NotifySelectedPreviewChanged();
+    }
+
+    private void NotifySelectedPreviewChanged()
+    {
+        OnPropertyChanged(nameof(SelectedPreviewOutput));
+        OnPropertyChanged(nameof(HasSelectedPreviewOutput));
+        OnPropertyChanged(nameof(IsSelectedPreviewMissing));
+        OnPropertyChanged(nameof(ViewingIterationText));
+        OnPropertyChanged(nameof(IsViewingLatest));
+        OnPropertyChanged(nameof(ViewingStateText));
     }
 
     private Dictionary<string, JsonNode?> BuildChanges() => Slots.ToDictionary(x => x.Address, x => x.ToJsonNode(), StringComparer.OrdinalIgnoreCase);

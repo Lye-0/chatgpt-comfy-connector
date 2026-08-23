@@ -85,7 +85,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
-    public string CommandText { get => _commandText; set { _commandText = value; OnPropertyChanged(); NotifyPipelineStateChanged(); } }
+    public string CommandText
+    {
+        get => _commandText;
+        set
+        {
+            _commandText = value;
+            _pendingValidation = null;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(CanApplyCommand));
+            NotifyPipelineStateChanged();
+        }
+    }
     public string Idea { get => _idea; set { _idea = value; OnPropertyChanged(); NotifyPipelineStateChanged(); } }
     public string? SlotLoadError { get => _slotLoadError; private set { _slotLoadError = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasSlotLoadError)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public string ProjectLabel { get => CurrentSession?.ProjectLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ProjectLabel = value; OnPropertyChanged(); } }
@@ -157,6 +168,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasIterations => Iterations.Count > 0;
     public bool HasLatestOutputs => LatestOutputs.Count > 0;
     public bool HasHistoryItems => HistoryItems.Count > 0;
+    public bool CanApplyCommand => _pendingValidation is { IsValid: true, Command: not null } command && command.Command.Action == "generate";
     public bool ShowWorkflowEmptyState => !HasSelectedWorkflow;
     public bool ShowDisconnectedState => HasSelectedWorkflow && !IsConnected;
     public bool ShowSlotLoadingState => HasSelectedWorkflow && IsConnected && IsSlotLoading;
@@ -461,10 +473,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task ImportCommandAsync()
     {
         _pendingValidation = ConnectorProtocol.Parse(CommandText);
-        if (!_pendingValidation.IsValid) { StatusMessage = string.Join(" ", _pendingValidation.Errors); NotifyPipelineStateChanged(); return; }
+        if (!_pendingValidation.IsValid) { OnPropertyChanged(nameof(CanApplyCommand)); StatusMessage = string.Join(" ", _pendingValidation.Errors); NotifyPipelineStateChanged(); return; }
         _pendingValidation = ConnectorProtocol.ValidateAgainstSlots(_pendingValidation.Command!, Slots.Select(ToWorkflowSlot), SelectedWorkflow);
         _commandReceived = true;
-        StatusMessage = _pendingValidation.IsValid ? $"{_pendingValidation.Command!.Action} commandを検証しました。APPLYで反映してください。" : string.Join(" ", _pendingValidation.Errors);
+        OnPropertyChanged(nameof(CanApplyCommand));
+        StatusMessage = _pendingValidation.IsValid ? "ChatGPTからの生成指示を確認しました。「適用」から反映できます。" : string.Join(" ", _pendingValidation.Errors);
         if (_pendingValidation.Command?.Action == "complete" && _pendingValidation.IsValid) CompleteSession(_pendingValidation.Command.Reason ?? "ChatGPT completed the session.");
         await Task.CompletedTask;
     }

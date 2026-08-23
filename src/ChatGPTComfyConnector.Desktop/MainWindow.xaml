@@ -90,17 +90,20 @@
             <StackPanel Orientation="Horizontal"
                         VerticalAlignment="Center"
                         AutomationProperties.Name="{Binding Label}">
-                <StackPanel Width="88"
+                <StackPanel Width="84"
                             HorizontalAlignment="Center">
-                    <Grid Width="28"
+                    <Grid x:Name="PipelineNode"
+                          Width="28"
                           Height="28"
                           HorizontalAlignment="Center">
-                        <Ellipse Fill="{Binding State, Converter={StaticResource StateToBrush}}"
-                                 Opacity="0.9" />
-                        <TextBlock Text="{Binding Number}"
-                                   Foreground="#071117"
-                                   FontSize="10"
-                                   FontWeight="Bold"
+                        <Ellipse Fill="#101D2B"
+                                 Stroke="{Binding State, Converter={StaticResource StateToBrush}}"
+                                 StrokeThickness="1.5"
+                                 Opacity="0.95" />
+                        <TextBlock Text="{Binding StateSymbol}"
+                                   Foreground="{Binding State, Converter={StaticResource StateToBrush}}"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
                                    HorizontalAlignment="Center"
                                    VerticalAlignment="Center" />
                     </Grid>
@@ -112,18 +115,43 @@
                                Margin="0,5,0,0" />
                     <TextBlock Text="{Binding StateLabel}"
                                Foreground="{StaticResource MutedTextBrush}"
-                               FontSize="9"
+                               FontSize="8"
                                HorizontalAlignment="Center"
                                Margin="0,2,0,0" />
                 </StackPanel>
-                <Border Width="68"
+                <Border Width="62"
                         Height="2"
                         Background="{Binding State, Converter={StaticResource StateToBrush}}"
-                        Opacity="0.72"
+                        Opacity="0.68"
                         VerticalAlignment="Top"
                         Margin="0,13,0,0"
                         Visibility="{Binding IsLast, Converter={StaticResource InverseBoolToVisibility}}" />
             </StackPanel>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                    <Setter TargetName="PipelineNode" Property="Effect">
+                        <Setter.Value>
+                            <DropShadowEffect Color="#63E6E2"
+                                              BlurRadius="13"
+                                              ShadowDepth="0"
+                                              Opacity="0.72" />
+                        </Setter.Value>
+                    </Setter>
+                    <DataTrigger.EnterActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetName="PipelineNode"
+                                                  Storyboard.TargetProperty="Opacity"
+                                                  From="0.72"
+                                                  To="1"
+                                                  Duration="0:0:2.4"
+                                                  AutoReverse="True"
+                                                  RepeatBehavior="Forever" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </DataTrigger.EnterActions>
+                </DataTrigger>
+            </DataTemplate.Triggers>
         </DataTemplate>
 
         <Style x:Key="HistoryListBoxItemStyle"
@@ -333,12 +361,14 @@
                                Margin="0,2,0,0" />
                 </StackPanel>
                 <Border Grid.Column="1"
+                        Width="700"
+                        HorizontalAlignment="Left"
                         Background="#0A111D"
                         BorderBrush="{StaticResource LineBrush}"
                         BorderThickness="1"
                         CornerRadius="10"
                         Padding="10,6"
-                        Margin="10,0,14,0"
+                        Margin="10,0,18,0"
                         AutomationProperties.Name="SYSTEM CONNECTION">
                     <Grid>
                         <Grid.RowDefinitions>
@@ -598,6 +628,7 @@
                                     Background="{StaticResource AccentBrush}"
                                     Foreground="#071117"
                                     FontWeight="SemiBold"
+                                    IsEnabled="{Binding HasSelectedWorkflow}"
                                     Margin="0,0,0,8" />
                             <TextBox x:Name="WorkflowNameBox"
                                      ToolTip="拡張子を除いた新しいWorkflow名"
@@ -609,11 +640,13 @@
                                 </Grid.ColumnDefinitions>
                                 <Button Content="複製"
                                         ToolTip="選択中Workflowを複製"
-                                        Click="Duplicate_Click" />
+                                        Click="Duplicate_Click"
+                                        IsEnabled="{Binding HasSelectedWorkflow}" />
                                 <Button Grid.Column="1"
                                         Content="名前変更"
                                         ToolTip="選択中Workflowの名前を変更"
                                         Click="Rename_Click"
+                                        IsEnabled="{Binding HasSelectedWorkflow}"
                                         Margin="6,0,0,0" />
                             </Grid>
                         </StackPanel>
@@ -822,14 +855,13 @@
                                                        FontSize="10"
                                                        HorizontalAlignment="Center"
                                                        Margin="0,6,0,0" />
-                                            <Button Content="GENERATE"
-                                                    ToolTip="validate後に1件のJobを生成"
-                                                    Background="{StaticResource WarmBrush}"
-                                                    Foreground="#21151A"
-                                                    FontWeight="SemiBold"
-                                                    Click="Generate_Click"
-                                                    IsEnabled="{Binding CanRunWorkflow}"
-                                                    Margin="0,14,0,0" />
+                                            <TextBlock Text="最初の映像を生成すると、ここにプレビューが表示されます。"
+                                                       Foreground="{StaticResource LineStrongBrush}"
+                                                       FontSize="10"
+                                                       TextAlignment="Center"
+                                                       TextWrapping="Wrap"
+                                                       MaxWidth="260"
+                                                       Margin="0,5,0,0" />
                                         </StackPanel>
                                         <StackPanel HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
@@ -1011,15 +1043,22 @@
                                            FontSize="11"
                                            Foreground="{StaticResource AccentBrush}"
                                            FontWeight="SemiBold" />
-                                <Label Content="プロジェクト / チャット（ローカル表示名）"
-                                       Margin="0,10,0,0" />
+                                <TextBlock Text="ChatGPTの送信先"
+                                           Foreground="{StaticResource TextBrush}"
+                                           FontSize="12"
+                                           FontWeight="SemiBold"
+                                           Margin="0,10,0,3" />
+                                <Label Content="Project"
+                                       Margin="0,2,0,0" />
                                 <TextBox Text="{Binding ProjectLabel, UpdateSourceTrigger=PropertyChanged}"
                                          ToolTip="プロジェクトの表示名（任意）"
                                          Margin="0,4,0,5" />
+                                <Label Content="Chat"
+                                       Margin="0,0,0,0" />
                                 <TextBox Text="{Binding ChatLabel, UpdateSourceTrigger=PropertyChanged}"
                                          ToolTip="チャットの表示名（任意）"
                                          Margin="0,0,0,2" />
-                                <TextBlock Text="ChatGPTとの制作連携をここで管理します。アイデアと生成物は中央キャンバスに集約しています。"
+                                <TextBlock Text="現在は手動連携のため、送信先名をローカルに保存します。"
                                            Foreground="{StaticResource MutedTextBrush}"
                                            FontSize="10"
                                            TextWrapping="Wrap"
@@ -1038,25 +1077,34 @@
                                            FontSize="11"
                                            Foreground="{StaticResource AccentStrongBrush}"
                                            FontWeight="SemiBold" />
-                                <TextBlock Text="Bootstrapで現在の制作状態を渡し、返ってきたCommandを反映します。"
+                                <TextBlock Text="制作状態をChatGPTへ渡し、返ってきた指示を反映します。"
                                            Foreground="{StaticResource MutedTextBrush}"
                                            FontSize="11"
                                            TextWrapping="Wrap"
                                            Margin="0,4,0,10" />
-                                <Button Content="BOOTSTRAPをChatGPTへコピー"
+                                <TextBlock Text="ChatGPTへ送る"
+                                           Foreground="{StaticResource TextBrush}"
+                                           FontSize="11"
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,0,4" />
+                                <Button Content="ChatGPTへ送る内容をコピー"
                                         ToolTip="現在のWorkflow・主要設定・slot情報をコピー"
                                         Click="CopyBootstrap_Click"
                                         Background="{StaticResource AccentBrush}"
                                         Foreground="#071117"
                                         FontWeight="SemiBold"
                                         Margin="0" />
-                                <TextBlock Text="生成後はRESULT Contextを返し、画像・動画を必要なものだけ手動添付します。"
+                                <TextBlock Text="生成後は結果をChatGPTへ返し、必要な画像・動画だけ手動で添付します。"
                                            Foreground="{StaticResource MutedTextBrush}"
                                            FontSize="10"
                                            TextWrapping="Wrap"
                                            Margin="0,8,0,12" />
-                                <Label Content="ChatGPTからのCommand" />
-                                <TextBlock Text="貼り付け → IMPORT / VALIDATE → APPLY"
+                                <TextBlock Text="ChatGPTからの指示"
+                                           Foreground="{StaticResource TextBrush}"
+                                           FontSize="11"
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,0,0" />
+                                <TextBlock Text="返答を貼り付けて、内容を確認してから適用します。"
                                            Foreground="{StaticResource MutedTextBrush}"
                                            FontSize="10"
                                            Margin="0,3,0,4" />
@@ -1069,22 +1117,24 @@
                                          FontSize="11"
                                          ToolTip="comfy-connector/1 commandを貼り付け" />
                                 <WrapPanel Margin="0,7,0,0">
-                                    <Button Content="IMPORT / VALIDATE"
+                                    <Button Content="読み込んで確認"
                                             ToolTip="Commandの形式とslotを検証"
                                             Click="ImportCommand_Click" />
-                                    <Button Content="APPLY"
+                                    <Button Content="適用"
                                             ToolTip="検証済みCommandをslotへ反映"
-                                            Click="ApplyCommand_Click" />
-                                    <Button Content="APPLY + GENERATE"
+                                            Click="ApplyCommand_Click"
+                                            IsEnabled="{Binding CanApplyCommand}" />
+                                    <Button Content="適用して生成"
                                             ToolTip="反映後に1件のJobを生成"
                                             Click="ApplyGenerateCommand_Click"
+                                            IsEnabled="{Binding CanApplyCommand}"
                                             Margin="0" />
                                 </WrapPanel>
-                                <Button Content="RESULTをChatGPTへコピー"
+                                <Button Content="生成結果をChatGPT用にコピー"
                                         ToolTip="生成結果と出力パスをコピー"
                                         Click="CopyResult_Click"
                                         Margin="0,10,0,0" />
-                                <TextBlock Text="COMPLETEはcomplete commandで実行します。完了後もRESUMEで再開できます。"
+                                <TextBlock Text="セッション完了はChatGPTからの完了指示で行い、必要ならRESUMEで再開できます。"
                                            Foreground="{StaticResource MutedTextBrush}"
                                            FontSize="10"
                                            TextWrapping="Wrap"
@@ -1101,16 +1151,6 @@
                        Foreground="{StaticResource MutedTextBrush}"
                        VerticalAlignment="Center"
                        TextTrimming="CharacterEllipsis" />
-            <StackPanel Orientation="Horizontal"
-                        HorizontalAlignment="Right">
-                <TextBlock Text="SYSTEM"
-                           Foreground="{StaticResource MutedTextBrush}"
-                           VerticalAlignment="Center" />
-                <TextBlock Text="{Binding ConnectionStateText}"
-                           Foreground="{Binding ConnectionStateText, Converter={StaticResource StateToBrush}}"
-                           VerticalAlignment="Center"
-                           Margin="6,0,0,0" />
-            </StackPanel>
         </Grid>
 
         <Border Grid.RowSpan="3"

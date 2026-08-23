@@ -12,4 +12,17 @@ public sealed record CreationPipelineStage(
     string Description,
     string State,
     string StateLabel,
-    bool IsLast);
+    bool IsLast)
+{
+    public string StateSymbol => State switch
+    {
+        "DONE" or "COMPLETE" => "✓",
+        "ERROR" => "!",
+        "WAITING" or "ATTENTION" => "!",
+        "NOW" => "●",
+        _ => "○",
+    };
+
+    public bool IsCurrent => State == "NOW";
+    public bool IsCompleted => State is "DONE" or "COMPLETE";
+}

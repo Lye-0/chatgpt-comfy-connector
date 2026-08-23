@@ -72,9 +72,9 @@ public partial class MainWindow : Window
     private async void ImportCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド検証", ViewModel.ImportCommandAsync);
     private async void ApplyCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド適用", () => ViewModel.ApplyCommandAsync(false));
     private async void ApplyGenerateCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド適用 + 生成", () => ViewModel.ApplyCommandAsync(true));
-    private async void CopyBootstrap_Click(object sender, RoutedEventArgs e) { await ViewModel.SaveSessionAsync(); Clipboard.SetText(ViewModel.BuildBootstrapContext()); ViewModel.StatusMessage = "Bootstrap Contextをクリップボードへコピーしました。"; }
+    private async void CopyBootstrap_Click(object sender, RoutedEventArgs e) { await ViewModel.SaveSessionAsync(); Clipboard.SetText(ViewModel.BuildBootstrapContext()); ViewModel.StatusMessage = "ChatGPTへ送る内容をコピーしました。ChatGPTへ貼り付けてください。"; }
     private void CopyIdea_Click(object sender, RoutedEventArgs e) { Clipboard.SetText(ViewModel.Idea ?? string.Empty); ViewModel.StatusMessage = "制作アイデアをクリップボードへコピーしました。ChatGPTへ貼り付けてください。"; }
-    private void CopyResult_Click(object sender, RoutedEventArgs e) { Clipboard.SetText(ViewModel.BuildResultContext()); ViewModel.StatusMessage = "Result Contextをクリップボードへコピーしました。動画・画像は手動添付してください。"; }
+    private void CopyResult_Click(object sender, RoutedEventArgs e) { Clipboard.SetText(ViewModel.BuildResultContext()); ViewModel.StatusMessage = "生成結果をChatGPT用にコピーしました。必要な画像・動画を手動で添付してください。"; }
     private void OpenOutput_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { Tag: string path }) RunSync("出力を開く", () => ViewModel.OpenOutputFile(path));

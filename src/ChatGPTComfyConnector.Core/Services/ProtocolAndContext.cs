@@ -135,6 +135,8 @@ public static class ConnectorContextBuilder
         sb.AppendLine("Return exactly one JSON command in a connector-command code fence.");
         sb.AppendLine("Allowed actions: generate, complete. Do not invent slots or filesystem paths.");
         sb.AppendLine($"Session: {session.Id} / {session.Title}");
+        sb.AppendLine($"Project: {session.ProjectLabel}");
+        sb.AppendLine($"Chat: {session.ChatLabel}");
         sb.AppendLine($"Workflow: {session.BoundWorkflow?.RelativePath ?? "(not selected)"}");
         sb.AppendLine($"Maximum iterations: {session.MaximumIterations}; current: {session.CurrentIteration}");
         sb.AppendLine($"Original idea: {session.OriginalIdea}");
@@ -153,6 +155,8 @@ public static class ConnectorContextBuilder
         var sb = new StringBuilder();
         sb.AppendLine("Connector generation result. Attach the output media manually in ChatGPT.");
         sb.AppendLine($"Session: {session.Title} ({session.Id})");
+        sb.AppendLine($"Project: {session.ProjectLabel}");
+        sb.AppendLine($"Chat: {session.ChatLabel}");
         sb.AppendLine($"Iteration: {iteration.Number}");
         sb.AppendLine($"Workflow: {session.BoundWorkflow?.RelativePath ?? "(not selected)"}");
         sb.AppendLine($"Status: {iteration.Status}");

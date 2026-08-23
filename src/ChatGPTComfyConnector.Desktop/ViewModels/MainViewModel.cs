@@ -38,6 +38,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private GenerationHistoryItem? _selectedHistoryItem;
     private bool _isWorkflowRenameVisible;
     private string _workflowRenameText = string.Empty;
+    private LocalContextCatalog _localContexts = new();
+    private readonly LocalProjectContext _createProjectOption = new() { Id = "__create_project__", DisplayName = "＋ 新しいProjectを作成", IsCreateAction = true };
+    private readonly LocalChatContext _createChatOption = new() { Id = "__create_chat__", DisplayName = "＋ 新しいChatを作成", IsCreateAction = true };
+    private LocalProjectContext? _selectedProject;
+    private LocalChatContext? _selectedChat;
+    private bool _isProjectCreateVisible;
+    private bool _isChatCreateVisible;
+    private string _newProjectName = string.Empty;
+    private string _newChatName = string.Empty;
+    private string _projectValidationMessage = string.Empty;
+    private string _chatValidationMessage = string.Empty;
+    private int _sessionMaximumIterations = 10;
 
     public MainViewModel(string applicationDirectory)
     {
@@ -62,6 +74,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         LatestOutputs = [];
         HistoryItems = [];
         PipelineStages = [];
+        ProjectOptions = [];
+        ChatOptions = [];
+        HandoffItems = [];
         Settings.PropertyChanged += Settings_PropertyChanged;
         RefreshPipeline();
     }
@@ -78,9 +93,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<OutputArtifact> LatestOutputs { get; }
     public ObservableCollection<GenerationHistoryItem> HistoryItems { get; }
     public ObservableCollection<CreationPipelineStage> PipelineStages { get; }
-    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); NotifyPipelineStateChanged(); } }
-    public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
-    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
+    public ObservableCollection<LocalProjectContext> ProjectOptions { get; }
+    public ObservableCollection<LocalChatContext> ChatOptions { get; }
+    public ObservableCollection<HandoffTimelineItem> HandoffItems { get; }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); NotifyPipelineStateChanged(); } }
+    public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
+    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
     public string StatusMessage { get => _statusMessage; set { _statusMessage = value; OnPropertyChanged(); } }
     public bool IsSetupVisible { get => _isSetupVisible; private set { _isSetupVisible = value; OnPropertyChanged(); } }
@@ -90,6 +108,67 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
     public bool IsWorkflowRenameVisible { get => _isWorkflowRenameVisible; private set { _isWorkflowRenameVisible = value; OnPropertyChanged(); } }
     public string WorkflowRenameText { get => _workflowRenameText; set { _workflowRenameText = value; OnPropertyChanged(); } }
+    public LocalProjectContext? SelectedProject
+    {
+        get => _selectedProject;
+        set
+        {
+            if (value?.IsCreateAction == true)
+            {
+                _selectedProject = null;
+                IsProjectCreateVisible = true;
+                NewProjectName = string.Empty;
+                ProjectValidationMessage = string.Empty;
+                RefreshChatOptions();
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(HasSelectedProject));
+                OnPropertyChanged(nameof(CanCreateChat));
+                OnPropertyChanged(nameof(CanStartNewCreation));
+                return;
+            }
+            if (ReferenceEquals(_selectedProject, value)) return;
+            _selectedProject = value;
+            IsProjectCreateVisible = false;
+            ProjectValidationMessage = string.Empty;
+            RefreshChatOptions();
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(HasSelectedProject));
+            OnPropertyChanged(nameof(CanCreateChat));
+            OnPropertyChanged(nameof(CanStartNewCreation));
+        }
+    }
+    public LocalChatContext? SelectedChat
+    {
+        get => _selectedChat;
+        set
+        {
+            if (value?.IsCreateAction == true)
+            {
+                _selectedChat = null;
+                IsChatCreateVisible = true;
+                NewChatName = string.Empty;
+                ChatValidationMessage = string.Empty;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(HasSelectedChat));
+                OnPropertyChanged(nameof(CanStartNewCreation));
+                return;
+            }
+            if (ReferenceEquals(_selectedChat, value)) return;
+            _selectedChat = value;
+            IsChatCreateVisible = false;
+            ChatValidationMessage = string.Empty;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(HasSelectedChat));
+            OnPropertyChanged(nameof(CanStartNewCreation));
+        }
+    }
+    public bool IsProjectCreateVisible { get => _isProjectCreateVisible; private set { _isProjectCreateVisible = value; OnPropertyChanged(); } }
+    public bool IsChatCreateVisible { get => _isChatCreateVisible; private set { _isChatCreateVisible = value; OnPropertyChanged(); } }
+    public string NewProjectName { get => _newProjectName; set { _newProjectName = value; ProjectValidationMessage = string.Empty; OnPropertyChanged(); } }
+    public string NewChatName { get => _newChatName; set { _newChatName = value; ChatValidationMessage = string.Empty; OnPropertyChanged(); } }
+    public string ProjectValidationMessage { get => _projectValidationMessage; private set { _projectValidationMessage = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasProjectValidationMessage)); } }
+    public string ChatValidationMessage { get => _chatValidationMessage; private set { _chatValidationMessage = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasChatValidationMessage)); } }
+    public int SessionMaximumIterations { get => _sessionMaximumIterations; set { if (_sessionMaximumIterations == value) return; _sessionMaximumIterations = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanStartNewCreation)); } }
     public string CommandText
     {
         get => _commandText;
@@ -162,6 +241,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string JobStatusDetailText => CurrentJob is null ? "生成待機中" : IsJobActive ? "ComfyUIで生成を実行中" : CurrentJob.Status switch { JobStatus.Completed => "生成が完了しました", JobStatus.Failed => "生成に失敗しました", JobStatus.Cancelled => "生成をキャンセルしました", _ => "Jobを確認してください" };
     public string DirtyText => IsDirty ? "UNSAVED CHANGES" : "SAVED";
     public string SessionProgressText => CurrentSession is null ? "0 / 10 ITERATIONS" : $"{CurrentSession.CurrentIteration} / {CurrentSession.MaximumIterations} ITERATIONS";
+    public string CurrentSessionContextText => CurrentSession is null ? "制作セッションなし" : $"{BlankFallback(CurrentSession.ProjectLabel, "Project未設定")}  ·  {BlankFallback(CurrentSession.ChatLabel, "Chat未設定")}";
     public string WorkflowSlotSummaryText => !HasSelectedWorkflow ? "左のライブラリからWorkflowを選択" : !IsConnected ? "MCP未接続 · CONNECTでslotを読み込み" : IsSlotLoading ? "slotを読み込み中…" : HasSlotLoadError ? "slotの読み込みに失敗" : $"主要 {PrimarySlots.Count} · 調整 {TuningSlots.Count} · 詳細 {AdvancedSlots.Count}";
     public bool IsConnected => ConnectionState == ConnectionState.Connected;
     public bool HasSelectedWorkflow => SelectedWorkflow is not null;
@@ -174,6 +254,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasIterations => Iterations.Count > 0;
     public bool HasLatestOutputs => LatestOutputs.Count > 0;
     public bool HasHistoryItems => HistoryItems.Count > 0;
+    public bool HasHandoffItems => HandoffItems.Count > 0;
+    public bool HasSelectedProject => SelectedProject is { IsCreateAction: false };
+    public bool HasSelectedChat => SelectedChat is { IsCreateAction: false };
+    public bool CanCreateChat => HasSelectedProject;
+    public bool HasProjectValidationMessage => !string.IsNullOrWhiteSpace(ProjectValidationMessage);
+    public bool HasChatValidationMessage => !string.IsNullOrWhiteSpace(ChatValidationMessage);
+    public bool CanStartNewCreation => HasSelectedWorkflow && HasSelectedProject && HasSelectedChat && SessionMaximumIterations is >= 1 and <= 1000 && !IsJobActive;
+    public bool CanResumeSession => CurrentSession?.Status is SessionStatus.Completed or SessionStatus.Paused or SessionStatus.Stopped or SessionStatus.Error;
     public bool CanApplyCommand => _pendingValidation is { IsValid: true, Command: not null } command && command.Command.Action == "generate";
     public bool ShowWorkflowEmptyState => !HasSelectedWorkflow;
     public bool ShowDisconnectedState => HasSelectedWorkflow && !IsConnected;
@@ -219,12 +307,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Sessions.Clear();
         foreach (var session in await _store.LoadSessionsAsync()) Sessions.Add(session);
         CurrentSession = Sessions.FirstOrDefault() ?? NewSessionInternal();
+        await InitializeLocalContextsAsync();
+        SessionMaximumIterations = CurrentSession.MaximumIterations;
         Idea = CurrentSession.OriginalIdea;
         Iterations.Clear();
         foreach (var iteration in CurrentSession.Iterations) Iterations.Add(iteration);
         LatestOutputs.Clear();
         foreach (var output in CurrentSession.Iterations.LastOrDefault()?.Outputs ?? []) LatestOutputs.Add(output);
         RebuildHistoryItems();
+        if (RebuildHandoffItems()) await _store.SaveSessionAsync(CurrentSession);
         _commandReceived = !string.IsNullOrWhiteSpace(CommandText);
         _workflowPrepared = CurrentSession.BoundWorkflow is not null;
         RefreshWorkflowTree();
@@ -453,31 +544,83 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StatusMessage = $"Workflowの名前を変更しました: {safeName}";
     }
 
-    public void CreateNewSession()
+    public async Task CreateProjectAsync()
     {
-        CurrentSession = NewSessionInternal();
-        Idea = string.Empty;
-        CommandText = string.Empty;
-        _pendingValidation = null;
-        _commandReceived = false;
-        _workflowPrepared = false;
-        Iterations.Clear();
-        LatestOutputs.Clear();
-        HistoryItems.Clear();
-        SelectedHistoryItem = null;
-        OnPropertyChanged(nameof(HasIterations));
-        OnPropertyChanged(nameof(HasLatestOutputs));
-        NotifyHistoryChanged();
-        OnPropertyChanged(nameof(SessionProgressText));
-        NotifyPipelineStateChanged();
-        StatusMessage = "新しい制作セッションを作成しました。";
+        var name = NormalizeContextName(NewProjectName, "Project");
+        if (_localContexts.Projects.Any(project => string.Equals(project.DisplayName, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            ProjectValidationMessage = "同名のProjectが既にあります。";
+            throw new InvalidOperationException(ProjectValidationMessage);
+        }
+        var project = new LocalProjectContext { DisplayName = name };
+        _localContexts.Projects.Add(project);
+        await _store.SaveLocalContextsAsync(_localContexts);
+        RefreshProjectOptions(project.Id);
+        IsProjectCreateVisible = false;
+        NewProjectName = string.Empty;
+        StatusMessage = $"ローカルProjectを作成しました: {name}";
+    }
+
+    public async Task CreateChatAsync()
+    {
+        if (!HasSelectedProject) throw new InvalidOperationException("先にProjectを選択してください。");
+        var name = NormalizeContextName(NewChatName, "Chat");
+        if (SelectedProject!.Chats.Any(chat => string.Equals(chat.DisplayName, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            ChatValidationMessage = "同名のChatがこのProjectに既にあります。";
+            throw new InvalidOperationException(ChatValidationMessage);
+        }
+        var chat = new LocalChatContext { DisplayName = name };
+        SelectedProject.Chats.Add(chat);
+        await _store.SaveLocalContextsAsync(_localContexts);
+        RefreshChatOptions(chat.Id);
+        IsChatCreateVisible = false;
+        NewChatName = string.Empty;
+        StatusMessage = $"ローカルChatを作成しました: {name}";
+    }
+
+    public void CancelProjectCreation()
+    {
+        IsProjectCreateVisible = false;
+        NewProjectName = string.Empty;
+        ProjectValidationMessage = string.Empty;
+        RefreshProjectOptions(_localContexts.Projects.FirstOrDefault()?.Id);
+    }
+
+    public void CancelChatCreation()
+    {
+        IsChatCreateVisible = false;
+        NewChatName = string.Empty;
+        ChatValidationMessage = string.Empty;
+        RefreshChatOptions(_selectedProject?.Chats.FirstOrDefault()?.Id);
+    }
+
+    public async Task StartNewCreationAsync()
+    {
+        ValidateNewCreationSetup();
+        var session = new CreationSession
+        {
+            Title = $"{SelectedProject!.DisplayName} / {SelectedChat!.DisplayName}",
+            ProjectLabel = SelectedProject.DisplayName,
+            ChatLabel = SelectedChat.DisplayName,
+            LocalProjectContextId = SelectedProject.Id,
+            LocalChatContextId = SelectedChat.Id,
+            ProjectId = SelectedProject.ExternalId,
+            ConversationId = SelectedChat.ExternalId,
+            MaximumIterations = SessionMaximumIterations,
+            BoundWorkflow = SelectedWorkflow,
+        };
+        Sessions.Insert(0, session);
+        CurrentSession = session;
+        ResetSessionWorkspace(session);
+        await _store.SaveSessionAsync(session);
+        StatusMessage = "新しい制作を開始しました。中央の制作アイデアから進めてください。";
     }
 
     public async Task SaveSessionAsync()
     {
         if (CurrentSession is null) return;
         CurrentSession.OriginalIdea = Idea;
-        CurrentSession.MaximumIterations = Settings.MaximumIterations;
         await _store.SaveSessionAsync(CurrentSession);
         StatusMessage = "制作セッションを保存しました。";
     }
@@ -544,8 +687,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _commandReceived = true;
         OnPropertyChanged(nameof(CanApplyCommand));
         StatusMessage = _pendingValidation.IsValid ? "ChatGPTからの生成指示を確認しました。「適用」から反映できます。" : string.Join(" ", _pendingValidation.Errors);
+        if (_pendingValidation.IsValid)
+        {
+            await RecordHandoffAsync(new HandoffMessage
+            {
+                Direction = HandoffDirection.ChatGptToComfy,
+                State = HandoffTransportState.Received,
+                Title = _pendingValidation.Command?.Action == "complete" ? "制作完了の指示" : "生成Commandを受信",
+                Summary = BuildCommandTimelineSummary(_pendingValidation.Command!),
+                Payload = CommandText,
+            });
+        }
         if (_pendingValidation.Command?.Action == "complete" && _pendingValidation.IsValid) CompleteSession(_pendingValidation.Command.Reason ?? "ChatGPT completed the session.");
-        await Task.CompletedTask;
     }
 
     public async Task ApplyCommandAsync(bool generate)
@@ -562,6 +715,34 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public string BuildBootstrapContext() => CurrentSession is null ? string.Empty : ConnectorContextBuilder.BuildBootstrap(CurrentSession, Slots.Select(ToWorkflowSlot));
     public string BuildResultContext() => CurrentSession?.Iterations.LastOrDefault() is { } iteration ? ConnectorContextBuilder.BuildResult(CurrentSession, iteration) : string.Empty;
+
+    public async Task<string> PrepareBootstrapHandoffAsync()
+    {
+        if (CurrentSession is null || CurrentSession.BoundWorkflow is null) throw new InvalidOperationException("左の設定から新しい制作を開始してください。");
+        if (SelectedWorkflow is null || !string.Equals(CurrentSession.BoundWorkflow.RelativePath, SelectedWorkflow.RelativePath, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("現在の制作セッションと選択中Workflowが一致しません。左から新しい制作を開始してください。");
+        }
+        if (string.IsNullOrWhiteSpace(CurrentSession.ProjectLabel) || string.IsNullOrWhiteSpace(CurrentSession.ChatLabel)) throw new InvalidOperationException("ProjectとChatを設定して新しい制作を開始してください。");
+        await SaveSessionAsync();
+        var payload = BuildBootstrapContext();
+        await RecordHandoffAsync(new HandoffMessage
+        {
+            Direction = HandoffDirection.ComfyToChatGpt,
+            State = HandoffTransportState.Copied,
+            Title = "制作コンテキストを送信",
+            Summary = $"制作アイデアとConnector ProtocolをChatGPTへ渡します。{Environment.NewLine}Workflow: {SelectedWorkflowName}{Environment.NewLine}Project: {CurrentSession.ProjectLabel}{Environment.NewLine}Chat: {CurrentSession.ChatLabel}",
+            Payload = payload,
+        });
+        return payload;
+    }
+
+    public async Task MarkHandoffCopiedAsync(HandoffTimelineItem item)
+    {
+        item.MarkCopied();
+        if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
+        StatusMessage = item.IsComfyToChatGpt ? "ChatGPTへ渡す内容をコピーしました。" : "Connector用Commandをコピーしました。";
+    }
 
     public void CompleteSession(string reason)
     {
@@ -638,7 +819,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 NotifySelectedPreviewChanged();
                 CurrentJob.CompletedAt = DateTimeOffset.UtcNow;
                 StatusMessage = $"Iteration {iteration.Number} が完了しました。出力 {iteration.Outputs.Count} 件。";
-                await _store.SaveSessionAsync(CurrentSession!);
+                var resultPayload = ConnectorContextBuilder.BuildResult(CurrentSession!, iteration);
+                await RecordHandoffAsync(new HandoffMessage
+                {
+                    Direction = HandoffDirection.ComfyToChatGpt,
+                    State = HandoffTransportState.Waiting,
+                    Title = $"Iteration {iteration.Number:00} の生成結果",
+                    Summary = BuildResultTimelineSummary(iteration),
+                    Payload = resultPayload,
+                    IterationNumber = iteration.Number,
+                });
                 NotifyPipelineStateChanged();
                 break;
             }
@@ -661,6 +851,182 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Sessions.Add(session);
         return session;
     }
+
+    private async Task InitializeLocalContextsAsync()
+    {
+        _localContexts = await _store.LoadLocalContextsAsync() ?? new LocalContextCatalog();
+        var changed = false;
+        if (_localContexts.Projects.Count == 0)
+        {
+            _localContexts.Projects.Add(new LocalProjectContext
+            {
+                DisplayName = "ComfyUI × ChatGPT",
+                Chats = [new LocalChatContext { DisplayName = "新しい制作" }],
+            });
+            changed = true;
+        }
+
+        if (CurrentSession is not null)
+        {
+            var project = _localContexts.Projects.FirstOrDefault(item => item.Id == CurrentSession.LocalProjectContextId);
+            if (project is null && !string.IsNullOrWhiteSpace(CurrentSession.ProjectLabel))
+            {
+                project = _localContexts.Projects.FirstOrDefault(item => string.Equals(item.DisplayName, CurrentSession.ProjectLabel, StringComparison.OrdinalIgnoreCase));
+                if (project is null)
+                {
+                    project = new LocalProjectContext { DisplayName = CurrentSession.ProjectLabel.Trim(), ExternalId = CurrentSession.ProjectId };
+                    _localContexts.Projects.Add(project);
+                }
+                CurrentSession.LocalProjectContextId = project.Id;
+                changed = true;
+            }
+
+            if (project is not null && !string.IsNullOrWhiteSpace(CurrentSession.ChatLabel))
+            {
+                var chat = project.Chats.FirstOrDefault(item => item.Id == CurrentSession.LocalChatContextId)
+                    ?? project.Chats.FirstOrDefault(item => string.Equals(item.DisplayName, CurrentSession.ChatLabel, StringComparison.OrdinalIgnoreCase));
+                if (chat is null)
+                {
+                    chat = new LocalChatContext { DisplayName = CurrentSession.ChatLabel.Trim(), ExternalId = CurrentSession.ConversationId };
+                    project.Chats.Add(chat);
+                }
+                CurrentSession.LocalChatContextId = chat.Id;
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            await _store.SaveLocalContextsAsync(_localContexts);
+            if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
+        }
+        RefreshProjectOptions(CurrentSession?.LocalProjectContextId);
+        if (SelectedProject is null) SelectedProject = ProjectOptions.FirstOrDefault(item => !item.IsCreateAction);
+        RefreshChatOptions(CurrentSession?.LocalChatContextId);
+        if (SelectedChat is null) SelectedChat = ChatOptions.FirstOrDefault(item => !item.IsCreateAction);
+    }
+
+    private void RefreshProjectOptions(string? preferredId = null)
+    {
+        var targetId = preferredId ?? _selectedProject?.Id;
+        ProjectOptions.Clear();
+        foreach (var project in _localContexts.Projects.OrderBy(item => item.CreatedAt)) ProjectOptions.Add(project);
+        ProjectOptions.Add(_createProjectOption);
+        _selectedProject = ProjectOptions.FirstOrDefault(item => !item.IsCreateAction && item.Id == targetId)
+            ?? ProjectOptions.FirstOrDefault(item => !item.IsCreateAction);
+        OnPropertyChanged(nameof(SelectedProject));
+        OnPropertyChanged(nameof(HasSelectedProject));
+        OnPropertyChanged(nameof(CanCreateChat));
+        OnPropertyChanged(nameof(CanStartNewCreation));
+        RefreshChatOptions(CurrentSession?.LocalChatContextId);
+    }
+
+    private void RefreshChatOptions(string? preferredId = null)
+    {
+        var targetId = preferredId ?? _selectedChat?.Id;
+        ChatOptions.Clear();
+        if (_selectedProject is not null)
+        {
+            foreach (var chat in _selectedProject.Chats.OrderBy(item => item.CreatedAt)) ChatOptions.Add(chat);
+            ChatOptions.Add(_createChatOption);
+        }
+        _selectedChat = ChatOptions.FirstOrDefault(item => !item.IsCreateAction && item.Id == targetId)
+            ?? ChatOptions.FirstOrDefault(item => !item.IsCreateAction);
+        OnPropertyChanged(nameof(SelectedChat));
+        OnPropertyChanged(nameof(HasSelectedChat));
+        OnPropertyChanged(nameof(CanStartNewCreation));
+    }
+
+    private void ResetSessionWorkspace(CreationSession session)
+    {
+        Idea = session.OriginalIdea;
+        CommandText = string.Empty;
+        _pendingValidation = null;
+        _commandReceived = false;
+        _workflowPrepared = session.BoundWorkflow is not null;
+        Iterations.Clear();
+        LatestOutputs.Clear();
+        HandoffItems.Clear();
+        RebuildHistoryItems();
+        OnPropertyChanged(nameof(HasIterations));
+        OnPropertyChanged(nameof(HasLatestOutputs));
+        OnPropertyChanged(nameof(HasHandoffItems));
+        OnPropertyChanged(nameof(SessionStatusText));
+        OnPropertyChanged(nameof(SessionProgressText));
+        OnPropertyChanged(nameof(CurrentSessionContextText));
+        NotifyPipelineStateChanged();
+    }
+
+    private void ValidateNewCreationSetup()
+    {
+        if (!HasSelectedWorkflow) throw new InvalidOperationException("制作に使うWorkflowを選択してください。");
+        if (!HasSelectedProject) throw new InvalidOperationException("ChatGPT Projectを選択してください。");
+        if (!HasSelectedChat) throw new InvalidOperationException("Chatを選択してください。");
+        if (SessionMaximumIterations is < 1 or > 1000) throw new InvalidOperationException("Maximum Iterationsは1〜1000で指定してください。");
+        if (IsJobActive) throw new InvalidOperationException("生成中は新しい制作を開始できません。");
+    }
+
+    private bool RebuildHandoffItems()
+    {
+        HandoffItems.Clear();
+        if (CurrentSession is null) return false;
+        var changed = false;
+        foreach (var iteration in CurrentSession.Iterations.Where(item => item.Status == JobStatus.Completed && item.Outputs.Count > 0))
+        {
+            if (CurrentSession.HandoffMessages.Any(item => item.Direction == HandoffDirection.ComfyToChatGpt && item.IterationNumber == iteration.Number)) continue;
+            CurrentSession.HandoffMessages.Add(new HandoffMessage
+            {
+                Direction = HandoffDirection.ComfyToChatGpt,
+                State = HandoffTransportState.Waiting,
+                Title = $"Iteration {iteration.Number:00} の生成結果",
+                Summary = BuildResultTimelineSummary(iteration),
+                Payload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration),
+                IterationNumber = iteration.Number,
+                CreatedAt = iteration.CreatedAt,
+            });
+            changed = true;
+        }
+        foreach (var message in CurrentSession.HandoffMessages.OrderBy(item => item.CreatedAt)) HandoffItems.Add(new HandoffTimelineItem(message));
+        OnPropertyChanged(nameof(HasHandoffItems));
+        return changed;
+    }
+
+    private async Task RecordHandoffAsync(HandoffMessage message)
+    {
+        if (CurrentSession is null) return;
+        var existing = CurrentSession.HandoffMessages.LastOrDefault();
+        if (existing is not null && existing.Direction == message.Direction && string.Equals(existing.Payload, message.Payload, StringComparison.Ordinal))
+        {
+            existing.State = message.State;
+            RebuildHandoffItems();
+        }
+        else
+        {
+            CurrentSession.HandoffMessages.Add(message);
+            HandoffItems.Add(new HandoffTimelineItem(message));
+            OnPropertyChanged(nameof(HasHandoffItems));
+        }
+        await _store.SaveSessionAsync(CurrentSession);
+    }
+
+    private static string BuildCommandTimelineSummary(ConnectorCommand command)
+        => command.Action == "complete"
+            ? command.Reason ?? "ChatGPTが制作完了を指示しました。"
+            : $"{command.Parameters.Count}件のslot変更を受信しました。適用前に検証できます。";
+
+    private static string BuildResultTimelineSummary(SessionIteration iteration)
+        => $"{iteration.Outputs.Count}件の生成物を受信しました。コピーしてChatGPTへレビューを依頼できます。";
+
+    private static string NormalizeContextName(string? name, string label)
+    {
+        var value = (name ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(value)) throw new InvalidOperationException($"{label}名を入力してください。");
+        if (value.Length > 80) throw new InvalidOperationException($"{label}名は80文字以内で入力してください。");
+        if (value.Any(char.IsControl)) throw new InvalidOperationException($"{label}名に制御文字は使用できません。");
+        return value;
+    }
+
+    private static string BlankFallback(string? value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value;
 
     private void RebuildHistoryItems()
     {

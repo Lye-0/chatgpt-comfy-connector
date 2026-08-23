@@ -328,6 +328,51 @@
                 </Grid>
             </Border>
         </DataTemplate>
+        <DataTemplate x:Key="HandoffTimelineItemTemplate">
+            <Grid Margin="0,0,0,12">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <Grid Grid.Column="0">
+                    <Border Width="2" Background="#28405A" HorizontalAlignment="Center" />
+                    <Ellipse x:Name="DirectionNode" Width="9" Height="9" Fill="{StaticResource AccentBrush}" Stroke="#08101B" StrokeThickness="2" VerticalAlignment="Top" Margin="0,18,0,0" />
+                </Grid>
+                <Border x:Name="MessageChrome" Grid.Column="1" Background="#0C1726" BorderBrush="#234968" BorderThickness="1" CornerRadius="11" Padding="11">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock x:Name="DirectionLabel" Text="{Binding DirectionLabel}" Foreground="{StaticResource AccentBrush}" FontSize="9" FontWeight="Bold" />
+                                <TextBlock Text="{Binding TimeText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" Margin="8,0,0,0" />
+                            </StackPanel>
+                            <Button Grid.Column="1" Style="{StaticResource IconButtonStyle}" Width="28" Height="26" Margin="0" Tag="{Binding}" Click="CopyHandoff_Click" ToolTip="{Binding CopyToolTip}" AutomationProperties.Name="メッセージをコピー">
+                                <Viewbox Width="14" Height="14">
+                                    <Canvas Width="24" Height="24">
+                                        <Rectangle Width="12" Height="12" Canvas.Left="7" Canvas.Top="3" Fill="Transparent" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" StrokeThickness="1.8" />
+                                        <Rectangle Width="12" Height="12" Canvas.Left="3" Canvas.Top="8" Fill="Transparent" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" StrokeThickness="1.8" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
+                        </Grid>
+                        <TextBlock Grid.Row="1" Text="{Binding Title}" FontSize="13" FontWeight="SemiBold" Margin="0,7,0,0" TextWrapping="Wrap" />
+                        <Grid Grid.Row="2" Margin="0,5,0,0">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Summary}" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap" />
+                            <Border Grid.Column="1" Background="#172738" CornerRadius="5" Padding="5,2" VerticalAlignment="Bottom" Margin="7,0,0,0">
+                                <TextBlock Text="{Binding StateLabel}" Foreground="{StaticResource MutedTextBrush}" FontSize="8" FontWeight="SemiBold" />
+                            </Border>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Grid>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsComfyToChatGpt}" Value="True">
+                    <Setter TargetName="DirectionNode" Property="Fill" Value="{StaticResource SuccessBrush}" />
+                    <Setter TargetName="DirectionLabel" Property="Foreground" Value="{StaticResource SuccessBrush}" />
+                    <Setter TargetName="MessageChrome" Property="BorderBrush" Value="#245C57" />
+                    <Setter TargetName="MessageChrome" Property="Background" Value="#0D201F" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
     </Window.Resources>
 
     <Grid Margin="16">
@@ -519,11 +564,11 @@
         <Grid Grid.Row="1"
               Margin="0,14,0,8">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="270" />
+                <ColumnDefinition Width="320" />
                 <ColumnDefinition Width="12" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="12" />
-                <ColumnDefinition Width="420" />
+                <ColumnDefinition Width="410" />
             </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0"
@@ -536,6 +581,7 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
                     <StackPanel Grid.Row="0"
@@ -727,6 +773,48 @@
                             </Grid>
                         </StackPanel>
                     </Border>
+                    <Border Grid.Row="3"
+                            Background="#0B1624"
+                            CornerRadius="10"
+                            Padding="10"
+                            Margin="0,9,0,0"
+                            BorderBrush="{StaticResource LineBrush}"
+                            BorderThickness="1">
+                        <StackPanel>
+                            <TextBlock Text="CHATGPT CONTEXT" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="SemiBold" />
+                            <TextBlock Text="制作開始前の設定" FontSize="14" FontWeight="SemiBold" Margin="0,3,0,8" />
+                            <TextBlock Text="Project" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
+                            <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" DisplayMemberPath="DisplayName" Margin="0,3,0,5" ToolTip="ローカルProjectを選択、または新規作成" />
+                            <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsProjectCreateVisible, Converter={StaticResource BoolToVisibility}}">
+                                <StackPanel>
+                                    <TextBox Text="{Binding NewProjectName, UpdateSourceTrigger=PropertyChanged}" ToolTip="新しいProject名" />
+                                    <TextBlock Text="{Binding ProjectValidationMessage}" Foreground="{StaticResource DangerBrush}" FontSize="9" Margin="0,4,0,0" Visibility="{Binding HasProjectValidationMessage, Converter={StaticResource BoolToVisibility}}" />
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,0,0">
+                                        <Button Content="キャンセル" Click="CancelProjectCreation_Click" Padding="7,4" />
+                                        <Button Content="作成" Click="CreateProject_Click" Padding="9,4" Margin="0" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                            <TextBlock Text="Chat" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
+                            <ComboBox ItemsSource="{Binding ChatOptions}" SelectedItem="{Binding SelectedChat}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanCreateChat}" Margin="0,3,0,5" ToolTip="選択したProject内のChat" />
+                            <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsChatCreateVisible, Converter={StaticResource BoolToVisibility}}">
+                                <StackPanel>
+                                    <TextBox Text="{Binding NewChatName, UpdateSourceTrigger=PropertyChanged}" ToolTip="新しいChat名" />
+                                    <TextBlock Text="{Binding ChatValidationMessage}" Foreground="{StaticResource DangerBrush}" FontSize="9" Margin="0,4,0,0" Visibility="{Binding HasChatValidationMessage, Converter={StaticResource BoolToVisibility}}" />
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,0,0">
+                                        <Button Content="キャンセル" Click="CancelChatCreation_Click" Padding="7,4" />
+                                        <Button Content="作成" Click="CreateChat_Click" Padding="9,4" Margin="0" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                            <Grid Margin="0,1,0,7">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="72" /></Grid.ColumnDefinitions>
+                                <TextBlock Text="Maximum Iterations" Foreground="{StaticResource MutedTextBrush}" FontSize="9" VerticalAlignment="Center" />
+                                <TextBox Grid.Column="1" Text="{Binding SessionMaximumIterations, UpdateSourceTrigger=PropertyChanged}" HorizontalContentAlignment="Center" Padding="6,4" ToolTip="1〜1000" />
+                            </Grid>
+                            <Button Content="新しい制作を開始" Click="NewSession_Click" IsEnabled="{Binding CanStartNewCreation}" Background="{StaticResource AccentBrush}" Foreground="#071117" FontWeight="SemiBold" Margin="0" ToolTip="Workflow・Project・Chatを確定して制作セッションを開始" />
+                        </StackPanel>
+                    </Border>
                 </Grid>
             </Border>
 
@@ -828,8 +916,8 @@
                             </StackPanel>
                             <Button Grid.Column="1"
                                     Content="SEND TO CHATGPT"
-                                    Click="CopyIdea_Click"
-                                    ToolTip="制作アイデアをクリップボードへコピー"
+                                    Click="CopyBootstrap_Click"
+                                    ToolTip="制作アイデア・Workflow・主要設定・slot情報をまとめてコピー"
                                     Background="{StaticResource AccentBrush}"
                                     Foreground="#071117"
                                     FontWeight="SemiBold"
@@ -887,23 +975,6 @@
                                                   Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                                                   StrokeThickness="1.8"
                                                   StrokeLineJoin="Round" />
-                                        </Viewbox>
-                                    </Button>
-                                    <Button Style="{StaticResource IconButtonStyle}"
-                                            ToolTip="動画出力フォルダを開く（ComfyUI output video）"
-                                            AutomationProperties.Name="動画出力フォルダを開く"
-                                            Tag="{Binding VideoOutputRoot}"
-                                            Click="OpenOutputFolder_Click">
-                                        <Viewbox Width="16" Height="16" Stretch="Uniform">
-                                            <Canvas Width="24" Height="24">
-                                                <Path Data="M2,5 L9,5 L11,7 L22,7 L22,19 L2,19 Z"
-                                                      Fill="Transparent"
-                                                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
-                                                      StrokeThickness="1.8"
-                                                      StrokeLineJoin="Round" />
-                                                <Polygon Points="10,9 10,15 16,12"
-                                                         Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" />
-                                            </Canvas>
                                         </Viewbox>
                                     </Button>
                                     <Border Background="#162A3A"
@@ -1090,167 +1161,51 @@
                     Padding="14"
                     BorderBrush="{StaticResource LineBrush}"
                     BorderThickness="1">
-                <ScrollViewer VerticalScrollBarVisibility="Auto"
-                              HorizontalScrollBarVisibility="Disabled">
-                    <StackPanel>
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <Border Background="#0C1726" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="11" Padding="11" Margin="0,0,0,10">
                         <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <StackPanel>
-                                <TextBlock Text="CHATGPT / SESSION"
-                                           FontSize="11"
-                                           Foreground="{StaticResource AccentBrush}"
-                                           FontWeight="SemiBold" />
-                                <TextBox Text="{Binding SessionTitle, UpdateSourceTrigger=PropertyChanged}"
-                                         FontSize="19"
-                                         FontWeight="SemiBold"
-                                         Margin="0,5,0,7" />
+                                <TextBlock Text="CHATGPT ↔ COMFY" FontSize="11" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+                                <TextBlock Text="Handoff Timeline" FontSize="18" FontWeight="SemiBold" Margin="0,3,0,2" />
+                                <TextBlock Text="{Binding CurrentSessionContextText}" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextTrimming="CharacterEllipsis" />
                             </StackPanel>
-                            <Border Grid.Column="1"
-                                    Background="#162A3A"
-                                    BorderBrush="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
-                                    BorderThickness="1"
-                                    CornerRadius="8"
-                                    Padding="8,5"
-                                    VerticalAlignment="Top">
-                                <TextBlock Text="{Binding SessionStatusText}"
-                                           Foreground="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
-                                           FontSize="10" />
-                            </Border>
-                        </Grid>
-                        <Grid Margin="0,0,0,11">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="{Binding SessionProgressText}"
-                                       Foreground="{StaticResource MutedTextBrush}"
-                                       FontSize="10" />
-                            <StackPanel Grid.Column="1"
-                                        Orientation="Horizontal">
-                                <Button Content="新規セッション"
-                                        Click="NewSession_Click"
-                                        Padding="9,6" />
-                                <Button Content="RESUME"
-                                        ToolTip="完了・停止したセッションを再開"
-                                        Click="Resume_Click"
-                                        Padding="9,6"
-                                        Margin="0" />
+                            <StackPanel Grid.Column="1" HorizontalAlignment="Right">
+                                <Border Background="#162A3A" BorderBrush="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}" BorderThickness="1" CornerRadius="7" Padding="7,4" HorizontalAlignment="Right">
+                                    <TextBlock Text="{Binding SessionStatusText}" Foreground="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}" FontSize="9" />
+                                </Border>
+                                <Button Content="RESUME" Click="Resume_Click" IsEnabled="{Binding CanResumeSession}" Padding="7,4" Margin="0,6,0,0" ToolTip="完了・停止した制作を再開" />
                             </StackPanel>
                         </Grid>
+                    </Border>
 
-                        <Border Background="{StaticResource PanelSoftBrush}"
-                                BorderBrush="{StaticResource LineBrush}"
-                                BorderThickness="1"
-                                CornerRadius="10"
-                                Padding="12">
-                            <StackPanel>
-                                <TextBlock Text="SESSION CONTEXT"
-                                           FontSize="11"
-                                           Foreground="{StaticResource AccentBrush}"
-                                           FontWeight="SemiBold" />
-                                <TextBlock Text="ChatGPTの送信先"
-                                           Foreground="{StaticResource TextBrush}"
-                                           FontSize="12"
-                                           FontWeight="SemiBold"
-                                           Margin="0,10,0,3" />
-                                <Label Content="Project"
-                                       Margin="0,2,0,0" />
-                                <TextBox Text="{Binding ProjectLabel, UpdateSourceTrigger=PropertyChanged}"
-                                         ToolTip="プロジェクトの表示名（任意）"
-                                         Margin="0,4,0,5" />
-                                <Label Content="Chat"
-                                       Margin="0,0,0,0" />
-                                <TextBox Text="{Binding ChatLabel, UpdateSourceTrigger=PropertyChanged}"
-                                         ToolTip="チャットの表示名（任意）"
-                                         Margin="0,0,0,2" />
-                                <TextBlock Text="現在は手動連携のため、送信先名をローカルに保存します。"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           FontSize="10"
-                                           TextWrapping="Wrap"
-                                           Margin="0,10,0,0" />
-                            </StackPanel>
-                        </Border>
+                    <Grid Grid.Row="1">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <ItemsControl ItemsSource="{Binding HandoffItems}" ItemTemplate="{StaticResource HandoffTimelineItemTemplate}" Margin="0,2,2,6" />
+                        </ScrollViewer>
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{Binding HasHandoffItems, Converter={StaticResource InverseBoolToVisibility}}">
+                            <Ellipse Width="36" Height="36" Fill="#102436" Stroke="{StaticResource LineStrongBrush}" StrokeThickness="1" />
+                            <TextBlock Text="まだHandoffはありません" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,10,0,0" />
+                            <TextBlock Text="中央のSEND TO CHATGPTから制作コンテキストをコピーすると、ここに記録されます。" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap" Width="270" Margin="0,5,0,0" />
+                        </StackPanel>
+                    </Grid>
 
-                        <Border Background="#102C31"
-                                BorderBrush="{StaticResource AccentBrush}"
-                                BorderThickness="1"
-                                CornerRadius="10"
-                                Padding="12"
-                                Margin="0,12,0,0">
-                            <StackPanel>
-                                <TextBlock Text="CHATGPT HANDOFF"
-                                           FontSize="11"
-                                           Foreground="{StaticResource AccentStrongBrush}"
-                                           FontWeight="SemiBold" />
-                                <TextBlock Text="制作状態をChatGPTへ渡し、返ってきた指示を反映します。"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           FontSize="11"
-                                           TextWrapping="Wrap"
-                                           Margin="0,4,0,10" />
-                                <TextBlock Text="ChatGPTへ送る"
-                                           Foreground="{StaticResource TextBrush}"
-                                           FontSize="11"
-                                           FontWeight="SemiBold"
-                                           Margin="0,0,0,4" />
-                                <Button Content="ChatGPTへ送る内容をコピー"
-                                        ToolTip="現在のWorkflow・主要設定・slot情報をコピー"
-                                        Click="CopyBootstrap_Click"
-                                        Background="{StaticResource AccentBrush}"
-                                        Foreground="#071117"
-                                        FontWeight="SemiBold"
-                                        Margin="0" />
-                                <TextBlock Text="生成後は結果をChatGPTへ返し、必要な画像・動画だけ手動で添付します。"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           FontSize="10"
-                                           TextWrapping="Wrap"
-                                           Margin="0,8,0,12" />
-                                <TextBlock Text="ChatGPTからの指示"
-                                           Foreground="{StaticResource TextBrush}"
-                                           FontSize="11"
-                                           FontWeight="SemiBold"
-                                           Margin="0,0,0,0" />
-                                <TextBlock Text="返答を貼り付けて、内容を確認してから適用します。"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           FontSize="10"
-                                           Margin="0,3,0,4" />
-                                <TextBox x:Name="CommandBox"
-                                         Text="{Binding CommandText, UpdateSourceTrigger=PropertyChanged}"
-                                         AcceptsReturn="True"
-                                         TextWrapping="Wrap"
-                                         MinHeight="148"
-                                         FontFamily="Cascadia Mono"
-                                         FontSize="11"
-                                         ToolTip="comfy-connector/1 commandを貼り付け" />
-                                <WrapPanel Margin="0,7,0,0">
-                                    <Button Content="読み込んで確認"
-                                            ToolTip="Commandの形式とslotを検証"
-                                            Click="ImportCommand_Click" />
-                                    <Button Content="適用"
-                                            ToolTip="検証済みCommandをslotへ反映"
-                                            Click="ApplyCommand_Click"
-                                            IsEnabled="{Binding CanApplyCommand}" />
-                                    <Button Content="適用して生成"
-                                            ToolTip="反映後に1件のJobを生成"
-                                            Click="ApplyGenerateCommand_Click"
-                                            IsEnabled="{Binding CanApplyCommand}"
-                                            Margin="0" />
-                                </WrapPanel>
-                                <Button Content="生成結果をChatGPT用にコピー"
-                                        ToolTip="生成結果と出力パスをコピー"
-                                        Click="CopyResult_Click"
-                                        Margin="0,10,0,0" />
-                                <TextBlock Text="セッション完了はChatGPTからの完了指示で行い、必要ならRESUMEで再開できます。"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           FontSize="10"
-                                           TextWrapping="Wrap"
-                                           Margin="0,9,0,0" />
-                            </StackPanel>
-                        </Border>
-                    </StackPanel>
-                </ScrollViewer>
+                    <Border Grid.Row="2" Background="#102C31" BorderBrush="#2F8E89" BorderThickness="1" CornerRadius="11" Padding="11" Margin="0,10,0,0">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="CHATGPT COMMAND" Foreground="{StaticResource AccentStrongBrush}" FontSize="10" FontWeight="SemiBold" />
+                                <TextBlock Text="貼り付け → 確認 → 適用" Foreground="{StaticResource MutedTextBrush}" FontSize="9" HorizontalAlignment="Right" />
+                            </Grid>
+                            <TextBox x:Name="CommandBox" Text="{Binding CommandText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="108" MaxHeight="180" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono" FontSize="10" ToolTip="ChatGPTから返されたcomfy-connector/1 commandを貼り付け" />
+                            <WrapPanel Margin="0,7,0,0">
+                                <Button Content="読み込んで確認" ToolTip="Commandの形式とslotを検証" Click="ImportCommand_Click" />
+                                <Button Content="適用" ToolTip="検証済みCommandをslotへ反映" Click="ApplyCommand_Click" IsEnabled="{Binding CanApplyCommand}" />
+                                <Button Content="適用して生成" ToolTip="反映後に1件のJobを生成" Click="ApplyGenerateCommand_Click" IsEnabled="{Binding CanApplyCommand}" Margin="0" />
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                </Grid>
             </Border>
         </Grid>
 

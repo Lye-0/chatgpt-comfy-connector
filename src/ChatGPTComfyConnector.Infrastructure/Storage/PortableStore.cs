@@ -56,6 +56,12 @@ public sealed class PortableStore : IPortableStore
         return AtomicWriteAsync(Path.Combine(_layout.Sessions, fileName), session, cancellationToken);
     }
 
+    public Task<LocalContextCatalog?> LoadLocalContextsAsync(CancellationToken cancellationToken = default)
+        => ReadAsync<LocalContextCatalog>(_layout.ContextsFile, cancellationToken);
+
+    public Task SaveLocalContextsAsync(LocalContextCatalog catalog, CancellationToken cancellationToken = default)
+        => AtomicWriteAsync(_layout.ContextsFile, catalog, cancellationToken);
+
     public async Task<string> CreateWorkflowBackupAsync(WorkflowIdentity workflow, string workflowRoot, string reason, CancellationToken cancellationToken = default)
     {
         var source = workflow.ToAbsolute(workflowRoot);
@@ -94,13 +100,13 @@ public sealed class PortableStore : IPortableStore
             throw new InvalidOperationException("指定されたバックアップはConnectorのバックアップ領域にありません。");
         }
 
-        if (File.Exists(source)) await CreateWorkflowBackupAsync(workflow, workflowRoot, "before-restore", cancellationToken);
         var temp = source + ".restore.tmp";
         await using (var input = File.OpenRead(fullBackup))
         await using (var output = File.Create(temp))
         {
             await input.CopyToAsync(output, cancellationToken);
         }
+        if (File.Exists(source)) await CreateWorkflowBackupAsync(workflow, workflowRoot, "before-restore", cancellationToken);
         File.Move(temp, source, true);
     }
 

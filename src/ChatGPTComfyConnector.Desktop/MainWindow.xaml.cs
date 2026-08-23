@@ -94,13 +94,29 @@ public partial class MainWindow : Window
             if (!ViewModel.IsWorkflowRenameVisible) WorkflowTree.Focus();
         }
     }
-    private void NewSession_Click(object sender, RoutedEventArgs e) => ViewModel.CreateNewSession();
+    private async void NewSession_Click(object sender, RoutedEventArgs e) => await Run("新しい制作", ViewModel.StartNewCreationAsync);
+    private async void CreateProject_Click(object sender, RoutedEventArgs e) => await Run("Project作成", ViewModel.CreateProjectAsync);
+    private void CancelProjectCreation_Click(object sender, RoutedEventArgs e) => ViewModel.CancelProjectCreation();
+    private async void CreateChat_Click(object sender, RoutedEventArgs e) => await Run("Chat作成", ViewModel.CreateChatAsync);
+    private void CancelChatCreation_Click(object sender, RoutedEventArgs e) => ViewModel.CancelChatCreation();
     private async void Resume_Click(object sender, RoutedEventArgs e) => await Run("セッション再開", ViewModel.ResumeSessionAsync);
     private async void ImportCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド検証", ViewModel.ImportCommandAsync);
     private async void ApplyCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド適用", () => ViewModel.ApplyCommandAsync(false));
     private async void ApplyGenerateCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド適用 + 生成", () => ViewModel.ApplyCommandAsync(true));
-    private async void CopyBootstrap_Click(object sender, RoutedEventArgs e) { await ViewModel.SaveSessionAsync(); Clipboard.SetText(ViewModel.BuildBootstrapContext()); ViewModel.StatusMessage = "ChatGPTへ送る内容をコピーしました。ChatGPTへ貼り付けてください。"; }
-    private void CopyIdea_Click(object sender, RoutedEventArgs e) { Clipboard.SetText(ViewModel.Idea ?? string.Empty); ViewModel.StatusMessage = "制作アイデアをクリップボードへコピーしました。ChatGPTへ貼り付けてください。"; }
+    private async void CopyBootstrap_Click(object sender, RoutedEventArgs e)
+    {
+        await Run("ChatGPTへ送信", async () =>
+        {
+            Clipboard.SetText(await ViewModel.PrepareBootstrapHandoffAsync());
+            ViewModel.StatusMessage = "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。";
+        });
+    }
+    private async void CopyHandoff_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: HandoffTimelineItem item }) return;
+        Clipboard.SetText(item.Payload);
+        await ViewModel.MarkHandoffCopiedAsync(item);
+    }
     private void CopyResult_Click(object sender, RoutedEventArgs e) { Clipboard.SetText(ViewModel.BuildResultContext()); ViewModel.StatusMessage = "生成結果をChatGPT用にコピーしました。必要な画像・動画を手動で添付してください。"; }
     private void OpenOutput_Click(object sender, RoutedEventArgs e)
     {

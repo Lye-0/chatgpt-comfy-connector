@@ -36,6 +36,27 @@ public enum JobStatus
     Cancelled,
 }
 
+public enum ContextBindingMode
+{
+    Local,
+    External,
+}
+
+public enum HandoffDirection
+{
+    ChatGptToComfy,
+    ComfyToChatGpt,
+}
+
+public enum HandoffTransportState
+{
+    Waiting,
+    Received,
+    Copied,
+    Sent,
+    Failed,
+}
+
 public sealed class AppSettings : INotifyPropertyChanged
 {
     private string _portableRoot = string.Empty;
@@ -84,6 +105,7 @@ public sealed class PortableLayout
         Logs = Path.Combine(Root, "logs");
         Backups = Path.Combine(Root, "backups");
         Cache = Path.Combine(Root, "cache");
+        ContextsFile = Path.Combine(Data, "chatgpt-contexts.json");
     }
 
     public string Root { get; }
@@ -93,6 +115,7 @@ public sealed class PortableLayout
     public string Logs { get; }
     public string Backups { get; }
     public string Cache { get; }
+    public string ContextsFile { get; }
     public string SettingsFile => Path.Combine(Config, "settings.json");
     public string LogFile => Path.Combine(Logs, "connector.log");
 
@@ -230,6 +253,47 @@ public sealed class JobSnapshot
     public List<OutputArtifact> Outputs { get; set; } = [];
 }
 
+public sealed class LocalChatContext
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string DisplayName { get; set; } = string.Empty;
+    public string? ExternalId { get; set; }
+    public ContextBindingMode Mode { get; set; } = ContextBindingMode.Local;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    [JsonIgnore]
+    public bool IsCreateAction { get; set; }
+}
+
+public sealed class LocalProjectContext
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string DisplayName { get; set; } = string.Empty;
+    public string? ExternalId { get; set; }
+    public ContextBindingMode Mode { get; set; } = ContextBindingMode.Local;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public List<LocalChatContext> Chats { get; set; } = [];
+    [JsonIgnore]
+    public bool IsCreateAction { get; set; }
+}
+
+public sealed class LocalContextCatalog
+{
+    public int Version { get; set; } = 1;
+    public List<LocalProjectContext> Projects { get; set; } = [];
+}
+
+public sealed class HandoffMessage
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public HandoffDirection Direction { get; set; }
+    public HandoffTransportState State { get; set; } = HandoffTransportState.Waiting;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public string Title { get; set; } = string.Empty;
+    public string Summary { get; set; } = string.Empty;
+    public string Payload { get; set; } = string.Empty;
+    public int? IterationNumber { get; set; }
+}
+
 public sealed class SessionIteration : INotifyPropertyChanged
 {
     private List<OutputArtifact> _outputs = [];
@@ -285,6 +349,8 @@ public sealed class CreationSession
     public string OriginalIdea { get; set; } = string.Empty;
     public string ProjectLabel { get; set; } = string.Empty;
     public string ChatLabel { get; set; } = string.Empty;
+    public string? LocalProjectContextId { get; set; }
+    public string? LocalChatContextId { get; set; }
     public string? ProjectId { get; set; }
     public string? ConversationId { get; set; }
     public WorkflowIdentity? BoundWorkflow { get; set; }
@@ -292,6 +358,7 @@ public sealed class CreationSession
     public int MaximumIterations { get; set; } = 10;
     public SessionStatus Status { get; set; } = SessionStatus.New;
     public List<SessionIteration> Iterations { get; set; } = [];
+    public List<HandoffMessage> HandoffMessages { get; set; } = [];
     public string? LastError { get; set; }
     public string? PauseReason { get; set; }
     public string? CompletionReason { get; set; }

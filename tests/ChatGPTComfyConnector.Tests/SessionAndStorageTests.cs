@@ -48,4 +48,50 @@ public sealed class SessionAndStorageTests
         }
         finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
     }
+
+    [Fact]
+    public async Task LocalChatContextsAndHandoffTimelineRoundTrip()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "connector-context-tests-" + Guid.NewGuid().ToString("N"));
+        var store = new PortableStore(new PortableLayout(temp));
+        var chat = new LocalChatContext { DisplayName = "Direction Chat", ExternalId = null, Mode = ContextBindingMode.Local };
+        var project = new LocalProjectContext { DisplayName = "Film Project", ExternalId = "future-project-id", Chats = [chat] };
+        var catalog = new LocalContextCatalog { Projects = [project] };
+        var session = new CreationSession
+        {
+            ProjectLabel = project.DisplayName,
+            ChatLabel = chat.DisplayName,
+            LocalProjectContextId = project.Id,
+            LocalChatContextId = chat.Id,
+            HandoffMessages =
+            [
+                new HandoffMessage
+                {
+                    Direction = HandoffDirection.ComfyToChatGpt,
+                    State = HandoffTransportState.Copied,
+                    Title = "制作コンテキストを送信",
+                    Summary = "bootstrap",
+                    Payload = "payload",
+                },
+            ],
+        };
+
+        try
+        {
+            await store.SaveLocalContextsAsync(catalog);
+            await store.SaveSessionAsync(session);
+
+            var loadedCatalog = await store.LoadLocalContextsAsync();
+            var loadedSession = Assert.Single(await store.LoadSessionsAsync(), item => item.Id == session.Id);
+            var loadedProject = Assert.Single(loadedCatalog!.Projects);
+            var loadedChat = Assert.Single(loadedProject.Chats);
+
+            Assert.Equal("Film Project", loadedProject.DisplayName);
+            Assert.Equal("future-project-id", loadedProject.ExternalId);
+            Assert.Equal(ContextBindingMode.Local, loadedChat.Mode);
+            Assert.Equal(chat.Id, loadedSession.LocalChatContextId);
+            Assert.Equal(HandoffTransportState.Copied, Assert.Single(loadedSession.HandoffMessages).State);
+        }
+        finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
+    }
 }

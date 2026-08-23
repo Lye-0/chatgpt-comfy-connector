@@ -9,6 +9,8 @@ public interface IPortableStore
     Task SaveSettingsAsync(AppSettings settings, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<CreationSession>> LoadSessionsAsync(CancellationToken cancellationToken = default);
     Task SaveSessionAsync(CreationSession session, CancellationToken cancellationToken = default);
+    Task<LocalContextCatalog?> LoadLocalContextsAsync(CancellationToken cancellationToken = default);
+    Task SaveLocalContextsAsync(LocalContextCatalog catalog, CancellationToken cancellationToken = default);
     Task<string> CreateWorkflowBackupAsync(WorkflowIdentity workflow, string workflowRoot, string reason, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<string>> ListWorkflowBackupsAsync(WorkflowIdentity workflow, CancellationToken cancellationToken = default);
     Task RestoreWorkflowBackupAsync(WorkflowIdentity workflow, string workflowRoot, string backupPath, CancellationToken cancellationToken = default);

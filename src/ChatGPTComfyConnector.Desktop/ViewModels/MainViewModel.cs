@@ -252,8 +252,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string DirtyText => IsDirty ? "UNSAVED CHANGES" : "SAVED";
     public string SessionProgressText => CurrentSession is null ? "0 / 10 ITERATIONS" : $"{CurrentSession.CurrentIteration} / {CurrentSession.MaximumIterations} ITERATIONS";
     public string CurrentSessionContextText => CurrentSession is null ? "制作セッションなし" : $"{BlankFallback(CurrentSession.ProjectLabel, "Project未設定")}  ·  {BlankFallback(CurrentSession.ChatLabel, "Chat未設定")}";
-    public string ProjectPlaceholderText => HasSelectedProject ? string.Empty : "Projectを選択…";
-    public string ChatPlaceholderText => !HasSelectedProject ? "先にProjectを選択してください" : HasSelectedChat ? string.Empty : "Chatを選択…";
+    public string ProjectPlaceholderText => HasSelectedProject || IsProjectCreateVisible ? string.Empty : "Projectを選択…";
+    public string ChatPlaceholderText => !HasSelectedProject ? "先にProjectを選択してください" : HasSelectedChat || IsChatCreateVisible ? string.Empty : "Chatを選択…";
     public string ContextReadinessText => string.Join(Environment.NewLine,
         $"{(HasSelectedWorkflow ? "✓" : "!")} Workflow  {SelectedWorkflowName}",
         $"{(HasSelectedProject ? "✓" : "!")} Project  {(SelectedProject?.DisplayName ?? "未選択")}",

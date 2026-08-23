@@ -17,8 +17,8 @@
 ### Creation Sessionは履歴を保持する制作単位である
 - id: `rm-20260823-creation-session-pipeline`
 - type: `constraint`
-- maturity: `candidate`
-- tags: `session`, `pipeline`, `iteration`, `review`, `persistence`
+- maturity: `reused`
+- tags: `session`, `pipeline`, `iteration`, `review`, `persistence`, `connection-gate`, `reconnect`
 - files: `docs/architecture.md`, `src/ChatGPTComfyConnector.Core/Models/AppModels.cs`, `src/ChatGPTComfyConnector.Core/Services/CreationPipelineStateMachine.cs` …
 - memory: `agent-knowledge/entries/2026-08-23-creation-session-pipeline-7c4e2a.md`
 

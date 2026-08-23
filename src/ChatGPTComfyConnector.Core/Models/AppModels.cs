@@ -76,14 +76,17 @@ public enum HandoffTransportState
 
 public enum CreationStage
 {
-    Context,
-    Idea,
-    ToChatGpt,
-    Command,
-    Apply,
-    Generate,
-    Output,
-    Review,
+    // Keep the persisted v1 numeric values stable. Display/execution order is
+    // defined by CreationPipelineStateMachine.OrderedStages.
+    Context = 0,
+    Idea = 1,
+    ToChatGpt = 2,
+    Command = 3,
+    Apply = 4,
+    Generate = 5,
+    Output = 6,
+    Review = 7,
+    Connect = 8,
 }
 
 public enum CreationStageState
@@ -456,7 +459,7 @@ public sealed class CreationStageStatus
 
 public sealed class CreationPipelineSnapshot
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
     public int IterationNumber { get; set; }
     public bool ContextBound { get; set; }
     public bool MaximumIterationSafetyStop { get; set; }

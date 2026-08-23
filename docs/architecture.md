@@ -55,11 +55,18 @@ this history.
 The pipeline is an ordered state machine:
 
 ```text
-Context → Idea → ToChatGpt → Command → Apply → Generate → Output → Review
+Connect → Context → Idea → ToChatGpt → Command → Apply → Generate → Output → Review
 ```
 
-Context binding requires a Workflow, Project, Chat, and a positive maximum-iteration
-limit. The idea must be explicitly copied to ChatGPT before a command can be
+Connect is the first production gate, not a duplicate of the header telemetry. It is
+completed only when the MCP transport is connected and ComfyUI is reachable. Connecting
+uses `InProgress`; a stopped ComfyUI or a mid-session disconnect uses `WaitingUser`;
+transport failure uses `Error`. Context cannot become current until Connect is completed.
+Workflow-specific slot discovery remains a Context responsibility.
+
+Context binding requires a Workflow whose slot schema loaded successfully, Project,
+Chat, a positive maximum-iteration limit, and successful Session creation/binding. The
+idea must be explicitly copied to ChatGPT before a command can be
 validated. A validated `generate` command enters Apply, where slot changes are
 backed up, written, saved, and validated before Generate is enabled. A completed Job
 must produce at least one existing output before Review becomes available. `complete`
@@ -71,6 +78,11 @@ Loading a persisted session restores its history but does not implicitly activat
 as a new creation. `StartNewCreationAsync` creates a new session and binds its
 context; `ResumeSessionAsync` explicitly reactivates a completed, paused, stopped,
 or errored session without deleting its previous iterations.
+
+Connection loss never resets the Session, Workflow selection, Project / Chat, original
+idea, iterations, or outputs. It moves Connect back to `WaitingUser` or `Error` and
+blocks connection-dependent Apply/Generate operations. A successful reconnect completes
+the same gate and resumes the existing Session from its retained production stage.
 
 ## Manual Handoff and timeline
 
@@ -119,11 +131,14 @@ The desktop surface keeps three responsibilities distinct:
 - right: Handoff Timeline, ChatGPT command import/validation/apply, and Session
   resume controls.
 
-The header's `Connector → MCP → ComfyUI → GPU` indicators describe system
-connectivity, not the creation pipeline. Workflow slots remain dynamically loaded
+The header's `Connector → MCP → ComfyUI → GPU` indicators describe detailed system
+connectivity. Pipeline Connect is a concise gate derived from the same Core connection
+readiness decision and indicates whether production can proceed; neither replaces the
+other. Workflow slots remain dynamically loaded
 and are edited in the dedicated Workflow settings view rather than making the
-creation canvas a low-level slot editor. Connection state and production state must
-therefore remain separate visual and behavioral concerns.
+creation canvas a low-level slot editor. The UI does not infer completion from a button
+click: both execution guards and stage rendering use `CreationPipelineStateMachine` as
+their source of truth.
 
 ## Process lifecycle
 
@@ -138,8 +153,8 @@ Creative intensity is concentrated in the production surface: session idea, work
 ## Verification anchors
 
 - `src/ChatGPTComfyConnector.Core/Services/CreationPipelineStateMachine.cs`
-  — stage ordering, gating, iteration safety stop, Review/complete rules, and
-  persisted-session resume semantics.
+  — stage ordering, MCP/ComfyUI connection gate, execution guards, iteration safety
+  stop, Review/complete rules, and persisted-session resume semantics.
 - `src/ChatGPTComfyConnector.Core/Services/ProtocolAndContext.cs` and
   `docs/connector-protocol-v1.md` — Bootstrap / Result Context and command contract.
 - `src/ChatGPTComfyConnector.Infrastructure/Workflows/WorkflowCatalog.cs` and

@@ -11,6 +11,44 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     public CreationPipelineStateMachineTests() => Directory.CreateDirectory(_temp);
 
     [Fact]
+    public void ConnectionGateControlsContextEntryUsingSharedStageStates()
+    {
+        var session = new CreationSession();
+        CreationPipelineStateMachine.PrepareContext(session);
+        AssertStage(session, CreationStage.Connect, CreationStageState.Current);
+        AssertStage(session, CreationStage.Context, CreationStageState.NotReached);
+
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connecting, false);
+        AssertStage(session, CreationStage.Connect, CreationStageState.InProgress);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, false);
+        AssertStage(session, CreationStage.Connect, CreationStageState.WaitingUser);
+        AssertStage(session, CreationStage.Context, CreationStageState.NotReached);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Error, false);
+        AssertStage(session, CreationStage.Connect, CreationStageState.Error);
+
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, true);
+        AssertStage(session, CreationStage.Connect, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Context, CreationStageState.Current);
+    }
+
+    [Fact]
+    public void ContextCannotBindUntilMcpAndComfyUiAreReady()
+    {
+        var session = ConfiguredSession(2);
+        CreationPipelineStateMachine.PrepareContext(session);
+        Assert.Throws<InvalidOperationException>(() => CreationPipelineStateMachine.BindContext(session));
+
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, false);
+        Assert.Throws<InvalidOperationException>(() => CreationPipelineStateMachine.BindContext(session));
+
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, true);
+        CreationPipelineStateMachine.BindContext(session);
+        AssertStage(session, CreationStage.Connect, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Context, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Idea, CreationStageState.Current);
+    }
+
+    [Fact]
     public void NormalFlowReachesCompletedReviewAndSession()
     {
         var session = BoundSession(maximumIterations: 2);
@@ -169,20 +207,47 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         AssertStage(session, CreationStage.Idea, CreationStageState.Current);
     }
 
+    [Fact]
+    public void DisconnectPreservesSessionDataAndReconnectContinuesAtExistingStage()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        var workflow = session.BoundWorkflow;
+        var idea = session.OriginalIdea;
+        var iteration = session.Iterations.Single();
+        var reviewState = CreationPipelineStateMachine.Get(session, CreationStage.Review).State;
+
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Disconnected, false);
+
+        AssertStage(session, CreationStage.Connect, CreationStageState.WaitingUser);
+        Assert.Same(workflow, session.BoundWorkflow);
+        Assert.Equal(idea, session.OriginalIdea);
+        Assert.Same(iteration, session.Iterations.Single());
+        Assert.Equal(reviewState, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+        Assert.Throws<InvalidOperationException>(() => CreationPipelineStateMachine.BeginGenerate(session));
+
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, true);
+        AssertStage(session, CreationStage.Connect, CreationStageState.Completed);
+        Assert.Equal(reviewState, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+        Assert.Same(iteration, session.Iterations.Single());
+    }
+
     private CreationSession BoundSession(int maximumIterations)
     {
-        var session = new CreationSession
-        {
-            BoundWorkflow = WorkflowIdentity.Create("test.json"),
-            LocalProjectContextId = "project",
-            LocalChatContextId = "chat",
-            ProjectLabel = "Project",
-            ChatLabel = "Chat",
-            MaximumIterations = maximumIterations,
-        };
+        var session = ConfiguredSession(maximumIterations);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, true);
         CreationPipelineStateMachine.BindContext(session);
         return session;
     }
+
+    private static CreationSession ConfiguredSession(int maximumIterations) => new()
+    {
+        BoundWorkflow = WorkflowIdentity.Create("test.json"),
+        LocalProjectContextId = "project",
+        LocalChatContextId = "chat",
+        ProjectLabel = "Project",
+        ChatLabel = "Chat",
+        MaximumIterations = maximumIterations,
+    };
 
     private CreationSession SentIdeaSession()
     {

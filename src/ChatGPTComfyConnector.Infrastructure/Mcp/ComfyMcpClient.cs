@@ -95,23 +95,36 @@ public sealed class ComfyMcpClient : IComfyMcpClient
     {
         var client = _client ?? throw new InvalidOperationException("MCPに接続されていません。");
         if (!_toolNames.Contains(toolName, StringComparer.Ordinal)) throw new InvalidOperationException($"MCP toolが見つかりません: {toolName}");
-        var result = await client.CallToolAsync(toolName, arguments, cancellationToken: cancellationToken);
-        var text = string.Join(Environment.NewLine, result.Content.OfType<TextContentBlock>().Select(c => c.Text));
-        if (result.IsError == true) throw new InvalidOperationException(string.IsNullOrWhiteSpace(text) ? $"MCP tool failed: {toolName}" : text);
-
-        if (result.StructuredContent is not null)
+        try
         {
-            var structuredText = JsonSerializer.Serialize(result.StructuredContent);
-            if (JsonNode.Parse(structuredText) is JsonNode structured) return structured;
-        }
+            var result = await client.CallToolAsync(toolName, arguments, cancellationToken: cancellationToken);
+            var text = string.Join(Environment.NewLine, result.Content.OfType<TextContentBlock>().Select(c => c.Text));
+            if (result.IsError == true) throw new InvalidOperationException(string.IsNullOrWhiteSpace(text) ? $"MCP tool failed: {toolName}" : text);
 
-        if (!string.IsNullOrWhiteSpace(text))
+            if (result.StructuredContent is not null)
+            {
+                var structuredText = JsonSerializer.Serialize(result.StructuredContent);
+                if (JsonNode.Parse(structuredText) is JsonNode structured) return structured;
+            }
+
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                try { return JsonNode.Parse(text); }
+                catch (JsonException) { return JsonValue.Create(text); }
+            }
+
+            return null;
+        }
+        catch (ClientTransportClosedException ex)
         {
-            try { return JsonNode.Parse(text); }
-            catch (JsonException) { return JsonValue.Create(text); }
+            State = ConnectionState.Error;
+            var diagnostics = ex.Details is StdioClientCompletionDetails stdio
+                ? FormatStdioDiagnostics(stdio)
+                : $"details={ex.Details.GetType().Name}";
+            await _store.LogAsync("mcp.transport", $"stdio transport closed during {toolName}: {diagnostics}", ex, cancellationToken);
+            await DisposeResourcesAsync();
+            throw new InvalidOperationException($"comfy-mcp stdio transportが終了しました。{diagnostics}", ex);
         }
-
-        return null;
     }
 
     public async ValueTask DisposeAsync() => await DisconnectAsync();

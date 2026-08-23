@@ -144,7 +144,7 @@ public sealed class SessionAndStorageTests
             MaximumIterations = 10,
         };
 
-        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, true);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
         CreationPipelineStateMachine.BindContext(session);
 
         Assert.True(session.HasBoundProjectChat);

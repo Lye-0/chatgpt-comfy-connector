@@ -42,17 +42,15 @@ public static class CreationPipelineStateMachine
         return session.Pipeline.Stages.Single(item => item.Stage == stage);
     }
 
-    public static CreationStageStatus EvaluateConnectionGate(ConnectionState connectionState, bool comfyUiReachable, bool hasSessionProgress)
+    public static CreationStageStatus EvaluateConnectionGate(ConnectionState connectionState, bool hasSessionProgress)
     {
         var (state, detail, waitingReason) = connectionState switch
         {
-            ConnectionState.Connecting => (CreationStageState.InProgress, "MCPへ接続しComfyUI到達性を確認中", CreationWaitingReason.None),
-            ConnectionState.Connected when comfyUiReachable => (CreationStageState.Completed, "MCP接続とComfyUI到達性を確認済み", CreationWaitingReason.None),
-            ConnectionState.Connected => (CreationStageState.WaitingUser, "MCP接続済み · ComfyUIを起動して再接続してください", CreationWaitingReason.ComfyUiStartRequired),
+            ConnectionState.Connecting => (CreationStageState.InProgress, "MCPへ接続中", CreationWaitingReason.None),
+            ConnectionState.Connected => (CreationStageState.Completed, "MCP接続済み · ComfyUIの状態は必要な処理の直前に確認します", CreationWaitingReason.None),
             ConnectionState.Error or ConnectionState.Unavailable => (CreationStageState.Error, "制作通信を確立できませんでした · 接続診断を確認してください", CreationWaitingReason.None),
-            ConnectionState.Stopped => (CreationStageState.WaitingUser, "ComfyUIを起動してCONNECTしてください", CreationWaitingReason.ComfyUiStartRequired),
             _ when hasSessionProgress => (CreationStageState.WaitingUser, "制作データを保持しています · 再接続すると続行できます", CreationWaitingReason.ReconnectRequired),
-            _ => (CreationStageState.Current, "CONNECTでMCP接続とComfyUI到達性を確認してください", CreationWaitingReason.None),
+            _ => (CreationStageState.Current, "CONNECTでMCP接続を確立してください", CreationWaitingReason.None),
         };
         return new CreationStageStatus { Stage = CreationStage.Connect, State = state, WaitingReason = waitingReason, Detail = detail };
     }
@@ -95,12 +93,12 @@ public static class CreationPipelineStateMachine
             },
         };
 
-    public static void SynchronizeConnectionGate(CreationSession session, ConnectionState connectionState, bool comfyUiReachable, string? detail = null)
+    public static void SynchronizeConnectionGate(CreationSession session, ConnectionState connectionState, string? detail = null)
     {
         EnsureInitialized(session);
         var hasSessionProgress = session.Pipeline.ContextBound
             || OrderedStages.Skip(2).Any(stage => Get(session, stage).State != CreationStageState.NotReached);
-        var evaluated = EvaluateConnectionGate(connectionState, comfyUiReachable, hasSessionProgress);
+        var evaluated = EvaluateConnectionGate(connectionState, hasSessionProgress);
         Set(session, CreationStage.Connect, evaluated.State, detail ?? evaluated.Detail, evaluated.WaitingReason);
         if (!session.Pipeline.ContextBound)
         {
@@ -115,8 +113,22 @@ public static class CreationPipelineStateMachine
         EnsureInitialized(session);
         if (Get(session, CreationStage.Connect).State != CreationStageState.Completed)
         {
-            throw new InvalidOperationException("MCP接続とComfyUI到達性を確認してから制作を続行してください。");
+            throw new InvalidOperationException("MCP接続を確立してから制作を続行してください。");
         }
+    }
+
+    /// <summary>
+    /// Blocks only the stage that actually needs a running ComfyUI instance.
+    /// CONNECT remains an MCP-only gate; callers pass the latest running check
+    /// immediately before invoking the ComfyUI-dependent operation.
+    /// </summary>
+    public static void RequireComfyUi(CreationSession session, CreationStage stage, bool comfyUiReachable)
+    {
+        RequireConnection(session);
+        if (comfyUiReachable) return;
+
+        Set(session, stage, CreationStageState.WaitingUser, "ComfyUIを起動してからこの工程を続行してください", CreationWaitingReason.ComfyUiStartRequired);
+        throw new InvalidOperationException("ComfyUI起動待ちです。ComfyUIを起動してからもう一度実行してください。");
     }
 
     public static void PrepareContext(CreationSession session, string detail = "CONNECTで制作通信を確認してください")

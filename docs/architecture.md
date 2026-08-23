@@ -59,10 +59,10 @@ Connect → Context → Idea → ToChatGpt → Command → Apply → Generate �
 ```
 
 Connect is the first production gate, not a duplicate of the header telemetry. It is
-completed only when the MCP transport is connected and ComfyUI is reachable. Connecting
-uses `InProgress`; a stopped ComfyUI or a mid-session disconnect uses `WaitingUser`;
-transport failure uses `Error`. Context cannot become current until Connect is completed.
-Workflow-specific slot discovery remains a Context responsibility.
+completed when the MCP transport is connected; ComfyUI running state is deliberately not
+part of this gate. Connecting uses `InProgress`; a mid-session MCP disconnect uses
+`WaitingUser`; transport failure uses `Error`. Context can become current while ComfyUI
+is stopped. Workflow-specific slot discovery remains a Context responsibility.
 
 Context binding requires a Workflow whose slot schema loaded successfully, Project,
 Chat, a positive maximum-iteration limit, and successful Session creation/binding. The
@@ -85,10 +85,16 @@ blocks connection-dependent Apply/Generate operations. A successful reconnect co
 the same gate and resumes the existing Session from its retained production stage.
 
 `WaitingUser` is a shared state, while `CreationStageStatus.WaitingReason` carries the
-specific reason. The Core projection resolves that pair into concise UI text: Connect
-uses `ComfyUI起動待ち` or `再接続待ち`, ToChatGpt uses `ChatGPT返答待ち`, Review uses
-`レビュー返答待ち`, and the iteration safety stop uses `続行判断待ち`. The UI must not
-display the enum name or a generic `ユーザー待ち` label.
+specific reason. The Core projection resolves that pair into concise UI text: a
+ComfyUI-dependent stage uses `ComfyUI起動待ち`, a disconnected MCP gate uses `再接続待ち`,
+ToChatGpt uses `ChatGPT返答待ち`, Review uses `レビュー返答待ち`, and the iteration
+safety stop uses `続行判断待ち`. The UI must not display the enum name or a generic
+`ユーザー待ち` label.
+
+ComfyUI readiness is checked immediately before operations that need it, through
+`CreationPipelineStateMachine.RequireComfyUi`. If the running check is false, only that
+stage becomes `WaitingUser`; Context, Idea, and Manual Handoff remain usable while the
+user starts ComfyUI. CONNECT itself is never downgraded merely because ComfyUI is stopped.
 
 ## Manual Handoff and timeline
 

@@ -233,16 +233,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ConnectionState.Connecting => "CONNECTING",
         ConnectionState.Error => "ERROR",
         _ when IsJobActive => "PROCESSING",
+        ConnectionState.Connected when ReadServerInfoBoolean("running") == true => "READY",
         ConnectionState.Connected when ReadServerInfoBoolean("running") == false => "STOPPED",
-        ConnectionState.Connected => "READY",
+        ConnectionState.Connected => "UNKNOWN",
         ConnectionState.Stopped => "STOPPED",
         _ => "DISCONNECTED",
     };
     public string GpuSystemState => !IsConnected ? "—" : IsSystemProcessing ? "PROCESSING" : HasGpuEvidence ? "READY" : "UNKNOWN";
     public bool HasGpuEvidence => FindServerInfoNode("gpu") is not null || FindServerInfoNode("gpu_name") is not null || FindServerInfoNode("device") is not null || FindServerInfoNode("hardware") is not null;
-    public string SystemConnectionSummary => IsCreationConnectionReady
-        ? HasGpuEvidence ? "MCP経由でComfyUIとGPU情報を確認済み" : "MCP / ComfyUI到達確認済み · GPU情報は未提供"
-        : IsConnected ? "MCP接続済み · ComfyUIは停止中または到達確認待ち" : "ローカル環境は未接続 · CONNECTまたはSTART COMFYUIから開始";
+    public string SystemConnectionSummary => !IsConnected
+        ? "ローカル環境は未接続 · CONNECTまたはSTART COMFYUIから開始"
+        : IsComfyUiReachable
+            ? HasGpuEvidence ? "MCP接続済み · ComfyUIとGPU情報を確認済み" : "MCP接続済み · ComfyUI到達確認済み（GPU情報は未提供）"
+            : ReadServerInfoBoolean("running") == false ? "MCP接続済み · ComfyUI停止中（生成時に起動が必要）" : "MCP接続済み · ComfyUI状態は未確認（必要な処理の直前に確認）";
     public string CurrentCreationStageText => GetCurrentPipelineStage().Label;
     public string CurrentCreationStageDescription => GetCurrentPipelineStage().Description;
     public string CurrentCreationStageState => GetCurrentPipelineStage().State;
@@ -265,7 +268,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string WorkflowSlotSummaryText => !HasSelectedWorkflow ? "左のライブラリからWorkflowを選択" : !IsConnected ? "MCP未接続 · CONNECTでslotを読み込み" : SlotDiscoveryState == SlotDiscoveryState.Loading ? "slotを読み込み中…" : SlotDiscoveryState == SlotDiscoveryState.Failed ? "slotの読み込みに失敗" : SlotDiscoveryState == SlotDiscoveryState.Loaded ? $"主要 {PrimarySlots.Count} · 調整 {TuningSlots.Count} · 詳細 {AdvancedSlots.Count}" : "slotはまだ読み込まれていません";
     public bool IsConnected => ConnectionState == ConnectionState.Connected && _mcp.IsConnected;
     public bool IsComfyUiReachable => IsConnected && ReadServerInfoBoolean("running") == true;
-    public bool IsCreationConnectionReady => IsConnected && IsComfyUiReachable;
+    public bool IsCreationConnectionReady => IsConnected;
     public bool HasSelectedWorkflow => SelectedWorkflow is not null;
     public bool HasTreeNodes => TreeNodes.Count > 0;
     public bool HasSlotLoadError => !string.IsNullOrWhiteSpace(SlotLoadError);
@@ -291,7 +294,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool ShowSlotErrorState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && HasSlotLoadError;
     public bool ShowNoSlotState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && !HasSlots;
     public bool ShowReadyState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && HasSlots;
-    public bool CanRunWorkflow => IsCreationConnectionReady && _isCurrentSessionActivated && HasSelectedWorkflow && !IsSlotLoading && !HasSlotLoadError && CurrentSession is not null && CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Generate).State is CreationStageState.Current or CreationStageState.Error or CreationStageState.Cancelled;
+    public bool CanRunWorkflow => IsCreationConnectionReady && _isCurrentSessionActivated && HasSelectedWorkflow && !IsSlotLoading && !HasSlotLoadError && CurrentSession is not null && CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Generate).State is CreationStageState.Current or CreationStageState.WaitingUser or CreationStageState.Error or CreationStageState.Cancelled;
     public bool HasIterationSafetyStop => _isCurrentSessionActivated && CurrentSession?.Pipeline.MaximumIterationSafetyStop == true;
     public bool HasPendingContextChange => _isCurrentSessionActivated && CurrentSession?.Pipeline.ContextBound == true &&
         (SelectedWorkflow?.RelativePath != CurrentSession.BoundWorkflow?.RelativePath || SelectedProject?.ProviderId != CurrentSession.EffectiveContextProviderId || SelectedProject?.Key != CurrentSession.EffectiveProjectContextKey || SelectedChat?.ProviderId != CurrentSession.EffectiveContextProviderId || SelectedChat?.Key != CurrentSession.EffectiveChatContextKey || SessionMaximumIterations != CurrentSession.MaximumIterations);
@@ -402,14 +405,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
         try
         {
             await _mcp.ConnectAsync(Settings);
-            var info = await _mcp.CallAsync("server_info", new Dictionary<string, object?>());
-            _serverInfo = info;
             ConnectionState = ConnectionState.Connected;
             SynchronizePipelineConnectionGate();
+            try
+            {
+                _serverInfo = await _mcp.CallAsync("server_info", new Dictionary<string, object?>());
+            }
+            catch (Exception ex) when (_mcp.IsConnected)
+            {
+                _serverInfo = null;
+                await _store.LogAsync("connection", $"ComfyUI状態確認を延期しました: {ex.Message}", ex);
+            }
             NotifyConnectionStateChanged();
-            StatusMessage = IsCreationConnectionReady
-                ? "MCP接続とComfyUI到達性を確認しました。制作を続行できます。"
-                : "MCPへ接続しましたがComfyUIへ到達できません。START COMFYUI後にCONNECTで再確認してください。";
+            StatusMessage = IsComfyUiReachable
+                ? "MCP接続を確認しました。ComfyUIも稼働中です。"
+                : "MCP接続を確認しました。ComfyUIは必要な処理の直前に確認します。";
             if (SelectedWorkflow is not null) await SelectWorkflowAsync(SelectedWorkflow.RelativePath);
         }
         catch (Exception ex)
@@ -505,7 +515,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task ApplySlotsAsync()
     {
         if (SelectedWorkflow is null) throw new InvalidOperationException("Workflowを選択してください。");
-        EnsureCreationConnectionReady();
+        EnsureMcpConnectionReady();
         var path = SelectedWorkflow.ToAbsolute(WorkflowRoot);
         if (_loadedFingerprint is not null && File.Exists(path) && !string.Equals(_loadedFingerprint, WorkflowCatalog.ComputeFingerprint(path), StringComparison.Ordinal))
         {
@@ -708,13 +718,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task GenerateAsync(bool applyFirst = true)
     {
         if (SelectedWorkflow is null) throw new InvalidOperationException("Workflowを選択してください。");
-        EnsureCreationConnectionReady();
+        EnsureMcpConnectionReady();
         if (IsJobActive) throw new InvalidOperationException("Connectorが管理中のJobは1件だけです。");
         if (CurrentSession is null || !CurrentSession.Pipeline.ContextBound) throw new InvalidOperationException("左側から新しい制作を開始してください。");
         if (CurrentSession.BoundWorkflow is null || !string.Equals(CurrentSession.BoundWorkflow.RelativePath, SelectedWorkflow.RelativePath, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("セッションに紐づくWorkflowと選択中Workflowが異なります。");
         if (CurrentSession.Pipeline.MaximumIterationSafetyStop) throw new InvalidOperationException("最大反復回数に達しました。続行するか制作を終了するか選択してください。");
         var changes = BuildChanges();
         if (applyFirst && (IsDirty || CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Apply).State != CreationStageState.Completed)) await ApplySlotsAsync();
+        await EnsureComfyUiForStageAsync(CurrentSession, CreationStage.Generate);
         CreationPipelineStateMachine.BeginGenerate(CurrentSession);
         var prompt = FindPrompt(changes) ?? Idea;
         var iteration = CurrentSession.StartIteration(prompt, changes);
@@ -1177,7 +1188,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void ValidateNewCreationSetup()
     {
-        EnsureCreationConnectionReady();
+        EnsureMcpConnectionReady();
         if (!HasSelectedWorkflow) throw new InvalidOperationException("制作に使うWorkflowを選択してください。");
         if (SlotDiscoveryState != SlotDiscoveryState.Loaded) throw new InvalidOperationException("選択WorkflowのSlot Schema取得が完了していません。");
         if (!HasSelectedProject) throw new InvalidOperationException("ChatGPT Projectを選択してください。");
@@ -1462,7 +1473,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void EnsureSlotSchemaAvailable()
     {
-        EnsureCreationConnectionReady();
+        EnsureMcpConnectionReady();
         if (SlotDiscoveryState == SlotDiscoveryState.Loading) throw new InvalidOperationException("Workflow slotを読み込み中です。完了後にもう一度SEND TO CHATGPTを押してください。");
         if (SlotDiscoveryState == SlotDiscoveryState.Failed) throw new InvalidOperationException($"Workflow slotの取得に失敗しています。再読み込みしてください。{(string.IsNullOrWhiteSpace(SlotLoadError) ? string.Empty : $" 詳細: {SlotLoadError}")}");
         if (SlotDiscoveryState != SlotDiscoveryState.Loaded) throw new InvalidOperationException("Workflow slot schemaが未取得です。Workflowを再選択して読み込んでください。");
@@ -1508,13 +1519,50 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     private void SynchronizePipelineConnectionGate(CreationSession session, string? detail = null)
-        => CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState, IsComfyUiReachable, detail);
+        => CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState, detail);
 
-    private void EnsureCreationConnectionReady()
+    private void EnsureMcpConnectionReady()
     {
         SynchronizePipelineConnectionGate();
         if (CurrentSession is not null) CreationPipelineStateMachine.RequireConnection(CurrentSession);
-        if (!IsCreationConnectionReady) throw new InvalidOperationException("MCP接続とComfyUI到達性を確認してから制作を続行してください。");
+        if (!IsCreationConnectionReady) throw new InvalidOperationException("MCP接続を確立してから制作を続行してください。");
+    }
+
+    private async Task EnsureComfyUiForStageAsync(CreationSession session, CreationStage stage)
+    {
+        EnsureMcpConnectionReady();
+        var comfyUiReachable = await RefreshComfyUiStatusAsync();
+        try
+        {
+            CreationPipelineStateMachine.RequireComfyUi(session, stage, comfyUiReachable);
+        }
+        catch (InvalidOperationException)
+        {
+            await _store.SaveSessionAsync(session);
+            StatusMessage = "ComfyUI起動待ちです。ComfyUIを起動してからもう一度実行してください。";
+            NotifyPipelineStateChanged();
+            throw;
+        }
+    }
+
+    private async Task<bool> RefreshComfyUiStatusAsync()
+    {
+        if (!IsConnected) return false;
+        try
+        {
+            _serverInfo = await _mcp.CallAsync("server_info", new Dictionary<string, object?>());
+            NotifyConnectionStateChanged();
+            return IsComfyUiReachable;
+        }
+        catch (Exception ex)
+        {
+            MarkConnectionFailureIfTransportClosed(ex);
+            if (!_mcp.IsConnected) throw;
+            _serverInfo = null;
+            await _store.LogAsync("connection", $"ComfyUI状態確認を延期しました: {ex.Message}", ex);
+            NotifyConnectionStateChanged();
+            return false;
+        }
     }
 
     private void MarkConnectionFailureIfTransportClosed(Exception exception)
@@ -1553,7 +1601,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CreationPipelineStateMachine.EnsureInitialized(CurrentSession);
         var definitions = new Dictionary<CreationStage, (string Key, string Label, string Description)>
         {
-            [CreationStage.Connect] = ("CONNECT", "Connect", "MCP接続 / ComfyUI Reachable / 制作通信Gate"),
+            [CreationStage.Connect] = ("CONNECT", "Connect", "MCP接続 / 制作通信Gate"),
             [CreationStage.Context] = ("CONTEXT", "Context", "Workflow / Project / Chat / Maximum Iterations / Session Binding"),
             [CreationStage.Idea] = ("IDEA", "アイデア", "制作の核となるイメージ"),
             [CreationStage.ToChatGpt] = ("TO CHATGPT", "To ChatGPT", "制作ContextをManual Handoff"),
@@ -1575,7 +1623,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
             else
             {
-                var connection = CreationPipelineStateMachine.EvaluateConnectionGate(ConnectionState, IsComfyUiReachable, false);
+                var connection = CreationPipelineStateMachine.EvaluateConnectionGate(ConnectionState, false);
                 status = stage switch
                 {
                     CreationStage.Connect => connection,
@@ -1601,7 +1649,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         return PipelineStages.FirstOrDefault(item => item.State is "CURRENT" or "INPROGRESS" or "WAITINGUSER" or "ERROR" or "CANCELLED")
             ?? PipelineStages.LastOrDefault(item => item.IsCompleted)
-            ?? new CreationPipelineStage(1, "CONNECT", "Connect", "MCP接続とComfyUI到達性を確認", "CURRENT", "現在", false);
+            ?? new CreationPipelineStage(1, "CONNECT", "Connect", "MCP接続を確認", "CURRENT", "現在", false);
     }
 
     private JsonNode? FindServerInfoNode(string key)

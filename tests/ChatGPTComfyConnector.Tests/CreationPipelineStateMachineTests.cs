@@ -18,15 +18,15 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         AssertStage(session, CreationStage.Connect, CreationStageState.Current);
         AssertStage(session, CreationStage.Context, CreationStageState.NotReached);
 
-        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connecting, false);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connecting);
         AssertStage(session, CreationStage.Connect, CreationStageState.InProgress);
-        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, false);
-        AssertStage(session, CreationStage.Connect, CreationStageState.WaitingUser);
-        AssertStage(session, CreationStage.Context, CreationStageState.NotReached);
-        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Error, false);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
+        AssertStage(session, CreationStage.Connect, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Context, CreationStageState.Current);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Error);
         AssertStage(session, CreationStage.Connect, CreationStageState.Error);
 
-        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, true);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
         AssertStage(session, CreationStage.Connect, CreationStageState.Completed);
         AssertStage(session, CreationStage.Context, CreationStageState.Current);
     }
@@ -35,12 +35,19 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     public void WaitingUserUsesStructuredStageSpecificReasons()
     {
         var session = SentIdeaSession();
-        var connectWaiting = CreationPipelineStateMachine.EvaluateConnectionGate(ConnectionState.Connected, false, false);
-        Assert.Equal(CreationStageState.WaitingUser, connectWaiting.State);
-        Assert.Equal(CreationWaitingReason.ComfyUiStartRequired, connectWaiting.WaitingReason);
-        Assert.Equal("ComfyUI起動待ち", CreationPipelineStateMachine.GetStageStateLabel(connectWaiting));
+        var connectCompleted = CreationPipelineStateMachine.EvaluateConnectionGate(ConnectionState.Connected, false);
+        Assert.Equal(CreationStageState.Completed, connectCompleted.State);
+        Assert.Equal(CreationWaitingReason.None, connectCompleted.WaitingReason);
 
-        var reconnectWaiting = CreationPipelineStateMachine.EvaluateConnectionGate(ConnectionState.Disconnected, false, true);
+        var generateSession = CommandReadySession();
+        CreationPipelineStateMachine.ApplyCompleted(generateSession);
+        Assert.Throws<InvalidOperationException>(() => CreationPipelineStateMachine.RequireComfyUi(generateSession, CreationStage.Generate, false));
+        var generateWaiting = CreationPipelineStateMachine.Get(generateSession, CreationStage.Generate);
+        Assert.Equal(CreationStageState.WaitingUser, generateWaiting.State);
+        Assert.Equal(CreationWaitingReason.ComfyUiStartRequired, generateWaiting.WaitingReason);
+        Assert.Equal("ComfyUI起動待ち", CreationPipelineStateMachine.GetStageStateLabel(generateWaiting));
+
+        var reconnectWaiting = CreationPipelineStateMachine.EvaluateConnectionGate(ConnectionState.Disconnected, true);
         Assert.Equal(CreationStageState.WaitingUser, reconnectWaiting.State);
         Assert.Equal(CreationWaitingReason.ReconnectRequired, reconnectWaiting.WaitingReason);
         Assert.Equal("再接続待ち", CreationPipelineStateMachine.GetStageStateLabel(reconnectWaiting));
@@ -66,20 +73,22 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
-    public void ContextCannotBindUntilMcpAndComfyUiAreReady()
+    public void ContextCanBindWhenOnlyMcpIsReady()
     {
         var session = ConfiguredSession(2);
         CreationPipelineStateMachine.PrepareContext(session);
         Assert.Throws<InvalidOperationException>(() => CreationPipelineStateMachine.BindContext(session));
 
-        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, false);
-        Assert.Throws<InvalidOperationException>(() => CreationPipelineStateMachine.BindContext(session));
-
-        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, true);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
         CreationPipelineStateMachine.BindContext(session);
         AssertStage(session, CreationStage.Connect, CreationStageState.Completed);
         AssertStage(session, CreationStage.Context, CreationStageState.Completed);
         AssertStage(session, CreationStage.Idea, CreationStageState.Current);
+
+        CreationPipelineStateMachine.IdeaChanged(session, "idea while ComfyUI is stopped");
+        CreationPipelineStateMachine.BootstrapCopied(session, "idea while ComfyUI is stopped");
+        AssertStage(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser);
+        Assert.Equal(CreationWaitingReason.ChatGptResponseRequired, CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).WaitingReason);
     }
 
     [Fact]
@@ -250,7 +259,7 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         var iteration = session.Iterations.Single();
         var reviewState = CreationPipelineStateMachine.Get(session, CreationStage.Review).State;
 
-        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Disconnected, false);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Disconnected);
 
         AssertStage(session, CreationStage.Connect, CreationStageState.WaitingUser);
         Assert.Same(workflow, session.BoundWorkflow);
@@ -259,7 +268,7 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         Assert.Equal(reviewState, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
         Assert.Throws<InvalidOperationException>(() => CreationPipelineStateMachine.BeginGenerate(session));
 
-        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, true);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
         AssertStage(session, CreationStage.Connect, CreationStageState.Completed);
         Assert.Equal(reviewState, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
         Assert.Same(iteration, session.Iterations.Single());
@@ -268,7 +277,7 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     private CreationSession BoundSession(int maximumIterations)
     {
         var session = ConfiguredSession(maximumIterations);
-        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected, true);
+        CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
         CreationPipelineStateMachine.BindContext(session);
         return session;
     }

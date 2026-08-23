@@ -120,11 +120,62 @@
                 </Grid>
             </Border>
         </DataTemplate>
+
+        <DataTemplate x:Key="PipelineStageTemplate">
+            <StackPanel Orientation="Horizontal"
+                        VerticalAlignment="Center">
+                <Border x:Name="PipelineChrome"
+                        Width="86"
+                        MinHeight="54"
+                        Background="#101827"
+                        BorderBrush="{Binding State, Converter={StaticResource StateToBrush}}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="7,6"
+                        AutomationProperties.Name="{Binding Label}">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Key}"
+                                   FontSize="9"
+                                   FontWeight="SemiBold"
+                                   Foreground="{Binding State, Converter={StaticResource StateToBrush}}" />
+                        <TextBlock Text="{Binding Label}"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Margin="0,2,0,0"
+                                   TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{Binding StateLabel}"
+                                   FontSize="9"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Margin="0,2,0,0" />
+                    </StackPanel>
+                </Border>
+                <TextBlock Text="→"
+                           Foreground="{StaticResource LineStrongBrush}"
+                           FontSize="16"
+                           VerticalAlignment="Center"
+                           Margin="5,0"
+                           Visibility="{Binding IsLast, Converter={StaticResource InverseBoolToVisibility}}" />
+            </StackPanel>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding State}" Value="NOW">
+                    <Setter TargetName="PipelineChrome" Property="Background" Value="#173B4A" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="DONE">
+                    <Setter TargetName="PipelineChrome" Property="Background" Value="#122A2B" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="COMPLETE">
+                    <Setter TargetName="PipelineChrome" Property="Background" Value="#1B3527" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="ERROR">
+                    <Setter TargetName="PipelineChrome" Property="Background" Value="#3A1E2A" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
     </Window.Resources>
 
     <Grid Margin="20">
         <Grid.RowDefinitions>
-            <RowDefinition Height="82" />
+            <RowDefinition Height="98" />
             <RowDefinition Height="*" />
             <RowDefinition Height="38" />
         </Grid.RowDefinitions>
@@ -132,56 +183,191 @@
         <Border Grid.Row="0"
                 Background="{StaticResource PanelBrush}"
                 CornerRadius="16"
-                Padding="20"
+                Padding="14,12"
                 BorderBrush="{StaticResource LineBrush}"
                 BorderThickness="1">
             <Grid>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="310" />
+                    <ColumnDefinition Width="220" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0">
+                <StackPanel Grid.Column="0"
+                            VerticalAlignment="Center">
                     <TextBlock Text="COMFY / CHATGPT"
                                FontSize="11"
                                Foreground="{StaticResource AccentBrush}"
                                FontWeight="SemiBold" />
                     <TextBlock Text="Connector"
-                               FontSize="26"
+                               FontSize="24"
                                FontWeight="SemiBold"
                                Margin="0,2,0,0" />
                 </StackPanel>
-                <StackPanel Grid.Column="1"
-                            Orientation="Horizontal"
-                            VerticalAlignment="Center">
-                    <Border Background="#14273A"
-                            BorderBrush="{StaticResource LineBrush}"
-                            BorderThickness="1"
-                            CornerRadius="9"
-                            Padding="10,6"
-                            Margin="0,0,12,0">
-                        <StackPanel Orientation="Horizontal">
-                            <Ellipse Width="8"
-                                     Height="8"
-                                     Fill="{StaticResource AccentBrush}"
-                                     Margin="0,0,7,0"
-                                     VerticalAlignment="Center" />
-                            <TextBlock Text="{Binding ConnectionStateText}"
-                                       FontSize="11"
+                <Border Grid.Column="1"
+                        Background="#0A111D"
+                        BorderBrush="{StaticResource LineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="10"
+                        Padding="10,7"
+                        Margin="10,0,14,0"
+                        AutomationProperties.Name="SYSTEM CONNECTION">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid Grid.Row="0">
+                            <TextBlock Text="SYSTEM CONNECTION"
+                                       Foreground="{StaticResource AccentBrush}"
+                                       FontSize="9"
                                        FontWeight="SemiBold" />
-                        </StackPanel>
-                    </Border>
-                    <StackPanel VerticalAlignment="Center">
-                        <TextBlock Text="制作ワークスペース"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   FontSize="10" />
-                        <TextBlock Text="{Binding SelectedWorkflowText}"
-                                   Foreground="{StaticResource WarmBrush}"
-                                   TextTrimming="CharacterEllipsis"
-                                   MaxWidth="470"
-                                   Margin="0,2,0,0" />
-                    </StackPanel>
-                </StackPanel>
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding SystemConnectionSummary}"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="9"
+                                       TextTrimming="CharacterEllipsis"
+                                       HorizontalAlignment="Right"
+                                       Margin="12,0,0,0" />
+                        </Grid>
+                        <Grid Grid.Row="1"
+                              Margin="0,5,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0"
+                                        Orientation="Horizontal"
+                                        AutomationProperties.Name="Connector">
+                                <Ellipse Width="8"
+                                         Height="8"
+                                         Fill="{Binding ConnectorSystemState, Converter={StaticResource StateToBrush}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,5,0" />
+                                <StackPanel>
+                                    <TextBlock Text="Connector"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding ConnectorSystemState}"
+                                               Foreground="{Binding ConnectorSystemState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="8"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </StackPanel>
+                            <Border Grid.Column="1"
+                                    Height="1"
+                                    Margin="9,0"
+                                    VerticalAlignment="Center"
+                                    Background="{StaticResource LineStrongBrush}"
+                                    ToolTip="ConnectorからMCPへ" >
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Opacity" Value="0.55" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsSystemProcessing}" Value="True">
+                                                <DataTrigger.EnterActions>
+                                                    <BeginStoryboard>
+                                                        <Storyboard>
+                                                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                             From="0.25"
+                                                                             To="1"
+                                                                             Duration="0:0:1.15"
+                                                                             AutoReverse="True"
+                                                                             RepeatBehavior="Forever" />
+                                                        </Storyboard>
+                                                    </BeginStoryboard>
+                                                </DataTrigger.EnterActions>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                            </Border>
+                            <StackPanel Grid.Column="2"
+                                        Orientation="Horizontal"
+                                        AutomationProperties.Name="MCP">
+                                <Ellipse Width="8"
+                                         Height="8"
+                                         Fill="{Binding McpSystemState, Converter={StaticResource StateToBrush}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,5,0" />
+                                <StackPanel>
+                                    <TextBlock Text="MCP"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding McpSystemState}"
+                                               Foreground="{Binding McpSystemState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="8"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </StackPanel>
+                            <Border Grid.Column="3"
+                                    Height="1"
+                                    Margin="9,0"
+                                    VerticalAlignment="Center"
+                                    Background="{StaticResource LineStrongBrush}"
+                                    Opacity="0.55" />
+                            <StackPanel Grid.Column="4"
+                                        Orientation="Horizontal"
+                                        AutomationProperties.Name="ComfyUI">
+                                <Ellipse Width="8"
+                                         Height="8"
+                                         Fill="{Binding ComfyUiSystemState, Converter={StaticResource StateToBrush}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,5,0" />
+                                <StackPanel>
+                                    <TextBlock Text="ComfyUI"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding ComfyUiSystemState}"
+                                               Foreground="{Binding ComfyUiSystemState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="8"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </StackPanel>
+                            <Border Grid.Column="5"
+                                    Height="1"
+                                    Margin="9,0"
+                                    VerticalAlignment="Center"
+                                    Background="{StaticResource LineStrongBrush}"
+                                    Opacity="0.55" />
+                            <StackPanel Grid.Column="6"
+                                        Orientation="Horizontal"
+                                        AutomationProperties.Name="GPU">
+                                <Ellipse Width="8"
+                                         Height="8"
+                                         Fill="{Binding GpuSystemState, Converter={StaticResource StateToBrush}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,5,0" />
+                                <StackPanel>
+                                    <TextBlock Text="GPU"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding GpuSystemState}"
+                                               Foreground="{Binding GpuSystemState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="8"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Grid>
+                        <Grid Grid.Row="2"
+                              Margin="0,5,0,0">
+                            <TextBlock Text="制作ワークスペース"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="9" />
+                            <TextBlock Text="{Binding SelectedWorkflowText}"
+                                       Foreground="{StaticResource WarmBrush}"
+                                       FontSize="9"
+                                       TextTrimming="CharacterEllipsis"
+                                       HorizontalAlignment="Right"
+                                       Margin="12,0,0,0" />
+                        </Grid>
+                    </Grid>
+                </Border>
                 <StackPanel Grid.Column="2"
                             Orientation="Horizontal"
                             VerticalAlignment="Center">
@@ -341,6 +527,80 @@
                 <ScrollViewer VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled">
                     <StackPanel>
+                        <Border Background="#0D1725"
+                                BorderBrush="{StaticResource LineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="14"
+                                AutomationProperties.Name="CREATION PIPELINE">
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="CREATION PIPELINE"
+                                                   FontSize="11"
+                                                   Foreground="{StaticResource AccentBrush}"
+                                                   FontWeight="SemiBold" />
+                                        <TextBlock Text="制作進行を一つのループとして確認"
+                                                   FontSize="13"
+                                                   FontWeight="SemiBold"
+                                                   Margin="0,3,0,0" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1"
+                                                HorizontalAlignment="Right"
+                                                Orientation="Horizontal">
+                                        <TextBlock Text="{Binding CurrentIterationLabel}"
+                                                   Foreground="{StaticResource WarmBrush}"
+                                                   FontSize="10"
+                                                   VerticalAlignment="Center"
+                                                   Margin="0,0,10,0" />
+                                        <TextBlock Text="{Binding PipelineLoopText}"
+                                                   Foreground="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
+                                                   FontSize="10"
+                                                   FontWeight="SemiBold"
+                                                   VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Grid>
+                                <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                                              VerticalScrollBarVisibility="Hidden"
+                                              Margin="0,12,0,0">
+                                    <ItemsControl ItemsSource="{Binding PipelineStages}"
+                                                  ItemTemplate="{StaticResource PipelineStageTemplate}">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <StackPanel Orientation="Horizontal" />
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                    </ItemsControl>
+                                </ScrollViewer>
+                                <Grid Margin="0,10,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Ellipse Width="7"
+                                             Height="7"
+                                             Fill="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
+                                             VerticalAlignment="Center"
+                                             Margin="0,0,6,0" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding CurrentCreationStageText}"
+                                               FontSize="11"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Grid.Column="2"
+                                               Text="{Binding CurrentCreationStageDescription}"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="10,0,0,0" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
                         <Border Background="#101C2C"
                                 BorderBrush="{StaticResource LineBrush}"
                                 BorderThickness="1"
@@ -356,7 +616,7 @@
                                                FontSize="11"
                                                Foreground="{StaticResource AccentBrush}"
                                                FontWeight="SemiBold" />
-                                    <TextBlock Text="Idea → Prompt → Output"
+                                    <TextBlock Text="制作キャンバス"
                                                FontSize="24"
                                                FontWeight="SemiBold"
                                                Margin="0,3,0,2" />

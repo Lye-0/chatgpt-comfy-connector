@@ -6,6 +6,7 @@
     <Application.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
         <conv:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibility" />
+        <conv:StateToBrushConverter x:Key="StateToBrush" />
         <FontFamily x:Key="UiFont">Segoe UI, Yu Gothic UI, Meiryo UI</FontFamily>
 
         <SolidColorBrush x:Key="CanvasBrush" Color="#070A12" />

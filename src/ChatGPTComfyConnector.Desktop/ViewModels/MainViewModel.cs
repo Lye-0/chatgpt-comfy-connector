@@ -31,6 +31,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string? _slotLoadError;
     private ProtocolValidationResult? _pendingValidation;
     private string? _loadedFingerprint;
+    private JsonNode? _serverInfo;
+    private bool _commandReceived;
+    private bool _workflowPrepared;
 
     public MainViewModel(string applicationDirectory)
     {
@@ -53,6 +56,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Iterations = [];
         Backups = [];
         LatestOutputs = [];
+        PipelineStages = [];
+        RefreshPipeline();
     }
 
     public AppSettings Settings { get; }
@@ -65,17 +70,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<SessionIteration> Iterations { get; }
     public ObservableCollection<string> Backups { get; }
     public ObservableCollection<OutputArtifact> LatestOutputs { get; }
-    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); } }
-    public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
-    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); } }
-    public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyViewStateChanged(); } }
+    public ObservableCollection<CreationPipelineStage> PipelineStages { get; }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); NotifyPipelineStateChanged(); } }
+    public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
+    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
+    public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
     public string StatusMessage { get => _statusMessage; set { _statusMessage = value; OnPropertyChanged(); } }
     public bool IsSetupVisible { get => _isSetupVisible; private set { _isSetupVisible = value; OnPropertyChanged(); } }
-    public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); } }
+    public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
-    public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); } }
-    public string CommandText { get => _commandText; set { _commandText = value; OnPropertyChanged(); } }
-    public string Idea { get => _idea; set { _idea = value; OnPropertyChanged(); } }
+    public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
+    public string CommandText { get => _commandText; set { _commandText = value; OnPropertyChanged(); NotifyPipelineStateChanged(); } }
+    public string Idea { get => _idea; set { _idea = value; OnPropertyChanged(); NotifyPipelineStateChanged(); } }
     public string? SlotLoadError { get => _slotLoadError; private set { _slotLoadError = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasSlotLoadError)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public string ProjectLabel { get => CurrentSession?.ProjectLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ProjectLabel = value; OnPropertyChanged(); } }
     public string ChatLabel { get => CurrentSession?.ChatLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ChatLabel = value; OnPropertyChanged(); } }
@@ -83,6 +89,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string SelectedWorkflowText => SelectedWorkflow?.RelativePath ?? "Workflow未選択";
     public string SelectedWorkflowName => SelectedWorkflow is null ? "Workflow未選択" : Path.GetFileNameWithoutExtension(SelectedWorkflow.RelativePath);
     public string ConnectionStateText => ConnectionState switch { ConnectionState.Connected => "CONNECTED", ConnectionState.Connecting => "CONNECTING", ConnectionState.Error => "ERROR", _ => "DISCONNECTED" };
+    public bool IsSystemProcessing => IsBusy || IsJobActive;
+    public string ConnectorSystemState => IsSystemProcessing ? "PROCESSING" : "ONLINE";
+    public string McpSystemState => IsSystemProcessing && IsConnected ? "PROCESSING" : ConnectionStateText;
+    public string ComfyUiSystemState => ConnectionState switch
+    {
+        ConnectionState.Connecting => "CONNECTING",
+        ConnectionState.Error => "ERROR",
+        _ when IsJobActive => "PROCESSING",
+        ConnectionState.Connected when ReadServerInfoBoolean("running") == false => "STOPPED",
+        ConnectionState.Connected => "READY",
+        ConnectionState.Stopped => "STOPPED",
+        _ => "DISCONNECTED",
+    };
+    public string GpuSystemState => !IsConnected ? "—" : IsSystemProcessing ? "PROCESSING" : HasGpuEvidence ? "READY" : "UNKNOWN";
+    public bool HasGpuEvidence => FindServerInfoNode("gpu") is not null || FindServerInfoNode("gpu_name") is not null || FindServerInfoNode("device") is not null || FindServerInfoNode("hardware") is not null;
+    public string SystemConnectionSummary => IsConnected
+        ? HasGpuEvidence ? "MCP経由でComfyUIとGPU情報を確認済み" : "MCP経由でComfyUIへ接続済み · GPU情報は未提供"
+        : "ローカル環境は未接続 · CONNECTまたはSTART COMFYUIから開始";
+    public string CurrentCreationStageText => GetCurrentPipelineStage().Label;
+    public string CurrentCreationStageDescription => GetCurrentPipelineStage().Description;
+    public string CurrentCreationStageState => GetCurrentPipelineStage().State;
+    public string CurrentIterationLabel => CurrentSession is null || CurrentSession.CurrentIteration == 0 ? "ITERATION —" : $"ITERATION {CurrentSession.CurrentIteration:00}";
+    public string PipelineLoopText => CurrentSession?.Status == SessionStatus.Completed ? "SESSION COMPLETE" : CurrentSession?.CurrentIteration > 0 ? "REVIEW → NEXT ITERATION" : "REVIEW → NEXT ITERATION";
     public string SessionStatusText => CurrentSession?.Status.ToString().ToUpperInvariant() ?? "NEW";
     public string JobStatusText => CurrentJob is null ? "IDLE" : CurrentJob.Status.ToString().ToUpperInvariant();
     public string JobStatusDetailText => CurrentJob is null ? "生成待機中" : IsJobActive ? "ComfyUIで生成を実行中" : CurrentJob.Status switch { JobStatus.Completed => "生成が完了しました", JobStatus.Failed => "生成に失敗しました", JobStatus.Cancelled => "生成をキャンセルしました", _ => "Jobを確認してください" };
@@ -130,10 +159,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         foreach (var iteration in CurrentSession.Iterations) Iterations.Add(iteration);
         LatestOutputs.Clear();
         foreach (var output in CurrentSession.Iterations.LastOrDefault()?.Outputs ?? []) LatestOutputs.Add(output);
+        _commandReceived = !string.IsNullOrWhiteSpace(CommandText);
+        _workflowPrepared = CurrentSession.BoundWorkflow is not null;
         RefreshWorkflowTree();
         StatusMessage = IsSetupVisible ? "接続先を確認して保存してください。" : "準備完了。ComfyUIの状態を確認できます。";
         OnPropertyChanged(nameof(HasIterations));
         OnPropertyChanged(nameof(HasLatestOutputs));
+        NotifyPipelineStateChanged();
+        NotifyConnectionStateChanged();
     }
 
     public async Task SaveSetupAsync()
@@ -152,11 +185,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         ValidateSettings();
         IsBusy = true;
+        ConnectionState = ConnectionState.Connecting;
         try
         {
             await _mcp.ConnectAsync(Settings);
             ConnectionState = ConnectionState.Connected;
             var info = await _mcp.CallAsync("server_info", new Dictionary<string, object?>());
+            _serverInfo = info;
+            NotifyConnectionStateChanged();
             StatusMessage = info is null ? "MCPに接続しました。" : "MCPに接続しました。server_infoを取得済みです。";
             if (SelectedWorkflow is not null) await SelectWorkflowAsync(SelectedWorkflow.RelativePath);
         }
@@ -172,6 +208,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task DisconnectAsync()
     {
         await _mcp.DisconnectAsync();
+        _serverInfo = null;
         ConnectionState = ConnectionState.Disconnected;
         StatusMessage = "MCPを切断しました。ComfyUIは終了していません。";
     }
@@ -250,13 +287,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         var changes = BuildChanges();
-        if (changes.Count == 0) { IsDirty = false; return; }
+        if (changes.Count == 0) { IsDirty = false; _workflowPrepared = true; NotifyPipelineStateChanged(); return; }
         IsBusy = true;
         try
         {
             await _catalog.ApplySlotsAsync(SelectedWorkflow, WorkflowRoot, changes);
             _loadedFingerprint = WorkflowCatalog.ComputeFingerprint(path);
             IsDirty = false;
+            _workflowPrepared = true;
             foreach (var backup in await _store.ListWorkflowBackupsAsync(SelectedWorkflow)) { if (!Backups.Contains(backup)) Backups.Add(backup); }
             StatusMessage = "Workflowをbackup → apply → validateしました。";
         }
@@ -307,11 +345,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         CurrentSession = NewSessionInternal();
         Idea = string.Empty;
+        CommandText = string.Empty;
+        _pendingValidation = null;
+        _commandReceived = false;
+        _workflowPrepared = false;
         Iterations.Clear();
         LatestOutputs.Clear();
         OnPropertyChanged(nameof(HasIterations));
         OnPropertyChanged(nameof(HasLatestOutputs));
         OnPropertyChanged(nameof(SessionProgressText));
+        NotifyPipelineStateChanged();
         StatusMessage = "新しい制作セッションを作成しました。";
     }
 
@@ -336,12 +379,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var changes = BuildChanges();
         if (applyFirst && IsDirty) await ApplySlotsAsync();
         await ValidateCurrentAsync();
+        _workflowPrepared = true;
         var prompt = FindPrompt(changes) ?? Idea;
         var iteration = CurrentSession.StartIteration(prompt, changes);
         await _store.SaveSessionAsync(CurrentSession);
+        OnPropertyChanged(nameof(SessionStatusText));
         OnPropertyChanged(nameof(SessionProgressText));
         Iterations.Add(iteration);
         OnPropertyChanged(nameof(HasIterations));
+        NotifyPipelineStateChanged();
         IsBusy = true;
         try
         {
@@ -360,6 +406,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             CurrentSession.LastError = ex.Message;
             CurrentJob = null;
             await _store.SaveSessionAsync(CurrentSession);
+            OnPropertyChanged(nameof(SessionStatusText));
+            NotifyPipelineStateChanged();
             StatusMessage = $"生成に失敗しました: {ex.Message}";
             await _store.LogAsync("generation", StatusMessage, ex);
         }
@@ -369,8 +417,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task ImportCommandAsync()
     {
         _pendingValidation = ConnectorProtocol.Parse(CommandText);
-        if (!_pendingValidation.IsValid) { StatusMessage = string.Join(" ", _pendingValidation.Errors); return; }
+        if (!_pendingValidation.IsValid) { StatusMessage = string.Join(" ", _pendingValidation.Errors); NotifyPipelineStateChanged(); return; }
         _pendingValidation = ConnectorProtocol.ValidateAgainstSlots(_pendingValidation.Command!, Slots.Select(ToWorkflowSlot), SelectedWorkflow);
+        _commandReceived = true;
         StatusMessage = _pendingValidation.IsValid ? $"{_pendingValidation.Command!.Action} commandを検証しました。APPLYで反映してください。" : string.Join(" ", _pendingValidation.Errors);
         if (_pendingValidation.Command?.Action == "complete" && _pendingValidation.IsValid) CompleteSession(_pendingValidation.Command.Reason ?? "ChatGPT completed the session.");
         await Task.CompletedTask;
@@ -383,6 +432,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (commandResult.Command.Action != "generate") throw new InvalidOperationException("このcommandはgenerateではありません。");
         foreach (var item in Slots) if (commandResult.Command.Parameters.TryGetPropertyValue(item.Address, out var value) && value is not null) item.ValueText = value is JsonValue v && v.TryGetValue<string>(out var text) ? text : value.ToJsonString();
         IsDirty = true;
+        _workflowPrepared = true;
+        NotifyPipelineStateChanged();
         if (generate) await GenerateAsync(); else await ApplySlotsAsync();
     }
 
@@ -393,6 +444,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         if (CurrentSession is null) return;
         CurrentSession.Complete(reason);
+        OnPropertyChanged(nameof(SessionStatusText));
+        NotifyPipelineStateChanged();
         StatusMessage = "セッションをCOMPLETEDにしました。履歴と出力は保持されています。必要ならRESUMEできます。";
         _ = _store.SaveSessionAsync(CurrentSession);
     }
@@ -403,6 +456,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CurrentSession.Resume();
         await _store.SaveSessionAsync(CurrentSession);
         OnPropertyChanged(nameof(SessionStatusText));
+        NotifyPipelineStateChanged();
         StatusMessage = "セッションを再開しました。";
     }
 
@@ -417,6 +471,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StatusMessage = "Connectorが投入したJobへCANCELを要求しました。";
         OnPropertyChanged(nameof(JobStatusText));
         OnPropertyChanged(nameof(JobStatusDetailText));
+        NotifyConnectionStateChanged();
+        NotifyPipelineStateChanged();
     }
 
     public async Task RestoreBackupAsync(string backupPath)
@@ -453,6 +509,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 CurrentJob.CompletedAt = DateTimeOffset.UtcNow;
                 StatusMessage = $"Iteration {iteration.Number} が完了しました。出力 {iteration.Outputs.Count} 件。";
                 await _store.SaveSessionAsync(CurrentSession!);
+                NotifyPipelineStateChanged();
                 break;
             }
             if (CurrentJob.Status is JobStatus.Failed or JobStatus.Cancelled)
@@ -460,6 +517,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 iteration.Error = CurrentJob.Message;
                 StatusMessage = $"Job {CurrentJob.Status}。";
                 await _store.SaveSessionAsync(CurrentSession!);
+                NotifyPipelineStateChanged();
                 break;
             }
         }
@@ -485,6 +543,122 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void SlotChanged(object? sender, PropertyChangedEventArgs e) { if (e.PropertyName == nameof(SlotEditorItem.ValueText)) IsDirty = true; }
 
+    private void NotifyConnectionStateChanged()
+    {
+        OnPropertyChanged(nameof(IsSystemProcessing));
+        OnPropertyChanged(nameof(ConnectorSystemState));
+        OnPropertyChanged(nameof(McpSystemState));
+        OnPropertyChanged(nameof(ComfyUiSystemState));
+        OnPropertyChanged(nameof(GpuSystemState));
+        OnPropertyChanged(nameof(HasGpuEvidence));
+        OnPropertyChanged(nameof(SystemConnectionSummary));
+    }
+
+    private void NotifyPipelineStateChanged()
+    {
+        RefreshPipeline();
+        OnPropertyChanged(nameof(CurrentCreationStageText));
+        OnPropertyChanged(nameof(CurrentCreationStageDescription));
+        OnPropertyChanged(nameof(CurrentCreationStageState));
+        OnPropertyChanged(nameof(CurrentIterationLabel));
+        OnPropertyChanged(nameof(PipelineLoopText));
+    }
+
+    private void RefreshPipeline()
+    {
+        var currentIndex = GetCurrentPipelineStageIndex();
+        var sessionCompleted = CurrentSession?.Status == SessionStatus.Completed;
+        var sessionErrored = CurrentSession?.Status == SessionStatus.Error;
+        var definitions = new[]
+        {
+            ("IDEA", "アイデア", "制作の核となるイメージ"),
+            ("CHATGPT", "ChatGPT", "会話で意図を磨く"),
+            ("COMMAND", "Command", "Connector Protocol v1を確認"),
+            ("WORKFLOW", "Workflow", "選択・微調整・検証"),
+            ("GENERATE", "Generate", "ComfyUIで1件を実行"),
+            ("OUTPUT", "Output", "最新の生成物を受け取る"),
+            ("REVIEW", "Review", "結果を見て次のIterationへ"),
+        };
+
+        PipelineStages.Clear();
+        for (var index = 0; index < definitions.Length; index++)
+        {
+            var state = index < currentIndex ? "DONE" : index > currentIndex ? "NEXT" : "NOW";
+            if (sessionCompleted) state = index == definitions.Length - 1 ? "COMPLETE" : "DONE";
+            if (sessionErrored && index == currentIndex) state = "ERROR";
+            var stateLabel = state switch
+            {
+                "DONE" => "完了",
+                "COMPLETE" => "完了",
+                "ERROR" => "要確認",
+                "NOW" => "現在",
+                _ => "次",
+            };
+            PipelineStages.Add(new CreationPipelineStage(index + 1, definitions[index].Item1, definitions[index].Item2, definitions[index].Item3, state, stateLabel, index == definitions.Length - 1));
+        }
+        OnPropertyChanged(nameof(PipelineStages));
+    }
+
+    private CreationPipelineStage GetCurrentPipelineStage()
+    {
+        var index = GetCurrentPipelineStageIndex();
+        return PipelineStages.ElementAtOrDefault(index) ?? new CreationPipelineStage(1, "IDEA", "アイデア", "制作の核となるイメージ", "NOW", "現在", false);
+    }
+
+    private int GetCurrentPipelineStageIndex()
+    {
+        if (CurrentSession?.Status == SessionStatus.Completed) return 6;
+        var latest = CurrentSession?.Iterations.LastOrDefault() ?? Iterations.LastOrDefault();
+        if (CurrentSession?.Status == SessionStatus.Error || latest?.Status == JobStatus.Failed) return 4;
+        if (IsJobActive || latest?.Status is JobStatus.Queued or JobStatus.Running) return 4;
+        if (latest?.Status == JobStatus.Completed) return 6;
+        if (_workflowPrepared && SelectedWorkflow is not null) return 3;
+        if (_commandReceived || !string.IsNullOrWhiteSpace(CommandText)) return 2;
+        if (!string.IsNullOrWhiteSpace(Idea)) return 1;
+        return 0;
+    }
+
+    private JsonNode? FindServerInfoNode(string key)
+    {
+        if (_serverInfo is null) return null;
+        return FindNodeRecursive(_serverInfo, key, 0);
+    }
+
+    private bool? ReadServerInfoBoolean(string key)
+    {
+        var node = FindServerInfoNode(key);
+        return node is JsonValue value && value.TryGetValue<bool>(out var result) ? result : null;
+    }
+
+    private static JsonNode? FindNodeRecursive(JsonNode node, string key, int depth)
+    {
+        if (depth > 3) return null;
+        if (node is JsonObject obj)
+        {
+            if (obj.TryGetPropertyValue(key, out var direct) && direct is not null) return direct;
+            foreach (var property in obj)
+            {
+                if (property.Value is not null)
+                {
+                    var nested = FindNodeRecursive(property.Value, key, depth + 1);
+                    if (nested is not null) return nested;
+                }
+            }
+        }
+        else if (node is JsonArray array)
+        {
+            foreach (var child in array)
+            {
+                if (child is not null)
+                {
+                    var nested = FindNodeRecursive(child, key, depth + 1);
+                    if (nested is not null) return nested;
+                }
+            }
+        }
+        return null;
+    }
+
     private void NotifySlotCollectionsChanged()
     {
         OnPropertyChanged(nameof(HasSlots));
@@ -493,6 +667,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(HasAdvancedSlots));
         OnPropertyChanged(nameof(WorkflowSlotSummaryText));
         NotifyViewStateChanged();
+        NotifyPipelineStateChanged();
     }
 
     private void NotifyViewStateChanged()

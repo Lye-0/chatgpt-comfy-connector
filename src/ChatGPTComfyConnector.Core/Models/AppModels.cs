@@ -101,6 +101,23 @@ public enum CreationStageState
     Skipped,
 }
 
+/// <summary>
+/// Structured reason for a stage that is waiting for a user action or response.
+/// Keep this separate from <see cref="CreationStageState"/> so the shared state
+/// model remains stable while the UI can explain the concrete wait condition.
+/// </summary>
+public enum CreationWaitingReason
+{
+    None,
+    ComfyUiStartRequired,
+    ReconnectRequired,
+    ConnectionCheckRequired,
+    ChatGptResponseRequired,
+    ReviewResponseRequired,
+    ContinueDecisionRequired,
+    UserActionRequired,
+}
+
 public sealed class AppSettings : INotifyPropertyChanged
 {
     private string _portableRoot = string.Empty;
@@ -453,13 +470,14 @@ public sealed class CreationStageStatus
 {
     public CreationStage Stage { get; set; }
     public CreationStageState State { get; set; } = CreationStageState.NotReached;
+    public CreationWaitingReason WaitingReason { get; set; } = CreationWaitingReason.None;
     public string Detail { get; set; } = string.Empty;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class CreationPipelineSnapshot
 {
-    public int Version { get; set; } = 2;
+    public int Version { get; set; } = 3;
     public int IterationNumber { get; set; }
     public bool ContextBound { get; set; }
     public bool MaximumIterationSafetyStop { get; set; }

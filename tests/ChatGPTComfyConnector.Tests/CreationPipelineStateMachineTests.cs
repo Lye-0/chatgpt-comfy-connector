@@ -32,6 +32,40 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
+    public void WaitingUserUsesStructuredStageSpecificReasons()
+    {
+        var session = SentIdeaSession();
+        var connectWaiting = CreationPipelineStateMachine.EvaluateConnectionGate(ConnectionState.Connected, false, false);
+        Assert.Equal(CreationStageState.WaitingUser, connectWaiting.State);
+        Assert.Equal(CreationWaitingReason.ComfyUiStartRequired, connectWaiting.WaitingReason);
+        Assert.Equal("ComfyUI起動待ち", CreationPipelineStateMachine.GetStageStateLabel(connectWaiting));
+
+        var reconnectWaiting = CreationPipelineStateMachine.EvaluateConnectionGate(ConnectionState.Disconnected, false, true);
+        Assert.Equal(CreationStageState.WaitingUser, reconnectWaiting.State);
+        Assert.Equal(CreationWaitingReason.ReconnectRequired, reconnectWaiting.WaitingReason);
+        Assert.Equal("再接続待ち", CreationPipelineStateMachine.GetStageStateLabel(reconnectWaiting));
+
+        var handoff = CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt);
+        Assert.Equal(CreationWaitingReason.ChatGptResponseRequired, handoff.WaitingReason);
+        Assert.Equal("ChatGPT返答待ち", CreationPipelineStateMachine.GetStageStateLabel(handoff));
+
+        var reviewSession = ReadyForReview(maximumIterations: 2);
+        CreationPipelineStateMachine.ReviewCopied(reviewSession);
+        var review = CreationPipelineStateMachine.Get(reviewSession, CreationStage.Review);
+        Assert.Equal(CreationStageState.WaitingUser, review.State);
+        Assert.Equal(CreationWaitingReason.ReviewResponseRequired, review.WaitingReason);
+        Assert.Equal("レビュー返答待ち", CreationPipelineStateMachine.GetStageStateLabel(review));
+
+        var limitSession = ReadyForReview(maximumIterations: 1);
+        CreationPipelineStateMachine.CommandValidated(limitSession, "generate");
+        var limit = CreationPipelineStateMachine.Get(limitSession, CreationStage.Review);
+        Assert.Equal(CreationStageState.WaitingUser, limit.State);
+        Assert.Equal(CreationWaitingReason.ContinueDecisionRequired, limit.WaitingReason);
+        Assert.Equal("続行判断待ち", CreationPipelineStateMachine.GetStageStateLabel(limit));
+        Assert.DoesNotContain("ユーザー待ち", CreationPipelineStateMachine.GetStageStateLabel(limit), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ContextCannotBindUntilMcpAndComfyUiAreReady()
     {
         var session = ConfiguredSession(2);

@@ -20,7 +20,7 @@ public static class CreationPipelineStateMachine
     public static void EnsureInitialized(CreationSession session)
     {
         session.Pipeline ??= new CreationPipelineSnapshot();
-        session.Pipeline.Version = 2;
+        session.Pipeline.Version = 3;
         foreach (var stage in OrderedStages)
         {
             if (session.Pipeline.Stages.All(item => item.Stage != stage))
@@ -44,18 +44,56 @@ public static class CreationPipelineStateMachine
 
     public static CreationStageStatus EvaluateConnectionGate(ConnectionState connectionState, bool comfyUiReachable, bool hasSessionProgress)
     {
-        var (state, detail) = connectionState switch
+        var (state, detail, waitingReason) = connectionState switch
         {
-            ConnectionState.Connecting => (CreationStageState.InProgress, "MCPへ接続しComfyUI到達性を確認中"),
-            ConnectionState.Connected when comfyUiReachable => (CreationStageState.Completed, "MCP接続とComfyUI到達性を確認済み"),
-            ConnectionState.Connected => (CreationStageState.WaitingUser, "MCP接続済み · ComfyUIを起動して再接続してください"),
-            ConnectionState.Error or ConnectionState.Unavailable => (CreationStageState.Error, "制作通信を確立できませんでした · 接続診断を確認してください"),
-            ConnectionState.Stopped => (CreationStageState.WaitingUser, "ComfyUIを起動してCONNECTしてください"),
-            _ when hasSessionProgress => (CreationStageState.WaitingUser, "制作データを保持しています · 再接続すると続行できます"),
-            _ => (CreationStageState.Current, "CONNECTでMCP接続とComfyUI到達性を確認してください"),
+            ConnectionState.Connecting => (CreationStageState.InProgress, "MCPへ接続しComfyUI到達性を確認中", CreationWaitingReason.None),
+            ConnectionState.Connected when comfyUiReachable => (CreationStageState.Completed, "MCP接続とComfyUI到達性を確認済み", CreationWaitingReason.None),
+            ConnectionState.Connected => (CreationStageState.WaitingUser, "MCP接続済み · ComfyUIを起動して再接続してください", CreationWaitingReason.ComfyUiStartRequired),
+            ConnectionState.Error or ConnectionState.Unavailable => (CreationStageState.Error, "制作通信を確立できませんでした · 接続診断を確認してください", CreationWaitingReason.None),
+            ConnectionState.Stopped => (CreationStageState.WaitingUser, "ComfyUIを起動してCONNECTしてください", CreationWaitingReason.ComfyUiStartRequired),
+            _ when hasSessionProgress => (CreationStageState.WaitingUser, "制作データを保持しています · 再接続すると続行できます", CreationWaitingReason.ReconnectRequired),
+            _ => (CreationStageState.Current, "CONNECTでMCP接続とComfyUI到達性を確認してください", CreationWaitingReason.None),
         };
-        return new CreationStageStatus { Stage = CreationStage.Connect, State = state, Detail = detail };
+        return new CreationStageStatus { Stage = CreationStage.Connect, State = state, WaitingReason = waitingReason, Detail = detail };
     }
+
+    /// <summary>
+    /// Resolves the concise user-facing label for a stage state. WaitingUser is
+    /// intentionally explained by its structured reason rather than its enum name.
+    /// The stage fallback keeps older persisted snapshots understandable when the
+    /// new WaitingReason field is absent.
+    /// </summary>
+    public static string GetStageStateLabel(CreationStageStatus status)
+        => status.State switch
+        {
+            CreationStageState.Completed => "完了",
+            CreationStageState.Current => "現在",
+            CreationStageState.WaitingUser => GetWaitingReasonLabel(status.Stage, status.WaitingReason),
+            CreationStageState.InProgress => "処理中",
+            CreationStageState.Error => "エラー",
+            CreationStageState.Cancelled => "キャンセル",
+            CreationStageState.Skipped => "スキップ",
+            _ => "未到達",
+        };
+
+    public static string GetWaitingReasonLabel(CreationStage stage, CreationWaitingReason reason)
+        => reason switch
+        {
+            CreationWaitingReason.ComfyUiStartRequired => "ComfyUI起動待ち",
+            CreationWaitingReason.ReconnectRequired => "再接続待ち",
+            CreationWaitingReason.ConnectionCheckRequired => "接続確認待ち",
+            CreationWaitingReason.ChatGptResponseRequired => "ChatGPT返答待ち",
+            CreationWaitingReason.ReviewResponseRequired => "レビュー返答待ち",
+            CreationWaitingReason.ContinueDecisionRequired => "続行判断待ち",
+            CreationWaitingReason.UserActionRequired => "操作待ち",
+            _ => stage switch
+            {
+                CreationStage.Connect => "再接続待ち",
+                CreationStage.ToChatGpt => "ChatGPT返答待ち",
+                CreationStage.Review => "レビュー返答待ち",
+                _ => "確認待ち",
+            },
+        };
 
     public static void SynchronizeConnectionGate(CreationSession session, ConnectionState connectionState, bool comfyUiReachable, string? detail = null)
     {
@@ -63,7 +101,7 @@ public static class CreationPipelineStateMachine
         var hasSessionProgress = session.Pipeline.ContextBound
             || OrderedStages.Skip(2).Any(stage => Get(session, stage).State != CreationStageState.NotReached);
         var evaluated = EvaluateConnectionGate(connectionState, comfyUiReachable, hasSessionProgress);
-        Set(session, CreationStage.Connect, evaluated.State, detail ?? evaluated.Detail);
+        Set(session, CreationStage.Connect, evaluated.State, detail ?? evaluated.Detail, evaluated.WaitingReason);
         if (!session.Pipeline.ContextBound)
         {
             Set(session, CreationStage.Context,
@@ -137,7 +175,7 @@ public static class CreationPipelineStateMachine
         session.Pipeline.SentIdeaSnapshot = idea;
         session.Pipeline.AcceptedCommandAction = null;
         Set(session, CreationStage.Idea, CreationStageState.Completed, "制作ContextをClipboardへ生成済み");
-        Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTからの返答待ち");
+        Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTからの返答待ち", CreationWaitingReason.ChatGptResponseRequired);
         ResetAfter(session, CreationStage.ToChatGpt);
     }
 
@@ -196,7 +234,7 @@ public static class CreationPipelineStateMachine
         {
             session.Pipeline.MaximumIterationSafetyStop = true;
             ResetFrom(session, CreationStage.Apply);
-            Set(session, CreationStage.Review, CreationStageState.WaitingUser, "最大反復回数に達しました · 続行するか判断してください");
+            Set(session, CreationStage.Review, CreationStageState.WaitingUser, "最大反復回数に達しました · 続行するか判断してください", CreationWaitingReason.ContinueDecisionRequired);
             return;
         }
 
@@ -275,7 +313,7 @@ public static class CreationPipelineStateMachine
     }
 
     public static void ReviewCopied(CreationSession session)
-        => Set(session, CreationStage.Review, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTの評価待ち");
+        => Set(session, CreationStage.Review, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTの評価待ち", CreationWaitingReason.ReviewResponseRequired);
 
     public static void ContinueBeyondLimit(CreationSession session)
     {
@@ -358,10 +396,11 @@ public static class CreationPipelineStateMachine
         for (var i = index; i < OrderedStages.Length; i++) Set(session, OrderedStages[i], state, string.Empty);
     }
 
-    private static void Set(CreationSession session, CreationStage stage, CreationStageState state, string detail)
+    private static void Set(CreationSession session, CreationStage stage, CreationStageState state, string detail, CreationWaitingReason waitingReason = CreationWaitingReason.None)
     {
         var item = session.Pipeline.Stages.Single(entry => entry.Stage == stage);
         item.State = state;
+        item.WaitingReason = state == CreationStageState.WaitingUser ? waitingReason : CreationWaitingReason.None;
         item.Detail = detail;
         item.UpdatedAt = DateTimeOffset.UtcNow;
         session.UpdatedAt = DateTimeOffset.UtcNow;

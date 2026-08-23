@@ -1590,17 +1590,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
             var definition = definitions[stage];
             var state = status.State.ToString().ToUpperInvariant();
-            var stateLabel = status.State switch
-            {
-                CreationStageState.Completed => "完了",
-                CreationStageState.Current => "現在",
-                CreationStageState.WaitingUser => "ユーザー待ち",
-                CreationStageState.InProgress => "処理中",
-                CreationStageState.Error => "エラー",
-                CreationStageState.Cancelled => "キャンセル",
-                CreationStageState.Skipped => "スキップ",
-                _ => "未到達",
-            };
+            var stateLabel = CreationPipelineStateMachine.GetStageStateLabel(status);
             var description = string.IsNullOrWhiteSpace(status.Detail) ? definition.Description : $"{definition.Description}{Environment.NewLine}{status.Detail}";
             PipelineStages.Add(new CreationPipelineStage(index + 1, definition.Key, definition.Label, description, state, stateLabel, index == CreationPipelineStateMachine.OrderedStages.Length - 1));
         }

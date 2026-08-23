@@ -84,6 +84,12 @@ idea, iterations, or outputs. It moves Connect back to `WaitingUser` or `Error` 
 blocks connection-dependent Apply/Generate operations. A successful reconnect completes
 the same gate and resumes the existing Session from its retained production stage.
 
+`WaitingUser` is a shared state, while `CreationStageStatus.WaitingReason` carries the
+specific reason. The Core projection resolves that pair into concise UI text: Connect
+uses `ComfyUI起動待ち` or `再接続待ち`, ToChatGpt uses `ChatGPT返答待ち`, Review uses
+`レビュー返答待ち`, and the iteration safety stop uses `続行判断待ち`. The UI must not
+display the enum name or a generic `ユーザー待ち` label.
+
 ## Manual Handoff and timeline
 
 v0.1 uses a manual clipboard transport: Connector creates a self-contained Bootstrap

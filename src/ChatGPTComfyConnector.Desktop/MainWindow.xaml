@@ -555,13 +555,21 @@
                                     Click="Refresh_Click">
                                 <Viewbox Width="16" Height="16" Stretch="Uniform">
                                     <Canvas Width="24" Height="24">
-                                        <Ellipse Width="15" Height="15"
-                                                 Canvas.Left="4.5"
-                                                 Canvas.Top="4.5"
-                                                 Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
-                                                 StrokeThickness="1.8"
-                                                 StrokeDashArray="14,5" />
-                                        <Polygon Points="17,3 21,3 21,7"
+                                        <Path Data="M19,9 C18,5 15,3 11,3 C6,3 3,7 3,12"
+                                              Fill="Transparent"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                              StrokeThickness="2"
+                                              StrokeStartLineCap="Round"
+                                              StrokeEndLineCap="Round" />
+                                        <Polygon Points="16,5 20,9 15,10"
+                                                 Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" />
+                                        <Path Data="M5,15 C6,19 9,21 13,21 C18,21 21,17 21,12"
+                                              Fill="Transparent"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                              StrokeThickness="2"
+                                              StrokeStartLineCap="Round"
+                                              StrokeEndLineCap="Round" />
+                                        <Polygon Points="8,19 4,15 9,14"
                                                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" />
                                     </Canvas>
                                 </Viewbox>

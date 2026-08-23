@@ -37,6 +37,8 @@ public sealed class WorkflowCatalog
             Type = slot["type"]?.GetValue<string>() ?? "UNKNOWN",
             CurrentValue = slot["current_value"]?.DeepClone(),
             Choices = slot["choices"] as JsonArray ?? slot["values"] as JsonArray,
+            Minimum = ReadDouble(slot, "minimum", "min"),
+            Maximum = ReadDouble(slot, "maximum", "max"),
             PairingSuspect = slot["pairing_suspect"]?.GetValue<bool>() ?? false,
         }).Where(slot => !string.IsNullOrWhiteSpace(slot.Address)).ToArray();
     }
@@ -153,6 +155,17 @@ public sealed class WorkflowCatalog
             if (value is null) continue;
             if (value is JsonValue jsonValue && jsonValue.TryGetValue<string>(out var text)) return text;
             return value.ToString();
+        }
+        return null;
+    }
+
+    private static double? ReadDouble(JsonNode? node, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (node?[name] is not JsonValue value) continue;
+            if (value.TryGetValue<double>(out var number)) return number;
+            if (value.TryGetValue<int>(out var integer)) return integer;
         }
         return null;
     }

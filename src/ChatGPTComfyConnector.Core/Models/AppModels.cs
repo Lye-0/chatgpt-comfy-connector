@@ -246,6 +246,20 @@ public enum WorkflowSlotType
     File,
 }
 
+public enum SlotValueTransport
+{
+    Json,
+    Payload,
+}
+
+public enum SlotDiscoveryState
+{
+    NotLoaded,
+    Loading,
+    Loaded,
+    Failed,
+}
+
 public sealed class WorkflowSlot
 {
     public string Address { get; set; } = string.Empty;
@@ -253,6 +267,8 @@ public sealed class WorkflowSlot
     public string Type { get; set; } = "UNKNOWN";
     public JsonNode? CurrentValue { get; set; }
     public JsonArray? Choices { get; set; }
+    public double? Minimum { get; set; }
+    public double? Maximum { get; set; }
     public bool PairingSuspect { get; set; }
 
     public WorkflowSlotType Kind => Type.ToUpperInvariant() switch
@@ -267,6 +283,42 @@ public sealed class WorkflowSlot
     };
 
     public string CurrentText => CurrentValue?.ToJsonString(new JsonSerializerOptions { WriteIndented = false }) ?? string.Empty;
+}
+
+public sealed class HandoffSlotSnapshot
+{
+    public string Address { get; set; } = string.Empty;
+    public string Label { get; set; } = string.Empty;
+    public string Type { get; set; } = "UNKNOWN";
+    public JsonNode? CurrentValue { get; set; }
+    public JsonArray? Choices { get; set; }
+    public double? Minimum { get; set; }
+    public double? Maximum { get; set; }
+    public SlotValueTransport Transport { get; set; }
+
+    [JsonIgnore]
+    public WorkflowSlotType Kind => Type.ToUpperInvariant() switch
+    {
+        "STRING" or "TEXT" => WorkflowSlotType.String,
+        "INT" or "INTEGER" => WorkflowSlotType.Integer,
+        "FLOAT" or "NUMBER" => WorkflowSlotType.Number,
+        "BOOLEAN" or "BOOL" => WorkflowSlotType.Boolean,
+        "COMBO" or "ENUM" or "CHOICE" => WorkflowSlotType.Enum,
+        "IMAGE" or "FILE" => WorkflowSlotType.File,
+        _ => WorkflowSlotType.Unknown,
+    };
+}
+
+public sealed class PendingHandoffSnapshot
+{
+    public string HandoffId { get; set; } = Guid.NewGuid().ToString("N");
+    public string SessionId { get; set; } = string.Empty;
+    public string BoundaryId { get; set; } = Guid.NewGuid().ToString("N");
+    public List<string> AllowedActions { get; set; } = [];
+    public string WorkflowIdentity { get; set; } = string.Empty;
+    public List<HandoffSlotSnapshot> Slots { get; set; } = [];
+    public int Iteration { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class OutputArtifact
@@ -470,6 +522,7 @@ public sealed class CreationSession
     public List<SessionIteration> Iterations { get; set; } = [];
     public List<HandoffMessage> HandoffMessages { get; set; } = [];
     public CreationPipelineSnapshot Pipeline { get; set; } = new();
+    public PendingHandoffSnapshot? PendingHandoff { get; set; }
     public string? LastError { get; set; }
     public string? PauseReason { get; set; }
     public string? CompletionReason { get; set; }
@@ -537,14 +590,26 @@ public sealed class ConnectorCommand
 {
     public string Protocol { get; init; } = string.Empty;
     public string Action { get; init; } = string.Empty;
-    public JsonObject Parameters { get; init; } = [];
+    public string HandoffId { get; init; } = string.Empty;
+    public string SessionId { get; init; } = string.Empty;
+    public JsonObject Slots { get; init; } = [];
+    public JsonObject ResolvedSlots { get; init; } = [];
+    [JsonIgnore]
+    public JsonObject Parameters => ResolvedSlots;
     public string? Reason { get; init; }
-    public string? Workflow { get; init; }
 }
 
 public sealed class ProtocolValidationResult
 {
     public ConnectorCommand? Command { get; set; }
+    public string RawResponse { get; set; } = string.Empty;
+    public Dictionary<string, string> ResolvedPayloads { get; } = new(StringComparer.Ordinal);
     public List<string> Errors { get; } = [];
     public bool IsValid => Errors.Count == 0 && Command is not null;
+    public string UserMessage => IsValid
+        ? "Connector Responseを確認しました。"
+        : Errors.Any(error => error.Contains("以前のHandoff", StringComparison.Ordinal))
+            ? "このCommandは以前のHandoffに対する返答です。現在待機中のChatGPT返答を貼り付けてください。"
+            : Errors.FirstOrDefault() ?? "Connector Responseを検証できませんでした。入力内容を確認してください。";
+    public string DiagnosticText => string.Join(Environment.NewLine, Errors);
 }

@@ -27,8 +27,8 @@
 ### v0.1のChatGPT連携はManual Handoffである
 - id: `rm-20260823-manual-handoff-contract`
 - type: `decision`
-- maturity: `candidate`
-- tags: `handoff`, `clipboard`, `protocol`, `timeline`, `content-first`
+- maturity: `reused`
+- tags: `handoff`, `clipboard`, `protocol`, `timeline`, `content-first`, `raw-payload`, `pending-handoff`
 - files: `README.md`, `docs/architecture.md`, `docs/connector-protocol-v1.md` …
 - memory: `agent-knowledge/entries/2026-08-23-manual-handoff-contract-a63f9d.md`
 

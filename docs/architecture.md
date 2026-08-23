@@ -74,9 +74,24 @@ or errored session without deleting its previous iterations.
 
 ## Manual Handoff and timeline
 
-v0.1 uses a manual clipboard boundary: Connector creates Bootstrap / Result Context
-text, the user pastes it into ChatGPT, and ChatGPT's single validated
-`comfy-connector/1` command is pasted back into the Connector. The persisted
+v0.1 uses a manual clipboard transport: Connector creates a self-contained Bootstrap
+/ Review Handoff, the user pastes it into ChatGPT, and ChatGPT's validated
+`comfy-connector/1` Connector Response is pasted back into the Connector. A Response
+contains exactly one small `connector-command` JSON block and zero or more referenced
+raw `COMFY_PAYLOAD` blocks. Connector-generated `handoff_id`, `session_id`, and
+`boundary_id` bind the response to a persisted Pending Handoff snapshot containing
+AllowedActions, Workflow identity, Iteration, and the MCP-discovered slot schema.
+Validation therefore does not trust stale clipboard text or transient UI state.
+
+Free-form string slots use payload references; numeric, boolean, and choice values
+remain direct JSON. Slot discovery distinguishes NotLoaded, Loading, Loaded, and
+Failed, so an unavailable schema is never silently exported as an empty slot list.
+The detailed grammar and validation invariants are canonicalized in
+`docs/connector-protocol-v1.md`. Clipboard is only the current transport boundary;
+the Protocol and Pending Handoff models remain reusable by a future browser or
+external provider.
+
+The persisted
 `HandoffMessage` separates transport direction, message kind, display text, secondary
 metadata, and the full payload. The three semantic directions are
 `CONNECTOR → CHATGPT`, `CHATGPT → COMFY`, and `COMFY → CHATGPT`; the initial creation

@@ -15,6 +15,9 @@ public sealed class SlotEditorItem : INotifyPropertyChanged
         Label = slot.Label;
         Type = slot.Type;
         Kind = slot.Kind;
+        CurrentValue = slot.CurrentValue?.DeepClone();
+        Minimum = slot.Minimum;
+        Maximum = slot.Maximum;
         Choices = slot.Choices?.Select(x => x?.ToString() ?? string.Empty).ToArray() ?? [];
         _valueText = Format(slot.CurrentValue);
         PairingSuspect = slot.PairingSuspect;
@@ -25,6 +28,9 @@ public sealed class SlotEditorItem : INotifyPropertyChanged
     public string Label { get; }
     public string Type { get; }
     public WorkflowSlotType Kind { get; }
+    public JsonNode? CurrentValue { get; }
+    public double? Minimum { get; }
+    public double? Maximum { get; }
     public IReadOnlyList<string> Choices { get; }
     public bool PairingSuspect { get; }
     public SlotPriority Priority { get; }

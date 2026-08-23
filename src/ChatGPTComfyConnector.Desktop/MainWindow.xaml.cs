@@ -11,6 +11,8 @@ namespace ChatGPTComfyConnector.Desktop;
 
 public partial class MainWindow : Window
 {
+    private bool _closeAfterDisconnect;
+    private bool _disconnectingForClose;
     private MainViewModel ViewModel => (MainViewModel)DataContext;
 
     public MainWindow()
@@ -21,8 +23,9 @@ public partial class MainWindow : Window
 
     private async void Window_Loaded(object sender, RoutedEventArgs e) => await ViewModel.InitializeAsync();
 
-    private void Window_Closing(object? sender, CancelEventArgs e)
+    private async void Window_Closing(object? sender, CancelEventArgs e)
     {
+        if (_closeAfterDisconnect) return;
         if (ViewModel.IsDirty)
         {
             MessageBox.Show("未保存のWorkflow変更があります。保存してから終了してください。", "未保存変更", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -34,7 +37,20 @@ public partial class MainWindow : Window
             e.Cancel = true;
             return;
         }
-        ViewModel.DisconnectAsync().GetAwaiter().GetResult();
+        e.Cancel = true;
+        if (_disconnectingForClose) return;
+        _disconnectingForClose = true;
+        try
+        {
+            await ViewModel.DisconnectAsync();
+            _closeAfterDisconnect = true;
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            _disconnectingForClose = false;
+            MessageBox.Show(ex.Message, "MCP切断", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private async void SaveSetup_Click(object sender, RoutedEventArgs e) => await Run("設定保存", ViewModel.SaveSetupAsync);
@@ -129,12 +145,22 @@ public partial class MainWindow : Window
     private async void CopyHandoff_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement { Tag: HandoffTimelineItem item }) return;
-        Clipboard.SetText(item.Payload);
-        await ViewModel.MarkHandoffCopiedAsync(item);
+        await Run("Handoffをコピー", async () =>
+        {
+            Clipboard.SetText(await ViewModel.PrepareTimelineHandoffAsync(item));
+            await ViewModel.MarkHandoffCopiedAsync(item);
+        });
     }
     private async void ContinueIteration_Click(object sender, RoutedEventArgs e) => await Run("Iteration続行", ViewModel.ContinueBeyondIterationLimitAsync);
     private async void EndIteration_Click(object sender, RoutedEventArgs e) => await Run("制作終了", ViewModel.EndAtIterationLimitAsync);
-    private void CopyResult_Click(object sender, RoutedEventArgs e) { Clipboard.SetText(ViewModel.BuildResultContext()); ViewModel.StatusMessage = "生成結果をChatGPT用にコピーしました。必要な画像・動画を手動で添付してください。"; }
+    private async void CopyResult_Click(object sender, RoutedEventArgs e)
+    {
+        await Run("生成結果をコピー", async () =>
+        {
+            Clipboard.SetText(await ViewModel.PrepareResultHandoffAsync(ViewModel.SelectedHistoryItem?.Iteration));
+            ViewModel.StatusMessage = "生成結果をChatGPT用にコピーしました。必要な画像・動画を手動で添付してください。";
+        });
+    }
     private void OpenOutput_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { Tag: string path }) RunSync("出力を開く", () => ViewModel.OpenOutputFile(path));

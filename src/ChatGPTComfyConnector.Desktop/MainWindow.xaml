@@ -1240,9 +1240,9 @@
                                 <TextBlock Text="CHATGPT COMMAND" Foreground="{StaticResource AccentStrongBrush}" FontSize="10" FontWeight="SemiBold" />
                                 <TextBlock Text="貼り付け → 確認 → 適用" Foreground="{StaticResource MutedTextBrush}" FontSize="9" HorizontalAlignment="Right" />
                             </Grid>
-                            <TextBox x:Name="CommandBox" Text="{Binding CommandText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="108" MaxHeight="180" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono" FontSize="10" ToolTip="ChatGPTから返されたcomfy-connector/1 commandを貼り付け" />
+                            <TextBox x:Name="CommandBox" Text="{Binding CommandText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="108" MaxHeight="180" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono" FontSize="10" ToolTip="ChatGPTから返されたconnector-command + COMFY_PAYLOAD全文を貼り付け" />
                             <WrapPanel Margin="0,7,0,0">
-                                <Button Content="読み込んで確認" ToolTip="Commandの形式とslotを検証" Click="ImportCommand_Click" />
+                                <Button Content="読み込んで確認" ToolTip="Connector Response、Handoff ID、Payload、slotを検証" Click="ImportCommand_Click" />
                                 <Button Content="適用" ToolTip="検証済みCommandをslotへ反映" Click="ApplyCommand_Click" IsEnabled="{Binding CanApplyCommand}" />
                                 <Button Content="適用して生成" ToolTip="反映後に1件のJobを生成" Click="ApplyGenerateCommand_Click" IsEnabled="{Binding CanApplyCommand}" Margin="0" />
                             </WrapPanel>

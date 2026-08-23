@@ -65,6 +65,12 @@ public sealed class SessionAndStorageTests
             ChatLabel = chat.DisplayName,
             LocalProjectContextId = project.Id,
             LocalChatContextId = chat.Id,
+            PendingHandoff = new PendingHandoffSnapshot
+            {
+                HandoffId = "handoff-1", SessionId = "session-1", BoundaryId = "boundary-1",
+                WorkflowIdentity = "workflow.json", AllowedActions = ["generate"],
+                Slots = [new HandoffSlotSnapshot { Address = "6.text", Type = "STRING", Transport = SlotValueTransport.Payload }],
+            },
             HandoffMessages =
             [
                 new HandoffMessage
@@ -93,6 +99,8 @@ public sealed class SessionAndStorageTests
             Assert.Equal(ContextBindingMode.Local, loadedChat.Mode);
             Assert.Equal(chat.Id, loadedSession.LocalChatContextId);
             Assert.Equal(HandoffTransportState.Copied, Assert.Single(loadedSession.HandoffMessages).State);
+            Assert.Equal("handoff-1", loadedSession.PendingHandoff!.HandoffId);
+            Assert.Equal(SlotValueTransport.Payload, Assert.Single(loadedSession.PendingHandoff.Slots).Transport);
         }
         finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
     }

@@ -26,6 +26,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _isSetupVisible;
     private bool _isBusy;
     private bool _isSlotLoading;
+    private SlotDiscoveryState _slotDiscoveryState = SlotDiscoveryState.NotLoaded;
     private bool _isDirty;
     private bool _isWorkflowEditorVisible;
     private string _commandText = string.Empty;
@@ -109,6 +110,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsWorkflowEditorVisible { get => _isWorkflowEditorVisible; private set { _isWorkflowEditorVisible = value; OnPropertyChanged(); } }
     public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
+    public SlotDiscoveryState SlotDiscoveryState { get => _slotDiscoveryState; private set { _slotDiscoveryState = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
     public bool IsWorkflowRenameVisible { get => _isWorkflowRenameVisible; private set { _isWorkflowRenameVisible = value; OnPropertyChanged(); } }
     public string WorkflowRenameText { get => _workflowRenameText; set { _workflowRenameText = value; OnPropertyChanged(); } }
@@ -259,7 +261,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         $"{(HasSelectedProject ? "✓" : "!")} Project  {(SelectedProject?.DisplayName ?? "未選択")}",
         $"{(HasSelectedChat ? "✓" : "!")} Chat  {(SelectedChat?.DisplayName ?? "未選択")}",
         $"{(SessionMaximumIterations is >= 1 and <= 1000 ? "✓" : "!")} Maximum Iterations  {SessionMaximumIterations}");
-    public string WorkflowSlotSummaryText => !HasSelectedWorkflow ? "左のライブラリからWorkflowを選択" : !IsConnected ? "MCP未接続 · CONNECTでslotを読み込み" : IsSlotLoading ? "slotを読み込み中…" : HasSlotLoadError ? "slotの読み込みに失敗" : $"主要 {PrimarySlots.Count} · 調整 {TuningSlots.Count} · 詳細 {AdvancedSlots.Count}";
+    public string WorkflowSlotSummaryText => !HasSelectedWorkflow ? "左のライブラリからWorkflowを選択" : !IsConnected ? "MCP未接続 · CONNECTでslotを読み込み" : SlotDiscoveryState == SlotDiscoveryState.Loading ? "slotを読み込み中…" : SlotDiscoveryState == SlotDiscoveryState.Failed ? "slotの読み込みに失敗" : SlotDiscoveryState == SlotDiscoveryState.Loaded ? $"主要 {PrimarySlots.Count} · 調整 {TuningSlots.Count} · 詳細 {AdvancedSlots.Count}" : "slotはまだ読み込まれていません";
     public bool IsConnected => ConnectionState == ConnectionState.Connected;
     public bool HasSelectedWorkflow => SelectedWorkflow is not null;
     public bool HasTreeNodes => TreeNodes.Count > 0;
@@ -417,6 +419,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         await _mcp.DisconnectAsync();
         _serverInfo = null;
         ConnectionState = ConnectionState.Disconnected;
+        SlotDiscoveryState = SlotDiscoveryState.NotLoaded;
         StatusMessage = "MCPを切断しました。ComfyUIは終了していません。";
     }
 
@@ -438,6 +441,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         AdvancedSlots.Clear();
         Backups.Clear();
         SlotLoadError = null;
+        SlotDiscoveryState = SlotDiscoveryState.NotLoaded;
         NotifySlotCollectionsChanged();
         var path = identity.ToAbsolute(WorkflowRoot);
         _loadedFingerprint = File.Exists(path) ? WorkflowCatalog.ComputeFingerprint(path) : null;
@@ -449,6 +453,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         IsBusy = true;
         IsSlotLoading = true;
+        SlotDiscoveryState = SlotDiscoveryState.Loading;
         try
         {
             foreach (var slot in await _catalog.DiscoverSlotsAsync(identity, WorkflowRoot))
@@ -465,12 +470,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
             foreach (var backup in await _store.ListWorkflowBackupsAsync(identity)) Backups.Add(backup);
             IsDirty = false;
+            SlotDiscoveryState = SlotDiscoveryState.Loaded;
             NotifySlotCollectionsChanged();
             StatusMessage = $"{Slots.Count}個のslotを読み込みました。";
         }
         catch (Exception ex)
         {
             SlotLoadError = ex.Message;
+            SlotDiscoveryState = SlotDiscoveryState.Failed;
             StatusMessage = $"slot取得に失敗しました: {ex.Message}";
             await _store.LogAsync("workflow", StatusMessage, ex);
         }
@@ -743,26 +750,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task ImportCommandAsync()
     {
         if (CurrentSession is null) throw new InvalidOperationException("先に新しい制作を開始してください。");
+        if (CurrentSession.PendingHandoff is not null && !string.Equals(CurrentSession.BoundWorkflow?.RelativePath, CurrentSession.PendingHandoff.WorkflowIdentity, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Handoff作成後に制作Contextが変更されています。現在のContextをChatGPTへ送り直してください。");
         CreationPipelineStateMachine.BeginCommandValidation(CurrentSession);
         NotifyPipelineStateChanged();
-        _pendingValidation = ConnectorProtocol.Parse(CommandText);
+        _pendingValidation = ConnectorProtocol.Parse(CommandText, CurrentSession.PendingHandoff);
         if (!_pendingValidation.IsValid)
         {
-            var detail = string.Join(" ", _pendingValidation.Errors);
+            var detail = _pendingValidation.DiagnosticText;
             CreationPipelineStateMachine.CommandValidationFailed(CurrentSession, detail);
+            await _store.LogAsync("protocol.validation", detail);
             await _store.SaveSessionAsync(CurrentSession);
-            OnPropertyChanged(nameof(CanApplyCommand)); StatusMessage = detail; NotifyPipelineStateChanged(); return;
+            OnPropertyChanged(nameof(CanApplyCommand)); StatusMessage = _pendingValidation.UserMessage; NotifyPipelineStateChanged(); return;
         }
-        _pendingValidation = ConnectorProtocol.ValidateAgainstSlots(_pendingValidation.Command!, Slots.Select(ToWorkflowSlot), SelectedWorkflow);
         OnPropertyChanged(nameof(CanApplyCommand));
-        StatusMessage = _pendingValidation.IsValid ? "ChatGPTからの生成指示を確認しました。「適用」から反映できます。" : string.Join(" ", _pendingValidation.Errors);
-        if (!_pendingValidation.IsValid)
-        {
-            CreationPipelineStateMachine.CommandValidationFailed(CurrentSession, StatusMessage);
-            await _store.SaveSessionAsync(CurrentSession);
-            NotifyPipelineStateChanged();
-            return;
-        }
+        StatusMessage = _pendingValidation.UserMessage + " 「適用」から反映できます。";
         try
         {
             var command = _pendingValidation.Command!;
@@ -801,9 +803,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (generate) await GenerateAsync(); else await ApplySlotsAsync();
     }
 
-    public string BuildBootstrapContext() => CurrentSession is null ? string.Empty : ConnectorContextBuilder.BuildBootstrap(CurrentSession, Slots.Select(ToWorkflowSlot));
-    public string BuildResultContext() => CurrentSession?.Iterations.LastOrDefault() is { } iteration ? ConnectorContextBuilder.BuildResult(CurrentSession, iteration) : string.Empty;
-
     public async Task<string> PrepareBootstrapHandoffAsync()
     {
         if (CurrentSession is null || CurrentSession.BoundWorkflow is null) throw new InvalidOperationException("左の設定から新しい制作を開始してください。");
@@ -812,8 +811,38 @@ public sealed class MainViewModel : INotifyPropertyChanged
             throw new InvalidOperationException("現在の制作セッションと選択中Workflowが一致しません。左から新しい制作を開始してください。");
         }
         if (string.IsNullOrWhiteSpace(CurrentSession.ProjectLabel) || string.IsNullOrWhiteSpace(CurrentSession.ChatLabel)) throw new InvalidOperationException("ProjectとChatを設定して新しい制作を開始してください。");
+        EnsureSlotSchemaAvailable();
+        CurrentSession.OriginalIdea = Idea;
+        CurrentSession.PendingHandoff = PendingHandoffFactory.Create(CurrentSession, Slots.Select(ToWorkflowSlot), "generate");
         await SaveSessionAsync();
-        return BuildBootstrapContext();
+        return ConnectorContextBuilder.BuildBootstrap(CurrentSession, CurrentSession.PendingHandoff);
+    }
+
+    public async Task<string> PrepareResultHandoffAsync(SessionIteration? selectedIteration = null)
+    {
+        if (CurrentSession is null) throw new InvalidOperationException("制作セッションがありません。");
+        var iteration = selectedIteration ?? CurrentSession.Iterations.LastOrDefault() ?? throw new InvalidOperationException("ChatGPTへ渡せる生成結果がありません。");
+        if (iteration.Status != JobStatus.Completed || iteration.Outputs.All(output => output.IsMissing)) throw new InvalidOperationException("成功した生成結果だけをChatGPTへ渡せます。");
+        EnsureSlotSchemaAvailable();
+        CurrentSession.PendingHandoff = PendingHandoffFactory.Create(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
+        var payload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, CurrentSession.PendingHandoff);
+        var message = CurrentSession.HandoffMessages.LastOrDefault(item => item.Direction == HandoffDirection.ComfyToChatGpt && item.IterationNumber == iteration.Number);
+        if (message is not null) message.Payload = payload;
+        await _store.SaveSessionAsync(CurrentSession);
+        return payload;
+    }
+
+    public async Task<string> PrepareTimelineHandoffAsync(HandoffTimelineItem item)
+    {
+        if (item.Message.Direction == HandoffDirection.ChatGptToComfy) return item.Payload;
+        if (item.Message.IterationNumber is { } iterationNumber)
+        {
+            var iteration = CurrentSession?.Iterations.FirstOrDefault(candidate => candidate.Number == iterationNumber);
+            return await PrepareResultHandoffAsync(iteration);
+        }
+        var payload = await PrepareBootstrapHandoffAsync();
+        item.Message.Payload = payload;
+        return payload;
     }
 
     public async Task ConfirmBootstrapCopiedAsync(string payload)
@@ -965,7 +994,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 NotifySelectedPreviewChanged();
                 CurrentJob.CompletedAt = DateTimeOffset.UtcNow;
                 StatusMessage = $"Iteration {iteration.Number} が完了しました。出力 {iteration.Outputs.Count} 件。";
-                var resultPayload = ConnectorContextBuilder.BuildResult(CurrentSession!, iteration);
+                EnsureSlotSchemaAvailable();
+                CurrentSession!.PendingHandoff = PendingHandoffFactory.Create(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
+                var resultPayload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, CurrentSession.PendingHandoff);
                 await RecordHandoffAsync(new HandoffMessage
                 {
                     Direction = HandoffDirection.ComfyToChatGpt,
@@ -1156,7 +1187,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 DisplayText = BuildResultTimelineDisplay(iteration),
                 Metadata = BuildResultTimelineMetadata(iteration),
                 Summary = BuildResultTimelineSummary(iteration),
-                Payload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration),
+                Payload = BuildPersistedResultPayload(CurrentSession, iteration),
                 IterationNumber = iteration.Number,
                 CreatedAt = iteration.CreatedAt,
             });
@@ -1224,7 +1255,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
             parts.Add(FormatMetadataPart(label, value));
             if (parts.Count == 4) break;
         }
-        if (!string.IsNullOrWhiteSpace(command.Workflow)) parts.Add($"Workflow: {command.Workflow}");
         return string.Join(" · ", parts);
     }
 
@@ -1287,7 +1317,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         if (message.Direction == HandoffDirection.ChatGptToComfy && string.IsNullOrWhiteSpace(message.DisplayText) && !string.IsNullOrWhiteSpace(message.Payload))
         {
-            var parsed = ConnectorProtocol.Parse(message.Payload);
+            var parsed = ConnectorProtocol.Parse(message.Payload, CurrentSession?.PendingHandoff);
             if (parsed.IsValid && parsed.Command is not null)
             {
                 message.DisplayText = BuildCommandTimelineDisplay(parsed.Command);
@@ -1399,7 +1429,30 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private Dictionary<string, JsonNode?> BuildChanges() => Slots.ToDictionary(x => x.Address, x => x.ToJsonNode(), StringComparer.OrdinalIgnoreCase);
     private string? FindPrompt(Dictionary<string, JsonNode?> changes) => changes.FirstOrDefault(x => x.Key.Contains("prompt", StringComparison.OrdinalIgnoreCase)).Value is JsonValue value && value.TryGetValue<string>(out var prompt) ? prompt : null;
-    private static WorkflowSlot ToWorkflowSlot(SlotEditorItem item) => new() { Address = item.Address, Label = item.Label, Type = item.Type, CurrentValue = item.ToJsonNode() };
+    private static WorkflowSlot ToWorkflowSlot(SlotEditorItem item) => new()
+    {
+        Address = item.Address,
+        Label = item.Label,
+        Type = item.Type,
+        CurrentValue = item.ToJsonNode(),
+        Choices = new JsonArray(item.Choices.Select(value => (JsonNode?)JsonValue.Create(value)).ToArray()),
+        Minimum = item.Minimum,
+        Maximum = item.Maximum,
+    };
+
+    private void EnsureSlotSchemaAvailable()
+    {
+        if (!IsConnected) throw new InvalidOperationException("MCPへ接続してWorkflow slotを読み込んでください。Handoffはまだ作成されていません。");
+        if (SlotDiscoveryState == SlotDiscoveryState.Loading) throw new InvalidOperationException("Workflow slotを読み込み中です。完了後にもう一度SEND TO CHATGPTを押してください。");
+        if (SlotDiscoveryState == SlotDiscoveryState.Failed) throw new InvalidOperationException($"Workflow slotの取得に失敗しています。再読み込みしてください。{(string.IsNullOrWhiteSpace(SlotLoadError) ? string.Empty : $" 詳細: {SlotLoadError}")}");
+        if (SlotDiscoveryState != SlotDiscoveryState.Loaded) throw new InvalidOperationException("Workflow slot schemaが未取得です。Workflowを再選択して読み込んでください。");
+    }
+
+    private static string BuildPersistedResultPayload(CreationSession session, SessionIteration iteration)
+    {
+        session.PendingHandoff ??= PendingHandoffFactory.Create(session, [], "generate", "complete");
+        return ConnectorContextBuilder.BuildResult(session, iteration, session.PendingHandoff);
+    }
 
     private static string NormalizeWorkflowName(string name)
     {

@@ -2,7 +2,7 @@
 
 ChatGPTを制作判断・改善役として使い、ローカルのComfyUI Workflowを安全に反復実行するWindows Portable Connectorです。
 
-v0.1 AlphaではChatGPTとの通信を自動化しません。ConnectorがBootstrap ContextやResult Contextをクリップボードへ作成し、ユーザーが通常のChatGPTへCopy/Pasteします。ChatGPTから返った `comfy-connector/1` commandをConnectorへ貼り付け、内容を確認してから適用・生成します。
+v0.1 AlphaではChatGPTとの通信を自動化しません。Connectorが自己完結したBootstrap / Review Handoffをクリップボードへ作成し、ユーザーが通常のChatGPTへCopy/Pasteします。ChatGPTから返った `comfy-connector/1` Connector Response（小さなCommand JSON + 必要なRaw Payload）をConnectorへ貼り付け、内容を確認してから適用・生成します。
 
 ## v0.1の範囲
 

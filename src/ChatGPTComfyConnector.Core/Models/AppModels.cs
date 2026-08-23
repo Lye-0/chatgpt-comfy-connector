@@ -51,6 +51,18 @@ public enum HandoffDirection
 {
     ChatGptToComfy,
     ComfyToChatGpt,
+    ConnectorToChatGpt,
+}
+
+public enum HandoffMessageKind
+{
+    Unknown,
+    CreationRequest,
+    GenerationCommand,
+    GenerationResult,
+    ReviewRequest,
+    RegenerationCommand,
+    Complete,
 }
 
 public enum HandoffTransportState
@@ -358,9 +370,13 @@ public sealed class HandoffMessage
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public HandoffDirection Direction { get; set; }
+    public HandoffMessageKind Kind { get; set; } = HandoffMessageKind.Unknown;
     public HandoffTransportState State { get; set; } = HandoffTransportState.Waiting;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public string Title { get; set; } = string.Empty;
+    public string DisplayText { get; set; } = string.Empty;
+    public string Metadata { get; set; } = string.Empty;
+    // Summary is retained for sessions written before the content-first card model.
     public string Summary { get; set; } = string.Empty;
     public string Payload { get; set; } = string.Empty;
     public int? IterationNumber { get; set; }

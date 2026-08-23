@@ -340,7 +340,7 @@
                 </Grid>
                 <Border x:Name="MessageChrome" Grid.Column="1" Background="#0C1726" BorderBrush="#234968" BorderThickness="1" CornerRadius="11" Padding="11">
                     <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <StackPanel Orientation="Horizontal">
@@ -356,10 +356,32 @@
                                 </Viewbox>
                             </Button>
                         </Grid>
-                        <TextBlock Grid.Row="1" Text="{Binding Title}" FontSize="13" FontWeight="SemiBold" Margin="0,7,0,0" TextWrapping="Wrap" />
-                        <Grid Grid.Row="2" Margin="0,5,0,0">
+                        <TextBlock Grid.Row="1" Text="{Binding KindLabel}" FontSize="12" FontWeight="SemiBold" Margin="0,7,0,0" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="2"
+                                   Text="{Binding DisplayText}"
+                                   Foreground="{StaticResource TextBrush}"
+                                   FontSize="11"
+                                   Margin="0,5,0,0"
+                                   TextWrapping="Wrap"
+                                   TextTrimming="CharacterEllipsis"
+                                   MaxHeight="32">
+                            <ToolTipService.ToolTip>
+                                <ToolTip>
+                                    <TextBlock Text="{Binding BodyTooltip}"
+                                               TextWrapping="Wrap"
+                                               MaxWidth="420"
+                                               MaxHeight="260" />
+                                </ToolTip>
+                            </ToolTipService.ToolTip>
+                        </TextBlock>
+                        <Grid Grid.Row="3" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <TextBlock Text="{Binding Summary}" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding MetadataText}"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="9"
+                                       TextWrapping="Wrap"
+                                       TextTrimming="CharacterEllipsis"
+                                       MaxHeight="28" />
                             <Border Grid.Column="1" Background="#172738" CornerRadius="5" Padding="5,2" VerticalAlignment="Bottom" Margin="7,0,0,0">
                                 <TextBlock Text="{Binding StateLabel}" Foreground="{StaticResource MutedTextBrush}" FontSize="8" FontWeight="SemiBold" />
                             </Border>
@@ -368,12 +390,32 @@
                 </Border>
             </Grid>
             <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsConnectorToChatGpt}" Value="True">
+                    <Setter TargetName="DirectionNode" Property="Fill" Value="{StaticResource AccentBrush}" />
+                    <Setter TargetName="DirectionLabel" Property="Foreground" Value="{StaticResource AccentBrush}" />
+                    <Setter TargetName="MessageChrome" Property="BorderBrush" Value="#245477" />
+                    <Setter TargetName="MessageChrome" Property="Background" Value="#0C1726" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsChatGptToComfy}" Value="True">
+                    <Setter TargetName="DirectionNode" Property="Fill" Value="{StaticResource AccentStrongBrush}" />
+                    <Setter TargetName="DirectionLabel" Property="Foreground" Value="{StaticResource AccentStrongBrush}" />
+                    <Setter TargetName="MessageChrome" Property="BorderBrush" Value="#304C78" />
+                    <Setter TargetName="MessageChrome" Property="Background" Value="#0D1728" />
+                </DataTrigger>
                 <DataTrigger Binding="{Binding IsComfyToChatGpt}" Value="True">
                     <Setter TargetName="DirectionNode" Property="Fill" Value="{StaticResource SuccessBrush}" />
                     <Setter TargetName="DirectionLabel" Property="Foreground" Value="{StaticResource SuccessBrush}" />
                     <Setter TargetName="MessageChrome" Property="BorderBrush" Value="#245C57" />
                     <Setter TargetName="MessageChrome" Property="Background" Value="#0D201F" />
                 </DataTrigger>
+                <Trigger SourceName="MessageChrome" Property="IsMouseOver" Value="True">
+                    <Setter TargetName="MessageChrome" Property="Background" Value="#13243A" />
+                    <Setter TargetName="MessageChrome" Property="BorderBrush" Value="{StaticResource LineStrongBrush}" />
+                </Trigger>
+                <Trigger SourceName="MessageChrome" Property="IsKeyboardFocusWithin" Value="True">
+                    <Setter TargetName="MessageChrome" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
+                    <Setter TargetName="MessageChrome" Property="BorderThickness" Value="2" />
+                </Trigger>
             </DataTemplate.Triggers>
         </DataTemplate>
     </Window.Resources>

@@ -770,9 +770,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
             await RecordHandoffAsync(new HandoffMessage
             {
                 Direction = HandoffDirection.ChatGptToComfy,
+                Kind = command.Action == "complete" ? HandoffMessageKind.Complete : HandoffMessageKind.GenerationCommand,
                 State = HandoffTransportState.Received,
-                Title = _pendingValidation.Command?.Action == "complete" ? "制作完了の指示" : "生成Commandを受信",
-                Summary = BuildCommandTimelineSummary(_pendingValidation.Command!),
+                Title = command.Action == "complete" ? "制作完了の指示" : "生成指示",
+                DisplayText = BuildCommandTimelineDisplay(command),
+                Metadata = BuildCommandTimelineMetadata(command),
+                Summary = BuildCommandTimelineSummary(command),
                 Payload = CommandText,
             });
             if (command.Action == "complete") await CompleteSessionAsync(command.Reason ?? "ChatGPT completed the session.");
@@ -819,10 +822,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CreationPipelineStateMachine.BootstrapCopied(CurrentSession, Idea);
         await RecordHandoffAsync(new HandoffMessage
         {
-            Direction = HandoffDirection.ComfyToChatGpt,
+            Direction = HandoffDirection.ConnectorToChatGpt,
+            Kind = HandoffMessageKind.CreationRequest,
             State = HandoffTransportState.Copied,
             Title = "制作コンテキストを送信",
-            Summary = $"制作アイデアとConnector ProtocolをChatGPTへ渡します。{Environment.NewLine}Workflow: {SelectedWorkflowName}{Environment.NewLine}Project: {CurrentSession.ProjectLabel}{Environment.NewLine}Chat: {CurrentSession.ChatLabel}",
+            DisplayText = string.IsNullOrWhiteSpace(Idea) ? "制作アイデア未入力" : Idea,
+            Metadata = $"Workflow: {CurrentSession.BoundWorkflow?.DisplayName ?? SelectedWorkflowName}{Environment.NewLine}{CurrentSession.ProjectLabel} / {CurrentSession.ChatLabel}",
+            Summary = "制作アイデアとConnector ProtocolをChatGPTへ渡します。",
             Payload = payload,
         });
         NotifyPipelineStateChanged();
@@ -837,7 +843,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             await _store.SaveSessionAsync(CurrentSession);
             NotifyPipelineStateChanged();
         }
-        StatusMessage = item.IsComfyToChatGpt ? "ChatGPTへ渡す内容をコピーしました。" : "Connector用Commandをコピーしました。";
+        StatusMessage = item.IsChatGptToComfy ? "Connector用Commandをコピーしました。" : "ChatGPTへ渡す内容をコピーしました。";
     }
 
     public async Task CompleteSessionAsync(string reason)
@@ -963,8 +969,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 await RecordHandoffAsync(new HandoffMessage
                 {
                     Direction = HandoffDirection.ComfyToChatGpt,
+                    Kind = HandoffMessageKind.GenerationResult,
                     State = HandoffTransportState.Waiting,
                     Title = $"Iteration {iteration.Number:00} の生成結果",
+                    DisplayText = BuildResultTimelineDisplay(iteration),
+                    Metadata = BuildResultTimelineMetadata(iteration),
                     Summary = BuildResultTimelineSummary(iteration),
                     Payload = resultPayload,
                     IterationNumber = iteration.Number,
@@ -1131,14 +1140,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
         HandoffItems.Clear();
         if (CurrentSession is null) return false;
         var changed = false;
+        foreach (var message in CurrentSession.HandoffMessages)
+        {
+            if (NormalizeHandoffMessage(message)) changed = true;
+        }
         foreach (var iteration in CurrentSession.Iterations.Where(item => item.Status == JobStatus.Completed && item.Outputs.Count > 0))
         {
             if (CurrentSession.HandoffMessages.Any(item => item.Direction == HandoffDirection.ComfyToChatGpt && item.IterationNumber == iteration.Number)) continue;
             CurrentSession.HandoffMessages.Add(new HandoffMessage
             {
                 Direction = HandoffDirection.ComfyToChatGpt,
+                Kind = HandoffMessageKind.GenerationResult,
                 State = HandoffTransportState.Waiting,
                 Title = $"Iteration {iteration.Number:00} の生成結果",
+                DisplayText = BuildResultTimelineDisplay(iteration),
+                Metadata = BuildResultTimelineMetadata(iteration),
                 Summary = BuildResultTimelineSummary(iteration),
                 Payload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration),
                 IterationNumber = iteration.Number,
@@ -1158,6 +1174,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (existing is not null && existing.Direction == message.Direction && string.Equals(existing.Payload, message.Payload, StringComparison.Ordinal))
         {
             existing.State = message.State;
+            existing.Kind = message.Kind;
+            existing.Title = message.Title;
+            existing.DisplayText = message.DisplayText;
+            existing.Metadata = message.Metadata;
+            existing.Summary = message.Summary;
             RebuildHandoffItems();
         }
         else
@@ -1176,6 +1197,153 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private static string BuildResultTimelineSummary(SessionIteration iteration)
         => $"{iteration.Outputs.Count}件の生成物を受信しました。コピーしてChatGPTへレビューを依頼できます。";
+
+    private string BuildCommandTimelineDisplay(ConnectorCommand command)
+    {
+        if (command.Action == "complete") return string.IsNullOrWhiteSpace(command.Reason) ? "ChatGPTが制作完了を指示しました。" : command.Reason!;
+        foreach (var parameter in command.Parameters)
+        {
+            var slot = Slots.FirstOrDefault(item => string.Equals(item.Address, parameter.Key, StringComparison.OrdinalIgnoreCase));
+            if (!IsPromptLike(parameter.Key, slot?.Label)) continue;
+            var value = FormatParameterValue(parameter.Value);
+            if (!string.IsNullOrWhiteSpace(value)) return value;
+        }
+        return command.Parameters.Count == 0 ? "生成パラメータを受信しました。" : $"{command.Parameters.Count}件の生成パラメータを受信しました。";
+    }
+
+    private string BuildCommandTimelineMetadata(ConnectorCommand command)
+    {
+        var parts = new List<string>();
+        foreach (var parameter in command.Parameters)
+        {
+            var slot = Slots.FirstOrDefault(item => string.Equals(item.Address, parameter.Key, StringComparison.OrdinalIgnoreCase));
+            var label = slot?.Label ?? parameter.Key;
+            if (!IsMetadataLike(parameter.Key, label)) continue;
+            var value = FormatParameterValue(parameter.Value);
+            if (string.IsNullOrWhiteSpace(value)) continue;
+            parts.Add(FormatMetadataPart(label, value));
+            if (parts.Count == 4) break;
+        }
+        if (!string.IsNullOrWhiteSpace(command.Workflow)) parts.Add($"Workflow: {command.Workflow}");
+        return string.Join(" · ", parts);
+    }
+
+    private string BuildResultTimelineDisplay(SessionIteration iteration)
+    {
+        var prompt = string.IsNullOrWhiteSpace(iteration.Prompt) ? "生成結果をChatGPTへレビュー用に送信します。" : $"Iteration #{iteration.Number}を生成しました。{iteration.Prompt}";
+        return prompt;
+    }
+
+    private string BuildResultTimelineMetadata(SessionIteration iteration)
+    {
+        var parts = new List<string> { $"Iteration #{iteration.Number}" };
+        var outputs = iteration.Outputs.Select(output => output.FileName).Where(name => !string.IsNullOrWhiteSpace(name)).Take(2).ToArray();
+        if (outputs.Length > 0) parts.Add(string.Join(" / ", outputs));
+        foreach (var parameter in iteration.Parameters)
+        {
+            if (!IsMetadataLike(parameter.Key, parameter.Key)) continue;
+            parts.Add(FormatMetadataPart(parameter.Key, FormatParameterValue(parameter.Value)));
+            if (parts.Count >= 5) break;
+        }
+        parts.Add($"Workflow: {CurrentSession?.BoundWorkflow?.DisplayName ?? SelectedWorkflowName}");
+        return string.Join(" · ", parts);
+    }
+
+    private bool NormalizeHandoffMessage(HandoffMessage message)
+    {
+        var changed = false;
+        if (message.Direction == HandoffDirection.ComfyToChatGpt && message.IterationNumber is null && message.Title == "制作コンテキストを送信")
+        {
+            message.Direction = HandoffDirection.ConnectorToChatGpt;
+            message.Kind = HandoffMessageKind.CreationRequest;
+            if (string.IsNullOrWhiteSpace(message.DisplayText)) message.DisplayText = string.IsNullOrWhiteSpace(CurrentSession?.OriginalIdea) ? "制作アイデア未入力" : CurrentSession.OriginalIdea;
+            if (CurrentSession is not null) message.Metadata = $"Workflow: {CurrentSession.BoundWorkflow?.DisplayName ?? SelectedWorkflowName}{Environment.NewLine}{CurrentSession.ProjectLabel} / {CurrentSession.ChatLabel}";
+            changed = true;
+        }
+        if (message.Kind == HandoffMessageKind.Unknown)
+        {
+            var inferredKind = message.Direction switch
+            {
+                HandoffDirection.ChatGptToComfy when message.Title.Contains("完了", StringComparison.Ordinal) => HandoffMessageKind.Complete,
+                HandoffDirection.ChatGptToComfy => HandoffMessageKind.GenerationCommand,
+                HandoffDirection.ComfyToChatGpt when message.IterationNumber is not null => HandoffMessageKind.GenerationResult,
+                HandoffDirection.ConnectorToChatGpt => HandoffMessageKind.CreationRequest,
+                _ => HandoffMessageKind.Unknown,
+            };
+            if (message.Kind != inferredKind)
+            {
+                message.Kind = inferredKind;
+                changed = true;
+            }
+        }
+        if (message.Kind == HandoffMessageKind.CreationRequest && CurrentSession is not null)
+        {
+            var metadata = $"Workflow: {CurrentSession.BoundWorkflow?.DisplayName ?? SelectedWorkflowName}{Environment.NewLine}{CurrentSession.ProjectLabel} / {CurrentSession.ChatLabel}";
+            if (!string.Equals(message.Metadata, metadata, StringComparison.Ordinal))
+            {
+                message.Metadata = metadata;
+                changed = true;
+            }
+        }
+        if (message.Direction == HandoffDirection.ChatGptToComfy && string.IsNullOrWhiteSpace(message.DisplayText) && !string.IsNullOrWhiteSpace(message.Payload))
+        {
+            var parsed = ConnectorProtocol.Parse(message.Payload);
+            if (parsed.IsValid && parsed.Command is not null)
+            {
+                message.DisplayText = BuildCommandTimelineDisplay(parsed.Command);
+                message.Metadata = BuildCommandTimelineMetadata(parsed.Command);
+                changed = true;
+            }
+        }
+        if (string.IsNullOrWhiteSpace(message.DisplayText) && !string.IsNullOrWhiteSpace(message.Summary))
+        {
+            message.DisplayText = message.Summary;
+            changed = true;
+        }
+        return changed;
+    }
+
+    private static bool IsPromptLike(string address, string? label)
+    {
+        var text = $"{address} {label}";
+        return text.Contains("prompt", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("positive", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("text", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("idea", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("description", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsMetadataLike(string address, string? label)
+    {
+        var text = $"{address} {label}";
+        return text.Contains("duration", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("length", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("seconds", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("frames", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("fps", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("aspect", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("ratio", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("resolution", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("megapixel", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("seed", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("width", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("height", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FormatParameterValue(JsonNode? value)
+    {
+        if (value is JsonValue jsonValue && jsonValue.TryGetValue<string>(out var text)) return text;
+        return value?.ToJsonString() ?? string.Empty;
+    }
+
+    private static string FormatMetadataPart(string label, string value)
+    {
+        var normalizedLabel = label.Replace('_', ' ').Trim();
+        if (normalizedLabel.Contains("duration", StringComparison.OrdinalIgnoreCase) || normalizedLabel.Contains("length", StringComparison.OrdinalIgnoreCase) || normalizedLabel.Contains("seconds", StringComparison.OrdinalIgnoreCase)) return $"{value} sec";
+        if (normalizedLabel.Contains("megapixel", StringComparison.OrdinalIgnoreCase)) return $"{value} MP";
+        if (normalizedLabel.Contains("seed", StringComparison.OrdinalIgnoreCase)) return $"Seed {value}";
+        return $"{normalizedLabel}: {value}";
+    }
 
     private static string NormalizeContextName(string? name, string label)
     {

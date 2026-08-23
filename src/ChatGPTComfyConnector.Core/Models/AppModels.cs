@@ -244,7 +244,7 @@ public sealed class SessionIteration
 public sealed class CreationSession
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
-    public string Title { get; set; } = "Untitled creation";
+    public string Title { get; set; } = "新しい制作";
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public string OriginalIdea { get; set; } = string.Empty;

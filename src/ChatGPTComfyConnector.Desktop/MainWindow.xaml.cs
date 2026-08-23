@@ -41,6 +41,10 @@ public partial class MainWindow : Window
     private void StartComfy_Click(object sender, RoutedEventArgs e) => RunSync("ComfyUI起動", ViewModel.StartComfyUi);
     private void Refresh_Click(object sender, RoutedEventArgs e) => ViewModel.RefreshWorkflowTree();
     private void OpenWorkflowFolder_Click(object sender, RoutedEventArgs e) => OpenFolder(ViewModel.WorkflowRoot);
+    private async void RetryWorkflow_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.SelectedWorkflow is not null) await Run("Workflow再読み込み", () => ViewModel.SelectWorkflowAsync(ViewModel.SelectedWorkflow.RelativePath));
+    }
 
     private async void WorkflowTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
     {

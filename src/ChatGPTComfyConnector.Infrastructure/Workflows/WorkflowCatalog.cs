@@ -131,7 +131,9 @@ public sealed class WorkflowCatalog
     {
         var node = new WorkflowTreeNode { Name = Path.GetFileName(folder), IsFolder = true, RelativePath = string.Empty };
         foreach (var directory in Directory.EnumerateDirectories(folder).OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)) node.Children.Add(BuildFolder(directory, root));
-        foreach (var file in Directory.EnumerateFiles(folder, "*.json").OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
+        foreach (var file in Directory.EnumerateFiles(folder, "*.json")
+                     .Where(file => !string.Equals(Path.GetFileNameWithoutExtension(file), ".index", StringComparison.OrdinalIgnoreCase))
+                     .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
         {
             node.Children.Add(new WorkflowTreeNode
             {

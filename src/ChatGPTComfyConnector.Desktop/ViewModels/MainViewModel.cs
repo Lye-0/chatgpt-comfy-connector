@@ -24,9 +24,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private ConnectionState _connectionState = ConnectionState.Disconnected;
     private bool _isSetupVisible;
     private bool _isBusy;
+    private bool _isSlotLoading;
     private bool _isDirty;
     private string _commandText = string.Empty;
     private string _idea = string.Empty;
+    private string? _slotLoadError;
     private ProtocolValidationResult? _pendingValidation;
     private string? _loadedFingerprint;
 
@@ -45,6 +47,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Sessions = [];
         TreeNodes = [];
         Slots = [];
+        PrimarySlots = [];
+        TuningSlots = [];
+        AdvancedSlots = [];
         Iterations = [];
         Backups = [];
         LatestOutputs = [];
@@ -54,28 +59,53 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<CreationSession> Sessions { get; }
     public ObservableCollection<WorkflowTreeNode> TreeNodes { get; }
     public ObservableCollection<SlotEditorItem> Slots { get; }
+    public ObservableCollection<SlotEditorItem> PrimarySlots { get; }
+    public ObservableCollection<SlotEditorItem> TuningSlots { get; }
+    public ObservableCollection<SlotEditorItem> AdvancedSlots { get; }
     public ObservableCollection<SessionIteration> Iterations { get; }
     public ObservableCollection<string> Backups { get; }
     public ObservableCollection<OutputArtifact> LatestOutputs { get; }
-    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); } }
-    public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); } }
-    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(IsJobActive)); } }
-    public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); } }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); } }
+    public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
+    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); } }
+    public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyViewStateChanged(); } }
     public string StatusMessage { get => _statusMessage; set { _statusMessage = value; OnPropertyChanged(); } }
     public bool IsSetupVisible { get => _isSetupVisible; private set { _isSetupVisible = value; OnPropertyChanged(); } }
     public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); } }
+    public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); } }
     public string CommandText { get => _commandText; set { _commandText = value; OnPropertyChanged(); } }
     public string Idea { get => _idea; set { _idea = value; OnPropertyChanged(); } }
+    public string? SlotLoadError { get => _slotLoadError; private set { _slotLoadError = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasSlotLoadError)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public string ProjectLabel { get => CurrentSession?.ProjectLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ProjectLabel = value; OnPropertyChanged(); } }
     public string ChatLabel { get => CurrentSession?.ChatLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ChatLabel = value; OnPropertyChanged(); } }
     public string SessionTitle { get => CurrentSession?.Title ?? "セッションなし"; set { if (CurrentSession is null) return; CurrentSession.Title = value; OnPropertyChanged(); } }
     public string SelectedWorkflowText => SelectedWorkflow?.RelativePath ?? "Workflow未選択";
+    public string SelectedWorkflowName => SelectedWorkflow is null ? "Workflow未選択" : Path.GetFileNameWithoutExtension(SelectedWorkflow.RelativePath);
     public string ConnectionStateText => ConnectionState switch { ConnectionState.Connected => "CONNECTED", ConnectionState.Connecting => "CONNECTING", ConnectionState.Error => "ERROR", _ => "DISCONNECTED" };
     public string SessionStatusText => CurrentSession?.Status.ToString().ToUpperInvariant() ?? "NEW";
     public string JobStatusText => CurrentJob is null ? "IDLE" : CurrentJob.Status.ToString().ToUpperInvariant();
+    public string JobStatusDetailText => CurrentJob is null ? "生成待機中" : IsJobActive ? "ComfyUIで生成を実行中" : CurrentJob.Status switch { JobStatus.Completed => "生成が完了しました", JobStatus.Failed => "生成に失敗しました", JobStatus.Cancelled => "生成をキャンセルしました", _ => "Jobを確認してください" };
     public string DirtyText => IsDirty ? "UNSAVED CHANGES" : "SAVED";
+    public string SessionProgressText => CurrentSession is null ? "0 / 10 ITERATIONS" : $"{CurrentSession.CurrentIteration} / {CurrentSession.MaximumIterations} ITERATIONS";
+    public string WorkflowSlotSummaryText => !HasSelectedWorkflow ? "左のライブラリからWorkflowを選択" : !IsConnected ? "MCP未接続 · CONNECTでslotを読み込み" : IsSlotLoading ? "slotを読み込み中…" : HasSlotLoadError ? "slotの読み込みに失敗" : $"主要 {PrimarySlots.Count} · 調整 {TuningSlots.Count} · 詳細 {AdvancedSlots.Count}";
     public bool IsConnected => ConnectionState == ConnectionState.Connected;
+    public bool HasSelectedWorkflow => SelectedWorkflow is not null;
+    public bool HasTreeNodes => TreeNodes.Count > 0;
+    public bool HasSlotLoadError => !string.IsNullOrWhiteSpace(SlotLoadError);
+    public bool HasSlots => Slots.Count > 0;
+    public bool HasPrimarySlots => PrimarySlots.Count > 0;
+    public bool HasTuningSlots => TuningSlots.Count > 0;
+    public bool HasAdvancedSlots => AdvancedSlots.Count > 0;
+    public bool HasIterations => Iterations.Count > 0;
+    public bool HasLatestOutputs => LatestOutputs.Count > 0;
+    public bool ShowWorkflowEmptyState => !HasSelectedWorkflow;
+    public bool ShowDisconnectedState => HasSelectedWorkflow && !IsConnected;
+    public bool ShowSlotLoadingState => HasSelectedWorkflow && IsConnected && IsSlotLoading;
+    public bool ShowSlotErrorState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && HasSlotLoadError;
+    public bool ShowNoSlotState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && !HasSlots;
+    public bool ShowReadyState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && HasSlots;
+    public bool CanRunWorkflow => HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError;
     public bool IsJobActive => CurrentJob is { Status: JobStatus.Queued or JobStatus.Running };
     public string WorkflowRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "user", "default", "workflows");
     public string OutputRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "output");
@@ -102,6 +132,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         foreach (var output in CurrentSession.Iterations.LastOrDefault()?.Outputs ?? []) LatestOutputs.Add(output);
         RefreshWorkflowTree();
         StatusMessage = IsSetupVisible ? "接続先を確認して保存してください。" : "準備完了。ComfyUIの状態を確認できます。";
+        OnPropertyChanged(nameof(HasIterations));
+        OnPropertyChanged(nameof(HasLatestOutputs));
     }
 
     public async Task SaveSetupAsync()
@@ -148,6 +180,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         TreeNodes.Clear();
         foreach (var node in _catalog.BuildTree(WorkflowRoot)) TreeNodes.Add(node);
+        OnPropertyChanged(nameof(HasTreeNodes));
         StatusMessage = Directory.Exists(WorkflowRoot) ? $"Workflowを{TreeNodes.Count}件読み込みました。" : "Workflowフォルダが見つかりません。Setupのパスを確認してください。";
     }
 
@@ -156,7 +189,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var identity = WorkflowIdentity.Create(relativePath);
         SelectedWorkflow = identity;
         Slots.Clear();
+        PrimarySlots.Clear();
+        TuningSlots.Clear();
+        AdvancedSlots.Clear();
         Backups.Clear();
+        SlotLoadError = null;
+        NotifySlotCollectionsChanged();
         var path = identity.ToAbsolute(WorkflowRoot);
         _loadedFingerprint = File.Exists(path) ? WorkflowCatalog.ComputeFingerprint(path) : null;
         if (!IsConnected)
@@ -166,6 +204,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         IsBusy = true;
+        IsSlotLoading = true;
         try
         {
             foreach (var slot in await _catalog.DiscoverSlotsAsync(identity, WorkflowRoot))
@@ -173,13 +212,25 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 var item = new SlotEditorItem(slot);
                 item.PropertyChanged += SlotChanged;
                 Slots.Add(item);
+                switch (item.Priority)
+                {
+                    case SlotPriority.Primary: PrimarySlots.Add(item); break;
+                    case SlotPriority.Tuning: TuningSlots.Add(item); break;
+                    default: AdvancedSlots.Add(item); break;
+                }
             }
             foreach (var backup in await _store.ListWorkflowBackupsAsync(identity)) Backups.Add(backup);
             IsDirty = false;
+            NotifySlotCollectionsChanged();
             StatusMessage = $"{Slots.Count}個のslotを読み込みました。";
         }
-        catch (Exception ex) { StatusMessage = $"slot取得に失敗しました: {ex.Message}"; await _store.LogAsync("workflow", StatusMessage, ex); }
-        finally { IsBusy = false; }
+        catch (Exception ex)
+        {
+            SlotLoadError = ex.Message;
+            StatusMessage = $"slot取得に失敗しました: {ex.Message}";
+            await _store.LogAsync("workflow", StatusMessage, ex);
+        }
+        finally { IsSlotLoading = false; IsBusy = false; NotifySlotCollectionsChanged(); }
     }
 
     public void DiscardChanges()
@@ -258,6 +309,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Idea = string.Empty;
         Iterations.Clear();
         LatestOutputs.Clear();
+        OnPropertyChanged(nameof(HasIterations));
+        OnPropertyChanged(nameof(HasLatestOutputs));
+        OnPropertyChanged(nameof(SessionProgressText));
         StatusMessage = "新しい制作セッションを作成しました。";
     }
 
@@ -285,7 +339,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var prompt = FindPrompt(changes) ?? Idea;
         var iteration = CurrentSession.StartIteration(prompt, changes);
         await _store.SaveSessionAsync(CurrentSession);
+        OnPropertyChanged(nameof(SessionProgressText));
         Iterations.Add(iteration);
+        OnPropertyChanged(nameof(HasIterations));
         IsBusy = true;
         try
         {
@@ -346,6 +402,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (CurrentSession is null) return;
         CurrentSession.Resume();
         await _store.SaveSessionAsync(CurrentSession);
+        OnPropertyChanged(nameof(SessionStatusText));
         StatusMessage = "セッションを再開しました。";
     }
 
@@ -359,6 +416,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
         StatusMessage = "Connectorが投入したJobへCANCELを要求しました。";
         OnPropertyChanged(nameof(JobStatusText));
+        OnPropertyChanged(nameof(JobStatusDetailText));
     }
 
     public async Task RestoreBackupAsync(string backupPath)
@@ -391,6 +449,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 CurrentJob.Outputs = iteration.Outputs;
                 LatestOutputs.Clear();
                 foreach (var output in iteration.Outputs) LatestOutputs.Add(output);
+                OnPropertyChanged(nameof(HasLatestOutputs));
                 CurrentJob.CompletedAt = DateTimeOffset.UtcNow;
                 StatusMessage = $"Iteration {iteration.Number} が完了しました。出力 {iteration.Outputs.Count} 件。";
                 await _store.SaveSessionAsync(CurrentSession!);
@@ -425,6 +484,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     private void SlotChanged(object? sender, PropertyChangedEventArgs e) { if (e.PropertyName == nameof(SlotEditorItem.ValueText)) IsDirty = true; }
+
+    private void NotifySlotCollectionsChanged()
+    {
+        OnPropertyChanged(nameof(HasSlots));
+        OnPropertyChanged(nameof(HasPrimarySlots));
+        OnPropertyChanged(nameof(HasTuningSlots));
+        OnPropertyChanged(nameof(HasAdvancedSlots));
+        OnPropertyChanged(nameof(WorkflowSlotSummaryText));
+        NotifyViewStateChanged();
+    }
+
+    private void NotifyViewStateChanged()
+    {
+        OnPropertyChanged(nameof(ShowWorkflowEmptyState));
+        OnPropertyChanged(nameof(ShowDisconnectedState));
+        OnPropertyChanged(nameof(ShowSlotLoadingState));
+        OnPropertyChanged(nameof(ShowSlotErrorState));
+        OnPropertyChanged(nameof(ShowNoSlotState));
+        OnPropertyChanged(nameof(ShowReadyState));
+        OnPropertyChanged(nameof(CanRunWorkflow));
+    }
 
     public void OpenOutputFile(string path)
     {

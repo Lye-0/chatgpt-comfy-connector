@@ -18,6 +18,7 @@ public sealed class SlotEditorItem : INotifyPropertyChanged
         Choices = slot.Choices?.Select(x => x?.ToString() ?? string.Empty).ToArray() ?? [];
         _valueText = Format(slot.CurrentValue);
         PairingSuspect = slot.PairingSuspect;
+        Priority = Classify(slot);
     }
 
     public string Address { get; }
@@ -26,6 +27,17 @@ public sealed class SlotEditorItem : INotifyPropertyChanged
     public WorkflowSlotType Kind { get; }
     public IReadOnlyList<string> Choices { get; }
     public bool PairingSuspect { get; }
+    public SlotPriority Priority { get; }
+    public bool IsPrimary => Priority == SlotPriority.Primary;
+    public bool IsTuning => Priority == SlotPriority.Tuning;
+    public bool IsAdvanced => Priority == SlotPriority.Advanced;
+    public bool HasChoices => Choices.Count > 0;
+    public string PriorityLabel => Priority switch
+    {
+        SlotPriority.Primary => "主要設定",
+        SlotPriority.Tuning => "調整",
+        _ => "詳細設定",
+    };
     public string ValueText
     {
         get => _valueText;
@@ -55,6 +67,34 @@ public sealed class SlotEditorItem : INotifyPropertyChanged
         return value?.ToJsonString() ?? string.Empty;
     }
 
+    private static SlotPriority Classify(WorkflowSlot slot)
+    {
+        var text = $"{slot.Address} {slot.Label}".ToLowerInvariant();
+        if (PrimaryTokens.Any(text.Contains) || (slot.Kind == WorkflowSlotType.File && FileInputTokens.Any(text.Contains))) return SlotPriority.Primary;
+        if (TuningTokens.Any(text.Contains)) return SlotPriority.Tuning;
+        return SlotPriority.Advanced;
+    }
+
+    private static readonly string[] PrimaryTokens =
+    [
+        "prompt", "positive", "negative", "text", "idea", "description",
+        "duration", "length", "seconds", "frames", "fps", "aspect", "ratio",
+        "resolution", "megapixel", "seed", "width", "height", "size",
+    ];
+
+    private static readonly string[] FileInputTokens =
+    ["image", "input", "reference", "first", "last", "init", "source", "start", "end"];
+
+    private static readonly string[] TuningTokens =
+    ["steps", "step", "denoise", "cfg", "guidance", "batch", "count", "samples", "noise"];
+
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) => PropertyChanged?.Invoke(this, new(propertyName));
+}
+
+public enum SlotPriority
+{
+    Primary,
+    Tuning,
+    Advanced,
 }

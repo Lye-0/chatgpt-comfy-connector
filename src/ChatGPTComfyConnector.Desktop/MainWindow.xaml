@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
 <Window x:Class="ChatGPTComfyConnector.Desktop.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -5,90 +6,546 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         Title="ChatGPT Comfy Connector"
-        Width="1560" Height="980" MinWidth="1120" MinHeight="720"
+        Width="1560"
+        Height="980"
+        MinWidth="1120"
+        MinHeight="720"
+        Language="ja-JP"
+        FontFamily="{StaticResource UiFont}"
         Background="{StaticResource CanvasBrush}"
         Foreground="{StaticResource TextBrush}"
         Loaded="Window_Loaded"
         Closing="Window_Closing">
     <Grid Margin="18">
-        <Grid.RowDefinitions><RowDefinition Height="76" /><RowDefinition Height="*" /><RowDefinition Height="28" /></Grid.RowDefinitions>
-        <Border Grid.Row="0" Background="{StaticResource PanelBrush}" CornerRadius="14" Padding="18" BorderBrush="{StaticResource LineBrush}" BorderThickness="1">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="76" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="32" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0"
+                Background="{StaticResource PanelBrush}"
+                CornerRadius="14"
+                Padding="18"
+                BorderBrush="{StaticResource LineBrush}"
+                BorderThickness="1">
             <Grid>
-                <Grid.ColumnDefinitions><ColumnDefinition Width="300" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0"><TextBlock Text="COMFY / CHATGPT" FontSize="11" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" /><TextBlock Text="Connector" FontSize="25" FontWeight="SemiBold" /></StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Border Background="#1A293D" CornerRadius="8" Padding="10,6" Margin="0,0,8,0"><StackPanel Orientation="Horizontal"><Ellipse Width="8" Height="8" Fill="{StaticResource AccentBrush}" Margin="0,0,7,0" /><TextBlock Text="{Binding ConnectionStateText}" FontSize="11" /></StackPanel></Border>
-                    <TextBlock Text="→ MCP → ComfyUI" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" /><TextBlock Text="   |   " Foreground="{StaticResource LineBrush}" VerticalAlignment="Center" /><TextBlock Text="{Binding SelectedWorkflowText}" Foreground="{StaticResource WarmBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="380" />
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="300" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <TextBlock Text="COMFY / CHATGPT"
+                               FontSize="11"
+                               Foreground="{StaticResource AccentBrush}"
+                               FontWeight="SemiBold" />
+                    <TextBlock Text="Connector"
+                               FontSize="25"
+                               FontWeight="SemiBold" />
                 </StackPanel>
-                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"><Button Content="SETUP" Click="Setup_Click" /><Button Content="CONNECT" Click="Connect_Click" /><Button Content="START COMFYUI" Click="StartComfy_Click" /></StackPanel>
+                <StackPanel Grid.Column="1"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Center">
+                    <Border Background="#1A293D"
+                            CornerRadius="8"
+                            Padding="10,6"
+                            Margin="0,0,8,0">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Width="8"
+                                     Height="8"
+                                     Fill="{StaticResource AccentBrush}"
+                                     Margin="0,0,7,0" />
+                            <TextBlock Text="{Binding ConnectionStateText}"
+                                       FontSize="11" />
+                        </StackPanel>
+                    </Border>
+                    <TextBlock Text="MCP → ComfyUI"
+                               Foreground="{StaticResource MutedTextBrush}"
+                               VerticalAlignment="Center" />
+                    <TextBlock Text="  /  "
+                               Foreground="{StaticResource LineBrush}"
+                               VerticalAlignment="Center" />
+                    <TextBlock Text="選択中"
+                               Foreground="{StaticResource MutedTextBrush}"
+                               VerticalAlignment="Center" />
+                    <TextBlock Text="{Binding SelectedWorkflowText}"
+                               Foreground="{StaticResource WarmBrush}"
+                               VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis"
+                               MaxWidth="380"
+                               Margin="8,0,0,0" />
+                </StackPanel>
+                <StackPanel Grid.Column="2"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Center">
+                    <Button Content="SETUP"
+                            ToolTip="接続先とPortableパスを設定"
+                            Click="Setup_Click" />
+                    <Button Content="CONNECT"
+                            ToolTip="comfy-mcpへ接続"
+                            Click="Connect_Click" />
+                    <Button Content="START COMFYUI"
+                            ToolTip="ComfyUIを起動（Connectorは終了させません）"
+                            Click="StartComfy_Click" />
+                </StackPanel>
             </Grid>
         </Border>
 
-        <Grid Grid.Row="1" Margin="0,14,0,8">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="250" /><ColumnDefinition Width="*" /><ColumnDefinition Width="360" /></Grid.ColumnDefinitions>
-            <Border Grid.Column="0" Background="{StaticResource PanelBrush}" CornerRadius="14" Padding="14" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" Margin="0,0,10,0">
-                <DockPanel>
-                    <StackPanel DockPanel.Dock="Top"><TextBlock Text="WORKFLOW LIBRARY" FontSize="11" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" /><TextBlock Text="Your local graph library" FontSize="16" Margin="0,4,0,12" /><StackPanel Orientation="Horizontal" Margin="0,0,0,12"><Button Content="REFRESH" Click="Refresh_Click" /><Button Content="OPEN" Click="OpenWorkflowFolder_Click" /></StackPanel></StackPanel>
-                    <TreeView ItemsSource="{Binding TreeNodes}" SelectedItemChanged="WorkflowTree_SelectedItemChanged"><TreeView.ItemTemplate><HierarchicalDataTemplate ItemsSource="{Binding Children}"><TextBlock Text="{Binding Name}" Margin="2,4" /></HierarchicalDataTemplate></TreeView.ItemTemplate></TreeView>
-                    <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0"><Label Content="CLONE / RENAME" /><TextBox x:Name="WorkflowNameBox" ToolTip="新しいWorkflow名（拡張子不要）" Margin="0,4,0,6" /><StackPanel Orientation="Horizontal"><Button Content="DUPLICATE" Click="Duplicate_Click" /><Button Content="RENAME" Click="Rename_Click" /></StackPanel></StackPanel>
-                </DockPanel>
-            </Border>
+        <Grid Grid.Row="1"
+              Margin="0,14,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="292" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="390" />
+            </Grid.ColumnDefinitions>
 
-            <Border Grid.Column="1" Background="{StaticResource PanelBrush}" CornerRadius="14" Padding="18" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" Margin="0,0,10,0">
+            <Border Grid.Column="0"
+                    Background="{StaticResource PanelBrush}"
+                    CornerRadius="14"
+                    Padding="14"
+                    BorderBrush="{StaticResource LineBrush}"
+                    BorderThickness="1"
+                    Margin="0,0,10,0">
                 <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                    <Grid Grid.Row="0" Margin="0,0,0,12"><StackPanel><TextBlock Text="WORKFLOW CONTROL" FontSize="11" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" /><TextBlock Text="{Binding SelectedWorkflowText}" FontSize="22" FontWeight="SemiBold" Margin="0,4,0,3" /><TextBlock Text="{Binding DirtyText}" Foreground="{StaticResource WarmBrush}" FontSize="11" /></StackPanel><StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom"><Button Content="SAVE + VALIDATE" Click="Save_Click" /><Button Content="VALIDATE" Click="Validate_Click" /><Button Content="GENERATE" Background="{StaticResource WarmBrush}" Foreground="#21151A" Click="Generate_Click" /></StackPanel></Grid>
-                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"><ItemsControl ItemsSource="{Binding Slots}"><ItemsControl.ItemTemplate><DataTemplate><Border Background="#0F172B" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,8"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="190" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><StackPanel Grid.Column="0"><TextBlock Text="{Binding Label}" FontWeight="SemiBold" /><TextBlock Text="{Binding Address}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,3,0,0" /></StackPanel><TextBox Grid.Column="1" Text="{Binding ValueText, UpdateSourceTrigger=PropertyChanged}" Margin="12,0" VerticalContentAlignment="Center" /><StackPanel Grid.Column="2" Width="70"><TextBlock Text="{Binding Type}" Foreground="{StaticResource AccentBrush}" FontSize="10" HorizontalAlignment="Right" /><TextBlock Text="SUSPECT" Foreground="{StaticResource DangerBrush}" FontSize="10" HorizontalAlignment="Right" Visibility="{Binding PairingSuspect, Converter={StaticResource BoolToVisibility}}" /></StackPanel></Grid></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer>
-                    <Border Grid.Row="2" Background="#0F172B" CornerRadius="10" Padding="12" Margin="0,12,0,0"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><StackPanel><TextBlock Text="BACKUPS / RESTORE" FontSize="11" Foreground="{StaticResource AccentBrush}" /><TextBlock Text="Workflowごと直近3世代。復元前に現在状態を保存します。" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,3,0,0" /></StackPanel><StackPanel Grid.Column="1" Orientation="Horizontal"><ComboBox x:Name="BackupCombo" ItemsSource="{Binding Backups}" Width="180" Margin="0,0,6,0" /><Button Content="RESTORE" Click="Restore_Click" /></StackPanel></Grid></Border>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0"
+                                Margin="0,0,0,12">
+                        <TextBlock Text="WORKFLOW LIBRARY"
+                                   FontSize="11"
+                                   Foreground="{StaticResource AccentBrush}"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="ローカルWorkflowを選択"
+                                   FontSize="17"
+                                   Margin="0,4,0,10" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Button Content="REFRESH"
+                                    ToolTip="Workflow一覧を再読み込み"
+                                    Click="Refresh_Click" />
+                            <Button Grid.Column="1"
+                                    Content="フォルダを開く"
+                                    ToolTip="Workflowフォルダをエクスプローラーで開く"
+                                    Click="OpenWorkflowFolder_Click"
+                                    Margin="6,0,0,0" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Border Grid.Row="1"
+                            Background="#0F172B"
+                            CornerRadius="10"
+                            Padding="8"
+                            BorderBrush="{StaticResource LineBrush}"
+                            BorderThickness="1">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <TreeView ItemsSource="{Binding TreeNodes}"
+                                      SelectedItemChanged="WorkflowTree_SelectedItemChanged">
+                                <TreeView.ItemTemplate>
+                                    <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                        <TextBlock Text="{Binding Name}"
+                                                   Margin="2,5"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </HierarchicalDataTemplate>
+                                </TreeView.ItemTemplate>
+                            </TreeView>
+                        </ScrollViewer>
+                    </Border>
+
+                    <Border Grid.Row="2"
+                            Background="#0F172B"
+                            CornerRadius="10"
+                            Padding="12"
+                            Margin="0,12,0,0"
+                            BorderBrush="{StaticResource LineBrush}"
+                            BorderThickness="1">
+                        <StackPanel>
+                            <TextBlock Text="選択中のWorkflow"
+                                       FontSize="11"
+                                       Foreground="{StaticResource AccentBrush}"
+                                       FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding SelectedWorkflowText}"
+                                       Foreground="{StaticResource WarmBrush}"
+                                       TextWrapping="Wrap"
+                                       TextTrimming="CharacterEllipsis"
+                                       MaxHeight="38"
+                                       Margin="0,4,0,10" />
+                            <TextBlock Text="Workflow操作"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="11" />
+                            <TextBox x:Name="WorkflowNameBox"
+                                     ToolTip="拡張子を除いた新しいWorkflow名"
+                                     Margin="0,4,0,8" />
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Button Content="複製"
+                                        ToolTip="選択中Workflowを複製"
+                                        Click="Duplicate_Click" />
+                                <Button Grid.Column="1"
+                                        Content="名前変更"
+                                        ToolTip="選択中Workflowの名前を変更"
+                                        Click="Rename_Click"
+                                        Margin="6,0,0,0" />
+                            </Grid>
+                        </StackPanel>
+                    </Border>
                 </Grid>
             </Border>
 
-            <Border Grid.Column="2" Background="{StaticResource PanelBrush}" CornerRadius="14" Padding="14" BorderBrush="{StaticResource LineBrush}" BorderThickness="1">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel>
-                        <TextBlock Text="CREATION SESSION" FontSize="11" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
-                        <TextBox Text="{Binding SessionTitle, UpdateSourceTrigger=PropertyChanged}" FontSize="18" FontWeight="SemiBold" Margin="0,5,0,8" />
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10"><Button Content="NEW SESSION" Click="NewSession_Click" /><Button Content="RESUME" Click="Resume_Click" /></StackPanel>
-                        <Label Content="PROJECT / CHAT · LOCAL LABEL" />
-                        <TextBox Text="{Binding ProjectLabel, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,5" />
-                        <TextBox Text="{Binding ChatLabel, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,10" />
-                        <Label Content="YOUR IDEA" />
-                        <TextBox Text="{Binding Idea, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="110" Margin="0,4,0,7" />
-                        <Button Content="COPY BOOTSTRAP → CHATGPT" Click="CopyBootstrap_Click" Background="{StaticResource AccentBrush}" Foreground="#091217" />
-                        <TextBlock Text="Manual Handoff · mediaはChatGPTへ手動添付" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,7,0,14" />
-                        <Label Content="CHATGPT COMMAND" />
-                        <TextBox x:Name="CommandBox" Text="{Binding CommandText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="125" Margin="0,4,0,7" FontFamily="Cascadia Mono" FontSize="11" />
-                        <StackPanel Orientation="Horizontal"><Button Content="IMPORT / VALIDATE" Click="ImportCommand_Click" /><Button Content="APPLY" Click="ApplyCommand_Click" /><Button Content="APPLY + GENERATE" Click="ApplyGenerateCommand_Click" /></StackPanel>
-                        <Button Content="COPY RESULT → CHATGPT" Click="CopyResult_Click" Margin="0,8,0,14" />
-                        <Border Background="#0F172B" CornerRadius="10" Padding="12">
+            <Border Grid.Column="1"
+                    Background="{StaticResource PanelBrush}"
+                    CornerRadius="14"
+                    Padding="18"
+                    BorderBrush="{StaticResource LineBrush}"
+                    BorderThickness="1"
+                    Margin="0,0,10,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0"
+                          Margin="0,0,0,12">
+                        <StackPanel>
+                            <TextBlock Text="WORKFLOW CONTROL"
+                                       FontSize="11"
+                                       Foreground="{StaticResource AccentBrush}"
+                                       FontWeight="SemiBold" />
+                            <TextBlock Text="Workflowを編集"
+                                       FontSize="22"
+                                       FontWeight="SemiBold"
+                                       Margin="0,4,0,1" />
+                            <TextBlock Text="{Binding SelectedWorkflowText}"
+                                       Foreground="{StaticResource WarmBrush}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{Binding DirtyText}"
+                                       Foreground="{StaticResource WarmBrush}"
+                                       FontSize="11"
+                                       Margin="0,4,0,0" />
+                        </StackPanel>
+                        <WrapPanel HorizontalAlignment="Right"
+                                   VerticalAlignment="Bottom">
+                            <Button Content="SAVE + VALIDATE"
+                                    ToolTip="変更を保存してWorkflowをvalidate"
+                                    Click="Save_Click" />
+                            <Button Content="VALIDATE"
+                                    ToolTip="現在のWorkflowをvalidate"
+                                    Click="Validate_Click" />
+                            <Button Content="GENERATE"
+                                    ToolTip="validate後に1件のJobを生成"
+                                    Background="{StaticResource WarmBrush}"
+                                    Foreground="#21151A"
+                                    Click="Generate_Click" />
+                        </WrapPanel>
+                    </Grid>
+
+                    <ScrollViewer Grid.Row="1"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <ItemsControl ItemsSource="{Binding Slots}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Background="#0F172B"
+                                            BorderBrush="{StaticResource LineBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="10"
+                                            Padding="12"
+                                            Margin="0,0,0,8">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="170" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="{Binding Label}"
+                                                           FontWeight="SemiBold"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{Binding Address}"
+                                                           Foreground="{StaticResource MutedTextBrush}"
+                                                           FontSize="11"
+                                                           Margin="0,3,0,0"
+                                                           TextWrapping="Wrap" />
+                                            </StackPanel>
+                                            <TextBox Grid.Column="1"
+                                                     Text="{Binding ValueText, UpdateSourceTrigger=PropertyChanged}"
+                                                     Margin="12,0"
+                                                     VerticalContentAlignment="Center" />
+                                            <StackPanel Grid.Column="2"
+                                                        Width="62">
+                                                <TextBlock Text="{Binding Type}"
+                                                           Foreground="{StaticResource AccentBrush}"
+                                                           FontSize="10"
+                                                           HorizontalAlignment="Right" />
+                                                <TextBlock Text="要確認"
+                                                           Foreground="{StaticResource DangerBrush}"
+                                                           FontSize="10"
+                                                           HorizontalAlignment="Right"
+                                                           Visibility="{Binding PairingSuspect, Converter={StaticResource BoolToVisibility}}" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <Border Grid.Row="2"
+                            Background="#0F172B"
+                            CornerRadius="10"
+                            Padding="12"
+                            Margin="0,12,0,0"
+                            BorderBrush="{StaticResource LineBrush}"
+                            BorderThickness="1">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
                             <StackPanel>
-                                <TextBlock Text="ITERATION HISTORY" FontSize="11" Foreground="{StaticResource AccentBrush}" />
-                                <ItemsControl ItemsSource="{Binding Iterations}" Margin="0,7,0,0">
-                                    <ItemsControl.ItemTemplate><DataTemplate><Border BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1" Padding="0,6"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="34" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Text="{Binding Number}" /><TextBlock Grid.Column="1" Text="{Binding Prompt}" TextTrimming="CharacterEllipsis" /><TextBlock Grid.Column="2" Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" FontSize="10" /></Grid></Border></DataTemplate></ItemsControl.ItemTemplate>
+                                <TextBlock Text="バックアップ / 復元"
+                                           FontSize="11"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontWeight="SemiBold" />
+                                <TextBlock Text="Workflowごとに直近3世代を保持。復元前に現在状態を保存します。"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="11"
+                                           Margin="0,3,0,0"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1"
+                                        Orientation="Horizontal"
+                                        VerticalAlignment="Center">
+                                <ComboBox x:Name="BackupCombo"
+                                          ItemsSource="{Binding Backups}"
+                                          Width="172"
+                                          Margin="0,0,6,0" />
+                                <Button Content="RESTORE"
+                                        ToolTip="選択した世代を復元"
+                                        Click="Restore_Click" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="2"
+                    Background="{StaticResource PanelBrush}"
+                    CornerRadius="14"
+                    Padding="14"
+                    BorderBrush="{StaticResource LineBrush}"
+                    BorderThickness="1">
+                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel>
+                        <Grid>
+                            <StackPanel>
+                                <TextBlock Text="制作セッション"
+                                           FontSize="11"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontWeight="SemiBold" />
+                                <TextBox Text="{Binding SessionTitle, UpdateSourceTrigger=PropertyChanged}"
+                                         FontSize="18"
+                                         FontWeight="SemiBold"
+                                         Margin="0,5,0,8" />
+                            </StackPanel>
+                            <Border HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Background="#1A293D"
+                                    CornerRadius="8"
+                                    Padding="8,5">
+                                <TextBlock Text="{Binding SessionStatusText}"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontSize="10" />
+                            </Border>
+                        </Grid>
+                        <StackPanel Orientation="Horizontal"
+                                    Margin="0,0,0,12">
+                            <Button Content="新規セッション"
+                                    Click="NewSession_Click" />
+                            <Button Content="RESUME"
+                                    ToolTip="完了・停止したセッションを再開"
+                                    Click="Resume_Click" />
+                        </StackPanel>
+
+                        <Label Content="プロジェクト / チャット（ローカル表示名）" />
+                        <TextBox Text="{Binding ProjectLabel, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Projectの表示名（任意）"
+                                 Margin="0,4,0,5" />
+                        <TextBox Text="{Binding ChatLabel, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Chatの表示名（任意）"
+                                 Margin="0,0,0,10" />
+
+                        <Label Content="制作アイデア" />
+                        <TextBox Text="{Binding Idea, UpdateSourceTrigger=PropertyChanged}"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 MinHeight="110"
+                                 ToolTip="ChatGPTへ伝える制作意図"
+                                 Margin="0,4,0,7" />
+                        <Button Content="BOOTSTRAPをChatGPTへコピー"
+                                ToolTip="現在のWorkflowとslot情報をコピー"
+                                Click="CopyBootstrap_Click"
+                                Background="{StaticResource AccentBrush}"
+                                Foreground="#091217" />
+                        <TextBlock Text="手動ハンドオフ · 画像・動画はChatGPTへ手動添付"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="11"
+                                   Margin="0,7,0,14"
+                                   TextWrapping="Wrap" />
+
+                        <Label Content="ChatGPTからのコマンド" />
+                        <TextBlock Text="貼り付け → IMPORT / VALIDATE → APPLY"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="11"
+                                   Margin="0,3,0,4" />
+                        <TextBox x:Name="CommandBox"
+                                 Text="{Binding CommandText, UpdateSourceTrigger=PropertyChanged}"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 MinHeight="125"
+                                 FontFamily="Cascadia Mono"
+                                 FontSize="11"
+                                 ToolTip="comfy-connector/1 commandを貼り付け" />
+                        <WrapPanel Margin="0,7,0,0">
+                            <Button Content="IMPORT / VALIDATE"
+                                    ToolTip="Commandの形式とslotを検証"
+                                    Click="ImportCommand_Click" />
+                            <Button Content="APPLY"
+                                    ToolTip="検証済みCommandをslotへ反映"
+                                    Click="ApplyCommand_Click" />
+                            <Button Content="APPLY + GENERATE"
+                                    ToolTip="反映後に1件のJobを生成"
+                                    Click="ApplyGenerateCommand_Click" />
+                        </WrapPanel>
+                        <Button Content="RESULTをChatGPTへコピー"
+                                ToolTip="生成結果と出力パスをコピー"
+                                Click="CopyResult_Click"
+                                Margin="0,8,0,14" />
+
+                        <Border Background="#0F172B"
+                                CornerRadius="10"
+                                Padding="12">
+                            <StackPanel>
+                                <TextBlock Text="反復履歴"
+                                           FontSize="11"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontWeight="SemiBold" />
+                                <ItemsControl ItemsSource="{Binding Iterations}"
+                                              Margin="0,7,0,0">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border BorderBrush="{StaticResource LineBrush}"
+                                                    BorderThickness="0,0,0,1"
+                                                    Padding="0,6">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="34" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding Number}" />
+                                                    <TextBlock Grid.Column="1"
+                                                               Text="{Binding Prompt}"
+                                                               TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Grid.Column="2"
+                                                               Text="{Binding Status}"
+                                                               Foreground="{StaticResource AccentBrush}"
+                                                               FontSize="10" />
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                             </StackPanel>
                         </Border>
-                        <Border Background="#0F172B" CornerRadius="10" Padding="12" Margin="0,12,0,0">
+
+                        <Border Background="#0F172B"
+                                CornerRadius="10"
+                                Padding="12"
+                                Margin="0,12,0,0">
                             <StackPanel>
                                 <Grid>
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                    <TextBlock Text="LATEST OUTPUTS" FontSize="11" Foreground="{StaticResource AccentBrush}" />
-                                    <Button Grid.Column="1" Content="OPEN OUTPUT FOLDER" Tag="{Binding OutputRoot}" Click="OpenOutputFolder_Click" HorizontalAlignment="Right" Padding="7,4" />
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="最新の出力"
+                                               FontSize="11"
+                                               Foreground="{StaticResource AccentBrush}"
+                                               FontWeight="SemiBold" />
+                                    <Button Grid.Column="1"
+                                            Content="フォルダを開く"
+                                            Tag="{Binding OutputRoot}"
+                                            ToolTip="ComfyUIのoutputフォルダを開く"
+                                            Click="OpenOutputFolder_Click"
+                                            Padding="7,4" />
                                 </Grid>
-                                <TextBlock Text="画像・動画はローカルで確認し、必要なものだけChatGPTへ手動添付します。" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,3,0,6" TextWrapping="Wrap" />
+                                <TextBlock Text="画像・動画はここで確認できます。必要なものだけChatGPTへ手動添付します。"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="11"
+                                           Margin="0,3,0,6"
+                                           TextWrapping="Wrap" />
                                 <ItemsControl ItemsSource="{Binding LatestOutputs}">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
-                                            <Border BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1" Padding="0,6">
+                                            <Border BorderBrush="{StaticResource LineBrush}"
+                                                    BorderThickness="0,0,0,1"
+                                                    Padding="0,6">
                                                 <StackPanel>
                                                     <Grid ToolTip="{Binding FullPath}">
-                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                                        <StackPanel><TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis" /><TextBlock Text="{Binding Type}" Foreground="{StaticResource MutedTextBrush}" FontSize="10" /></StackPanel>
-                                                        <Button Grid.Column="1" Content="OPEN" Tag="{Binding FullPath}" Click="OpenOutput_Click" Padding="7,4" />
-                                                        <Button Grid.Column="2" Content="FOLDER" Tag="{Binding FullPath}" Click="OpenOutputFolder_Click" Padding="7,4" />
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <StackPanel>
+                                                            <TextBlock Text="{Binding FileName}"
+                                                                       TextTrimming="CharacterEllipsis" />
+                                                            <TextBlock Text="{Binding Type}"
+                                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                                       FontSize="10" />
+                                                        </StackPanel>
+                                                        <Button Grid.Column="1"
+                                                                Content="OPEN"
+                                                                Tag="{Binding FullPath}"
+                                                                ToolTip="OSの既定アプリで開く"
+                                                                Click="OpenOutput_Click"
+                                                                Padding="7,4" />
+                                                        <Button Grid.Column="2"
+                                                                Content="フォルダ"
+                                                                Tag="{Binding FullPath}"
+                                                                ToolTip="出力ファイルのフォルダを開く"
+                                                                Click="OpenOutputFolder_Click"
+                                                                Padding="7,4" />
                                                     </Grid>
-                                                    <Image Source="{Binding FullPath}" Visibility="{Binding IsImage, Converter={StaticResource BoolToVisibility}}" MaxHeight="150" Stretch="Uniform" Margin="0,8,0,2" ImageFailed="OutputImageFailed" />
-                                                    <MediaElement Source="{Binding FullPath}" Visibility="{Binding IsVideo, Converter={StaticResource BoolToVisibility}}" LoadedBehavior="Play" UnloadedBehavior="Stop" MaxHeight="170" Stretch="Uniform" Margin="0,8,0,2" MediaFailed="OutputMediaFailed" />
+                                                    <Image Source="{Binding FullPath}"
+                                                           Visibility="{Binding IsImage, Converter={StaticResource BoolToVisibility}}"
+                                                           MaxHeight="150"
+                                                           Stretch="Uniform"
+                                                           Margin="0,8,0,2"
+                                                           ImageFailed="OutputImageFailed" />
+                                                    <MediaElement Source="{Binding FullPath}"
+                                                                  Visibility="{Binding IsVideo, Converter={StaticResource BoolToVisibility}}"
+                                                                  LoadedBehavior="Play"
+                                                                  UnloadedBehavior="Stop"
+                                                                  MaxHeight="170"
+                                                                  Stretch="Uniform"
+                                                                  Margin="0,8,0,2"
+                                                                  MediaFailed="OutputMediaFailed" />
                                                 </StackPanel>
                                             </Border>
                                         </DataTemplate>
@@ -101,8 +558,82 @@
             </Border>
         </Grid>
 
-        <Grid Grid.Row="2"><TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" /><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><TextBlock Text="JOB " Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" /><TextBlock Text="{Binding JobStatusText}" Foreground="{StaticResource WarmBrush}" VerticalAlignment="Center" Margin="4,0,12,0" /><ProgressBar Width="90" Height="6" IsIndeterminate="{Binding IsJobActive}" VerticalAlignment="Center" Margin="0,0,8,0" /><Button Content="CANCEL JOB" Click="CancelJob_Click" Padding="8,3" /></StackPanel></Grid>
+        <Grid Grid.Row="2">
+            <TextBlock Text="{Binding StatusMessage}"
+                       Foreground="{StaticResource MutedTextBrush}"
+                       VerticalAlignment="Center"
+                       TextTrimming="CharacterEllipsis" />
+            <StackPanel Orientation="Horizontal"
+                        HorizontalAlignment="Right">
+                <TextBlock Text="JOB"
+                           Foreground="{StaticResource MutedTextBrush}"
+                           VerticalAlignment="Center" />
+                <TextBlock Text="{Binding JobStatusText}"
+                           Foreground="{StaticResource WarmBrush}"
+                           VerticalAlignment="Center"
+                           Margin="6,0,12,0" />
+                <ProgressBar Width="90"
+                             Height="6"
+                             IsIndeterminate="{Binding IsJobActive}"
+                             VerticalAlignment="Center"
+                             Margin="0,0,8,0" />
+                <Button Content="CANCEL JOB"
+                        ToolTip="ConnectorのJob監視を停止し、ComfyUI側へcancelを要求"
+                        Click="CancelJob_Click"
+                        Padding="8,3" />
+            </StackPanel>
+        </Grid>
 
-        <Border Grid.RowSpan="3" Background="#D90B1020" Visibility="{Binding IsSetupVisible, Converter={StaticResource BoolToVisibility}}" Panel.ZIndex="20"><Border Width="640" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource AccentBrush}" BorderThickness="1" CornerRadius="18" Padding="28" HorizontalAlignment="Center" VerticalAlignment="Center"><StackPanel><TextBlock Text="FIRST RUN / CONNECTION SETUP" FontSize="12" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" /><TextBlock Text="Connect your local creative engine" FontSize="28" FontWeight="SemiBold" Margin="0,5,0,5" /><TextBlock Text="設定はこのPortableフォルダ内に保存されます。ComfyUIは自動起動しません。" Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,20" /><Label Content="COMFYUI PORTABLE ROOT" /><TextBox Text="{Binding Settings.PortableRoot, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" /><Label Content="COMFY MCP EXECUTABLE" /><TextBox Text="{Binding Settings.ComfyMcpPath, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" /><Label Content="ENDPOINT" /><TextBox Text="{Binding Settings.Endpoint, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" /><Label Content="MAXIMUM ITERATIONS" /><TextBox Text="{Binding Settings.MaximumIterations, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,20" /><StackPanel Orientation="Horizontal"><Button Content="SAVE + START" Click="SaveSetup_Click" Background="{StaticResource AccentBrush}" Foreground="#091217" /><Button Content="OPEN LOG FOLDER" Click="OpenLogs_Click" /></StackPanel></StackPanel></Border></Border>
+        <Border Grid.RowSpan="3"
+                Background="#D90B1020"
+                Visibility="{Binding IsSetupVisible, Converter={StaticResource BoolToVisibility}}"
+                Panel.ZIndex="20">
+            <Border Width="640"
+                    MaxHeight="760"
+                    Background="{StaticResource PanelBrush}"
+                    BorderBrush="{StaticResource AccentBrush}"
+                    BorderThickness="1"
+                    CornerRadius="18"
+                    Padding="28"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <TextBlock Text="初回設定 / 接続設定"
+                                   FontSize="12"
+                                   Foreground="{StaticResource AccentBrush}"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="ローカルの制作環境を接続"
+                                   FontSize="28"
+                                   FontWeight="SemiBold"
+                                   Margin="0,5,0,5" />
+                        <TextBlock Text="設定はこのPortableフォルダ内に保存されます。ComfyUIは自動起動しません。"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Margin="0,0,0,20"
+                                   TextWrapping="Wrap" />
+                        <Label Content="ComfyUI Portableの場所" />
+                        <TextBox Text="{Binding Settings.PortableRoot, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,4,0,12" />
+                        <Label Content="comfy-mcpの実行ファイル" />
+                        <TextBox Text="{Binding Settings.ComfyMcpPath, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,4,0,12" />
+                        <Label Content="Endpoint" />
+                        <TextBox Text="{Binding Settings.Endpoint, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,4,0,12" />
+                        <Label Content="最大反復回数" />
+                        <TextBox Text="{Binding Settings.MaximumIterations, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,4,0,20" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="設定を保存"
+                                    Background="{StaticResource AccentBrush}"
+                                    Foreground="#091217"
+                                    Click="SaveSetup_Click" />
+                            <Button Content="ログフォルダを開く"
+                                    Click="OpenLogs_Click" />
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+        </Border>
     </Grid>
 </Window>

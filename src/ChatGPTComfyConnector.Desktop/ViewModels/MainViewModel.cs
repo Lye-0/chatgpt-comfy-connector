@@ -69,7 +69,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string Idea { get => _idea; set { _idea = value; OnPropertyChanged(); } }
     public string ProjectLabel { get => CurrentSession?.ProjectLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ProjectLabel = value; OnPropertyChanged(); } }
     public string ChatLabel { get => CurrentSession?.ChatLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ChatLabel = value; OnPropertyChanged(); } }
-    public string SessionTitle { get => CurrentSession?.Title ?? "No session"; set { if (CurrentSession is null) return; CurrentSession.Title = value; OnPropertyChanged(); } }
+    public string SessionTitle { get => CurrentSession?.Title ?? "セッションなし"; set { if (CurrentSession is null) return; CurrentSession.Title = value; OnPropertyChanged(); } }
     public string SelectedWorkflowText => SelectedWorkflow?.RelativePath ?? "Workflow未選択";
     public string ConnectionStateText => ConnectionState switch { ConnectionState.Connected => "CONNECTED", ConnectionState.Connecting => "CONNECTING", ConnectionState.Error => "ERROR", _ => "DISCONNECTED" };
     public string SessionStatusText => CurrentSession?.Status.ToString().ToUpperInvariant() ?? "NEW";
@@ -148,7 +148,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         TreeNodes.Clear();
         foreach (var node in _catalog.BuildTree(WorkflowRoot)) TreeNodes.Add(node);
-        StatusMessage = Directory.Exists(WorkflowRoot) ? $"Workflow {TreeNodes.Count} 件のルートを読み込みました。" : "Workflowフォルダが見つかりません。Setupのパスを確認してください。";
+        StatusMessage = Directory.Exists(WorkflowRoot) ? $"Workflowを{TreeNodes.Count}件読み込みました。" : "Workflowフォルダが見つかりません。Setupのパスを確認してください。";
     }
 
     public async Task SelectWorkflowAsync(string relativePath)
@@ -176,7 +176,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
             foreach (var backup in await _store.ListWorkflowBackupsAsync(identity)) Backups.Add(backup);
             IsDirty = false;
-            StatusMessage = $"{Slots.Count}個のdynamic slotを読み込みました。";
+            StatusMessage = $"{Slots.Count}個のslotを読み込みました。";
         }
         catch (Exception ex) { StatusMessage = $"slot取得に失敗しました: {ex.Message}"; await _store.LogAsync("workflow", StatusMessage, ex); }
         finally { IsBusy = false; }
@@ -207,7 +207,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _loadedFingerprint = WorkflowCatalog.ComputeFingerprint(path);
             IsDirty = false;
             foreach (var backup in await _store.ListWorkflowBackupsAsync(SelectedWorkflow)) { if (!Backups.Contains(backup)) Backups.Add(backup); }
-            StatusMessage = "Workflowをbackup→apply→validateしました。";
+            StatusMessage = "Workflowをbackup → apply → validateしました。";
         }
         finally { IsBusy = false; }
     }
@@ -258,7 +258,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Idea = string.Empty;
         Iterations.Clear();
         LatestOutputs.Clear();
-        StatusMessage = "新しいCreation Sessionを作成しました。";
+        StatusMessage = "新しい制作セッションを作成しました。";
     }
 
     public async Task SaveSessionAsync()
@@ -267,7 +267,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CurrentSession.OriginalIdea = Idea;
         CurrentSession.MaximumIterations = Settings.MaximumIterations;
         await _store.SaveSessionAsync(CurrentSession);
-        StatusMessage = "Sessionを保存しました。";
+        StatusMessage = "制作セッションを保存しました。";
     }
 
     public async Task GenerateAsync(bool applyFirst = true)
@@ -277,7 +277,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (IsJobActive) throw new InvalidOperationException("Connectorが管理中のJobは1件だけです。");
         CurrentSession ??= NewSessionInternal();
         if (CurrentSession.BoundWorkflow is null) CurrentSession.BoundWorkflow = SelectedWorkflow;
-        if (!string.Equals(CurrentSession.BoundWorkflow.RelativePath, SelectedWorkflow.RelativePath, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("SessionにbindされたWorkflowと選択中Workflowが異なります。");
+        if (!string.Equals(CurrentSession.BoundWorkflow.RelativePath, SelectedWorkflow.RelativePath, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("セッションに紐づくWorkflowと選択中Workflowが異なります。");
         if (CurrentSession.AtIterationLimit) throw new InvalidOperationException("最大反復回数に達しました。上限を変更してから続行してください。");
         var changes = BuildChanges();
         if (applyFirst && IsDirty) await ApplySlotsAsync();
@@ -315,7 +315,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _pendingValidation = ConnectorProtocol.Parse(CommandText);
         if (!_pendingValidation.IsValid) { StatusMessage = string.Join(" ", _pendingValidation.Errors); return; }
         _pendingValidation = ConnectorProtocol.ValidateAgainstSlots(_pendingValidation.Command!, Slots.Select(ToWorkflowSlot), SelectedWorkflow);
-        StatusMessage = _pendingValidation.IsValid ? $"{_pendingValidation.Command!.Action} commandを検証しました。Applyを押して反映してください。" : string.Join(" ", _pendingValidation.Errors);
+        StatusMessage = _pendingValidation.IsValid ? $"{_pendingValidation.Command!.Action} commandを検証しました。APPLYで反映してください。" : string.Join(" ", _pendingValidation.Errors);
         if (_pendingValidation.Command?.Action == "complete" && _pendingValidation.IsValid) CompleteSession(_pendingValidation.Command.Reason ?? "ChatGPT completed the session.");
         await Task.CompletedTask;
     }
@@ -337,7 +337,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         if (CurrentSession is null) return;
         CurrentSession.Complete(reason);
-        StatusMessage = "SessionをCOMPLETEDにしました。履歴と出力は保持されています。必要ならResumeできます。";
+        StatusMessage = "セッションをCOMPLETEDにしました。履歴と出力は保持されています。必要ならRESUMEできます。";
         _ = _store.SaveSessionAsync(CurrentSession);
     }
 
@@ -346,7 +346,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (CurrentSession is null) return;
         CurrentSession.Resume();
         await _store.SaveSessionAsync(CurrentSession);
-        StatusMessage = "Sessionを再開しました。";
+        StatusMessage = "セッションを再開しました。";
     }
 
     public async Task CancelJobAsync()
@@ -357,7 +357,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var iteration = CurrentSession?.Iterations.LastOrDefault(i => i.JobId == CurrentJob.JobId);
         if (iteration is not null) iteration.Status = JobStatus.Cancelled;
         if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
-        StatusMessage = "Connectorが投入したJobへcancelを要求しました。";
+        StatusMessage = "Connectorが投入したJobへCANCELを要求しました。";
         OnPropertyChanged(nameof(JobStatusText));
     }
 
@@ -408,7 +408,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private CreationSession NewSessionInternal()
     {
-        var session = new CreationSession { Title = "New creation", MaximumIterations = Settings.MaximumIterations, BoundWorkflow = SelectedWorkflow };
+        var session = new CreationSession { Title = "新しい制作", MaximumIterations = Settings.MaximumIterations, BoundWorkflow = SelectedWorkflow };
         Sessions.Add(session);
         return session;
     }

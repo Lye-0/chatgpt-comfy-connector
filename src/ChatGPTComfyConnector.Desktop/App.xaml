@@ -4,6 +4,7 @@
              StartupUri="MainWindow.xaml">
     <Application.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+        <FontFamily x:Key="UiFont">Segoe UI, Yu Gothic UI, Meiryo UI</FontFamily>
         <SolidColorBrush x:Key="CanvasBrush" Color="#0B1020" />
         <SolidColorBrush x:Key="PanelBrush" Color="#121A2E" />
         <SolidColorBrush x:Key="PanelRaisedBrush" Color="#182440" />
@@ -13,11 +14,11 @@
         <SolidColorBrush x:Key="AccentBrush" Color="#65D6D2" />
         <SolidColorBrush x:Key="WarmBrush" Color="#FF9D7A" />
         <SolidColorBrush x:Key="DangerBrush" Color="#FF718B" />
-        <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{StaticResource TextBrush}" /><Setter Property="FontFamily" Value="Segoe UI" /></Style>
-        <Style TargetType="Label"><Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" /><Setter Property="FontSize" Value="11" /><Setter Property="Padding" Value="0" /></Style>
-        <Style TargetType="Button"><Setter Property="Foreground" Value="{StaticResource TextBrush}" /><Setter Property="Background" Value="{StaticResource PanelRaisedBrush}" /><Setter Property="BorderBrush" Value="{StaticResource LineBrush}" /><Setter Property="BorderThickness" Value="1" /><Setter Property="Padding" Value="12,7" /><Setter Property="Margin" Value="0,0,6,0" /><Setter Property="FontSize" Value="12" /></Style>
-        <Style TargetType="TextBox"><Setter Property="Foreground" Value="{StaticResource TextBrush}" /><Setter Property="Background" Value="#0E1629" /><Setter Property="BorderBrush" Value="{StaticResource LineBrush}" /><Setter Property="BorderThickness" Value="1" /><Setter Property="Padding" Value="8,6" /><Setter Property="FontSize" Value="12" /></Style>
-        <Style TargetType="ListBox"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Foreground" Value="{StaticResource TextBrush}" /></Style>
-        <Style TargetType="TreeView"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Foreground" Value="{StaticResource TextBrush}" /></Style>
+        <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{StaticResource TextBrush}" /><Setter Property="FontFamily" Value="{StaticResource UiFont}" /></Style>
+        <Style TargetType="Label"><Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" /><Setter Property="FontFamily" Value="{StaticResource UiFont}" /><Setter Property="FontSize" Value="11" /><Setter Property="Padding" Value="0" /></Style>
+        <Style TargetType="Button"><Setter Property="Foreground" Value="{StaticResource TextBrush}" /><Setter Property="Background" Value="{StaticResource PanelRaisedBrush}" /><Setter Property="BorderBrush" Value="{StaticResource LineBrush}" /><Setter Property="BorderThickness" Value="1" /><Setter Property="Padding" Value="12,7" /><Setter Property="Margin" Value="0,0,6,0" /><Setter Property="FontFamily" Value="{StaticResource UiFont}" /><Setter Property="FontSize" Value="12" /></Style>
+        <Style TargetType="TextBox"><Setter Property="Foreground" Value="{StaticResource TextBrush}" /><Setter Property="Background" Value="#0E1629" /><Setter Property="BorderBrush" Value="{StaticResource LineBrush}" /><Setter Property="BorderThickness" Value="1" /><Setter Property="Padding" Value="8,6" /><Setter Property="FontFamily" Value="{StaticResource UiFont}" /><Setter Property="FontSize" Value="12" /></Style>
+        <Style TargetType="ListBox"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Foreground" Value="{StaticResource TextBrush}" /><Setter Property="FontFamily" Value="{StaticResource UiFont}" /></Style>
+        <Style TargetType="TreeView"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Foreground" Value="{StaticResource TextBrush}" /><Setter Property="FontFamily" Value="{StaticResource UiFont}" /></Style>
     </Application.Resources>
 </Application>

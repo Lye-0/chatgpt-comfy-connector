@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ChatGPTComfyConnector.Core/ChatGPTComfyConnector.Core.csproj" />
+    <Project Path="src/ChatGPTComfyConnector.Desktop/ChatGPTComfyConnector.Desktop.csproj" />
+    <Project Path="src/ChatGPTComfyConnector.Infrastructure/ChatGPTComfyConnector.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ChatGPTComfyConnector.Tests/ChatGPTComfyConnector.Tests.csproj" />
+  </Folder>
+</Solution>

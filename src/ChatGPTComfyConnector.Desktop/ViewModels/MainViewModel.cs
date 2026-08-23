@@ -1,0 +1,471 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Text.Json.Nodes;
+using ChatGPTComfyConnector.Core.Models;
+using ChatGPTComfyConnector.Core.Services;
+using ChatGPTComfyConnector.Infrastructure.Storage;
+using ChatGPTComfyConnector.Infrastructure.Workflows;
+
+namespace ChatGPTComfyConnector.Desktop.ViewModels;
+
+public sealed class MainViewModel : INotifyPropertyChanged
+{
+    private readonly PortableLayout _layout;
+    private readonly PortableStore _store;
+    private readonly ComfyMcpClientProxy _mcp;
+    private readonly WorkflowCatalog _catalog;
+    private CreationSession? _currentSession;
+    private WorkflowIdentity? _selectedWorkflow;
+    private JobSnapshot? _currentJob;
+    private string _statusMessage = "初回セットアップを確認しています。";
+    private ConnectionState _connectionState = ConnectionState.Disconnected;
+    private bool _isSetupVisible;
+    private bool _isBusy;
+    private bool _isDirty;
+    private string _commandText = string.Empty;
+    private string _idea = string.Empty;
+    private ProtocolValidationResult? _pendingValidation;
+    private string? _loadedFingerprint;
+
+    public MainViewModel(string applicationDirectory)
+    {
+        _layout = new PortableLayout(applicationDirectory);
+        _store = new PortableStore(_layout);
+        _mcp = new ComfyMcpClientProxy(_store);
+        _catalog = new WorkflowCatalog(_mcp, _store);
+        Settings = new AppSettings
+        {
+            PortableRoot = Directory.Exists("C:\\AI\\ComfyUI_windows_portable") ? "C:\\AI\\ComfyUI_windows_portable" : string.Empty,
+            ComfyMcpPath = File.Exists("C:\\AI\\comfy-mcp-runtime\\.venv\\Scripts\\comfy-mcp.exe") ? "C:\\AI\\comfy-mcp-runtime\\.venv\\Scripts\\comfy-mcp.exe" : string.Empty,
+            ComfyCliPath = File.Exists("C:\\AI\\comfy-mcp-runtime\\.venv\\Scripts\\comfy.exe") ? "C:\\AI\\comfy-mcp-runtime\\.venv\\Scripts\\comfy.exe" : null,
+        };
+        Sessions = [];
+        TreeNodes = [];
+        Slots = [];
+        Iterations = [];
+        Backups = [];
+        LatestOutputs = [];
+    }
+
+    public AppSettings Settings { get; }
+    public ObservableCollection<CreationSession> Sessions { get; }
+    public ObservableCollection<WorkflowTreeNode> TreeNodes { get; }
+    public ObservableCollection<SlotEditorItem> Slots { get; }
+    public ObservableCollection<SessionIteration> Iterations { get; }
+    public ObservableCollection<string> Backups { get; }
+    public ObservableCollection<OutputArtifact> LatestOutputs { get; }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); } }
+    public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); } }
+    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(IsJobActive)); } }
+    public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); } }
+    public string StatusMessage { get => _statusMessage; set { _statusMessage = value; OnPropertyChanged(); } }
+    public bool IsSetupVisible { get => _isSetupVisible; private set { _isSetupVisible = value; OnPropertyChanged(); } }
+    public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); } }
+    public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); } }
+    public string CommandText { get => _commandText; set { _commandText = value; OnPropertyChanged(); } }
+    public string Idea { get => _idea; set { _idea = value; OnPropertyChanged(); } }
+    public string ProjectLabel { get => CurrentSession?.ProjectLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ProjectLabel = value; OnPropertyChanged(); } }
+    public string ChatLabel { get => CurrentSession?.ChatLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ChatLabel = value; OnPropertyChanged(); } }
+    public string SessionTitle { get => CurrentSession?.Title ?? "No session"; set { if (CurrentSession is null) return; CurrentSession.Title = value; OnPropertyChanged(); } }
+    public string SelectedWorkflowText => SelectedWorkflow?.RelativePath ?? "Workflow未選択";
+    public string ConnectionStateText => ConnectionState switch { ConnectionState.Connected => "CONNECTED", ConnectionState.Connecting => "CONNECTING", ConnectionState.Error => "ERROR", _ => "DISCONNECTED" };
+    public string SessionStatusText => CurrentSession?.Status.ToString().ToUpperInvariant() ?? "NEW";
+    public string JobStatusText => CurrentJob is null ? "IDLE" : CurrentJob.Status.ToString().ToUpperInvariant();
+    public string DirtyText => IsDirty ? "UNSAVED CHANGES" : "SAVED";
+    public bool IsConnected => ConnectionState == ConnectionState.Connected;
+    public bool IsJobActive => CurrentJob is { Status: JobStatus.Queued or JobStatus.Running };
+    public string WorkflowRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "user", "default", "workflows");
+    public string OutputRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "output");
+
+    public async Task InitializeAsync()
+    {
+        var saved = await _store.LoadSettingsAsync();
+        if (saved is not null)
+        {
+            Settings.PortableRoot = saved.PortableRoot;
+            Settings.ComfyMcpPath = saved.ComfyMcpPath;
+            Settings.ComfyCliPath = saved.ComfyCliPath;
+            Settings.Endpoint = saved.Endpoint;
+            Settings.MaximumIterations = saved.MaximumIterations;
+        }
+        IsSetupVisible = saved is null || !Settings.IsConfigured;
+        Sessions.Clear();
+        foreach (var session in await _store.LoadSessionsAsync()) Sessions.Add(session);
+        CurrentSession = Sessions.FirstOrDefault() ?? NewSessionInternal();
+        Idea = CurrentSession.OriginalIdea;
+        Iterations.Clear();
+        foreach (var iteration in CurrentSession.Iterations) Iterations.Add(iteration);
+        LatestOutputs.Clear();
+        foreach (var output in CurrentSession.Iterations.LastOrDefault()?.Outputs ?? []) LatestOutputs.Add(output);
+        RefreshWorkflowTree();
+        StatusMessage = IsSetupVisible ? "接続先を確認して保存してください。" : "準備完了。ComfyUIの状態を確認できます。";
+    }
+
+    public async Task SaveSetupAsync()
+    {
+        ValidateSettings();
+        Settings.ComfyCliPath ??= Path.Combine(Path.GetDirectoryName(Settings.ComfyMcpPath)!, "comfy.exe");
+        await _store.SaveSettingsAsync(Settings);
+        IsSetupVisible = false;
+        RefreshWorkflowTree();
+        StatusMessage = "設定をPortable領域へ保存しました。Connectを押してMCPへ接続してください。";
+    }
+
+    public void ShowSetup() => IsSetupVisible = true;
+
+    public async Task ConnectAsync()
+    {
+        ValidateSettings();
+        IsBusy = true;
+        try
+        {
+            await _mcp.ConnectAsync(Settings);
+            ConnectionState = ConnectionState.Connected;
+            var info = await _mcp.CallAsync("server_info", new Dictionary<string, object?>());
+            StatusMessage = info is null ? "MCPに接続しました。" : "MCPに接続しました。server_infoを取得済みです。";
+            if (SelectedWorkflow is not null) await SelectWorkflowAsync(SelectedWorkflow.RelativePath);
+        }
+        catch (Exception ex)
+        {
+            ConnectionState = ConnectionState.Error;
+            StatusMessage = $"MCP接続に失敗しました: {ex.Message}";
+            await _store.LogAsync("connection", StatusMessage, ex);
+        }
+        finally { IsBusy = false; }
+    }
+
+    public async Task DisconnectAsync()
+    {
+        await _mcp.DisconnectAsync();
+        ConnectionState = ConnectionState.Disconnected;
+        StatusMessage = "MCPを切断しました。ComfyUIは終了していません。";
+    }
+
+    public void RefreshWorkflowTree()
+    {
+        TreeNodes.Clear();
+        foreach (var node in _catalog.BuildTree(WorkflowRoot)) TreeNodes.Add(node);
+        StatusMessage = Directory.Exists(WorkflowRoot) ? $"Workflow {TreeNodes.Count} 件のルートを読み込みました。" : "Workflowフォルダが見つかりません。Setupのパスを確認してください。";
+    }
+
+    public async Task SelectWorkflowAsync(string relativePath)
+    {
+        var identity = WorkflowIdentity.Create(relativePath);
+        SelectedWorkflow = identity;
+        Slots.Clear();
+        Backups.Clear();
+        var path = identity.ToAbsolute(WorkflowRoot);
+        _loadedFingerprint = File.Exists(path) ? WorkflowCatalog.ComputeFingerprint(path) : null;
+        if (!IsConnected)
+        {
+            StatusMessage = "Workflowを選択しました。slot取得にはMCP接続が必要です。";
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            foreach (var slot in await _catalog.DiscoverSlotsAsync(identity, WorkflowRoot))
+            {
+                var item = new SlotEditorItem(slot);
+                item.PropertyChanged += SlotChanged;
+                Slots.Add(item);
+            }
+            foreach (var backup in await _store.ListWorkflowBackupsAsync(identity)) Backups.Add(backup);
+            IsDirty = false;
+            StatusMessage = $"{Slots.Count}個のdynamic slotを読み込みました。";
+        }
+        catch (Exception ex) { StatusMessage = $"slot取得に失敗しました: {ex.Message}"; await _store.LogAsync("workflow", StatusMessage, ex); }
+        finally { IsBusy = false; }
+    }
+
+    public void DiscardChanges()
+    {
+        if (SelectedWorkflow is null) return;
+        _ = SelectWorkflowAsync(SelectedWorkflow.RelativePath);
+    }
+
+    public async Task ApplySlotsAsync()
+    {
+        if (SelectedWorkflow is null) throw new InvalidOperationException("Workflowを選択してください。");
+        if (!IsConnected) throw new InvalidOperationException("MCPに接続してください。");
+        var path = SelectedWorkflow.ToAbsolute(WorkflowRoot);
+        if (_loadedFingerprint is not null && File.Exists(path) && !string.Equals(_loadedFingerprint, WorkflowCatalog.ComputeFingerprint(path), StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Workflowが外部で変更されています。再読み込みしてから保存してください。");
+        }
+
+        var changes = BuildChanges();
+        if (changes.Count == 0) { IsDirty = false; return; }
+        IsBusy = true;
+        try
+        {
+            await _catalog.ApplySlotsAsync(SelectedWorkflow, WorkflowRoot, changes);
+            _loadedFingerprint = WorkflowCatalog.ComputeFingerprint(path);
+            IsDirty = false;
+            foreach (var backup in await _store.ListWorkflowBackupsAsync(SelectedWorkflow)) { if (!Backups.Contains(backup)) Backups.Add(backup); }
+            StatusMessage = "Workflowをbackup→apply→validateしました。";
+        }
+        finally { IsBusy = false; }
+    }
+
+    public async Task ValidateCurrentAsync()
+    {
+        if (SelectedWorkflow is null) throw new InvalidOperationException("Workflowを選択してください。");
+        if (!IsConnected) throw new InvalidOperationException("MCPに接続してください。");
+        var result = await _catalog.ValidateAsync(SelectedWorkflow, WorkflowRoot);
+        var valid = result?["valid"]?.GetValue<bool>();
+        StatusMessage = valid == true ? "Workflowのvalidateに成功しました。" : valid == false ? "Workflowのvalidateが失敗しました。内容を確認してください。" : "Workflowのvalidate結果を判定できませんでした。";
+    }
+
+    public async Task DuplicateWorkflowAsync(string name)
+    {
+        if (SelectedWorkflow is null) throw new InvalidOperationException("Workflowを選択してください。");
+        var source = SelectedWorkflow.ToAbsolute(WorkflowRoot);
+        var safeName = NormalizeWorkflowName(name);
+        var destination = Path.Combine(Path.GetDirectoryName(source)!, safeName + ".json");
+        PathSafety.RequireWithin(WorkflowRoot, destination);
+        if (File.Exists(destination)) throw new InvalidOperationException("同名Workflowが既に存在します。上書きはしません。");
+        File.Copy(source, destination);
+        RefreshWorkflowTree();
+        await SelectWorkflowAsync(Path.GetRelativePath(WorkflowRoot, destination).Replace('\\', '/'));
+        StatusMessage = $"Workflowを複製しました: {safeName}";
+    }
+
+    public async Task RenameWorkflowAsync(string name)
+    {
+        if (SelectedWorkflow is null) throw new InvalidOperationException("Workflowを選択してください。");
+        var source = SelectedWorkflow.ToAbsolute(WorkflowRoot);
+        var safeName = NormalizeWorkflowName(name);
+        var destination = Path.Combine(Path.GetDirectoryName(source)!, safeName + ".json");
+        PathSafety.RequireWithin(WorkflowRoot, destination);
+        if (File.Exists(destination)) throw new InvalidOperationException("同名Workflowが既に存在します。上書きはしません。");
+        File.Move(source, destination);
+        var newIdentity = WorkflowIdentity.Create(Path.GetRelativePath(WorkflowRoot, destination).Replace('\\', '/'));
+        if (CurrentSession?.BoundWorkflow?.RelativePath.Equals(SelectedWorkflow.RelativePath, StringComparison.OrdinalIgnoreCase) == true) CurrentSession.BoundWorkflow = newIdentity;
+        RefreshWorkflowTree();
+        await SelectWorkflowAsync(newIdentity.RelativePath);
+        if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
+        StatusMessage = $"Workflowの名前を変更しました: {safeName}";
+    }
+
+    public void CreateNewSession()
+    {
+        CurrentSession = NewSessionInternal();
+        Idea = string.Empty;
+        Iterations.Clear();
+        LatestOutputs.Clear();
+        StatusMessage = "新しいCreation Sessionを作成しました。";
+    }
+
+    public async Task SaveSessionAsync()
+    {
+        if (CurrentSession is null) return;
+        CurrentSession.OriginalIdea = Idea;
+        CurrentSession.MaximumIterations = Settings.MaximumIterations;
+        await _store.SaveSessionAsync(CurrentSession);
+        StatusMessage = "Sessionを保存しました。";
+    }
+
+    public async Task GenerateAsync(bool applyFirst = true)
+    {
+        if (SelectedWorkflow is null) throw new InvalidOperationException("Workflowを選択してください。");
+        if (!IsConnected) throw new InvalidOperationException("MCPに接続してください。");
+        if (IsJobActive) throw new InvalidOperationException("Connectorが管理中のJobは1件だけです。");
+        CurrentSession ??= NewSessionInternal();
+        if (CurrentSession.BoundWorkflow is null) CurrentSession.BoundWorkflow = SelectedWorkflow;
+        if (!string.Equals(CurrentSession.BoundWorkflow.RelativePath, SelectedWorkflow.RelativePath, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("SessionにbindされたWorkflowと選択中Workflowが異なります。");
+        if (CurrentSession.AtIterationLimit) throw new InvalidOperationException("最大反復回数に達しました。上限を変更してから続行してください。");
+        var changes = BuildChanges();
+        if (applyFirst && IsDirty) await ApplySlotsAsync();
+        await ValidateCurrentAsync();
+        var prompt = FindPrompt(changes) ?? Idea;
+        var iteration = CurrentSession.StartIteration(prompt, changes);
+        await _store.SaveSessionAsync(CurrentSession);
+        Iterations.Add(iteration);
+        IsBusy = true;
+        try
+        {
+            CurrentJob = await _catalog.RunAsync(SelectedWorkflow, WorkflowRoot);
+            iteration.JobId = CurrentJob.JobId;
+            iteration.Status = CurrentJob.Status;
+            await _store.SaveSessionAsync(CurrentSession);
+            StatusMessage = $"Job {CurrentJob.JobId} を投入しました。進捗率は推測せず状態だけ表示します。";
+            await MonitorJobAsync(iteration);
+        }
+        catch (Exception ex)
+        {
+            iteration.Status = JobStatus.Failed;
+            iteration.Error = ex.Message;
+            CurrentSession.Status = SessionStatus.Error;
+            CurrentSession.LastError = ex.Message;
+            CurrentJob = null;
+            await _store.SaveSessionAsync(CurrentSession);
+            StatusMessage = $"生成に失敗しました: {ex.Message}";
+            await _store.LogAsync("generation", StatusMessage, ex);
+        }
+        finally { IsBusy = false; }
+    }
+
+    public async Task ImportCommandAsync()
+    {
+        _pendingValidation = ConnectorProtocol.Parse(CommandText);
+        if (!_pendingValidation.IsValid) { StatusMessage = string.Join(" ", _pendingValidation.Errors); return; }
+        _pendingValidation = ConnectorProtocol.ValidateAgainstSlots(_pendingValidation.Command!, Slots.Select(ToWorkflowSlot), SelectedWorkflow);
+        StatusMessage = _pendingValidation.IsValid ? $"{_pendingValidation.Command!.Action} commandを検証しました。Applyを押して反映してください。" : string.Join(" ", _pendingValidation.Errors);
+        if (_pendingValidation.Command?.Action == "complete" && _pendingValidation.IsValid) CompleteSession(_pendingValidation.Command.Reason ?? "ChatGPT completed the session.");
+        await Task.CompletedTask;
+    }
+
+    public async Task ApplyCommandAsync(bool generate)
+    {
+        if (_pendingValidation is not { IsValid: true, Command: not null } validation) { await ImportCommandAsync(); validation = _pendingValidation; }
+        if (validation is not { IsValid: true, Command: not null } commandResult) throw new InvalidOperationException(string.Join(" ", validation?.Errors ?? []));
+        if (commandResult.Command.Action != "generate") throw new InvalidOperationException("このcommandはgenerateではありません。");
+        foreach (var item in Slots) if (commandResult.Command.Parameters.TryGetPropertyValue(item.Address, out var value) && value is not null) item.ValueText = value is JsonValue v && v.TryGetValue<string>(out var text) ? text : value.ToJsonString();
+        IsDirty = true;
+        if (generate) await GenerateAsync(); else await ApplySlotsAsync();
+    }
+
+    public string BuildBootstrapContext() => CurrentSession is null ? string.Empty : ConnectorContextBuilder.BuildBootstrap(CurrentSession, Slots.Select(ToWorkflowSlot));
+    public string BuildResultContext() => CurrentSession?.Iterations.LastOrDefault() is { } iteration ? ConnectorContextBuilder.BuildResult(CurrentSession, iteration) : string.Empty;
+
+    public void CompleteSession(string reason)
+    {
+        if (CurrentSession is null) return;
+        CurrentSession.Complete(reason);
+        StatusMessage = "SessionをCOMPLETEDにしました。履歴と出力は保持されています。必要ならResumeできます。";
+        _ = _store.SaveSessionAsync(CurrentSession);
+    }
+
+    public async Task ResumeSessionAsync()
+    {
+        if (CurrentSession is null) return;
+        CurrentSession.Resume();
+        await _store.SaveSessionAsync(CurrentSession);
+        StatusMessage = "Sessionを再開しました。";
+    }
+
+    public async Task CancelJobAsync()
+    {
+        if (CurrentJob is null || !IsJobActive) return;
+        await _catalog.CancelAsync(CurrentJob.JobId);
+        CurrentJob.Status = JobStatus.Cancelled;
+        var iteration = CurrentSession?.Iterations.LastOrDefault(i => i.JobId == CurrentJob.JobId);
+        if (iteration is not null) iteration.Status = JobStatus.Cancelled;
+        if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
+        StatusMessage = "Connectorが投入したJobへcancelを要求しました。";
+        OnPropertyChanged(nameof(JobStatusText));
+    }
+
+    public async Task RestoreBackupAsync(string backupPath)
+    {
+        if (SelectedWorkflow is null) throw new InvalidOperationException("Workflowを選択してください。");
+        await _store.RestoreWorkflowBackupAsync(SelectedWorkflow, WorkflowRoot, backupPath);
+        _loadedFingerprint = WorkflowCatalog.ComputeFingerprint(SelectedWorkflow.ToAbsolute(WorkflowRoot));
+        await SelectWorkflowAsync(SelectedWorkflow.RelativePath);
+        StatusMessage = "現在のWorkflowをbackupした後、選択した世代を復元しました。";
+    }
+
+    public void StartComfyUi()
+    {
+        var batch = Path.Combine(Settings.PortableRoot, "run_nvidia_gpu.bat");
+        if (!File.Exists(batch)) throw new FileNotFoundException("ComfyUI起動batchが見つかりません。", batch);
+        Process.Start(new ProcessStartInfo(batch) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(batch) });
+        StatusMessage = "ComfyUIの起動を要求しました。ConnectorはComfyUIを終了しません。";
+    }
+
+    private async Task MonitorJobAsync(SessionIteration iteration)
+    {
+        while (CurrentJob is { Status: JobStatus.Queued or JobStatus.Running } job)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            CurrentJob = await _catalog.GetJobAsync(job.JobId);
+            iteration.Status = CurrentJob.Status;
+            if (CurrentJob.Status == JobStatus.Completed)
+            {
+                iteration.Outputs = (await _catalog.FetchOutputsAsync(job.JobId, OutputRoot)).ToList();
+                CurrentJob.Outputs = iteration.Outputs;
+                LatestOutputs.Clear();
+                foreach (var output in iteration.Outputs) LatestOutputs.Add(output);
+                CurrentJob.CompletedAt = DateTimeOffset.UtcNow;
+                StatusMessage = $"Iteration {iteration.Number} が完了しました。出力 {iteration.Outputs.Count} 件。";
+                await _store.SaveSessionAsync(CurrentSession!);
+                break;
+            }
+            if (CurrentJob.Status is JobStatus.Failed or JobStatus.Cancelled)
+            {
+                iteration.Error = CurrentJob.Message;
+                StatusMessage = $"Job {CurrentJob.Status}。";
+                await _store.SaveSessionAsync(CurrentSession!);
+                break;
+            }
+        }
+    }
+
+    private CreationSession NewSessionInternal()
+    {
+        var session = new CreationSession { Title = "New creation", MaximumIterations = Settings.MaximumIterations, BoundWorkflow = SelectedWorkflow };
+        Sessions.Add(session);
+        return session;
+    }
+
+    private Dictionary<string, JsonNode?> BuildChanges() => Slots.ToDictionary(x => x.Address, x => x.ToJsonNode(), StringComparer.OrdinalIgnoreCase);
+    private string? FindPrompt(Dictionary<string, JsonNode?> changes) => changes.FirstOrDefault(x => x.Key.Contains("prompt", StringComparison.OrdinalIgnoreCase)).Value is JsonValue value && value.TryGetValue<string>(out var prompt) ? prompt : null;
+    private static WorkflowSlot ToWorkflowSlot(SlotEditorItem item) => new() { Address = item.Address, Label = item.Label, Type = item.Type, CurrentValue = item.ToJsonNode() };
+
+    private static string NormalizeWorkflowName(string name)
+    {
+        var value = Path.GetFileNameWithoutExtension(name ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(value) || value is "." or ".." || value.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) throw new InvalidOperationException("Workflow名が不正です。");
+        return value;
+    }
+
+    private void SlotChanged(object? sender, PropertyChangedEventArgs e) { if (e.PropertyName == nameof(SlotEditorItem.ValueText)) IsDirty = true; }
+
+    public void OpenOutputFile(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        PathSafety.RequireWithin(OutputRoot, fullPath);
+        if (!File.Exists(fullPath)) throw new FileNotFoundException("出力ファイルが見つかりません。", fullPath);
+        Process.Start(new ProcessStartInfo(fullPath) { UseShellExecute = true });
+    }
+
+    public void OpenOutputFolder(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        PathSafety.RequireWithin(OutputRoot, fullPath);
+        var folder = Directory.Exists(fullPath) ? fullPath : Path.GetDirectoryName(fullPath);
+        if (string.IsNullOrWhiteSpace(folder)) throw new DirectoryNotFoundException("出力フォルダを特定できません。");
+        Directory.CreateDirectory(folder);
+        Process.Start(new ProcessStartInfo("explorer.exe", $"\"{folder}\"") { UseShellExecute = true });
+    }
+
+    private void ValidateSettings()
+    {
+        if (!Directory.Exists(Settings.PortableRoot)) throw new InvalidOperationException("ComfyUI Portable rootが存在しません。");
+        if (!Directory.Exists(Path.Combine(Settings.PortableRoot, "ComfyUI"))) throw new InvalidOperationException("Portable root内にComfyUIがありません。");
+        if (!File.Exists(Settings.ComfyMcpPath)) throw new InvalidOperationException("comfy-mcp.exeが存在しません。");
+        if (!Uri.TryCreate(Settings.Endpoint, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) throw new InvalidOperationException("Endpoint URLが不正です。");
+        if (Settings.MaximumIterations is < 1 or > 1000) throw new InvalidOperationException("Maximum Iterationsは1〜1000で指定してください。");
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null) => PropertyChanged?.Invoke(this, new(propertyName));
+
+    private sealed class ComfyMcpClientProxy : IComfyMcpClient
+    {
+        private readonly ChatGPTComfyConnector.Infrastructure.Mcp.ComfyMcpClient _inner;
+        public ComfyMcpClientProxy(IPortableStore store) => _inner = new(store);
+        public bool IsConnected => _inner.IsConnected;
+        public ConnectionState State => _inner.State;
+        public IReadOnlyList<string> ToolNames => _inner.ToolNames;
+        public Task ConnectAsync(AppSettings settings, CancellationToken cancellationToken = default) => _inner.ConnectAsync(settings, cancellationToken);
+        public Task DisconnectAsync(CancellationToken cancellationToken = default) => _inner.DisconnectAsync(cancellationToken);
+        public Task<JsonNode?> CallAsync(string toolName, IReadOnlyDictionary<string, object?> arguments, CancellationToken cancellationToken = default) => _inner.CallAsync(toolName, arguments, cancellationToken);
+        public ValueTask DisposeAsync() => _inner.DisposeAsync();
+    }
+}

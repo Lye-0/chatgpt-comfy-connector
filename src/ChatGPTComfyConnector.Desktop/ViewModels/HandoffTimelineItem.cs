@@ -34,7 +34,9 @@ public sealed class HandoffTimelineItem : INotifyPropertyChanged
         string.IsNullOrWhiteSpace(Message.DisplayText) ? Message.Summary : Message.DisplayText);
     public string BodyTooltip => LimitTooltip(
         string.IsNullOrWhiteSpace(Message.DisplayText) ? Message.Summary : Message.DisplayText);
-    public string MetadataText => NormalizeForDisplay(Message.Metadata);
+    // Metadata is secondary context, but its two semantic rows must remain
+    // visible: the workflow on the first row and Project / Chat on the second.
+    public string MetadataText => NormalizeMetadataForDisplay(Message.Metadata);
     public string Summary => Message.Summary;
     public string Payload => Message.Payload;
     public string StateLabel => Message.State.ToString().ToUpperInvariant();
@@ -68,6 +70,18 @@ public sealed class HandoffTimelineItem : INotifyPropertyChanged
             .Select(line => Regex.Replace(line.Trim(), "\\s+", " "))
             .Where(line => line.Length > 0);
         return string.Join(" ", lines).Trim();
+    }
+
+    private static string NormalizeMetadataForDisplay(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var normalized = value.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        var lines = normalized
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => Regex.Replace(line.Trim(), "\\s+", " "))
+            .Where(line => line.Length > 0)
+            .Take(2);
+        return string.Join(Environment.NewLine, lines);
     }
 
     private static string LimitTooltip(string? value)

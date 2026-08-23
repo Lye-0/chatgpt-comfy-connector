@@ -57,6 +57,30 @@ public enum HandoffTransportState
     Failed,
 }
 
+public enum CreationStage
+{
+    Context,
+    Idea,
+    ToChatGpt,
+    Command,
+    Apply,
+    Generate,
+    Output,
+    Review,
+}
+
+public enum CreationStageState
+{
+    NotReached,
+    Current,
+    WaitingUser,
+    InProgress,
+    Completed,
+    Error,
+    Cancelled,
+    Skipped,
+}
+
 public sealed class AppSettings : INotifyPropertyChanged
 {
     private string _portableRoot = string.Empty;
@@ -278,7 +302,7 @@ public sealed class LocalProjectContext
 
 public sealed class LocalContextCatalog
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
     public List<LocalProjectContext> Projects { get; set; } = [];
 }
 
@@ -292,6 +316,25 @@ public sealed class HandoffMessage
     public string Summary { get; set; } = string.Empty;
     public string Payload { get; set; } = string.Empty;
     public int? IterationNumber { get; set; }
+}
+
+public sealed class CreationStageStatus
+{
+    public CreationStage Stage { get; set; }
+    public CreationStageState State { get; set; } = CreationStageState.NotReached;
+    public string Detail { get; set; } = string.Empty;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class CreationPipelineSnapshot
+{
+    public int Version { get; set; } = 1;
+    public int IterationNumber { get; set; }
+    public bool ContextBound { get; set; }
+    public bool MaximumIterationSafetyStop { get; set; }
+    public string? SentIdeaSnapshot { get; set; }
+    public string? AcceptedCommandAction { get; set; }
+    public List<CreationStageStatus> Stages { get; set; } = [];
 }
 
 public sealed class SessionIteration : INotifyPropertyChanged
@@ -359,6 +402,7 @@ public sealed class CreationSession
     public SessionStatus Status { get; set; } = SessionStatus.New;
     public List<SessionIteration> Iterations { get; set; } = [];
     public List<HandoffMessage> HandoffMessages { get; set; } = [];
+    public CreationPipelineSnapshot Pipeline { get; set; } = new();
     public string? LastError { get; set; }
     public string? PauseReason { get; set; }
     public string? CompletionReason { get; set; }

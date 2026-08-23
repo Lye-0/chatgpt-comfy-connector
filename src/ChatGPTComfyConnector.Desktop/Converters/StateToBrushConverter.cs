@@ -17,11 +17,11 @@ public sealed class StateToBrushConverter : IValueConverter
         var state = value?.ToString()?.Trim().ToUpperInvariant() ?? string.Empty;
         var resourceKey = state switch
         {
-            "CONNECTED" or "ONLINE" or "READY" or "DONE" or "SUCCESS" or "COMPLETE" => "SuccessBrush",
-            "PROCESSING" or "NOW" => "AccentStrongBrush",
-            "CONNECTING" or "WAITING" or "WARNING" or "ATTENTION" => "WarningBrush",
+            "CONNECTED" or "ONLINE" or "READY" or "DONE" or "SUCCESS" or "COMPLETE" or "COMPLETED" => "SuccessBrush",
+            "PROCESSING" or "NOW" or "CURRENT" or "INPROGRESS" => "AccentStrongBrush",
+            "CONNECTING" or "WAITING" or "WAITINGUSER" or "WARNING" or "ATTENTION" => "WarningBrush",
             "ERROR" or "FAILED" => "DangerBrush",
-            "DISCONNECTED" or "STOPPED" or "UNKNOWN" or "—" or "-" => "MutedTextBrush",
+            "DISCONNECTED" or "STOPPED" or "UNKNOWN" or "NOTREACHED" or "CANCELLED" or "SKIPPED" or "—" or "-" => "MutedTextBrush",
             _ => "LineStrongBrush",
         };
 

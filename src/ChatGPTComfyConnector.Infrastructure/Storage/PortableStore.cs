@@ -68,7 +68,7 @@ public sealed class PortableStore : IPortableStore
         if (!File.Exists(source)) throw new FileNotFoundException("バックアップ対象のWorkflowが見つかりません。", source);
         var folder = GetBackupFolder(workflow);
         Directory.CreateDirectory(folder);
-        var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmssfff");
+        var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmssfffffff");
         var destination = Path.Combine(folder, $"{stamp}-{SanitizeFileName(reason)}.json");
         await using (var input = File.OpenRead(source))
         await using (var output = File.Create(destination))
@@ -76,7 +76,7 @@ public sealed class PortableStore : IPortableStore
             await input.CopyToAsync(output, cancellationToken);
         }
 
-        var backups = Directory.EnumerateFiles(folder, "*.json").OrderByDescending(File.GetLastWriteTimeUtc).ToArray();
+        var backups = Directory.EnumerateFiles(folder, "*.json").OrderByDescending(Path.GetFileName, StringComparer.Ordinal).ToArray();
         foreach (var old in backups.Skip(3)) File.Delete(old);
         return destination;
     }
@@ -86,7 +86,7 @@ public sealed class PortableStore : IPortableStore
         cancellationToken.ThrowIfCancellationRequested();
         var folder = GetBackupFolder(workflow);
         IReadOnlyList<string> result = Directory.Exists(folder)
-            ? Directory.EnumerateFiles(folder, "*.json").OrderByDescending(File.GetLastWriteTimeUtc).ToArray()
+            ? Directory.EnumerateFiles(folder, "*.json").OrderByDescending(Path.GetFileName, StringComparer.Ordinal).ToArray()
             : [];
         return Task.FromResult(result);
     }

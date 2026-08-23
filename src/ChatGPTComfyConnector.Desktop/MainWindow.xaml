@@ -89,8 +89,9 @@
         <DataTemplate x:Key="PipelineStageTemplate">
             <StackPanel Orientation="Horizontal"
                         VerticalAlignment="Center"
-                        AutomationProperties.Name="{Binding Label}">
-                <StackPanel Width="84"
+                        AutomationProperties.Name="{Binding Label}"
+                        ToolTip="{Binding Description}">
+                <StackPanel Width="72"
                             HorizontalAlignment="Center">
                     <Grid x:Name="PipelineNode"
                           Width="28"
@@ -119,7 +120,7 @@
                                HorizontalAlignment="Center"
                                Margin="0,2,0,0" />
                 </StackPanel>
-                <Border Width="62"
+                <Border Width="26"
                         Height="2"
                         Background="{Binding State, Converter={StaticResource StateToBrush}}"
                         Opacity="0.68"
@@ -137,6 +138,8 @@
                                               Opacity="0.72" />
                         </Setter.Value>
                     </Setter>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsInProgress}" Value="True">
                     <DataTrigger.EnterActions>
                         <BeginStoryboard>
                             <Storyboard>
@@ -784,7 +787,10 @@
                             <TextBlock Text="CHATGPT CONTEXT" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="SemiBold" />
                             <TextBlock Text="制作開始前の設定" FontSize="14" FontWeight="SemiBold" Margin="0,3,0,8" />
                             <TextBlock Text="Project" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
-                            <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" DisplayMemberPath="DisplayName" Margin="0,3,0,5" ToolTip="ローカルProjectを選択、または新規作成" />
+                            <Grid Margin="0,3,0,5">
+                                <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" DisplayMemberPath="DisplayName" ToolTip="ローカルProjectを選択、または新規作成" />
+                                <TextBlock Text="{Binding ProjectPlaceholderText}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="10,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False" />
+                            </Grid>
                             <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsProjectCreateVisible, Converter={StaticResource BoolToVisibility}}">
                                 <StackPanel>
                                     <TextBox Text="{Binding NewProjectName, UpdateSourceTrigger=PropertyChanged}" ToolTip="新しいProject名" />
@@ -796,7 +802,10 @@
                                 </StackPanel>
                             </Border>
                             <TextBlock Text="Chat" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
-                            <ComboBox ItemsSource="{Binding ChatOptions}" SelectedItem="{Binding SelectedChat}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanCreateChat}" Margin="0,3,0,5" ToolTip="選択したProject内のChat" />
+                            <Grid Margin="0,3,0,5">
+                                <ComboBox ItemsSource="{Binding ChatOptions}" SelectedItem="{Binding SelectedChat}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanCreateChat}" ToolTip="選択したProject内のChat" />
+                                <TextBlock Text="{Binding ChatPlaceholderText}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="10,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False" />
+                            </Grid>
                             <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsChatCreateVisible, Converter={StaticResource BoolToVisibility}}">
                                 <StackPanel>
                                     <TextBox Text="{Binding NewChatName, UpdateSourceTrigger=PropertyChanged}" ToolTip="新しいChat名" />
@@ -812,7 +821,8 @@
                                 <TextBlock Text="Maximum Iterations" Foreground="{StaticResource MutedTextBrush}" FontSize="9" VerticalAlignment="Center" />
                                 <TextBox Grid.Column="1" Text="{Binding SessionMaximumIterations, UpdateSourceTrigger=PropertyChanged}" HorizontalContentAlignment="Center" Padding="6,4" ToolTip="1〜1000" />
                             </Grid>
-                            <Button Content="新しい制作を開始" Click="NewSession_Click" IsEnabled="{Binding CanStartNewCreation}" Background="{StaticResource AccentBrush}" Foreground="#071117" FontWeight="SemiBold" Margin="0" ToolTip="Workflow・Project・Chatを確定して制作セッションを開始" />
+                            <TextBlock Text="{Binding ContextReadinessText}" Foreground="{StaticResource MutedTextBrush}" FontSize="8" LineHeight="12" Margin="0,0,0,6" ToolTip="CONTEXTの準備状況" />
+                            <Button Content="新しい制作を開始" Click="NewSession_Click" IsEnabled="{Binding CanStartNewCreation}" Background="{StaticResource AccentBrush}" Foreground="#071117" FontWeight="SemiBold" Margin="0" ToolTip="{Binding ContextReadinessText}" />
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -1120,7 +1130,7 @@
                                 </Border>
                             </Grid>
 
-                            <Grid Grid.Row="2">
+                            <Grid Grid.Row="2" Visibility="{Binding HasIterationSafetyStop, Converter={StaticResource InverseBoolToVisibility}}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
@@ -1150,6 +1160,19 @@
                                             Margin="0" />
                                 </WrapPanel>
                             </Grid>
+                            <Border Grid.Row="2" Background="#2A2113" BorderBrush="{StaticResource WarningBrush}" BorderThickness="1" CornerRadius="8" Padding="9" Visibility="{Binding HasIterationSafetyStop, Converter={StaticResource BoolToVisibility}}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="最大反復回数に達しました" Foreground="{StaticResource WarningBrush}" FontSize="11" FontWeight="SemiBold" />
+                                        <TextBlock Text="自動では次Iterationへ進みません。続行または制作終了を選択してください。" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                        <Button Content="続行" Click="ContinueIteration_Click" Padding="10,5" />
+                                        <Button Content="この制作を終了" Click="EndIteration_Click" Padding="10,5" Margin="0" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
                         </Grid>
                     </Border>
                 </Grid>

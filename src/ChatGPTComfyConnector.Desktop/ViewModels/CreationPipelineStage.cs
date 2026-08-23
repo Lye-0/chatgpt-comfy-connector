@@ -1,9 +1,7 @@
 namespace ChatGPTComfyConnector.Desktop.ViewModels;
 
 /// <summary>
-/// A presentation-only snapshot of one stage in the creation loop.
-/// The underlying workflow/session models remain unchanged; this model keeps
-/// the visual pipeline easy to extend without coupling it to WPF controls.
+/// Presentation projection of the persisted Core pipeline state.
 /// </summary>
 public sealed record CreationPipelineStage(
     int Number,
@@ -16,13 +14,16 @@ public sealed record CreationPipelineStage(
 {
     public string StateSymbol => State switch
     {
-        "DONE" or "COMPLETE" => "✓",
-        "ERROR" => "!",
-        "WAITING" or "ATTENTION" => "!",
-        "NOW" => "●",
+        "COMPLETED" => "✓",
+        "ERROR" => "×",
+        "WAITINGUSER" => "!",
+        "INPROGRESS" => "◉",
+        "CURRENT" => "●",
+        "CANCELLED" or "SKIPPED" => "—",
         _ => "○",
     };
 
-    public bool IsCurrent => State == "NOW";
-    public bool IsCompleted => State is "DONE" or "COMPLETE";
+    public bool IsCurrent => State is "CURRENT" or "INPROGRESS";
+    public bool IsInProgress => State == "INPROGRESS";
+    public bool IsCompleted => State == "COMPLETED";
 }

@@ -94,7 +94,21 @@ public partial class MainWindow : Window
             if (!ViewModel.IsWorkflowRenameVisible) WorkflowTree.Focus();
         }
     }
-    private async void NewSession_Click(object sender, RoutedEventArgs e) => await Run("新しい制作", ViewModel.StartNewCreationAsync);
+    private async void NewSession_Click(object sender, RoutedEventArgs e)
+    {
+        if (!ViewModel.HasPendingContextChange)
+        {
+            await Run("新しい制作", ViewModel.StartNewCreationAsync);
+            return;
+        }
+        var answer = MessageBox.Show(
+            "現在の制作セッションと異なるContextが選択されています。\n\nYes: 現在のセッションへ反映\nNo: 新しい制作として開始\nCancel: 変更しない",
+            "制作Contextの変更",
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Question);
+        if (answer == MessageBoxResult.Yes) await Run("Context変更", ViewModel.ApplySelectedContextToCurrentSessionAsync);
+        else if (answer == MessageBoxResult.No) await Run("新しい制作", ViewModel.StartNewCreationAsync);
+    }
     private async void CreateProject_Click(object sender, RoutedEventArgs e) => await Run("Project作成", ViewModel.CreateProjectAsync);
     private void CancelProjectCreation_Click(object sender, RoutedEventArgs e) => ViewModel.CancelProjectCreation();
     private async void CreateChat_Click(object sender, RoutedEventArgs e) => await Run("Chat作成", ViewModel.CreateChatAsync);
@@ -108,6 +122,7 @@ public partial class MainWindow : Window
         await Run("ChatGPTへ送信", async () =>
         {
             Clipboard.SetText(await ViewModel.PrepareBootstrapHandoffAsync());
+            await ViewModel.ConfirmBootstrapCopiedAsync(Clipboard.GetText());
             ViewModel.StatusMessage = "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。";
         });
     }
@@ -117,6 +132,8 @@ public partial class MainWindow : Window
         Clipboard.SetText(item.Payload);
         await ViewModel.MarkHandoffCopiedAsync(item);
     }
+    private async void ContinueIteration_Click(object sender, RoutedEventArgs e) => await Run("Iteration続行", ViewModel.ContinueBeyondIterationLimitAsync);
+    private async void EndIteration_Click(object sender, RoutedEventArgs e) => await Run("制作終了", ViewModel.EndAtIterationLimitAsync);
     private void CopyResult_Click(object sender, RoutedEventArgs e) { Clipboard.SetText(ViewModel.BuildResultContext()); ViewModel.StatusMessage = "生成結果をChatGPT用にコピーしました。必要な画像・動画を手動で添付してください。"; }
     private void OpenOutput_Click(object sender, RoutedEventArgs e)
     {

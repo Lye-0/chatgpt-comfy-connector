@@ -2,7 +2,9 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using ChatGPTComfyConnector.Core.Models;
 using ChatGPTComfyConnector.Desktop.ViewModels;
@@ -26,6 +28,7 @@ public partial class MainWindow : Window
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        HideSystemConnectionSeparators();
         _comfyUiStatusTimer.Start();
         await ViewModel.InitializeAsync();
     }
@@ -221,6 +224,42 @@ public partial class MainWindow : Window
             WorkflowRenameBox.Focus();
             WorkflowRenameBox.SelectAll();
         }));
+    }
+
+    private void HideSystemConnectionSeparators()
+    {
+        var systemConnection = FindVisualChild<Border>(this, static border =>
+            AutomationProperties.GetName(border) == "SYSTEM CONNECTION");
+        if (systemConnection is null) return;
+        HideOnePixelBorders(systemConnection);
+    }
+
+    private static T? FindVisualChild<T>(DependencyObject root, Predicate<T> predicate) where T : DependencyObject
+    {
+        var childCount = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < childCount; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T typed && predicate(typed)) return typed;
+
+            var nested = FindVisualChild(child, predicate);
+            if (nested is not null) return nested;
+        }
+        return null;
+    }
+
+    private static void HideOnePixelBorders(DependencyObject root)
+    {
+        var childCount = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < childCount; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is Border border && Math.Abs(border.Height - 1d) < 0.01)
+            {
+                border.Visibility = Visibility.Collapsed;
+            }
+            HideOnePixelBorders(child);
+        }
     }
 
     private async Task Run(string title, Func<Task> operation)

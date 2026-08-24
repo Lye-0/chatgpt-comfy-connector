@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Shapes;
 using System.Windows.Threading;
 using ChatGPTComfyConnector.Core.Models;
 using ChatGPTComfyConnector.Desktop.ViewModels;
@@ -15,6 +16,7 @@ public partial class MainWindow : Window
 {
     private readonly DispatcherTimer _comfyUiStatusTimer = new() { Interval = TimeSpan.FromSeconds(5) };
     private bool _refreshingComfyUiStatus;
+    private bool _comfyUiStartPending;
     private bool _closeAfterDisconnect;
     private bool _disconnectingForClose;
     private MainViewModel ViewModel => (MainViewModel)DataContext;
@@ -23,6 +25,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = new MainViewModel(AppContext.BaseDirectory);
+        ViewModel.PropertyChanged += ViewModel_PropertyChanged;
         _comfyUiStatusTimer.Tick += ComfyUiStatusTimer_Tick;
     }
 
@@ -73,7 +76,30 @@ public partial class MainWindow : Window
     private void OpenWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.ShowWorkflowEditor();
     private void CloseWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.HideWorkflowEditor();
     private async void Connect_Click(object sender, RoutedEventArgs e) => await Run("MCP接続", ViewModel.ConnectAsync);
-    private async void StartComfy_Click(object sender, RoutedEventArgs e) => await Run("ComfyUI起動", ViewModel.StartComfyUiAsync);
+    private async void StartComfy_Click(object sender, RoutedEventArgs e)
+    {
+        _comfyUiStartPending = true;
+        ShowComfyUiStartingState();
+        try
+        {
+            await ViewModel.StartComfyUiAsync();
+            if (ViewModel.IsComfyUiReachable)
+            {
+                _comfyUiStartPending = false;
+                RestoreComfyUiStatusBindings();
+            }
+            else
+            {
+                ShowComfyUiStartingState();
+            }
+        }
+        catch (Exception ex)
+        {
+            _comfyUiStartPending = false;
+            RestoreComfyUiStatusBindings();
+            MessageBox.Show(ex.Message, "ComfyUI起動", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
     private void Refresh_Click(object sender, RoutedEventArgs e) => ViewModel.RefreshWorkflowTree();
     private void OpenWorkflowFolder_Click(object sender, RoutedEventArgs e) => OpenFolder(ViewModel.WorkflowRoot);
     private async void RetryWorkflow_Click(object sender, RoutedEventArgs e)
@@ -194,8 +220,31 @@ public partial class MainWindow : Window
 
     private void OpenLogs_Click(object sender, RoutedEventArgs e) => OpenFolder(Path.Combine(AppContext.BaseDirectory, "logs"));
 
+    private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (!_comfyUiStartPending || e.PropertyName is not (nameof(MainViewModel.ComfyUiSystemState) or nameof(MainViewModel.IsComfyUiReachable))) return;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            if (!_comfyUiStartPending) return;
+            if (ViewModel.IsComfyUiReachable)
+            {
+                _comfyUiStartPending = false;
+                RestoreComfyUiStatusBindings();
+            }
+            else
+            {
+                ShowComfyUiStartingState();
+            }
+        }));
+    }
+
     private async void ComfyUiStatusTimer_Tick(object? sender, EventArgs e)
     {
+        if (_comfyUiStartPending && ViewModel.IsComfyUiReachable)
+        {
+            _comfyUiStartPending = false;
+            RestoreComfyUiStatusBindings();
+        }
         if (_refreshingComfyUiStatus || !ViewModel.IsConnected || ViewModel.IsComfyUiReachable) return;
         _refreshingComfyUiStatus = true;
         try
@@ -204,10 +253,23 @@ public partial class MainWindow : Window
             // than through START COMFYUI. Keep the header from retaining an
             // old STOPPED value by retrying while the last known state is not
             // ready. Generate still performs its own immediate preflight.
-            await ViewModel.RefreshComfyUiStatusAsync();
+            var reachable = await ViewModel.RefreshComfyUiStatusAsync();
+            if (_comfyUiStartPending)
+            {
+                if (reachable)
+                {
+                    _comfyUiStartPending = false;
+                    RestoreComfyUiStatusBindings();
+                }
+                else
+                {
+                    ShowComfyUiStartingState();
+                }
+            }
         }
         catch
         {
+            if (_comfyUiStartPending) ShowComfyUiStartingState();
             // The next tick will retry. Connection failures are handled by the
             // ViewModel and should not surface as an unhandled async-void error.
         }
@@ -234,6 +296,30 @@ public partial class MainWindow : Window
         HideOnePixelBorders(systemConnection);
     }
 
+    private void ShowComfyUiStartingState()
+    {
+        var comfyUi = FindVisualChild<StackPanel>(this, static panel => AutomationProperties.GetName(panel) == "ComfyUI");
+        if (comfyUi is null) return;
+        var warningBrush = TryFindResource("WarningBrush") as Brush ?? Brushes.Goldenrod;
+        var lamp = FindVisualChild<Ellipse>(comfyUi, static _ => true);
+        if (lamp is not null) lamp.SetCurrentValue(Shape.FillProperty, warningBrush);
+        var statusText = FindVisualChildren<TextBlock>(comfyUi).LastOrDefault();
+        if (statusText is null) return;
+        statusText.SetCurrentValue(TextBlock.TextProperty, "STARTING");
+        statusText.SetCurrentValue(TextBlock.ForegroundProperty, warningBrush);
+    }
+
+    private void RestoreComfyUiStatusBindings()
+    {
+        var comfyUi = FindVisualChild<StackPanel>(this, static panel => AutomationProperties.GetName(panel) == "ComfyUI");
+        if (comfyUi is null) return;
+        var lamp = FindVisualChild<Ellipse>(comfyUi, static _ => true);
+        lamp?.GetBindingExpression(Shape.FillProperty)?.UpdateTarget();
+        var statusText = FindVisualChildren<TextBlock>(comfyUi).LastOrDefault();
+        statusText?.GetBindingExpression(TextBlock.TextProperty)?.UpdateTarget();
+        statusText?.GetBindingExpression(TextBlock.ForegroundProperty)?.UpdateTarget();
+    }
+
     private static T? FindVisualChild<T>(DependencyObject root, Predicate<T> predicate) where T : DependencyObject
     {
         var childCount = VisualTreeHelper.GetChildrenCount(root);
@@ -246,6 +332,17 @@ public partial class MainWindow : Window
             if (nested is not null) return nested;
         }
         return null;
+    }
+
+    private static IEnumerable<T> FindVisualChildren<T>(DependencyObject root) where T : DependencyObject
+    {
+        var childCount = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < childCount; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T typed) yield return typed;
+            foreach (var nested in FindVisualChildren<T>(child)) yield return nested;
+        }
     }
 
     private static void HideOnePixelBorders(DependencyObject root)

@@ -75,10 +75,23 @@ is accepted only from a Review state after a successful output; it preserves all
 iterations and outputs. Reaching the iteration limit creates an explicit user
 decision stop rather than silently starting another iteration.
 
-Loading a persisted session restores its history but does not implicitly activate it
-as a new creation. `StartNewCreationAsync` creates a new session and binds its
-context; `ResumeSessionAsync` explicitly reactivates a completed, paused, stopped,
-or errored session without deleting its previous iterations.
+The initial `SEND TO CHATGPT` action is governed by the Core
+`CreationWorkspacePolicy` and is exposed by the ViewModel as
+`CanSendToChatGpt`. It requires an explicitly activated, Context-bound session,
+loaded slot schema, connected MCP, a non-empty idea, an IDEA stage that is still
+current (or waiting for user input), and no active Job. ComfyUI runtime readiness
+is intentionally excluded because the initial handoff does not execute a
+ComfyUI-dependent operation.
+
+At startup, persisted sessions are loaded only as internal data for provider
+bindings and future recovery. They are not expanded into the visible Workspace:
+the current session is a fresh, non-persisted draft with an empty idea, command,
+handoff timeline, output, and iteration history, and the pipeline starts at
+Connect. `StartNewCreationAsync` is the explicit activation boundary: it creates
+and persists a new session only after the MCP, Workflow/slot schema, Project,
+Chat, and maximum-iteration prerequisites pass. `ResumeSessionAsync` remains the
+explicit reactivation path for an already active session and is not an automatic
+startup recovery mechanism.
 
 Connection loss never resets the Session, Workflow selection, Project / Chat, original
 idea, iterations, or outputs. It moves Connect back to `WaitingUser` or `Error` and

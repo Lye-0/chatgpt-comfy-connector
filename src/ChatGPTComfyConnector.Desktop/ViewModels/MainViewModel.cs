@@ -109,7 +109,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<ProjectContextOption> ProjectOptions { get; }
     public ObservableCollection<ChatContextOption> ChatOptions { get; }
     public ObservableCollection<HandoffTimelineItem> HandoffItems { get; }
-    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); NotifyPipelineStateChanged(); } }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyPipelineStateChanged(); } }
     public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); NotifyContextSelectionChanged(); } }
     public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
@@ -118,7 +118,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsWorkflowEditorVisible { get => _isWorkflowEditorVisible; private set { _isWorkflowEditorVisible = value; OnPropertyChanged(); } }
     public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
-    public SlotDiscoveryState SlotDiscoveryState { get => _slotDiscoveryState; private set { _slotDiscoveryState = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); } }
+    public SlotDiscoveryState SlotDiscoveryState { get => _slotDiscoveryState; private set { _slotDiscoveryState = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CanStartNewCreation)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyViewStateChanged(); } }
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
     public bool IsWorkflowRenameVisible { get => _isWorkflowRenameVisible; private set { _isWorkflowRenameVisible = value; OnPropertyChanged(); } }
     public string WorkflowRenameText { get => _workflowRenameText; set { _workflowRenameText = value; OnPropertyChanged(); } }
@@ -302,7 +302,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasProjectValidationMessage => !string.IsNullOrWhiteSpace(ProjectValidationMessage);
     public bool HasChatValidationMessage => !string.IsNullOrWhiteSpace(ChatValidationMessage);
     public bool CanStartNewCreation => IsCreationConnectionReady && SlotDiscoveryState == SlotDiscoveryState.Loaded && HasSelectedWorkflow && HasSelectedProject && HasSelectedChat && SessionMaximumIterations is >= 1 and <= 1000 && !IsJobActive;
-    public bool CanResumeSession => IsCreationConnectionReady && CurrentSession?.Status is SessionStatus.Completed or SessionStatus.Paused or SessionStatus.Stopped or SessionStatus.Error;
+    public bool CanResumeSession => _isCurrentSessionActivated && IsCreationConnectionReady && CurrentSession?.Status is SessionStatus.Completed or SessionStatus.Paused or SessionStatus.Stopped or SessionStatus.Error;
+    public bool IsIdeaInputEnabled => _isCurrentSessionActivated && CurrentSession?.Pipeline.ContextBound == true && !IsJobActive;
+    public string IdeaInputHint => IsIdeaInputEnabled ? "制作アイデアを入力し、SEND TO CHATGPTで渡します。" : "左側の設定から新しい制作を開始してください。";
+    public bool CanSendToChatGpt => CreationWorkspacePolicy.CanSendToChatGpt(CurrentSession, _isCurrentSessionActivated, IsConnected, SlotDiscoveryState, Idea, IsJobActive);
+    public string SendToChatGptHint
+        => CanSendToChatGpt
+            ? "制作コンテキストをChatGPTへコピー"
+            : !_isCurrentSessionActivated
+                ? "左側の設定から新しい制作を開始してください。"
+                : !IsConnected
+                    ? "MCP接続を確立してください。"
+                    : CurrentSession?.Pipeline.ContextBound != true
+                        ? "制作ContextをSessionへBindingしてください。"
+                        : SlotDiscoveryState != SlotDiscoveryState.Loaded
+                            ? "WorkflowのSlot Schema取得を完了してください。"
+                            : string.IsNullOrWhiteSpace(Idea)
+                                ? "制作アイデアを入力してください。"
+                                : IsJobActive
+                                    ? "生成中は送信できません。"
+                                    : "IDEA Stageを確認してください。";
     public bool CanApplyCommand => IsCreationConnectionReady && _isCurrentSessionActivated && _pendingValidation is { IsValid: true, Command: not null } command && command.Command.Action == "generate" && !HasIterationSafetyStop;
     public bool ShowWorkflowEmptyState => !HasSelectedWorkflow;
     public bool ShowDisconnectedState => HasSelectedWorkflow && !IsConnected;
@@ -350,27 +369,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
         IsSetupVisible = saved is null || !Settings.IsConfigured;
         Sessions.Clear();
         foreach (var session in await _store.LoadSessionsAsync()) Sessions.Add(session);
-        CurrentSession = Sessions.FirstOrDefault() ?? NewSessionInternal();
-        // Loading a persisted session is not the same as starting a new creation.
-        // Keep its history available, while the setup screen remains at CONTEXT
-        // until the user explicitly activates the session.
+        // Persisted sessions are loaded for internal provider bindings and future
+        // recovery, but never become the active Workspace on startup.  The
+        // visible Workspace always starts from a fresh, non-persisted session.
         _isCurrentSessionActivated = false;
-        NotifyPipelineStateChanged();
-        CreationPipelineStateMachine.EnsureInitialized(CurrentSession);
+        CurrentSession = NewSessionInternal();
         await InitializeContextProviderAsync();
-        SessionMaximumIterations = CurrentSession.MaximumIterations;
-        Idea = CurrentSession.OriginalIdea;
+        SessionMaximumIterations = Settings.MaximumIterations is >= 1 and <= 1000 ? Settings.MaximumIterations : 10;
+        Idea = string.Empty;
+        CommandText = string.Empty;
+        _pendingValidation = null;
         Iterations.Clear();
-        foreach (var iteration in CurrentSession.Iterations) Iterations.Add(iteration);
         LatestOutputs.Clear();
-        foreach (var output in CurrentSession.Iterations.LastOrDefault()?.Outputs ?? []) LatestOutputs.Add(output);
         RebuildHistoryItems();
-        if (RebuildHandoffItems()) await _store.SaveSessionAsync(CurrentSession);
+        HandoffItems.Clear();
+        OnPropertyChanged(nameof(HasLatestOutputs));
+        OnPropertyChanged(nameof(HasHandoffItems));
         RefreshWorkflowTree();
         await RefreshComfyUiStatusAsync();
         StatusMessage = IsSetupVisible ? "接続先を確認して保存してください。" : "準備完了。ComfyUIの状態を確認できます。";
         OnPropertyChanged(nameof(HasIterations));
-        OnPropertyChanged(nameof(HasLatestOutputs));
         NotifyPipelineStateChanged();
         NotifyConnectionStateChanged();
     }
@@ -448,7 +466,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             SynchronizePipelineConnectionGate(ex.Message);
             StatusMessage = $"MCP接続に失敗しました: {ex.Message}";
             await _store.LogAsync("connection", StatusMessage, ex);
-            if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
+            await SaveActiveSessionAsync();
         }
         finally { IsBusy = false; }
     }
@@ -461,7 +479,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         SynchronizePipelineConnectionGate();
         SlotDiscoveryState = SlotDiscoveryState.NotLoaded;
         StatusMessage = "MCPを切断しました。ComfyUIは終了していません。";
-        if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
     }
 
     public void RefreshWorkflowTree()
@@ -559,13 +577,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (trackApply) CreationPipelineStateMachine.ApplyCompleted(CurrentSession!);
             foreach (var backup in await _store.ListWorkflowBackupsAsync(SelectedWorkflow)) { if (!Backups.Contains(backup)) Backups.Add(backup); }
             StatusMessage = "Workflowをbackup → apply → validateしました。";
-            if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
+            await SaveActiveSessionAsync();
         }
         catch (Exception ex)
         {
             MarkConnectionFailureIfTransportClosed(ex);
             if (trackApply) CreationPipelineStateMachine.ApplyFailed(CurrentSession!, ex.Message);
-            if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
+            await SaveActiveSessionAsync();
             throw;
         }
         finally { IsBusy = false; }
@@ -627,7 +645,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (CurrentSession?.BoundWorkflow?.RelativePath.Equals(SelectedWorkflow.RelativePath, StringComparison.OrdinalIgnoreCase) == true) CurrentSession.BoundWorkflow = newIdentity;
         RefreshWorkflowTree();
         await SelectWorkflowAsync(newIdentity.RelativePath);
-        if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
         StatusMessage = $"Workflowの名前を変更しました: {safeName}";
     }
 
@@ -706,7 +724,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task ApplySelectedContextToCurrentSessionAsync()
     {
         ValidateNewCreationSetup();
-        if (CurrentSession is null) throw new InvalidOperationException("現在の制作セッションがありません。");
+        if (!_isCurrentSessionActivated || CurrentSession is null) throw new InvalidOperationException("先に新しい制作を開始してください。");
         CurrentSession.ProjectLabel = SelectedProject!.DisplayName;
         CurrentSession.ChatLabel = SelectedChat!.DisplayName;
         CurrentSession.ProjectId = SelectedProject.ExternalId;
@@ -718,7 +736,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         SynchronizePipelineConnectionGate(CurrentSession);
         CreationPipelineStateMachine.BindContext(CurrentSession);
         _isCurrentSessionActivated = true;
-        await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
         OnPropertyChanged(nameof(CurrentSessionContextText));
         OnPropertyChanged(nameof(SessionTitle));
         OnPropertyChanged(nameof(SessionProgressText));
@@ -729,11 +747,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task SaveSessionAsync()
     {
-        if (CurrentSession is null) return;
+        if (!_isCurrentSessionActivated || CurrentSession is null) return;
         CurrentSession.OriginalIdea = Idea;
-        await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
         StatusMessage = "制作セッションを保存しました。";
     }
+
+    private Task SaveActiveSessionAsync()
+        => !_isCurrentSessionActivated || CurrentSession is null
+            ? Task.CompletedTask
+            : _store.SaveSessionAsync(CurrentSession);
 
     public async Task GenerateAsync(bool applyFirst = true)
     {
@@ -749,7 +772,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CreationPipelineStateMachine.BeginGenerate(CurrentSession);
         var prompt = FindPrompt(changes) ?? Idea;
         var iteration = CurrentSession.StartIteration(prompt, changes);
-        await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
         OnPropertyChanged(nameof(SessionStatusText));
         OnPropertyChanged(nameof(SessionProgressText));
         Iterations.Add(iteration);
@@ -767,7 +790,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             iteration.JobId = CurrentJob.JobId;
             iteration.Status = CurrentJob.Status;
             CreationPipelineStateMachine.JobStatusChanged(CurrentSession, CurrentJob.Status, CurrentJob.Message);
-            await _store.SaveSessionAsync(CurrentSession);
+            await SaveActiveSessionAsync();
             StatusMessage = $"Job {CurrentJob.JobId} を投入しました。進捗率は推測せず状態だけ表示します。";
             await MonitorJobAsync(iteration);
         }
@@ -783,7 +806,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             else
                 CreationPipelineStateMachine.OutputFailed(CurrentSession, ex.Message);
             CurrentJob = null;
-            await _store.SaveSessionAsync(CurrentSession);
+            await SaveActiveSessionAsync();
             RefreshHistoryFlags();
             NotifySelectedPreviewChanged();
             OnPropertyChanged(nameof(SessionStatusText));
@@ -807,7 +830,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             var detail = _pendingValidation.DiagnosticText;
             CreationPipelineStateMachine.CommandValidationFailed(CurrentSession, detail);
             await _store.LogAsync("protocol.validation", detail);
-            await _store.SaveSessionAsync(CurrentSession);
+            await SaveActiveSessionAsync();
             OnPropertyChanged(nameof(CanApplyCommand)); StatusMessage = _pendingValidation.UserMessage; NotifyPipelineStateChanged(); return;
         }
         OnPropertyChanged(nameof(CanApplyCommand));
@@ -833,7 +856,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (!_pendingValidation.Errors.Contains(ex.Message)) _pendingValidation.Errors.Add(ex.Message);
             StatusMessage = ex.Message;
-            await _store.SaveSessionAsync(CurrentSession);
+            await SaveActiveSessionAsync();
         }
         OnPropertyChanged(nameof(CanApplyCommand));
         NotifyPipelineStateChanged();
@@ -852,6 +875,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task<string> PrepareBootstrapHandoffAsync()
     {
+        EnsureSendToChatGptAllowed();
         if (CurrentSession is null || CurrentSession.BoundWorkflow is null) throw new InvalidOperationException("左の設定から新しい制作を開始してください。");
         if (SelectedWorkflow is null || !string.Equals(CurrentSession.BoundWorkflow.RelativePath, SelectedWorkflow.RelativePath, StringComparison.OrdinalIgnoreCase))
         {
@@ -875,7 +899,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var payload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, CurrentSession.PendingHandoff);
         var message = CurrentSession.HandoffMessages.LastOrDefault(item => item.Direction == HandoffDirection.ComfyToChatGpt && item.IterationNumber == iteration.Number);
         if (message is not null) message.Payload = payload;
-        await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
         return payload;
     }
 
@@ -894,6 +918,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task ConfirmBootstrapCopiedAsync(string payload)
     {
+        EnsureSendToChatGptAllowed();
         if (CurrentSession is null) return;
         CreationPipelineStateMachine.BootstrapCopied(CurrentSession, Idea);
         await RecordHandoffAsync(new HandoffMessage
@@ -916,7 +941,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (CurrentSession is not null)
         {
             if (item.Message.IterationNumber is not null) CreationPipelineStateMachine.ReviewCopied(CurrentSession);
-            await _store.SaveSessionAsync(CurrentSession);
+            await SaveActiveSessionAsync();
             NotifyPipelineStateChanged();
         }
         StatusMessage = item.IsChatGptToComfy ? "Connector用Commandをコピーしました。" : "ChatGPTへ渡す内容をコピーしました。";
@@ -930,18 +955,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(SessionStatusText));
         NotifyPipelineStateChanged();
         StatusMessage = "セッションをCOMPLETEDにしました。履歴と出力は保持されています。必要ならRESUMEできます。";
-        await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
     }
 
     public async Task ResumeSessionAsync()
     {
-        if (CurrentSession is null) return;
+        if (!_isCurrentSessionActivated || CurrentSession is null)
+        {
+            throw new InvalidOperationException("再開する制作Sessionを明示的に選択してください。");
+        }
         SynchronizePipelineConnectionGate(CurrentSession);
         CreationPipelineStateMachine.RequireConnection(CurrentSession);
         _isCurrentSessionActivated = true;
         CreationPipelineStateMachine.Resume(CurrentSession);
         RefreshHistoryFlags();
-        await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
         OnPropertyChanged(nameof(SessionStatusText));
         NotifyPipelineStateChanged();
         StatusMessage = "セッションを再開しました。";
@@ -952,7 +980,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (CurrentSession is null) return;
         CreationPipelineStateMachine.ContinueBeyondLimit(CurrentSession);
         SessionMaximumIterations = CurrentSession.MaximumIterations;
-        await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
         OnPropertyChanged(nameof(SessionProgressText));
         NotifyPipelineStateChanged();
         StatusMessage = $"Maximum Iterationsを{CurrentSession.MaximumIterations}へ拡張しました。次のIterationへ進めます。";
@@ -974,7 +1002,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (CurrentSession is not null) CreationPipelineStateMachine.JobStatusChanged(CurrentSession, JobStatus.Cancelled, "ユーザーが生成をキャンセル");
         RefreshHistoryFlags();
         NotifySelectedPreviewChanged();
-        if (CurrentSession is not null) await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
         StatusMessage = "Connectorが投入したJobへCANCELを要求しました。";
         OnPropertyChanged(nameof(JobStatusText));
         OnPropertyChanged(nameof(JobStatusDetailText));
@@ -1043,7 +1071,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     iteration.Error = ex.Message;
                     CreationPipelineStateMachine.OutputFailed(CurrentSession!, ex.Message);
                     StatusMessage = $"Jobは完了しましたがOutput取得に失敗しました: {ex.Message}";
-                    await _store.SaveSessionAsync(CurrentSession!);
+                    await SaveActiveSessionAsync();
                     await _store.LogAsync("output", StatusMessage, ex);
                     NotifyPipelineStateChanged();
                     break;
@@ -1052,7 +1080,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 if (CreationPipelineStateMachine.Get(CurrentSession!, CreationStage.Output).State == CreationStageState.Error)
                 {
                     StatusMessage = CreationPipelineStateMachine.Get(CurrentSession!, CreationStage.Output).Detail;
-                    await _store.SaveSessionAsync(CurrentSession!);
+                    await SaveActiveSessionAsync();
                     RefreshHistoryFlags();
                     NotifySelectedPreviewChanged();
                     NotifyPipelineStateChanged();
@@ -1090,7 +1118,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 RefreshHistoryFlags();
                 NotifySelectedPreviewChanged();
                 StatusMessage = $"Job {CurrentJob.Status}。";
-                await _store.SaveSessionAsync(CurrentSession!);
+                await SaveActiveSessionAsync();
                 NotifyPipelineStateChanged();
                 break;
             }
@@ -1099,9 +1127,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private CreationSession NewSessionInternal()
     {
-        var session = new CreationSession { Title = "新しい制作", MaximumIterations = Settings.MaximumIterations };
+        var maximumIterations = Settings.MaximumIterations is >= 1 and <= 1000 ? Settings.MaximumIterations : 10;
+        var session = new CreationSession { Title = "新しい制作", MaximumIterations = maximumIterations };
         CreationPipelineStateMachine.PrepareContext(session);
-        Sessions.Add(session);
         return session;
     }
 
@@ -1117,7 +1145,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 var before = CurrentSession.ToProjectChatBindingSnapshot();
                 BindSessionContext(CurrentSession, project, chat);
                 var after = CurrentSession.ToProjectChatBindingSnapshot();
-                if (!BindingEquals(before, after)) await _store.SaveSessionAsync(CurrentSession);
+                if (!BindingEquals(before, after)) await SaveActiveSessionAsync();
             }
         }
 
@@ -1292,7 +1320,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             HandoffItems.Add(new HandoffTimelineItem(message));
             OnPropertyChanged(nameof(HasHandoffItems));
         }
-        await _store.SaveSessionAsync(CurrentSession);
+        await SaveActiveSessionAsync();
     }
 
     private static string BuildCommandTimelineSummary(ConnectorCommand command)
@@ -1522,6 +1550,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (SlotDiscoveryState != SlotDiscoveryState.Loaded) throw new InvalidOperationException("Workflow slot schemaが未取得です。Workflowを再選択して読み込んでください。");
     }
 
+    private void EnsureSendToChatGptAllowed()
+    {
+        if (!IsConnected) EnsureMcpConnectionReady();
+        if (!_isCurrentSessionActivated || CurrentSession is null)
+        {
+            throw new InvalidOperationException("左側の設定から新しい制作を開始してください。");
+        }
+        if (!CurrentSession.Pipeline.ContextBound || CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Context).State != CreationStageState.Completed)
+        {
+            throw new InvalidOperationException("制作ContextをSessionへBindingしてください。");
+        }
+        EnsureSlotSchemaAvailable();
+        if (IsJobActive) throw new InvalidOperationException("生成中はChatGPTへ送信できません。");
+        if (string.IsNullOrWhiteSpace(Idea)) throw new InvalidOperationException("制作アイデアを入力してください。");
+        var ideaState = CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Idea).State;
+        if (ideaState is not (CreationStageState.Current or CreationStageState.WaitingUser))
+        {
+            throw new InvalidOperationException("IDEA Stageを確認してからChatGPTへ送信してください。");
+        }
+    }
+
     private static string BuildPersistedResultPayload(CreationSession session, SessionIteration iteration)
     {
         session.PendingHandoff ??= PendingHandoffFactory.Create(session, [], "generate", "complete");
@@ -1551,6 +1600,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(IsCreationConnectionReady));
         OnPropertyChanged(nameof(CanStartNewCreation));
         OnPropertyChanged(nameof(CanResumeSession));
+        OnPropertyChanged(nameof(IsIdeaInputEnabled));
+        OnPropertyChanged(nameof(IdeaInputHint));
+        OnPropertyChanged(nameof(CanSendToChatGpt));
+        OnPropertyChanged(nameof(SendToChatGptHint));
         OnPropertyChanged(nameof(CanApplyCommand));
         OnPropertyChanged(nameof(CanRunWorkflow));
     }
@@ -1654,6 +1707,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CurrentIterationLabel));
         OnPropertyChanged(nameof(PipelineLoopText));
         OnPropertyChanged(nameof(HasIterationSafetyStop));
+        OnPropertyChanged(nameof(IsIdeaInputEnabled));
+        OnPropertyChanged(nameof(IdeaInputHint));
+        OnPropertyChanged(nameof(CanSendToChatGpt));
+        OnPropertyChanged(nameof(SendToChatGptHint));
         OnPropertyChanged(nameof(CanApplyCommand));
         OnPropertyChanged(nameof(CanRunWorkflow));
     }

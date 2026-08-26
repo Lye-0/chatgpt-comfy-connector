@@ -941,13 +941,22 @@
                                          TextWrapping="Wrap"
                                          Height="62"
                                          VerticalScrollBarVisibility="Auto"
+                                         IsEnabled="{Binding IsIdeaInputEnabled}"
                                          AutomationProperties.Name="制作アイデア入力"
-                                         ToolTip="作りたい映像のイメージ・雰囲気・目的を入力" />
+                                         ToolTip="{Binding IdeaInputHint}"
+                                         ToolTipService.ShowOnDisabled="True" />
+                                <TextBlock Text="{Binding IdeaInputHint}"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="10"
+                                           TextWrapping="Wrap"
+                                           Margin="0,5,0,0" />
                             </StackPanel>
                             <Button Grid.Column="1"
                                     Content="SEND TO CHATGPT"
                                     Click="CopyBootstrap_Click"
-                                    ToolTip="制作アイデア・Workflow・主要設定・slot情報をまとめてコピー"
+                                    IsEnabled="{Binding CanSendToChatGpt}"
+                                    ToolTip="{Binding SendToChatGptHint}"
+                                    ToolTipService.ShowOnDisabled="True"
                                     Background="{StaticResource AccentBrush}"
                                     Foreground="#071117"
                                     FontWeight="SemiBold"

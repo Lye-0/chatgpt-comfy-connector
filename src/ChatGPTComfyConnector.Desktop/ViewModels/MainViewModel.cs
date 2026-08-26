@@ -7,6 +7,7 @@ using System.Text.Json.Nodes;
 using ChatGPTComfyConnector.Core.Models;
 using ChatGPTComfyConnector.Core.Services;
 using ChatGPTComfyConnector.Infrastructure.Contexts;
+using ChatGPTComfyConnector.Infrastructure.Mcp;
 using ChatGPTComfyConnector.Infrastructure.Storage;
 using ChatGPTComfyConnector.Infrastructure.Workflows;
 
@@ -17,6 +18,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly PortableLayout _layout;
     private readonly PortableStore _store;
     private readonly ComfyMcpClientProxy _mcp;
+    private readonly IComfyUiHealthProbe _comfyUiHealthProbe;
     private readonly WorkflowCatalog _catalog;
     private readonly SemaphoreSlim _comfyUiStatusGate = new(1, 1);
     private CreationSession? _currentSession;
@@ -24,6 +26,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private JobSnapshot? _currentJob;
     private string _statusMessage = "初回セットアップを確認しています。";
     private ConnectionState _connectionState = ConnectionState.Disconnected;
+    private ComfyUiRuntimeState _comfyUiRuntimeState = ComfyUiRuntimeState.Unknown;
     private bool _isSetupVisible;
     private bool _isBusy;
     private bool _isSlotLoading;
@@ -56,12 +59,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // creation draft until the user explicitly starts or resumes it.
     private bool _isCurrentSessionActivated;
 
-    public MainViewModel(string applicationDirectory, IProjectChatProvider? contextProvider = null)
+    public MainViewModel(
+        string applicationDirectory,
+        IProjectChatProvider? contextProvider = null,
+        IComfyUiHealthProbe? comfyUiHealthProbe = null)
     {
         _layout = new PortableLayout(applicationDirectory);
         _store = new PortableStore(_layout);
         _contextProvider = contextProvider ?? new LocalProjectChatProvider(_store);
         _mcp = new ComfyMcpClientProxy(_store);
+        _comfyUiHealthProbe = comfyUiHealthProbe ?? new ComfyUiEndpointHealthProbe();
         _catalog = new WorkflowCatalog(_mcp, _store);
         Settings = new AppSettings
         {
@@ -229,24 +236,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsSystemProcessing => IsBusy || IsJobActive;
     public string ConnectorSystemState => IsSystemProcessing ? "PROCESSING" : "ONLINE";
     public string McpSystemState => IsSystemProcessing && IsConnected ? "PROCESSING" : ConnectionStateText;
-    public string ComfyUiSystemState => ConnectionState switch
+    public ComfyUiRuntimeState ComfyUiRuntimeState => _comfyUiRuntimeState;
+    public string ComfyUiSystemState => _comfyUiRuntimeState switch
     {
-        ConnectionState.Connecting => "CONNECTING",
-        ConnectionState.Error => "ERROR",
-        _ when IsJobActive => "PROCESSING",
-        ConnectionState.Connected when ReadServerInfoBoolean("running") == true => "READY",
-        ConnectionState.Connected when ReadServerInfoBoolean("running") == false => "STOPPED",
-        ConnectionState.Connected => "UNKNOWN",
-        ConnectionState.Stopped => "STOPPED",
-        _ => "DISCONNECTED",
+        ComfyUiRuntimeState.Starting => "STARTING",
+        ComfyUiRuntimeState.Ready => "READY",
+        ComfyUiRuntimeState.Stopped => "STOPPED",
+        ComfyUiRuntimeState.Error => "ERROR",
+        _ => "UNKNOWN",
     };
     public string GpuSystemState => !IsConnected ? "—" : IsSystemProcessing ? "PROCESSING" : HasGpuEvidence ? "READY" : "UNKNOWN";
     public bool HasGpuEvidence => FindServerInfoNode("gpu") is not null || FindServerInfoNode("gpu_name") is not null || FindServerInfoNode("device") is not null || FindServerInfoNode("hardware") is not null;
-    public string SystemConnectionSummary => !IsConnected
-        ? "ローカル環境は未接続 · CONNECTまたはSTART COMFYUIから開始"
-        : IsComfyUiReachable
-            ? HasGpuEvidence ? "MCP接続済み · ComfyUIとGPU情報を確認済み" : "MCP接続済み · ComfyUI到達確認済み（GPU情報は未提供）"
-            : ReadServerInfoBoolean("running") == false ? "MCP接続済み · ComfyUI停止中（生成時に起動が必要）" : "MCP接続済み · ComfyUI状態は未確認（必要な処理の直前に確認）";
+    public string SystemConnectionSummary
+    {
+        get
+        {
+            var mcp = IsConnected
+                ? "MCP接続済み"
+                : ConnectionState == ConnectionState.Connecting
+                    ? "MCP接続中"
+                    : ConnectionState == ConnectionState.Error
+                        ? "MCP接続エラー"
+                        : "MCP未接続";
+            var gpu = HasGpuEvidence ? " · GPU情報確認済み" : string.Empty;
+            return $"{mcp} · ComfyUI {ComfyUiSystemState}{gpu}";
+        }
+    }
     public string CurrentCreationStageText => GetCurrentPipelineStage().Label;
     public string CurrentCreationStageDescription => GetCurrentPipelineStage().Description;
     public string CurrentCreationStageState => GetCurrentPipelineStage().State;
@@ -268,7 +283,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         $"{(SessionMaximumIterations is >= 1 and <= 1000 ? "✓" : "!")} Maximum Iterations  {SessionMaximumIterations}");
     public string WorkflowSlotSummaryText => !HasSelectedWorkflow ? "左のライブラリからWorkflowを選択" : !IsConnected ? "MCP未接続 · CONNECTでslotを読み込み" : SlotDiscoveryState == SlotDiscoveryState.Loading ? "slotを読み込み中…" : SlotDiscoveryState == SlotDiscoveryState.Failed ? "slotの読み込みに失敗" : SlotDiscoveryState == SlotDiscoveryState.Loaded ? $"主要 {PrimarySlots.Count} · 調整 {TuningSlots.Count} · 詳細 {AdvancedSlots.Count}" : "slotはまだ読み込まれていません";
     public bool IsConnected => ConnectionState == ConnectionState.Connected && _mcp.IsConnected;
-    public bool IsComfyUiReachable => IsConnected && ReadServerInfoBoolean("running") == true;
+    public bool IsComfyUiReachable => _comfyUiRuntimeState == ComfyUiRuntimeState.Ready;
     public bool IsCreationConnectionReady => IsConnected;
     public bool HasSelectedWorkflow => SelectedWorkflow is not null;
     public bool HasTreeNodes => TreeNodes.Count > 0;
@@ -352,6 +367,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RebuildHistoryItems();
         if (RebuildHandoffItems()) await _store.SaveSessionAsync(CurrentSession);
         RefreshWorkflowTree();
+        await RefreshComfyUiStatusAsync();
         StatusMessage = IsSetupVisible ? "接続先を確認して保存してください。" : "準備完了。ComfyUIの状態を確認できます。";
         OnPropertyChanged(nameof(HasIterations));
         OnPropertyChanged(nameof(HasLatestOutputs));
@@ -366,6 +382,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         await _store.SaveSettingsAsync(Settings);
         IsSetupVisible = false;
         RefreshWorkflowTree();
+        await RefreshComfyUiStatusAsync();
         StatusMessage = "設定をPortable領域へ保存しました。Connectを押してMCPへ接続してください。";
     }
 
@@ -401,6 +418,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         ValidateSettings();
         IsBusy = true;
+        _serverInfo = null;
         ConnectionState = ConnectionState.Connecting;
         SynchronizePipelineConnectionGate();
         try
@@ -417,10 +435,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 _serverInfo = null;
                 await _store.LogAsync("connection", $"ComfyUI状態確認を延期しました: {ex.Message}", ex);
             }
+            // MCP's server_info is retained for optional GPU/server details,
+            // but ComfyUI readiness always comes from the direct endpoint.
+            await RefreshComfyUiStatusAsync();
             NotifyConnectionStateChanged();
-            StatusMessage = IsComfyUiReachable
-                ? "MCP接続を確認しました。ComfyUIも稼働中です。"
-                : "MCP接続を確認しました。ComfyUIは必要な処理の直前に確認します。";
+            StatusMessage = $"MCP接続を確認しました。ComfyUIは{ComfyUiSystemState}です。";
             if (SelectedWorkflow is not null) await SelectWorkflowAsync(SelectedWorkflow.RelativePath);
         }
         catch (Exception ex)
@@ -974,38 +993,33 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task StartComfyUiAsync()
     {
+        // The visual state belongs to the ViewModel. Set it before launching
+        // the asynchronous batch so the header immediately reflects startup,
+        // regardless of whether MCP is currently connected.
+        SetComfyUiRuntimeState(ComfyUiRuntimeState.Starting);
         var batch = Path.Combine(Settings.PortableRoot, "run_nvidia_gpu.bat");
-        if (!File.Exists(batch)) throw new FileNotFoundException("ComfyUI起動batchが見つかりません。", batch);
-        Process.Start(new ProcessStartInfo(batch) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(batch) });
-        StatusMessage = "ComfyUIの起動を要求しました。起動状態を確認しています…";
-
-        // START COMFYUI can be pressed after MCP is already connected.  The
-        // batch file starts ComfyUI asynchronously, so refresh the same live
-        // status used by Generate instead of leaving the header at a stale
-        // STOPPED snapshot from ConnectAsync.
-        if (!IsConnected)
+        try
         {
-            StatusMessage = "ComfyUIの起動を要求しました。ConnectorはComfyUIを終了しません。";
-            return;
-        }
-
-        // Do a few immediate checks for the normal startup path. The window
-        // timer continues retrying after this method returns, so a slow model
-        // load does not keep the command handler waiting indefinitely.
-        for (var attempt = 0; attempt < 3; attempt++)
-        {
-            if (await RefreshComfyUiStatusAsync())
+            if (!File.Exists(batch)) throw new FileNotFoundException("ComfyUI起動batchが見つかりません。", batch);
+            var process = Process.Start(new ProcessStartInfo(batch)
             {
-                StatusMessage = "ComfyUIが起動しました。生成を実行できます。";
-                return;
-            }
-
-            await Task.Delay(TimeSpan.FromSeconds(2));
+                UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(batch),
+            });
+            if (process is null) throw new InvalidOperationException("ComfyUI起動プロセスを開始できませんでした。");
+        }
+        catch (Exception ex)
+        {
+            SetComfyUiRuntimeState(ComfyUiRuntimeState.Error);
+            StatusMessage = $"ComfyUIの起動要求に失敗しました: {ex.Message}";
+            await _store.LogAsync("connection", StatusMessage, ex);
+            throw;
         }
 
-        StatusMessage = IsComfyUiReachable
-            ? "ComfyUIが起動しました。生成を実行できます。"
-            : "ComfyUIの起動を要求しましたが、まだ応答を確認できません。";
+        StatusMessage = "ComfyUIの起動を要求しました。起動状態を確認しています…";
+        // The immediate probe handles the already-running/fast-start case;
+        // the window timer keeps retrying while the process loads models.
+        if (await RefreshComfyUiStatusAsync()) StatusMessage = "ComfyUIが起動しました。生成を実行できます。";
     }
 
     private async Task MonitorJobAsync(SessionIteration iteration)
@@ -1528,6 +1542,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(IsSystemProcessing));
         OnPropertyChanged(nameof(ConnectorSystemState));
         OnPropertyChanged(nameof(McpSystemState));
+        OnPropertyChanged(nameof(ComfyUiRuntimeState));
         OnPropertyChanged(nameof(ComfyUiSystemState));
         OnPropertyChanged(nameof(GpuSystemState));
         OnPropertyChanged(nameof(HasGpuEvidence));
@@ -1574,29 +1589,43 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    public async Task<bool> RefreshComfyUiStatusAsync()
+    public async Task<bool> RefreshComfyUiStatusAsync(CancellationToken cancellationToken = default)
     {
-        if (!IsConnected) return false;
-        await _comfyUiStatusGate.WaitAsync();
+        await _comfyUiStatusGate.WaitAsync(cancellationToken);
         try
         {
-            _serverInfo = await _mcp.CallAsync("server_info", new Dictionary<string, object?>());
-            NotifyConnectionStateChanged();
-            return IsComfyUiReachable;
+            var health = await _comfyUiHealthProbe.CheckAsync(Settings.Endpoint, cancellationToken);
+            var nextState = ComfyUiRuntimeStateMachine.Resolve(_comfyUiRuntimeState, health);
+            SetComfyUiRuntimeState(nextState);
+            return health.IsReady;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
-            MarkConnectionFailureIfTransportClosed(ex);
-            if (!_mcp.IsConnected) throw;
-            _serverInfo = null;
-            await _store.LogAsync("connection", $"ComfyUI状態確認を延期しました: {ex.Message}", ex);
-            NotifyConnectionStateChanged();
+            // A probe implementation should normally classify transport
+            // failures as Unavailable. Keep this guard so an unexpected probe
+            // failure is still reflected as an explicit runtime ERROR without
+            // affecting MCP's independent connection state.
+            SetComfyUiRuntimeState(ComfyUiRuntimeStateMachine.Resolve(
+                _comfyUiRuntimeState,
+                new ComfyUiHealthCheckResult(ComfyUiHealthCheckStatus.Error, ex.Message)));
+            await _store.LogAsync("connection", $"ComfyUI Endpointの状態確認に失敗しました: {ex.Message}", ex);
             return false;
         }
         finally
         {
             _comfyUiStatusGate.Release();
         }
+    }
+
+    private void SetComfyUiRuntimeState(ComfyUiRuntimeState state)
+    {
+        if (_comfyUiRuntimeState == state) return;
+        _comfyUiRuntimeState = state;
+        NotifyConnectionStateChanged();
     }
 
     private void MarkConnectionFailureIfTransportClosed(Exception exception)
@@ -1692,12 +1721,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         return FindNodeRecursive(_serverInfo, key, 0);
     }
 
-    private bool? ReadServerInfoBoolean(string key)
-    {
-        var node = FindServerInfoNode(key);
-        return node is JsonValue value && value.TryGetValue<bool>(out var result) ? result : null;
-    }
-
     private static JsonNode? FindNodeRecursive(JsonNode node, string key, int depth)
     {
         if (depth > 3) return null;
@@ -1784,6 +1807,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(OutputRoot));
             OnPropertyChanged(nameof(VideoOutputRoot));
             OnPropertyChanged(nameof(CurrentOutputFolderPath));
+        }
+        if (e.PropertyName is nameof(AppSettings.Endpoint) or null)
+        {
+            SetComfyUiRuntimeState(ComfyUiRuntimeState.Unknown);
         }
     }
 

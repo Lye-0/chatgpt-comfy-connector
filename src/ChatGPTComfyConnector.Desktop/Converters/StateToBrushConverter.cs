@@ -19,7 +19,7 @@ public sealed class StateToBrushConverter : IValueConverter
         {
             "CONNECTED" or "ONLINE" or "READY" or "DONE" or "SUCCESS" or "COMPLETE" or "COMPLETED" => "SuccessBrush",
             "PROCESSING" or "NOW" or "CURRENT" or "INPROGRESS" => "AccentStrongBrush",
-            "CONNECTING" or "WAITING" or "WAITINGUSER" or "WARNING" or "ATTENTION" => "WarningBrush",
+            "CONNECTING" or "STARTING" or "WAITING" or "WAITINGUSER" or "WARNING" or "ATTENTION" => "WarningBrush",
             "ERROR" or "FAILED" => "DangerBrush",
             "DISCONNECTED" or "STOPPED" or "UNKNOWN" or "NOTREACHED" or "CANCELLED" or "SKIPPED" or "—" or "-" => "MutedTextBrush",
             _ => "LineStrongBrush",

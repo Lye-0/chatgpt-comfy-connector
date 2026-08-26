@@ -9,7 +9,8 @@ WPF Desktop
   └─ Infrastructure
        ├─ PortableStore: atomic settings/session JSON, logs, backups
        ├─ WorkflowCatalog: filesystem tree + dynamic MCP slot/job mapping
-       └─ ComfyMcpClient: official C# SDK StdioClientTransport
+       ├─ ComfyMcpClient: official C# SDK StdioClientTransport
+       └─ ComfyUiEndpointHealthProbe: direct ComfyUI HTTP runtime check
 ```
 
 ## Project / Chat context providers
@@ -96,10 +97,15 @@ ComfyUI readiness is checked immediately before operations that need it, through
 stage becomes `WaitingUser`; Context, Idea, and Manual Handoff remain usable while the
 user starts ComfyUI. CONNECT itself is never downgraded merely because ComfyUI is stopped.
 
-The Desktop header refreshes this live ComfyUI status after `START COMFYUI` and while a
-connected session still reports a non-ready state. This also covers starting ComfyUI
-outside Connector. The header therefore does not treat the one-time `ConnectAsync`
-snapshot as permanent; Generate retains its immediate preflight as the final gate.
+The Desktop header owns one independent `ComfyUiRuntimeState` and refreshes it with a
+lightweight direct HTTP health check against `AppSettings.Endpoint` (`/system_stats`).
+This check runs whether MCP is connected or disconnected, so `MCP未接続 · ComfyUI READY`
+is represented without conflating the two facts. `START COMFYUI` sets `STARTING`
+immediately; an unavailable endpoint keeps that state while the periodic probe retries,
+and a successful response changes it to `READY`. Normal unavailable probes resolve to
+`STOPPED`, launch/probe configuration failures to `ERROR`, and `server_info` remains
+available only for optional MCP-provided details such as GPU information. Generate
+retains its immediate direct preflight as the final ComfyUI gate.
 
 ## Manual Handoff and timeline
 

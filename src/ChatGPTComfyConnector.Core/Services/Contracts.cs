@@ -35,6 +35,16 @@ public interface IComfyMcpClient : IAsyncDisposable
     Task<JsonNode?> CallAsync(string toolName, IReadOnlyDictionary<string, object?> arguments, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Checks the configured ComfyUI endpoint without going through MCP. Keeping
+/// this boundary injectable lets the desktop runtime use one shared HTTP
+/// implementation while the state transitions remain independently testable.
+/// </summary>
+public interface IComfyUiHealthProbe
+{
+    Task<ComfyUiHealthCheckResult> CheckAsync(string endpoint, CancellationToken cancellationToken = default);
+}
+
 public interface IClipboardService
 {
     void SetText(string text);

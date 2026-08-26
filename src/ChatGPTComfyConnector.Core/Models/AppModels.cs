@@ -17,6 +17,35 @@ public enum ConnectionState
     Error,
 }
 
+/// <summary>
+/// Runtime state of the ComfyUI HTTP endpoint. This is deliberately separate
+/// from <see cref="ConnectionState"/>: MCP transport connectivity and the
+/// ComfyUI process are independent facts in the system connection topology.
+/// </summary>
+public enum ComfyUiRuntimeState
+{
+    Unknown,
+    Stopped,
+    Starting,
+    Ready,
+    Error,
+}
+
+public enum ComfyUiHealthCheckStatus
+{
+    Ready,
+    Unavailable,
+    InvalidEndpoint,
+    Error,
+}
+
+public readonly record struct ComfyUiHealthCheckResult(
+    ComfyUiHealthCheckStatus Status,
+    string? Detail = null)
+{
+    public bool IsReady => Status == ComfyUiHealthCheckStatus.Ready;
+}
+
 public enum SessionStatus
 {
     New,

@@ -19,12 +19,24 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
     public int Number => Iteration.Number;
     public string Prompt => Iteration.Prompt;
     public string StatusText => Iteration.Status.ToString().ToUpperInvariant();
+    public bool IsGenerating => Iteration.Status is JobStatus.Queued or JobStatus.Running;
+    public string ActivityText => IsGenerating ? "GENERATING" : StatusText;
+    public string StatusDetailText => Iteration.Status switch
+    {
+        JobStatus.Queued => "ComfyUIで生成準備中",
+        JobStatus.Running => "ComfyUIで生成中",
+        JobStatus.Completed => "生成が完了しました",
+        JobStatus.Failed => "生成に失敗しました",
+        JobStatus.Cancelled => "生成をキャンセルしました",
+        _ => "Jobを確認してください",
+    };
     public DateTimeOffset CreatedAt => Iteration.CreatedAt;
     public string CreatedAtText => Iteration.CreatedAt.ToLocalTime().ToString("yyyy/MM/dd HH:mm");
     public OutputArtifact? PrimaryOutput => Iteration.Outputs.FirstOrDefault();
     public bool HasOutput => PrimaryOutput is not null;
-    public bool HasImage => PrimaryOutput?.IsImage == true;
-    public bool HasVideo => PrimaryOutput?.IsVideo == true;
+    public bool HasImage => !IsGenerating && PrimaryOutput?.IsImage == true;
+    public bool HasVideo => !IsGenerating && PrimaryOutput?.IsVideo == true;
+    public bool ShowNoOutput => !HasOutput && !IsGenerating;
     public bool IsFailed => Iteration.Status == JobStatus.Failed;
     public bool IsLatest => _isLatest;
     public bool IsFinal => _isFinal;
@@ -47,7 +59,13 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
         if (e.PropertyName == nameof(SessionIteration.Status))
         {
             OnPropertyChanged(nameof(StatusText));
+            OnPropertyChanged(nameof(IsGenerating));
+            OnPropertyChanged(nameof(ActivityText));
+            OnPropertyChanged(nameof(StatusDetailText));
             OnPropertyChanged(nameof(IsFailed));
+            OnPropertyChanged(nameof(HasImage));
+            OnPropertyChanged(nameof(HasVideo));
+            OnPropertyChanged(nameof(ShowNoOutput));
         }
 
         if (e.PropertyName is nameof(SessionIteration.Outputs) or nameof(SessionIteration.HasOutputs))
@@ -56,6 +74,7 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
             OnPropertyChanged(nameof(HasOutput));
             OnPropertyChanged(nameof(HasImage));
             OnPropertyChanged(nameof(HasVideo));
+            OnPropertyChanged(nameof(ShowNoOutput));
         }
     }
 

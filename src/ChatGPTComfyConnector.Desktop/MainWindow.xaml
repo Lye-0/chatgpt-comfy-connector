@@ -249,12 +249,39 @@
                                            FontSize="8"
                                            Margin="0,2,0,0" />
                             </StackPanel>
+                            <StackPanel x:Name="HistoryGeneratingState"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisibility}}">
+                                <ProgressBar Width="88"
+                                             Height="4"
+                                             IsIndeterminate="True"
+                                             Foreground="{StaticResource AccentBrush}"
+                                             Background="#1A3140"
+                                             Margin="0,0,0,8" />
+                                <TextBlock Text="{Binding ActivityText}"
+                                           Foreground="{StaticResource AccentStrongBrush}"
+                                           FontSize="11"
+                                           FontWeight="SemiBold"
+                                           HorizontalAlignment="Center" />
+                                <TextBlock Text="{Binding StatusDetailText}"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="9"
+                                           HorizontalAlignment="Center"
+                                           Margin="0,3,0,0" />
+                                <TextBlock Text="{Binding StatusText}"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontSize="8"
+                                           FontWeight="SemiBold"
+                                           HorizontalAlignment="Center"
+                                           Margin="0,3,0,0" />
+                            </StackPanel>
                             <TextBlock Text="出力なし"
                                        Foreground="{StaticResource MutedTextBrush}"
                                        FontSize="10"
                                        HorizontalAlignment="Center"
                                        VerticalAlignment="Center"
-                                       Visibility="{Binding HasOutput, Converter={StaticResource InverseBoolToVisibility}}" />
+                                       Visibility="{Binding ShowNoOutput, Converter={StaticResource BoolToVisibility}}" />
                         </Grid>
                     </Border>
                     <Grid Grid.Row="2">
@@ -270,6 +297,22 @@
                 </Grid>
             </Border>
             <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsGenerating}" Value="True">
+                    <Setter TargetName="HistoryCard" Property="Background" Value="#102A35" />
+                    <DataTrigger.EnterActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetName="HistoryGeneratingState"
+                                                  Storyboard.TargetProperty="Opacity"
+                                                  From="0.72"
+                                                  To="1"
+                                                  Duration="0:0:1.6"
+                                                  AutoReverse="True"
+                                                  RepeatBehavior="Forever" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </DataTrigger.EnterActions>
+                </DataTrigger>
                 <DataTrigger Binding="{Binding IsFailed}" Value="True">
                     <Setter TargetName="HistoryCard" Property="Background" Value="#2B141E" />
                 </DataTrigger>
@@ -1071,9 +1114,9 @@
 
                             <Grid Grid.Row="1" Margin="0,10,0,10">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" MinWidth="160" />
+                                    <ColumnDefinition Width="*" MinWidth="120" />
                                     <ColumnDefinition Width="10" />
-                                    <ColumnDefinition Width="220" />
+                                    <ColumnDefinition Width="280" MinWidth="240" />
                                 </Grid.ColumnDefinitions>
                                 <Border Background="#050912"
                                         BorderBrush="{StaticResource LineBrush}"
@@ -1095,7 +1138,7 @@
                                                       MediaFailed="OutputMediaFailed" />
                                         <StackPanel HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
-                                                    Visibility="{Binding HasSelectedPreviewOutput, Converter={StaticResource InverseBoolToVisibility}}">
+                                                    Visibility="{Binding ShowOutputEmptyState, Converter={StaticResource BoolToVisibility}}">
                                             <TextBlock Text="VIDEO / IMAGE PREVIEW"
                                                        Foreground="{StaticResource MutedTextBrush}"
                                                        FontSize="14"
@@ -1114,6 +1157,34 @@
                                                        MaxWidth="260"
                                                        Margin="0,5,0,0" />
                                         </StackPanel>
+                                        <StackPanel x:Name="OutputGeneratingState"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    Visibility="{Binding ShowOutputGeneratingState, Converter={StaticResource BoolToVisibility}}">
+                                            <ProgressBar Width="170"
+                                                         Height="5"
+                                                         IsIndeterminate="True"
+                                                         Foreground="{StaticResource AccentBrush}"
+                                                         Background="#1A3140"
+                                                         Margin="0,0,0,12" />
+                                            <TextBlock Text="{Binding CurrentOutputGenerationLabel}"
+                                                       Foreground="{StaticResource AccentStrongBrush}"
+                                                       FontSize="15"
+                                                       FontWeight="SemiBold"
+                                                       HorizontalAlignment="Center" />
+                                            <TextBlock Text="{Binding CurrentOutputGenerationDetail}"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       FontSize="11"
+                                                       HorizontalAlignment="Center"
+                                                       Margin="0,6,0,0" />
+                                            <TextBlock Text="{Binding CurrentOutputGenerationHint}"
+                                                       Foreground="{StaticResource LineStrongBrush}"
+                                                       FontSize="10"
+                                                       TextAlignment="Center"
+                                                       TextWrapping="Wrap"
+                                                       MaxWidth="300"
+                                                       Margin="0,5,0,0" />
+                                        </StackPanel>
                                         <StackPanel HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
                                                     Visibility="{Binding IsSelectedPreviewMissing, Converter={StaticResource BoolToVisibility}}">
@@ -1126,6 +1197,26 @@
                                                        FontSize="9"
                                                        Margin="0,4,0,0" />
                                         </StackPanel>
+                                        <Border HorizontalAlignment="Left"
+                                                VerticalAlignment="Top"
+                                                Background="#D90B1421"
+                                                BorderBrush="{StaticResource AccentBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="7"
+                                                Padding="8,6"
+                                                Panel.ZIndex="2"
+                                                Visibility="{Binding ShowOutputUpdatingState, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel>
+                                                <TextBlock Text="NEXT ITERATION · GENERATING"
+                                                           Foreground="{StaticResource AccentStrongBrush}"
+                                                           FontSize="9"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock Text="直前の完成結果を表示中"
+                                                           Foreground="{StaticResource MutedTextBrush}"
+                                                           FontSize="9"
+                                                           Margin="0,3,0,0" />
+                                            </StackPanel>
+                                        </Border>
                                         <Border VerticalAlignment="Bottom"
                                                 Background="#DD070A12"
                                                 Padding="9,7"
@@ -1200,7 +1291,7 @@
                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                     <ProgressBar Width="130"
                                                  Height="7"
-                                                 IsIndeterminate="{Binding IsJobActive}"
+                                                 IsIndeterminate="{Binding IsGenerationInProgress}"
                                                  Margin="0,0,10,0" />
                                     <TextBlock Text="{Binding JobStatusDetailText}"
                                                Foreground="{StaticResource MutedTextBrush}"

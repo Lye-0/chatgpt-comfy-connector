@@ -116,12 +116,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<HandoffTimelineItem> HandoffItems { get; }
     public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyPipelineStateChanged(); } }
     public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); NotifyContextSelectionChanged(); } }
-    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
+    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
     public string StatusMessage { get => _statusMessage; set { _statusMessage = value; OnPropertyChanged(); } }
     public bool IsSetupVisible { get => _isSetupVisible; private set { _isSetupVisible = value; OnPropertyChanged(); } }
     public bool IsWorkflowEditorVisible { get => _isWorkflowEditorVisible; private set { _isWorkflowEditorVisible = value; OnPropertyChanged(); } }
-    public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
+    public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public SlotDiscoveryState SlotDiscoveryState { get => _slotDiscoveryState; private set { _slotDiscoveryState = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CanStartNewCreation)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyViewStateChanged(); } }
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
@@ -253,15 +253,45 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(IsViewingLatest));
             OnPropertyChanged(nameof(ViewingStateText));
             OnPropertyChanged(nameof(CurrentOutputFolderPath));
+            NotifyGenerationDisplayChanged();
         }
     }
-    public OutputArtifact? SelectedPreviewOutput => SelectedHistoryItem?.PrimaryOutput;
+    private GenerationHistoryItem? PreviewHistoryItem => IsGenerationInProgress
+        && (SelectedHistoryItem?.HasOutput != true || SelectedHistoryItem.PrimaryOutput?.IsMissing == true)
+            ? HistoryItems.LastOrDefault(item => item.HasOutput && item.PrimaryOutput?.IsMissing != true)
+            : SelectedHistoryItem;
+    public OutputArtifact? SelectedPreviewOutput => PreviewHistoryItem?.PrimaryOutput;
     public bool HasSelectedPreviewOutput => SelectedPreviewOutput is not null;
     public bool IsSelectedPreviewMissing => SelectedPreviewOutput?.IsMissing == true;
-    public string ViewingIterationText => SelectedHistoryItem is null ? "VIEWING —" : $"VIEWING ITERATION {SelectedHistoryItem.Number:00}";
+    public string ViewingIterationText => PreviewHistoryItem is null ? "VIEWING —" : $"VIEWING ITERATION {PreviewHistoryItem.Number:00}";
     public string LatestIterationText => HistoryItems.LastOrDefault() is { } latest ? $"LATEST ITERATION {latest.Number:00}" : "LATEST —";
     public bool IsViewingLatest => SelectedHistoryItem is not null && ReferenceEquals(SelectedHistoryItem, HistoryItems.LastOrDefault());
     public string ViewingStateText => IsViewingLatest ? "VIEWING LATEST" : SelectedHistoryItem is null ? "NO OUTPUT" : "VIEWING HISTORY";
+    public bool IsGenerationInProgress
+    {
+        get
+        {
+            if (!_isCurrentSessionActivated || CurrentSession is null) return false;
+            var generateState = CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Generate).State;
+            var outputState = CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Output).State;
+            return IsJobActive
+                || generateState == CreationStageState.InProgress
+                || outputState == CreationStageState.InProgress;
+        }
+    }
+    public bool HasCompletedPreview => HistoryItems.Any(item => item.HasOutput && item.PrimaryOutput?.IsMissing != true);
+    public bool ShowOutputEmptyState => !HasSelectedPreviewOutput && !IsGenerationInProgress;
+    public bool ShowOutputGeneratingState => !HasSelectedPreviewOutput && IsGenerationInProgress;
+    public bool ShowOutputUpdatingState => HasSelectedPreviewOutput && IsGenerationInProgress;
+    public string CurrentOutputGenerationLabel => HasCompletedPreview ? "NEXT ITERATION · GENERATING" : "GENERATING";
+    public string CurrentOutputGenerationHint => HasCompletedPreview
+        ? "直前の完成結果を表示中。完了後に更新されます。"
+        : "完了するとここにプレビューが表示されます。";
+    public string CurrentOutputGenerationDetail => CurrentSession is not null
+        && CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Output).State == CreationStageState.InProgress
+        && CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Generate).State != CreationStageState.InProgress
+            ? "生成結果を取得中"
+            : "ComfyUIで生成中";
     public string SelectedWorkflowText => SelectedWorkflow?.RelativePath ?? "Workflow未選択";
     public string SelectedWorkflowName => SelectedWorkflow is null ? "Workflow未選択" : Path.GetFileNameWithoutExtension(SelectedWorkflow.RelativePath);
     public string ConnectionStateText => ConnectionState switch { ConnectionState.Connected => "CONNECTED", ConnectionState.Connecting => "CONNECTING", ConnectionState.Error => "ERROR", _ => "DISCONNECTED" };
@@ -301,7 +331,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string PipelineLoopText => CreationPipelineLoopText.Resolve(CurrentSession, _isCurrentSessionActivated, ConnectionState, Idea);
     public string SessionStatusText => CurrentSession?.Status.ToString().ToUpperInvariant() ?? "NEW";
     public string JobStatusText => CurrentJob is null ? "IDLE" : CurrentJob.Status.ToString().ToUpperInvariant();
-    public string JobStatusDetailText => CurrentJob is null ? "生成待機中" : IsJobActive ? "ComfyUIで生成を実行中" : CurrentJob.Status switch { JobStatus.Completed => "生成が完了しました", JobStatus.Failed => "生成に失敗しました", JobStatus.Cancelled => "生成をキャンセルしました", _ => "Jobを確認してください" };
+    public string JobStatusDetailText => IsGenerationInProgress ? CurrentOutputGenerationDetail : CurrentJob is null ? "生成待機中" : CurrentJob.Status switch { JobStatus.Completed => "生成が完了しました", JobStatus.Failed => "生成に失敗しました", JobStatus.Cancelled => "生成をキャンセルしました", _ => "Jobを確認してください" };
     public string DirtyText => IsDirty ? "UNSAVED CHANGES" : "SAVED";
     public string SessionProgressText => CurrentSession is null ? "0 / 10 ITERATIONS" : $"{CurrentSession.CurrentIteration} / {CurrentSession.MaximumIterations} ITERATIONS";
     public string CurrentSessionContextText => CurrentSession is null ? "制作セッションなし" : $"{BlankFallback(CurrentSession.ProjectLabel, "Project未設定")}  ·  {BlankFallback(CurrentSession.ChatLabel, "Chat未設定")}";
@@ -816,9 +846,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(SessionProgressText));
         Iterations.Add(iteration);
         var historyItem = new GenerationHistoryItem(iteration);
+        var previousPreviewItem = HistoryItems.LastOrDefault(item => item.HasOutput && item.PrimaryOutput?.IsMissing != true);
         HistoryItems.Add(historyItem);
         RefreshHistoryFlags();
-        SelectedHistoryItem = historyItem;
+        // Keep the last completed preview visible while a later iteration is
+        // running. The new iteration remains in HISTORY with its live status;
+        // once it produces output, MonitorJobAsync selects it below.
+        SelectedHistoryItem = previousPreviewItem ?? historyItem;
         OnPropertyChanged(nameof(HasIterations));
         NotifyHistoryChanged();
         NotifyPipelineStateChanged();
@@ -1652,6 +1686,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         OnPropertyChanged(nameof(HasHistoryItems));
         OnPropertyChanged(nameof(LatestIterationText));
+        NotifyGenerationDisplayChanged();
         NotifySelectedPreviewChanged();
     }
 
@@ -1664,6 +1699,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(IsViewingLatest));
         OnPropertyChanged(nameof(ViewingStateText));
         OnPropertyChanged(nameof(CurrentOutputFolderPath));
+        NotifyGenerationDisplayChanged();
+    }
+
+    private void NotifyGenerationDisplayChanged()
+    {
+        // The selected item can temporarily point at a queued/running
+        // iteration while the preview intentionally falls back to the last
+        // completed output. Notify both the generation flags and the derived
+        // preview properties whenever that fallback can change.
+        OnPropertyChanged(nameof(SelectedPreviewOutput));
+        OnPropertyChanged(nameof(HasSelectedPreviewOutput));
+        OnPropertyChanged(nameof(IsSelectedPreviewMissing));
+        OnPropertyChanged(nameof(ViewingIterationText));
+        OnPropertyChanged(nameof(ViewingStateText));
+        OnPropertyChanged(nameof(IsGenerationInProgress));
+        OnPropertyChanged(nameof(HasCompletedPreview));
+        OnPropertyChanged(nameof(ShowOutputEmptyState));
+        OnPropertyChanged(nameof(ShowOutputGeneratingState));
+        OnPropertyChanged(nameof(ShowOutputUpdatingState));
+        OnPropertyChanged(nameof(CurrentOutputGenerationLabel));
+        OnPropertyChanged(nameof(CurrentOutputGenerationHint));
+        OnPropertyChanged(nameof(CurrentOutputGenerationDetail));
+        OnPropertyChanged(nameof(JobStatusDetailText));
     }
 
     private Dictionary<string, JsonNode?> BuildChanges() => Slots.ToDictionary(x => x.Address, x => x.ToJsonNode(), StringComparer.OrdinalIgnoreCase);
@@ -1748,6 +1806,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(SendToChatGptHint));
         OnPropertyChanged(nameof(CanApplyCommand));
         OnPropertyChanged(nameof(CanRunWorkflow));
+        NotifyGenerationDisplayChanged();
     }
 
     private void SynchronizePipelineConnectionGate(string? detail = null)

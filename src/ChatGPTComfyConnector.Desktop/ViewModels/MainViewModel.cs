@@ -893,27 +893,36 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         if (CurrentSession is null) throw new InvalidOperationException("制作セッションがありません。");
         var iteration = selectedIteration ?? CurrentSession.Iterations.LastOrDefault() ?? throw new InvalidOperationException("ChatGPTへ渡せる生成結果がありません。");
+        var existingMessage = CurrentSession.HandoffMessages.LastOrDefault(item =>
+            item.Direction == HandoffDirection.ComfyToChatGpt &&
+            item.IterationNumber == iteration.Number);
+        if (HandoffPayloadReuse.TryGetSavedPayload(existingMessage, out var savedPayload))
+        {
+            // Result Handoff payloads are immutable copy material once
+            // persisted. Re-copying must not rotate the PendingHandoff or
+            // rebuild the payload from the current editor state.
+            return savedPayload;
+        }
         if (iteration.Status != JobStatus.Completed || iteration.Outputs.All(output => output.IsMissing)) throw new InvalidOperationException("成功した生成結果だけをChatGPTへ渡せます。");
         EnsureSlotSchemaAvailable();
         CurrentSession.PendingHandoff = PendingHandoffFactory.Create(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
         var payload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, CurrentSession.PendingHandoff);
-        var message = CurrentSession.HandoffMessages.LastOrDefault(item => item.Direction == HandoffDirection.ComfyToChatGpt && item.IterationNumber == iteration.Number);
-        if (message is not null) message.Payload = payload;
+        if (existingMessage is not null) existingMessage.Payload = payload;
         await SaveActiveSessionAsync();
         return payload;
     }
 
-    public async Task<string> PrepareTimelineHandoffAsync(HandoffTimelineItem item)
+    public Task<string> PrepareTimelineHandoffAsync(HandoffTimelineItem item)
     {
-        if (item.Message.Direction == HandoffDirection.ChatGptToComfy) return item.Payload;
-        if (item.Message.IterationNumber is { } iterationNumber)
+        if (item is null) throw new ArgumentNullException(nameof(item));
+        if (!HandoffPayloadReuse.TryGetSavedPayload(item.Message, out var savedPayload))
         {
-            var iteration = CurrentSession?.Iterations.FirstOrDefault(candidate => candidate.Number == iterationNumber);
-            return await PrepareResultHandoffAsync(iteration);
+            throw new InvalidOperationException("このTimelineカードには再コピーできる保存済みHandoffがありません。");
         }
-        var payload = await PrepareBootstrapHandoffAsync();
-        item.Message.Payload = payload;
-        return payload;
+        // Timeline Copy is deliberately a pure re-copy operation. Do not
+        // create a new handoff, bind a new PendingHandoff, validate the current
+        // IDEA stage, or regenerate content from mutable editor state.
+        return Task.FromResult(savedPayload);
     }
 
     public async Task ConfirmBootstrapCopiedAsync(string payload)
@@ -940,7 +949,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         item.MarkCopied();
         if (CurrentSession is not null)
         {
-            if (item.Message.IterationNumber is not null) CreationPipelineStateMachine.ReviewCopied(CurrentSession);
+            // Copying an existing Timeline payload is transport-only. The
+            // pipeline advances when a new Handoff is created or a Command is
+            // accepted, never when a saved card is copied again.
             await SaveActiveSessionAsync();
             NotifyPipelineStateChanged();
         }

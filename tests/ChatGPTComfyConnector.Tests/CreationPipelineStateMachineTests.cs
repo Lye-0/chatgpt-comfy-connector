@@ -73,6 +73,18 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
+    public void PersistedHandoffPayloadCanBeReusedWithoutRebuilding()
+    {
+        const string saved = "  {\"handoff_id\":\"original\"}\n";
+        var message = new HandoffMessage { Payload = saved };
+
+        Assert.True(HandoffPayloadReuse.TryGetSavedPayload(message, out var payload));
+        Assert.Equal(saved, payload);
+        Assert.False(HandoffPayloadReuse.TryGetSavedPayload(new HandoffMessage(), out _));
+        Assert.False(HandoffPayloadReuse.TryGetSavedPayload(null, out _));
+    }
+
+    [Fact]
     public void ContextCanBindWhenOnlyMcpIsReady()
     {
         var session = ConfiguredSession(2);

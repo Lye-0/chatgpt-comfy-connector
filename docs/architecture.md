@@ -166,6 +166,13 @@ legacy direction, kind, display text, and metadata do not break the timeline.
 
 ## Production UI information architecture
 
+Timeline Copy is a pure re-copy operation: when a card has a persisted
+Payload, the Desktop ViewModel returns that exact string without creating a new
+handoff, rotating PendingHandoff, validating the current IDEA stage, or
+changing the pipeline. Result Handoff copying follows the same reuse rule;
+payload generation is only a fallback for an iteration whose saved Handoff
+payload is absent.
+
 The desktop surface keeps three responsibilities distinct:
 
 - left: Workflow library, selection, duplicate/rename, and the detailed Workflow

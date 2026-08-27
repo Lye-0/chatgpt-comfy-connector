@@ -953,8 +953,30 @@
                                                TextWrapping="Wrap"
                                                Margin="12,9,12,9"
                                                VerticalAlignment="Top"
-                                               IsHitTestVisible="False"
-                                               Visibility="{Binding ShowIdeaPlaceholder, Converter={StaticResource BoolToVisibility}}" />
+                                               IsHitTestVisible="False">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <!--
+                                                    WPF renders an IME pre-edit string directly in the TextBox
+                                                    before TextBox.Text (and therefore ShowIdeaPlaceholder) is
+                                                    updated. Do not place the watermark over an active editor:
+                                                    while the field owns keyboard focus the IME owns this visual
+                                                    surface, so the watermark stays collapsed for the whole
+                                                    composition, including Japanese conversion/candidate mode.
+                                                -->
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                <Style.Triggers>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding ShowIdeaPlaceholder}" Value="True" />
+                                                            <Condition Binding="{Binding RelativeSource={RelativeSource AncestorType={x:Type Grid}}, Path=IsKeyboardFocusWithin}" Value="False" />
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Visibility" Value="Visible" />
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
                                 </Grid>
                                 <TextBlock Text="{Binding IdeaInputHint}"
                                            Foreground="{StaticResource MutedTextBrush}"

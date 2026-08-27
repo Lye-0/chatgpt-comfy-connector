@@ -36,7 +36,6 @@ public partial class MainWindow : Window
             new TextCompositionEventHandler(IdeaInput_TextInputUpdate), true);
         IdeaInputBox.AddHandler(TextCompositionManager.TextInputEvent,
             new TextCompositionEventHandler(IdeaInput_TextInput), true);
-        IdeaInputBox.TextChanged += IdeaInput_TextChanged;
         IdeaInputBox.AddHandler(Keyboard.PreviewKeyDownEvent,
             new KeyEventHandler(IdeaInput_PreviewKeyDown), true);
         IdeaInputBox.LostKeyboardFocus += IdeaInput_LostKeyboardFocus;
@@ -255,15 +254,12 @@ public partial class MainWindow : Window
 
     private void IdeaInput_TextInput(object sender, TextCompositionEventArgs e)
     {
-        // Some IMEs raise TextInput before the composed text has been copied
-        // into TextBox.Text. Keep the placeholder hidden until TextChanged
-        // confirms that the committed value is actually present.
-        if (IdeaInputBox.Text.Length > 0) ViewModel.SetIdeaCompositionState(false);
-    }
-
-    private void IdeaInput_TextChanged(object sender, TextChangedEventArgs e)
-    {
-        if (sender is TextBox { Text.Length: > 0 }) ViewModel.SetIdeaCompositionState(false);
+        // TextInput is the completion signal for a WPF text composition. Let
+        // TextBox.Text/binding settle first, then clear the presentation-only
+        // flag. TextChanged must not clear it: Japanese IMEs can update the
+        // bound text while their underlined pre-edit string is still visible.
+        Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(() =>
+            ViewModel.SetIdeaCompositionState(false)));
     }
 
     private void IdeaInput_PreviewKeyDown(object sender, KeyEventArgs e)

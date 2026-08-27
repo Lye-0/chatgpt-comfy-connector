@@ -105,6 +105,14 @@ ToChatGpt uses `ChatGPT返答待ち`, Review uses `レビュー返答待ち`, an
 safety stop uses `続行判断待ち`. The UI must not display the enum name or a generic
 `ユーザー待ち` label.
 
+The small helper text at the top-right of the Creation Pipeline is resolved by
+CreationPipelineLoopText. It selects the most recently updated active stage in
+the ordered Core state machine and combines that stage with its state, the
+current idea input, or a structured waiting reason. This keeps messages such as
+"IDEA → 制作アイデアを入力", "GENERATE → 生成中", and
+"REVIEW → レビュー返答待ち" aligned with the actual pipeline state instead
+of using the broad Active session status as a shortcut.
+
 ComfyUI readiness is checked immediately before operations that need it, through
 `CreationPipelineStateMachine.RequireComfyUi`. If the running check is false, only that
 stage becomes `WaitingUser`; Context, Idea, and Manual Handoff remain usable while the

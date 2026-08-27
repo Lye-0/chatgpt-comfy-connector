@@ -266,7 +266,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string CurrentCreationStageDescription => GetCurrentPipelineStage().Description;
     public string CurrentCreationStageState => GetCurrentPipelineStage().State;
     public string CurrentIterationLabel => !_isCurrentSessionActivated || CurrentSession is null || CurrentSession.Pipeline.IterationNumber == 0 ? "ITERATION —" : CurrentSession.Pipeline.IterationNumber > CurrentSession.CurrentIteration ? $"ITERATION {CurrentSession.Pipeline.IterationNumber:00} · PREP" : $"ITERATION {CurrentSession.CurrentIteration:00}";
-    public string PipelineLoopText => !_isCurrentSessionActivated ? IsCreationConnectionReady ? "CONTEXT → 新しい制作を開始" : "CONNECT → 通信状態を確認" : CurrentSession?.Status == SessionStatus.Completed ? "SESSION COMPLETE" : HasIterationSafetyStop ? "SAFETY STOP · USER DECISION" : "REVIEW → NEXT ITERATION / COMPLETE";
+    public string PipelineLoopText => CreationPipelineLoopText.Resolve(CurrentSession, _isCurrentSessionActivated, ConnectionState, Idea);
     public string SessionStatusText => CurrentSession?.Status.ToString().ToUpperInvariant() ?? "NEW";
     public string JobStatusText => CurrentJob is null ? "IDLE" : CurrentJob.Status.ToString().ToUpperInvariant();
     public string JobStatusDetailText => CurrentJob is null ? "生成待機中" : IsJobActive ? "ComfyUIで生成を実行中" : CurrentJob.Status switch { JobStatus.Completed => "生成が完了しました", JobStatus.Failed => "生成に失敗しました", JobStatus.Cancelled => "生成をキャンセルしました", _ => "Jobを確認してください" };
@@ -1767,6 +1767,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private CreationPipelineStage GetCurrentPipelineStage()
     {
+        if (_isCurrentSessionActivated && CurrentSession is not null)
+        {
+            var active = CreationPipelineStateMachine.OrderedStages
+                .Select((stage, index) => (Status: CreationPipelineStateMachine.Get(CurrentSession, stage), Index: index))
+                .Where(item => item.Status.State is CreationStageState.Current
+                    or CreationStageState.InProgress
+                    or CreationStageState.WaitingUser
+                    or CreationStageState.Error
+                    or CreationStageState.Cancelled)
+                .OrderByDescending(item => item.Status.UpdatedAt)
+                .ThenByDescending(item => item.Index)
+                .FirstOrDefault();
+            if (active.Status is not null && active.Index < PipelineStages.Count) return PipelineStages[active.Index];
+        }
+
         return PipelineStages.FirstOrDefault(item => item.State is "CURRENT" or "INPROGRESS" or "WAITINGUSER" or "ERROR" or "CANCELLED")
             ?? PipelineStages.LastOrDefault(item => item.IsCompleted)
             ?? new CreationPipelineStage(1, "CONNECT", "Connect", "MCP接続を確認", "CURRENT", "現在", false);

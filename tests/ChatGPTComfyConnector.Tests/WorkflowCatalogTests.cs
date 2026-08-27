@@ -9,6 +9,60 @@ namespace ChatGPTComfyConnector.Tests;
 public sealed class WorkflowCatalogTests
 {
     [Fact]
+    public async Task DiscoverSlotsCollapsesIdenticalAddressesFromMcpResponse()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var mcp = new StubMcpClient((tool, _) => tool == "list_workflow_slots"
+                ? JsonNode.Parse("""
+                    {"slots":[
+                      {"address":"115.aspect_ratio","label":"aspect_ratio","type":"COMBO","current_value":"16:9","choices":["16:9","9:16"]},
+                      {"address":"115.ASPECT_RATIO","label":"aspect_ratio","type":"COMBO","current_value":"16:9","choices":["16:9","9:16"]}
+                    ]}
+                    """)
+                : null);
+            var catalog = new WorkflowCatalog(mcp, new StubPortableStore());
+
+            var slots = await catalog.DiscoverSlotsAsync(WorkflowIdentity.Create("test.json"), root);
+
+            var slot = Assert.Single(slots);
+            Assert.Equal("115.aspect_ratio", slot.Address);
+        }
+        finally
+        {
+            DeleteTempDirectory(root);
+        }
+    }
+
+    [Fact]
+    public async Task DiscoverSlotsRejectsConflictingAddressesFromMcpResponse()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var mcp = new StubMcpClient((tool, _) => tool == "list_workflow_slots"
+                ? JsonNode.Parse("""
+                    {"slots":[
+                      {"address":"115.aspect_ratio","label":"aspect_ratio","type":"COMBO","current_value":"16:9","choices":["16:9","9:16"]},
+                      {"address":"115.ASPECT_RATIO","label":"aspect_ratio","type":"COMBO","current_value":"1:1","choices":["1:1"]}
+                    ]}
+                    """)
+                : null);
+            var catalog = new WorkflowCatalog(mcp, new StubPortableStore());
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                catalog.DiscoverSlotsAsync(WorkflowIdentity.Create("test.json"), root));
+
+            Assert.Contains("競合するAddress", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteTempDirectory(root);
+        }
+    }
+
+    [Fact]
     public async Task FetchOutputsResolvesComfySubfolderWithoutDownloadingAFlatCopy()
     {
         var root = CreateTempDirectory();

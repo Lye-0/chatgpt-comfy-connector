@@ -1,4 +1,3 @@
-using System.Text.Json.Nodes;
 using ChatGPTComfyConnector.Core.Models;
 
 namespace ChatGPTComfyConnector.Core.Services;
@@ -46,9 +45,9 @@ public static class PendingHandoffReuse
             return false;
         }
 
-        var current = slots.Select(ChatGptSlotPolicy.CreateSnapshot).ToArray();
+        var current = SlotSchemaPolicy.CreateSnapshots(slots).ToArray();
         return pending.Slots.Count == current.Length
-            && pending.Slots.Zip(current).All(pair => SnapshotsEqual(pair.First, pair.Second));
+            && pending.Slots.Zip(current).All(pair => SlotSchemaPolicy.SnapshotsEquivalent(pair.First, pair.Second));
     }
 
     public static bool IsBootstrap(PendingHandoffSnapshot? pending)
@@ -87,21 +86,6 @@ public static class PendingHandoffReuse
     private static bool HasField(string payload, string name, string value)
         => payload.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
             .Any(line => string.Equals(line.Trim(), $"{name}: {value}", StringComparison.Ordinal));
-
-    private static bool SnapshotsEqual(HandoffSlotSnapshot left, HandoffSlotSnapshot right)
-        => string.Equals(left.Address, right.Address, StringComparison.Ordinal)
-            && string.Equals(left.Label, right.Label, StringComparison.Ordinal)
-            && string.Equals(left.Type, right.Type, StringComparison.Ordinal)
-            && JsonEqual(left.CurrentValue, right.CurrentValue)
-            && JsonEqual(left.Choices, right.Choices)
-            && left.Minimum == right.Minimum
-            && left.Maximum == right.Maximum
-            && left.Transport == right.Transport
-            && left.Exposure == right.Exposure
-            && string.Equals(left.PolicyReason, right.PolicyReason, StringComparison.Ordinal);
-
-    private static bool JsonEqual(JsonNode? left, JsonNode? right)
-        => string.Equals(left?.ToJsonString() ?? string.Empty, right?.ToJsonString() ?? string.Empty, StringComparison.Ordinal);
 
     private static bool MatchesPersistedValue(string? issued, string? current)
         // Empty values are absent in snapshots written before the context

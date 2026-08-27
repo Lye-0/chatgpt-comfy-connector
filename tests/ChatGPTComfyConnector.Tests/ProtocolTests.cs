@@ -324,6 +324,97 @@ public sealed class ProtocolTests
     }
 
     [Fact]
+    public void PendingHandoffFactoryCollapsesIdenticalDuplicateWorkflowSlots()
+    {
+        var session = new CreationSession { Id = "session-duplicate", BoundWorkflow = WorkflowIdentity.Create("folder/test.json") };
+        var slot = new WorkflowSlot
+        {
+            Address = "115.aspect_ratio", Label = "aspect_ratio", Type = "COMBO",
+            CurrentValue = JsonValue.Create("16:9"), Choices = ["16:9", "9:16"],
+        };
+
+        var pending = PendingHandoffFactory.Create(session, [slot, slot], "generate");
+        var text = ConnectorContextBuilder.BuildBootstrap(session, pending);
+
+        Assert.Single(pending.Slots);
+        Assert.Equal(1, text.Split("- 115.aspect_ratio", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void PendingHandoffFactoryRejectsConflictingDuplicateWorkflowSlots()
+    {
+        var session = new CreationSession { Id = "session-conflict", BoundWorkflow = WorkflowIdentity.Create("folder/test.json") };
+        var first = new WorkflowSlot
+        {
+            Address = "115.aspect_ratio", Label = "aspect_ratio", Type = "COMBO",
+            CurrentValue = JsonValue.Create("16:9"), Choices = ["16:9", "9:16"],
+        };
+        var conflicting = new WorkflowSlot
+        {
+            Address = "115.ASPECT_RATIO", Label = "aspect_ratio", Type = "COMBO",
+            CurrentValue = JsonValue.Create("1:1"), Choices = ["1:1"],
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() => PendingHandoffFactory.Create(session, [first, conflicting], "generate"));
+        Assert.Contains("競合するAddress", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DuplicatePendingSnapshotIsRejectedAsValidationErrorInsteadOfThrowing()
+    {
+        var pending = Pending();
+        var original = pending.Slots.Single(slot => slot.Address == "10.steps");
+        pending.Slots.Add(new HandoffSlotSnapshot
+        {
+            Address = original.Address, Label = original.Label, Type = original.Type,
+            CurrentValue = original.CurrentValue?.DeepClone(), Choices = original.Choices?.DeepClone() as JsonArray,
+            Minimum = original.Minimum, Maximum = original.Maximum, Transport = original.Transport,
+            Exposure = original.Exposure, PolicyReason = original.PolicyReason,
+        });
+
+        var result = ConnectorProtocol.Parse(Generate(pending, "{\"10.steps\":25}"), pending);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, error => error.Contains("重複したAddressがあります: 10.steps", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void DuplicatePendingSnapshotIsRejectedForCompleteResponsesToo()
+    {
+        var pending = Pending("generate", "complete");
+        var original = pending.Slots.Single(slot => slot.Address == "10.steps");
+        pending.Slots.Add(new HandoffSlotSnapshot
+        {
+            Address = original.Address, Label = original.Label, Type = original.Type,
+            CurrentValue = original.CurrentValue?.DeepClone(), Choices = original.Choices?.DeepClone() as JsonArray,
+            Minimum = original.Minimum, Maximum = original.Maximum, Transport = original.Transport,
+            Exposure = original.Exposure, PolicyReason = original.PolicyReason,
+        });
+        var response = $"```connector-command\n{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"complete\",\"handoff_id\":\"{pending.HandoffId}\",\"session_id\":\"{pending.SessionId}\",\"reason\":\"done\"}}\n```";
+
+        var result = ConnectorProtocol.Parse(response, pending);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, error => error.Contains("重複したAddressがあります: 10.steps", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ConflictingPendingSnapshotIsRejectedAsValidationErrorInsteadOfThrowing()
+    {
+        var pending = Pending();
+        pending.Slots.Add(new HandoffSlotSnapshot
+        {
+            Address = "10.STEPS", Label = "Steps", Type = "FLOAT", CurrentValue = JsonValue.Create(20d),
+            Minimum = 1, Maximum = 100, Transport = SlotValueTransport.Json, Exposure = ChatGptSlotExposure.Writable,
+        });
+
+        var result = ConnectorProtocol.Parse(Generate(pending, "{\"10.steps\":25}"), pending);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, error => error.Contains("競合するAddressがあります: 10.steps", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void HandoffKeepsReadableUnicodeSymbolsAndExactMarkers()
     {
         var session = new CreationSession

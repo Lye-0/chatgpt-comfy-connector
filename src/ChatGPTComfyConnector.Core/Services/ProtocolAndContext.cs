@@ -61,7 +61,11 @@ public static partial class ConnectorProtocol
         slots ??= [];
         var resolved = new JsonObject();
         var referencedPayloads = new HashSet<string>(StringComparer.Ordinal);
-        if (action == "generate") ValidateAndResolveSlots(slots, pending, envelope.Payloads, referencedPayloads, resolved, result.Errors);
+        // Validate the issued schema for every response, including
+        // `complete`. A duplicate PendingHandoff schema is corrupted state and
+        // must not slip through merely because that action has no slot values.
+        SlotSchemaPolicy.TryBuildSnapshotDictionary(pending.Slots, out var schema, result.Errors);
+        if (action == "generate") ValidateAndResolveSlots(slots, schema, envelope.Payloads, referencedPayloads, resolved, result.Errors);
         foreach (var payloadId in envelope.Payloads.Keys)
         {
             if (!referencedPayloads.Contains(payloadId)) result.Errors.Add($"参照されていないCOMFY_PAYLOADがあります: {payloadId}");
@@ -79,9 +83,12 @@ public static partial class ConnectorProtocol
         return result;
     }
 
-    private static void ValidateAndResolveSlots(JsonObject slots, PendingHandoffSnapshot pending, IReadOnlyDictionary<string, string> payloads, ISet<string> referencedPayloads, JsonObject resolved, ICollection<string> errors)
+    private static void ValidateAndResolveSlots(JsonObject slots, IReadOnlyDictionary<string, HandoffSlotSnapshot> schema, IReadOnlyDictionary<string, string> payloads, ISet<string> referencedPayloads, JsonObject resolved, ICollection<string> errors)
     {
-        var schema = pending.Slots.ToDictionary(slot => slot.Address, StringComparer.OrdinalIgnoreCase);
+        // The schema dictionary was built by SlotSchemaPolicy before this
+        // method is called. Do not use ToDictionary here: PendingHandoff is
+        // persisted data and duplicate addresses must remain validation errors,
+        // not unhandled ArgumentExceptions.
         foreach (var property in slots)
         {
             if (!schema.TryGetValue(property.Key, out var slot)) { errors.Add($"現在のHandoffに存在しないslotです: {property.Key}"); continue; }
@@ -484,7 +491,7 @@ public static class PendingHandoffFactory
             KickoffInstruction = session.OriginalIdea,
             Iteration = session.CurrentIteration,
             AllowedActions = allowedActions.Distinct(StringComparer.Ordinal).ToList(),
-            Slots = slots.Select(ChatGptSlotPolicy.CreateSnapshot).ToList(),
+            Slots = SlotSchemaPolicy.CreateSnapshots(slots).ToList(),
         };
 }
 
@@ -611,7 +618,14 @@ public static class ConnectorContextBuilder
         }
         sb.AppendLine();
         sb.AppendLine("## Available writable slot schema");
-        var writableSlots = handoff.Slots.Where(slot => slot.IsWritableByChatGpt).ToArray();
+        // A Handoff must never publish the same protocol address twice. The
+        // factory already canonicalizes discovery results; this final guard
+        // protects rendering when an older/corrupt persisted PendingHandoff is
+        // encountered and fails explicitly instead of producing ambiguous
+        // instructions for ChatGPT.
+        var writableSlots = SlotSchemaPolicy.RequireUniqueSnapshots(handoff.Slots)
+            .Where(slot => slot.IsWritableByChatGpt)
+            .ToArray();
         if (writableSlots.Length == 0) sb.AppendLine("(No writable creative slots are available. A generate response must use an empty slots object.)");
         foreach (var slot in writableSlots)
         {

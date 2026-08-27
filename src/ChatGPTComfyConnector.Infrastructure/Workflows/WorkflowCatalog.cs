@@ -30,7 +30,7 @@ public sealed class WorkflowCatalog
         var node = await _mcp.CallAsync("list_workflow_slots", new Dictionary<string, object?> { ["workflow_path"] = workflow.ToAbsolute(workflowRoot) }, cancellationToken);
         var array = node?["slots"] as JsonArray ?? (node as JsonArray);
         if (array is null) return [];
-        return array.OfType<JsonObject>().Select(slot => new WorkflowSlot
+        var discovered = array.OfType<JsonObject>().Select(slot => new WorkflowSlot
         {
             Address = slot["address"]?.GetValue<string>() ?? string.Empty,
             Label = slot["label"]?.GetValue<string>() ?? slot["name"]?.GetValue<string>() ?? slot["address"]?.GetValue<string>() ?? "slot",
@@ -40,7 +40,15 @@ public sealed class WorkflowCatalog
             Minimum = ReadDouble(slot, "minimum", "min"),
             Maximum = ReadDouble(slot, "maximum", "max"),
             PairingSuspect = slot["pairing_suspect"]?.GetValue<bool>() ?? false,
-        }).Where(slot => !string.IsNullOrWhiteSpace(slot.Address)).ToArray();
+        }).Where(slot => !string.IsNullOrWhiteSpace(slot.Address));
+
+        // comfy-cli normally emits one record per address, but older MCP/CLI
+        // combinations and concurrent schema projections can return the same
+        // record more than once. Canonicalize here, before the VM or a
+        // PendingHandoff ever sees the collection. A same-address conflict is
+        // intentionally surfaced as an error rather than silently choosing a
+        // value that could make a later write ambiguous.
+        return SlotSchemaPolicy.NormalizeWorkflowSlots(discovered);
     }
 
     public async Task<JsonNode?> ValidateAsync(WorkflowIdentity workflow, string workflowRoot, CancellationToken cancellationToken = default)

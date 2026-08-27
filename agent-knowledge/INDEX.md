@@ -62,6 +62,16 @@
 - files: `README.md`, `docs/architecture.md`, `docs/connector-protocol-v1.md` …
 - memory: `agent-knowledge/entries/2026-08-23-workflow-safety-generation-4e91ab.md`
 
+## workflow-slot-safety
+
+### Workflow Slot Schemaの一意性と非同期発見結果の境界
+- id: `rm-20260827-slot-schema-uniqueness`
+- type: `pattern`
+- maturity: `candidate`
+- tags: `workflow`, `slots`, `schema`, `duplicate`, `validation`, `async-race`
+- files: `src/ChatGPTComfyConnector.Core/Services/SlotSchemaPolicy.cs`, `src/ChatGPTComfyConnector.Infrastructure/Workflows/WorkflowCatalog.cs`, `src/ChatGPTComfyConnector.Core/Services/ProtocolAndContext.cs` …
+- memory: `agent-knowledge/entries/2026-08-27-slot-schema-uniqueness-a2c4d1.md`
+
 ## Search guidance
 
 Use topic, tags, related paths, filenames, and text search such as `rg` to shortlist entries.

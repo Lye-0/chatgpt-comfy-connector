@@ -176,6 +176,12 @@ enum/dynamic-combo slots ReadOnly when allowed choices are unavailable. The Pend
 Handoff snapshot—not the current editor state—is the validation source of truth.
 Slot discovery distinguishes NotLoaded, Loading, Loaded, and
 Failed, so an unavailable schema is never silently exported as an empty slot list.
+Every slot address is canonicalized with the Protocol's case-insensitive comparer
+before it reaches the editor or Pending Handoff. Identical duplicate records are
+collapsed at discovery; conflicting records and duplicate addresses in persisted
+Pending Handoffs are rejected as validation errors. Async discovery responses from
+an older selection/reconnect generation are ignored rather than appended to the
+current collection.
 The detailed grammar and validation invariants are canonicalized in
 `docs/connector-protocol-v1.md`. Clipboard is only the current transport boundary;
 the Protocol and Pending Handoff models remain reusable by a future browser or

@@ -90,9 +90,9 @@ ExposureとTransportは独立している。たとえば `filename_prefix` はpa
 | boolean | `json` | JSON boolean |
 | enum / choice | `json` | choices内のJSON string |
 
-H3固有addressはProtocolへハードコードしない。`list_workflow_slots` から得たaddress、label、type、current、choices、取得可能なrangeへPolicyを適用してsnapshotし、Response検証にも同じsnapshotを使用する。Handoff本文にはWritable schemaだけを掲載するが、Pending Handoffは発見slotのPolicy結果を保持し、手書きされたHidden / ReadOnly addressも拒否する。
+H3固有addressはProtocolへハードコードしない。`list_workflow_slots` から得たaddress、label、type、current、choices、取得可能なrangeへPolicyを適用してsnapshotし、Response検証にも同じsnapshotを使用する。Slot addressは `OrdinalIgnoreCase` でWorkflow Context内の一意キーとして扱う。同一addressの同一schemaレコードは発見段階で1件へ正規化し、内容が異なる同一addressはschema conflictとして拒否する。Handoff本文にはWritable schemaだけを掲載するが、Pending Handoffは発見slotのPolicy結果を保持し、手書きされたHidden / ReadOnly addressも拒否する。
 
-Slot discoveryは `NotLoaded`、`Loading`、`Loaded`、`Failed` を区別する。MCP未接続や取得失敗は空schemaとして送らず、Handoff作成を停止する。正常に `Loaded` となった0 slot Workflowだけは、明示的な0件schemaとして扱える。
+Slot discoveryは `NotLoaded`、`Loading`、`Loaded`、`Failed` を区別する。MCP未接続や取得失敗は空schemaとして送らず、Handoff作成を停止する。正常に `Loaded` となった0 slot Workflowだけは、明示的な0件schemaとして扱える。Workflow選択や再接続に伴う非同期の古い応答は、現在の読み込み世代と一致しない限りUIのslot collectionへ反映しない。
 
 ## Pending Handoff snapshot
 
@@ -106,7 +106,7 @@ ChatGPTへ渡す各Handoffは次を永続化する。
 - `WorkflowIdentity`
 - Project / Chat provider and context keys
 - Project / Chat labels
-- Slot schemaとChatGPT exposure / writable policy
+- Slot schemaとChatGPT exposure / writable policy（addressは一意、競合は発行不可）
 - `Iteration`
 - `CreatedAt`
 
@@ -121,7 +121,7 @@ Importerは次の順序を保つ。
 3. `System.Text.Json` で抽出したJSONをparseする
 4. `protocol`、`action`、`handoff_id`、`session_id`、`AllowedActions` を検証する
 5. payload referenceを収集し、supplied boundaryでRaw blockを解析する
-6. Pending Handoffのslot schemaに対してwritable、address、transport、type、choice、range、changed-onlyを検証する
+6. Pending Handoffのslot schemaに対して重複／競合addressがないこと、およびwritable、address、transport、type、choice、range、changed-onlyを検証する
 7. payloadを解決した `ResolvedSlots` を内部Preview modelへ渡す
 8. 全検証成功後だけCOMMAND stageをCompletedへ進める
 

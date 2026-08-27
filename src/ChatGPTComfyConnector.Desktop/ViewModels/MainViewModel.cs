@@ -32,6 +32,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _isBusy;
     private bool _isSlotLoading;
     private SlotDiscoveryState _slotDiscoveryState = SlotDiscoveryState.NotLoaded;
+    // Slot discovery is asynchronous and can be triggered by both Workflow
+    // selection and a successful MCP reconnect.  A later request must own the
+    // observable collections; otherwise an earlier response can append the
+    // same schema (or a previous Workflow's schema) after the newer request
+    // has already started.
+    private long _slotDiscoveryVersion;
     private bool _isDirty;
     private bool _isWorkflowEditorVisible;
     private string _commandText = string.Empty;
@@ -544,11 +550,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task DisconnectAsync()
     {
+        // Invalidate an in-flight list_workflow_slots request before changing
+        // the connection gate.  Its continuation may arrive after disconnect;
+        // it must not repopulate the visible collections with a stale schema.
+        Interlocked.Increment(ref _slotDiscoveryVersion);
         await _mcp.DisconnectAsync();
+        // A selection can begin while the transport is still completing its
+        // shutdown. Invalidate that narrow race as well once disconnect has
+        // finished and the connection state is authoritative.
+        Interlocked.Increment(ref _slotDiscoveryVersion);
         _serverInfo = null;
         ConnectionState = ConnectionState.Disconnected;
         SynchronizePipelineConnectionGate();
         SlotDiscoveryState = SlotDiscoveryState.NotLoaded;
+        IsSlotLoading = false;
         StatusMessage = "MCPを切断しました。ComfyUIは終了していません。";
         await SaveActiveSessionAsync();
     }
@@ -564,6 +579,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task SelectWorkflowAsync(string relativePath)
     {
         var identity = WorkflowIdentity.Create(relativePath);
+        var loadVersion = Interlocked.Increment(ref _slotDiscoveryVersion);
         SelectedWorkflow = identity;
         Slots.Clear();
         PrimarySlots.Clear();
@@ -577,6 +593,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _loadedFingerprint = File.Exists(path) ? WorkflowCatalog.ComputeFingerprint(path) : null;
         if (!IsConnected)
         {
+            IsSlotLoading = false;
             StatusMessage = "Workflowを選択しました。slot取得にはMCP接続が必要です。";
             return;
         }
@@ -586,7 +603,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         SlotDiscoveryState = SlotDiscoveryState.Loading;
         try
         {
-            foreach (var slot in await _catalog.DiscoverSlotsAsync(identity, WorkflowRoot))
+            var discovered = await _catalog.DiscoverSlotsAsync(identity, WorkflowRoot);
+            // A stale response must never append into the collections owned by
+            // a newer selection. This is also what prevents two identical
+            // list_workflow_slots responses from becoming a doubled Handoff
+            // schema when selection/reconnect events overlap.
+            if (!IsCurrentSlotDiscovery(loadVersion, identity)) return;
+
+            foreach (var slot in discovered)
             {
                 var item = new SlotEditorItem(slot);
                 item.PropertyChanged += SlotChanged;
@@ -606,13 +630,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
+            if (!IsCurrentSlotDiscovery(loadVersion, identity)) return;
             MarkConnectionFailureIfTransportClosed(ex);
             SlotLoadError = ex.Message;
             SlotDiscoveryState = SlotDiscoveryState.Failed;
             StatusMessage = $"slot取得に失敗しました: {ex.Message}";
             await _store.LogAsync("workflow", StatusMessage, ex);
         }
-        finally { IsSlotLoading = false; IsBusy = false; NotifySlotCollectionsChanged(); }
+        finally
+        {
+            if (IsCurrentSlotDiscovery(loadVersion, identity))
+            {
+                IsSlotLoading = false;
+                IsBusy = false;
+                NotifySlotCollectionsChanged();
+            }
+        }
     }
 
     public void DiscardChanges()
@@ -1849,6 +1882,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (string.IsNullOrWhiteSpace(value) || value is "." or ".." || value.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) throw new InvalidOperationException("Workflow名が不正です。");
         return value;
     }
+
+    private bool IsCurrentSlotDiscovery(long version, WorkflowIdentity identity)
+        => Volatile.Read(ref _slotDiscoveryVersion) == version
+            && SelectedWorkflow is { } selected
+            && string.Equals(selected.RelativePath, identity.RelativePath, StringComparison.OrdinalIgnoreCase);
 
     private void SlotChanged(object? sender, PropertyChangedEventArgs e) { if (e.PropertyName == nameof(SlotEditorItem.ValueText)) IsDirty = true; }
 

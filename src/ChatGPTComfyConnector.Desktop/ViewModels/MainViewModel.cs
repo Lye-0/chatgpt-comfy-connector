@@ -252,6 +252,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(ViewingIterationText));
             OnPropertyChanged(nameof(IsViewingLatest));
             OnPropertyChanged(nameof(ViewingStateText));
+            OnPropertyChanged(nameof(CanReturnToLatest));
             OnPropertyChanged(nameof(CurrentOutputFolderPath));
             NotifyGenerationDisplayChanged();
         }
@@ -267,6 +268,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string LatestIterationText => HistoryItems.LastOrDefault() is { } latest ? $"LATEST ITERATION {latest.Number:00}" : "LATEST —";
     public bool IsViewingLatest => SelectedHistoryItem is not null && ReferenceEquals(SelectedHistoryItem, HistoryItems.LastOrDefault());
     public string ViewingStateText => IsViewingLatest ? "VIEWING LATEST" : SelectedHistoryItem is null ? "NO OUTPUT" : "VIEWING HISTORY";
+    public bool CanReturnToLatest => SelectedHistoryItem is not null && HistoryItems.Count > 0 && !IsViewingLatest;
     public bool IsGenerationInProgress
     {
         get
@@ -949,7 +951,39 @@ public sealed class MainViewModel : INotifyPropertyChanged
         foreach (var item in Slots) if (commandResult.Command.Parameters.TryGetPropertyValue(item.Address, out var value) && value is not null) item.ValueText = value is JsonValue v && v.TryGetValue<string>(out var text) ? text : value.ToJsonString();
         IsDirty = true;
         NotifyPipelineStateChanged();
-        if (generate) await GenerateAsync(); else await ApplySlotsAsync();
+        if (generate)
+        {
+            // Apply first so the temporary command can be cleared at the
+            // exact point where APPLY has succeeded.  GenerateAsync(false)
+            // then performs the normal ComfyUI gate without applying twice;
+            // a later ComfyUI wait/failure must not put the command back.
+            await ApplySlotsAsync();
+            ClearAppliedCommandInput();
+            await GenerateAsync(applyFirst: false);
+        }
+        else
+        {
+            await ApplySlotsAsync();
+            ClearAppliedCommandInput();
+        }
+    }
+
+    private void ClearAppliedCommandInput()
+    {
+        // Clearing through the public setter would look like a replacement
+        // and reset the command stage. APPLY has already completed, so only
+        // discard the transient validation buffer and notify the binding.
+        _pendingValidation = null;
+        _commandText = string.Empty;
+        OnPropertyChanged(nameof(CommandText));
+        OnPropertyChanged(nameof(CanApplyCommand));
+        NotifyPipelineStateChanged();
+    }
+
+    public void ReturnToLatestOutput()
+    {
+        SelectedHistoryItem = HistoryItems.LastOrDefault(item => item.HasOutput && item.PrimaryOutput?.IsMissing != true)
+            ?? HistoryItems.LastOrDefault();
     }
 
     public async Task<string> PrepareBootstrapHandoffAsync()
@@ -1680,6 +1714,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(LatestIterationText));
         OnPropertyChanged(nameof(IsViewingLatest));
         OnPropertyChanged(nameof(ViewingStateText));
+        OnPropertyChanged(nameof(CanReturnToLatest));
     }
 
     private void NotifyHistoryChanged()
@@ -1698,6 +1733,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ViewingIterationText));
         OnPropertyChanged(nameof(IsViewingLatest));
         OnPropertyChanged(nameof(ViewingStateText));
+        OnPropertyChanged(nameof(CanReturnToLatest));
         OnPropertyChanged(nameof(CurrentOutputFolderPath));
         NotifyGenerationDisplayChanged();
     }

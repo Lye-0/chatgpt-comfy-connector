@@ -24,6 +24,7 @@ public partial class MainWindow : Window
     private bool _currentOutputVideoFailed;
     private bool _currentOutputPreviewHovering;
     private string? _lastCurrentOutputVideoPath;
+    private string? _requestedHistoryPlaybackPath;
     private MainViewModel ViewModel => (MainViewModel)DataContext;
 
     public MainWindow()
@@ -211,6 +212,26 @@ public partial class MainWindow : Window
         if (sender is FrameworkElement { Tag: string path }) RunSync("出力フォルダを開く", () => ViewModel.OpenOutputFolder(path));
     }
 
+    private void ReturnToLatest_Click(object sender, RoutedEventArgs e)
+        => ViewModel.ReturnToLatestOutput();
+
+    private void HistoryPlay_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: GenerationHistoryItem item }
+            || item.PrimaryOutput is not { IsVideo: true } output
+            || output.IsMissing)
+        {
+            return;
+        }
+
+        // Selecting a history card only changes the viewer. This explicit
+        // play affordance is the one path that requests a one-shot restart.
+        _requestedHistoryPlaybackPath = output.FullPath;
+        ViewModel.SelectedHistoryItem = item;
+        Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(TryStartRequestedHistoryPlayback));
+        e.Handled = true;
+    }
+
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName != nameof(MainViewModel.SelectedPreviewOutput) || Dispatcher.HasShutdownStarted) return;
@@ -222,6 +243,11 @@ public partial class MainWindow : Window
     private void SynchronizeCurrentOutputVideo()
     {
         var currentPath = ViewModel.SelectedPreviewOutput?.FullPath;
+        if (!string.IsNullOrWhiteSpace(_requestedHistoryPlaybackPath)
+            && !string.Equals(_requestedHistoryPlaybackPath, currentPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _requestedHistoryPlaybackPath = null;
+        }
         if (string.Equals(_lastCurrentOutputVideoPath, currentPath, StringComparison.OrdinalIgnoreCase))
         {
             UpdateVideoControls();
@@ -270,9 +296,22 @@ public partial class MainWindow : Window
     {
         _currentOutputVideoReady = true;
         _currentOutputVideoFailed = false;
-        // Preserve the existing first-play experience; LOOP only changes what
-        // happens after the first pass completes.
-        StartCurrentOutputVideo(restart: true);
+        if (IsRequestedHistoryPlayback())
+        {
+            _requestedHistoryPlaybackPath = null;
+            StartCurrentOutputVideo(restart: true);
+        }
+        else if (_videoLoopEnabled)
+        {
+            // LOOP ON is a playback preference, so a newly selected video
+            // starts as soon as its MediaElement is ready.
+            StartCurrentOutputVideo(restart: true);
+        }
+        else
+        {
+            // A normal HISTORY selection must not autoplay in LOOP OFF mode.
+            UpdateVideoControls();
+        }
     }
 
     private void CurrentOutputVideo_MediaEnded(object sender, RoutedEventArgs e)
@@ -304,6 +343,25 @@ public partial class MainWindow : Window
         }
         UpdateVideoControls();
     }
+
+    private void TryStartRequestedHistoryPlayback()
+    {
+        if (!IsRequestedHistoryPlayback())
+        {
+            _requestedHistoryPlaybackPath = null;
+            return;
+        }
+
+        if (!_currentOutputVideoReady) return;
+        _requestedHistoryPlaybackPath = null;
+        StartCurrentOutputVideo(restart: true);
+    }
+
+    private bool IsRequestedHistoryPlayback()
+        => !string.IsNullOrWhiteSpace(_requestedHistoryPlaybackPath)
+            && string.Equals(_requestedHistoryPlaybackPath, ViewModel.SelectedPreviewOutput?.FullPath, StringComparison.OrdinalIgnoreCase)
+            && ViewModel.SelectedPreviewOutput?.IsVideo == true
+            && ViewModel.SelectedPreviewOutput.IsMissing == false;
 
     private void UpdateVideoControls()
     {
@@ -354,7 +412,7 @@ public partial class MainWindow : Window
     }
 
     private void HistoryVideoMediaFailed(object sender, ExceptionRoutedEventArgs e)
-        => ViewModel.StatusMessage = "履歴の動画サムネイルを読み込めません。CURRENT OUTPUTまたはOPENで確認できます。";
+        => ViewModel.StatusMessage = "履歴の動画サムネイルを読み込めません。OUTPUT VIEWERまたはOPENで確認できます。";
 
     private static TimeSpan GetThumbnailPosition(MediaElement media)
     {

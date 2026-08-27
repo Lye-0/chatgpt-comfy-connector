@@ -309,22 +309,17 @@
                                               IsHitTestVisible="False"
                                               MediaOpened="HistoryVideoMediaOpened"
                                               MediaFailed="HistoryVideoMediaFailed" />
-                                <Border Width="26"
-                                        Height="26"
-                                        HorizontalAlignment="Left"
-                                        VerticalAlignment="Bottom"
-                                        Margin="7"
-                                        Background="#CC07111C"
-                                        BorderBrush="{StaticResource AccentBrush}"
-                                        BorderThickness="1"
-                                        CornerRadius="13"
-                                        IsHitTestVisible="False">
-                                    <TextBlock Text="▶"
-                                               Foreground="{StaticResource AccentStrongBrush}"
-                                               FontSize="11"
-                                               HorizontalAlignment="Center"
-                                               VerticalAlignment="Center" />
-                                </Border>
+                                <Button Style="{StaticResource VideoPlayButtonStyle}"
+                                        Width="28"
+                                        Height="28"
+                                        FontSize="12"
+                                        Content="▶"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Click="HistoryPlay_Click"
+                                        ToolTip="このIterationをOUTPUT VIEWERで再生"
+                                        AutomationProperties.Name="Iterationの動画を再生"
+                                        Panel.ZIndex="2" />
                             </Grid>
                             <StackPanel x:Name="HistoryGeneratingState"
                                         HorizontalAlignment="Center"
@@ -1125,7 +1120,7 @@
                             CornerRadius="12"
                             Padding="12"
                             Margin="0,10,0,0"
-                            AutomationProperties.Name="CURRENT OUTPUT">
+                            AutomationProperties.Name="OUTPUT VIEWER">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
@@ -1138,7 +1133,7 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel>
-                                    <TextBlock Text="CURRENT OUTPUT"
+                                    <TextBlock Text="OUTPUT VIEWER"
                                                FontSize="10"
                                                Foreground="{StaticResource AccentBrush}"
                                                FontWeight="SemiBold" />
@@ -1164,6 +1159,14 @@
                                             ToolTip="動画の自動ループを切り替え"
                                             AutomationProperties.Name="動画の自動ループ"
                                             Visibility="Collapsed" />
+                                    <Button Content="最新へ戻る"
+                                            Padding="8,5"
+                                            Margin="0,0,8,0"
+                                            Click="ReturnToLatest_Click"
+                                            IsEnabled="{Binding CanReturnToLatest}"
+                                            Visibility="{Binding CanReturnToLatest, Converter={StaticResource BoolToVisibility}}"
+                                            ToolTip="最新IterationのOutputを表示"
+                                            AutomationProperties.Name="最新Iterationへ戻る" />
                                     <Button Style="{StaticResource IconButtonStyle}"
                                             ToolTip="生成物の保存フォルダを開く（未生成時はComfyUI output）"
                                             AutomationProperties.Name="生成物の保存フォルダを開く"

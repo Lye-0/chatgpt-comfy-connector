@@ -243,7 +243,12 @@ public partial class MainWindow : Window
         => ViewModel.SetIdeaCompositionState(true);
 
     private void IdeaInput_TextInput(object sender, TextCompositionEventArgs e)
-        => ViewModel.SetIdeaCompositionState(false);
+    {
+        // Some IMEs raise TextInput before the composed text has been copied
+        // into TextBox.Text. Keep the placeholder hidden until TextChanged
+        // confirms that the committed value is actually present.
+        if (IdeaInputBox.Text.Length > 0) ViewModel.SetIdeaCompositionState(false);
+    }
 
     private void IdeaInput_TextChanged(object sender, TextChangedEventArgs e)
     {
@@ -252,7 +257,41 @@ public partial class MainWindow : Window
 
     private void IdeaInput_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Escape) ViewModel.SetIdeaCompositionState(false);
+        if (e.Key == Key.Escape)
+        {
+            ViewModel.SetIdeaCompositionState(false);
+            return;
+        }
+
+        // TextCompositionManager is the primary IME signal, but a few
+        // Windows IME configurations expose the first composition keystroke
+        // only through PreviewKeyDown. Hide the watermark at that point so
+        // it cannot remain behind the in-progress composition string.
+        if (IdeaInputBox.Text.Length == 0 && IsTextEntryKey(e.Key, Keyboard.Modifiers))
+        {
+            ViewModel.SetIdeaCompositionState(true);
+        }
+    }
+
+    private static bool IsTextEntryKey(Key key, ModifierKeys modifiers)
+    {
+        if ((modifiers & (ModifierKeys.Control | ModifierKeys.Alt | ModifierKeys.Windows)) != 0) return false;
+        return key is (>= Key.A and <= Key.Z)
+            or (>= Key.D0 and <= Key.D9)
+            or (>= Key.NumPad0 and <= Key.NumPad9)
+            or Key.Space
+            or Key.Oem1
+            or Key.Oem2
+            or Key.Oem3
+            or Key.Oem4
+            or Key.Oem5
+            or Key.Oem6
+            or Key.Oem7
+            or Key.Oem8
+            or Key.OemComma
+            or Key.OemMinus
+            or Key.OemPeriod
+            or Key.OemPlus;
     }
 
     private void IdeaInput_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)

@@ -24,6 +24,16 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = new MainViewModel(AppContext.BaseDirectory);
+        IdeaInputBox.AddHandler(TextCompositionManager.TextInputStartEvent,
+            new TextCompositionEventHandler(IdeaInput_TextInputStart), true);
+        IdeaInputBox.AddHandler(TextCompositionManager.TextInputUpdateEvent,
+            new TextCompositionEventHandler(IdeaInput_TextInputUpdate), true);
+        IdeaInputBox.AddHandler(TextCompositionManager.TextInputEvent,
+            new TextCompositionEventHandler(IdeaInput_TextInput), true);
+        IdeaInputBox.TextChanged += IdeaInput_TextChanged;
+        IdeaInputBox.PreviewKeyDown += IdeaInput_PreviewKeyDown;
+        IdeaInputBox.LostKeyboardFocus += IdeaInput_LostKeyboardFocus;
+        IdeaInputBox.IsEnabledChanged += IdeaInput_IsEnabledChanged;
         _comfyUiStatusTimer.Tick += ComfyUiStatusTimer_Tick;
     }
 
@@ -224,6 +234,33 @@ public partial class MainWindow : Window
             WorkflowRenameBox.Focus();
             WorkflowRenameBox.SelectAll();
         }));
+    }
+
+    private void IdeaInput_TextInputStart(object sender, TextCompositionEventArgs e)
+        => ViewModel.SetIdeaCompositionState(true);
+
+    private void IdeaInput_TextInputUpdate(object sender, TextCompositionEventArgs e)
+        => ViewModel.SetIdeaCompositionState(true);
+
+    private void IdeaInput_TextInput(object sender, TextCompositionEventArgs e)
+        => ViewModel.SetIdeaCompositionState(false);
+
+    private void IdeaInput_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (sender is TextBox { Text.Length: > 0 }) ViewModel.SetIdeaCompositionState(false);
+    }
+
+    private void IdeaInput_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape) ViewModel.SetIdeaCompositionState(false);
+    }
+
+    private void IdeaInput_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+        => ViewModel.SetIdeaCompositionState(false);
+
+    private void IdeaInput_IsEnabledChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (e.NewValue is false) ViewModel.SetIdeaCompositionState(false);
     }
 
     private void HideSystemConnectionSeparators()

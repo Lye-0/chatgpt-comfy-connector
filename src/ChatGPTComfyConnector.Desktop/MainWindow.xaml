@@ -937,7 +937,8 @@
                                                FontWeight="SemiBold" />
                                 </StackPanel>
                                 <Grid>
-                                    <TextBox Text="{Binding Idea, UpdateSourceTrigger=PropertyChanged}"
+                                    <TextBox x:Name="IdeaInputBox"
+                                             Text="{Binding Idea, UpdateSourceTrigger=PropertyChanged}"
                                              AcceptsReturn="True"
                                              TextWrapping="Wrap"
                                              Height="62"

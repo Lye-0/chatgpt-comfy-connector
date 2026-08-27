@@ -58,6 +58,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // A persisted session may be loaded for history, but it is not the new
     // creation draft until the user explicitly starts or resumes it.
     private bool _isCurrentSessionActivated;
+    // WPF keeps IME composition text out of the bound Text value until the
+    // composition is committed. Keep this presentation-only flag so the
+    // custom placeholder does not render over the composition text.
+    private bool _isIdeaComposing;
 
     public MainViewModel(
         string applicationDirectory,
@@ -215,6 +219,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
             NotifyPipelineStateChanged();
         }
     }
+
+    /// <summary>
+    /// Updates the view-only IME composition state used by the kickoff input.
+    /// The bound <see cref="Idea"/> value is intentionally unchanged until
+    /// WPF commits the composition to the TextBox.
+    /// </summary>
+    internal void SetIdeaCompositionState(bool isComposing)
+    {
+        if (_isIdeaComposing == isComposing) return;
+        _isIdeaComposing = isComposing;
+        OnPropertyChanged(nameof(IsIdeaComposing));
+        OnPropertyChanged(nameof(ShowIdeaPlaceholder));
+    }
+
     public string? SlotLoadError { get => _slotLoadError; private set { _slotLoadError = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasSlotLoadError)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public string ProjectLabel { get => CurrentSession?.ProjectLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ProjectLabel = value; OnPropertyChanged(); } }
     public string ChatLabel { get => CurrentSession?.ChatLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ChatLabel = value; OnPropertyChanged(); } }
@@ -318,7 +336,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool CanResumeSession => _isCurrentSessionActivated && IsCreationConnectionReady && CurrentSession?.Status is SessionStatus.Completed or SessionStatus.Paused or SessionStatus.Stopped or SessionStatus.Error;
     public bool IsIdeaInputEnabled => _isCurrentSessionActivated && CurrentSession?.Pipeline.ContextBound == true && !IsJobActive;
     public bool HasIdeaInput => !string.IsNullOrWhiteSpace(Idea);
-    public bool ShowIdeaPlaceholder => IsIdeaInputEnabled && !HasIdeaInput;
+    public bool IsIdeaComposing => _isIdeaComposing;
+    public bool ShowIdeaPlaceholder => IsIdeaInputEnabled && !HasIdeaInput && !IsIdeaComposing;
     public string IdeaInputPlaceholder => $"任意：既存のChatGPT会話への開始指示・補足{Environment.NewLine}空欄：これまでの会話内容をもとに生成を開始";
     public string IdeaInputHint => IsIdeaInputEnabled
         ? "開始指示・補足は任意です。空欄なら既存ChatGPT会話をもとに開始します。"

@@ -242,14 +242,22 @@ public static class CreationPipelineStateMachine
     {
         RequireContext(session);
         var handoff = Get(session, CreationStage.ToChatGpt).State;
-        var review = Get(session, CreationStage.Review).State;
+        // The pending snapshot is the durable response boundary.  In
+        // particular, a Review response must remain identifiable even after
+        // COMMAND validation starts changing transient pipeline states.
+        var isReviewResponse = IsReviewResponse(session);
         if (handoff is not (CreationStageState.WaitingUser or CreationStageState.Completed)
-            && review is not (CreationStageState.Current or CreationStageState.WaitingUser))
+            && !isReviewResponse)
         {
             throw new InvalidOperationException("先にSEND TO CHATGPTで制作ContextをHandoffしてください。");
         }
         Set(session, CreationStage.Command, CreationStageState.InProgress, "Connector Commandを解析・検証中");
-        ResetAfter(session, CreationStage.Command);
+        // A Bootstrap response starts a new command branch, so its downstream
+        // stages are reset as before.  A Review response must retain the
+        // successful Output, Review context, and history until validation has
+        // completed; otherwise the response would erase the evidence needed
+        // to accept `complete` or continue with `generate`.
+        if (!isReviewResponse) ResetAfter(session, CreationStage.Command);
     }
 
     public static void CommandReplaced(CreationSession session)
@@ -257,7 +265,7 @@ public static class CreationPipelineStateMachine
         EnsureInitialized(session);
         if (Get(session, CreationStage.Command).State == CreationStageState.NotReached) return;
         Set(session, CreationStage.Command, CreationStageState.Current, "Commandが変更されました · 再検証が必要です");
-        ResetAfter(session, CreationStage.Command);
+        if (!IsReviewResponse(session)) ResetAfter(session, CreationStage.Command);
         session.Pipeline.AcceptedCommandAction = null;
         session.Pipeline.MaximumIterationSafetyStop = false;
     }
@@ -265,19 +273,16 @@ public static class CreationPipelineStateMachine
     public static void CommandValidationFailed(CreationSession session, string detail)
     {
         Set(session, CreationStage.Command, CreationStageState.Error, detail);
-        ResetAfter(session, CreationStage.Command);
+        // Keep a Review response boundary and its successful Output intact so
+        // the user can correct and resubmit the same command.  Bootstrap
+        // validation keeps the original downstream reset behavior.
+        if (!IsReviewResponse(session)) ResetAfter(session, CreationStage.Command);
     }
 
     public static void CommandValidated(CreationSession session, string action)
     {
         RequireContext(session);
-        var review = Get(session, CreationStage.Review);
-        var isReviewResponse = review.State is CreationStageState.Current or CreationStageState.WaitingUser;
-        if (isReviewResponse) Set(session, CreationStage.Review, CreationStageState.Completed, action == "complete" ? "ChatGPTが完成を承認" : "次のIterationへ進みます");
-
-        Set(session, CreationStage.ToChatGpt, CreationStageState.Completed, "有効なConnector Commandを受信");
-        Set(session, CreationStage.Command, CreationStageState.Completed, "Protocol・Action・Schema・Workflow整合性を確認済み");
-        session.Pipeline.AcceptedCommandAction = action;
+        var isReviewResponse = IsReviewResponse(session);
 
         if (action == "complete")
         {
@@ -286,8 +291,18 @@ public static class CreationPipelineStateMachine
                 Set(session, CreationStage.Command, CreationStageState.Error, "completeはOutput成功後のREVIEWでのみ受理できます");
                 throw new InvalidOperationException("completeは、少なくとも1回Outputが成功したREVIEW工程でのみ受理できます。");
             }
+
+            Set(session, CreationStage.Review, CreationStageState.Completed, "ChatGPTが完成を承認");
+            Set(session, CreationStage.ToChatGpt, CreationStageState.Completed, "有効なConnector Commandを受信");
+            Set(session, CreationStage.Command, CreationStageState.Completed, "Protocol・Action・Schema・Workflow整合性を確認済み");
+            session.Pipeline.AcceptedCommandAction = action;
             return;
         }
+
+        Set(session, CreationStage.ToChatGpt, CreationStageState.Completed, "有効なConnector Commandを受信");
+        Set(session, CreationStage.Command, CreationStageState.Completed, "Protocol・Action・Schema・Workflow整合性を確認済み");
+        session.Pipeline.AcceptedCommandAction = action;
+        if (isReviewResponse) Set(session, CreationStage.Review, CreationStageState.Completed, "次のIterationへ進みます");
 
         if (isReviewResponse && session.AtIterationLimit)
         {
@@ -436,6 +451,22 @@ public static class CreationPipelineStateMachine
 
     private static bool HasSuccessfulOutput(CreationSession session)
         => session.Iterations.Any(iteration => iteration.Status == JobStatus.Completed && iteration.Outputs.Any(output => !output.IsMissing));
+
+    private static bool IsReviewResponse(CreationSession session)
+    {
+        // New Handoffs carry an explicit immutable purpose.  A complete
+        // permission is the compatibility signal for Review snapshots saved
+        // before Purpose was introduced.  The transient stage fallback keeps
+        // old in-memory callers/snapshots working when no PendingHandoff was
+        // persisted, but is never used when a snapshot is available.
+        if (session.PendingHandoff is not null)
+        {
+            return PendingHandoffReuse.IsReview(session.PendingHandoff);
+        }
+
+        var review = Get(session, CreationStage.Review).State;
+        return review is CreationStageState.Current or CreationStageState.WaitingUser;
+    }
 
     private static void ResetAfter(CreationSession session, CreationStage stage)
     {

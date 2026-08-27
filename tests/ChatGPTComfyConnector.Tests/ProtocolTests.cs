@@ -50,6 +50,80 @@ public sealed class ProtocolTests
         Assert.True(complete.IsValid, string.Join(" | ", complete.Errors));
     }
 
+    [Fact]
+    public void AcceptsJsonFenceAndFenceLessRawJson()
+    {
+        var pending = Pending();
+        var json = RawGenerate(pending, "{\"10.steps\":25}");
+
+        var jsonFence = ConnectorProtocol.Parse($"```json\n{json}\n```", pending);
+        var unlabeledFence = ConnectorProtocol.Parse($"```\n{json}\n```", pending);
+        var raw = ConnectorProtocol.Parse(json, pending);
+
+        Assert.True(jsonFence.IsValid, string.Join(" | ", jsonFence.Errors));
+        Assert.True(unlabeledFence.IsValid, string.Join(" | ", unlabeledFence.Errors));
+        Assert.True(raw.IsValid, string.Join(" | ", raw.Errors));
+        Assert.Equal(25, raw.Command!.Parameters["10.steps"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void AcceptsExplanatoryTextAroundOneRawJsonObject()
+    {
+        var pending = Pending("generate", "complete");
+        var json = $"{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"complete\",\"handoff_id\":\"{pending.HandoffId}\",\"session_id\":\"{pending.SessionId}\",\"reason\":\"approved {{after review}}\"}}";
+
+        var result = ConnectorProtocol.Parse($"Here is the Connector Response:\n{json}\nPaste this into the Connector.", pending);
+
+        Assert.True(result.IsValid, string.Join(" | ", result.Errors));
+        Assert.Equal("complete", result.Command!.Action);
+        Assert.Equal("approved {after review}", result.Command.Reason);
+    }
+
+    [Fact]
+    public void RawJsonScannerHandlesNestedObjectsAndBracesInsideStrings()
+    {
+        var pending = Pending();
+        var json = RawGenerate(pending, "{\"6.text\":{\"payload_id\":\"main\"},\"10.steps\":25}");
+        var payload = "prompt with {braces} and escaped \\\"quotes\\\"";
+        var response = $"Assistant note\n{json}\n<<<COMFY_PAYLOAD:main:{pending.BoundaryId}>>>\n{payload}\n<<<END_COMFY_PAYLOAD:main:{pending.BoundaryId}>>>";
+
+        var result = ConnectorProtocol.Parse(response, pending);
+
+        Assert.True(result.IsValid, string.Join(" | ", result.Errors));
+        Assert.Equal(payload, result.Command!.Parameters["6.text"]!.GetValue<string>());
+
+        var fenced = $"```json\n{json}\n```\n<<<COMFY_PAYLOAD:main:{pending.BoundaryId}>>>\n{payload}\n<<<END_COMFY_PAYLOAD:main:{pending.BoundaryId}>>>";
+        var fencedResult = ConnectorProtocol.Parse(fenced, pending);
+        Assert.True(fencedResult.IsValid, string.Join(" | ", fencedResult.Errors));
+    }
+
+    [Fact]
+    public void RejectsMultipleRawJsonObjectsAndUnsupportedFences()
+    {
+        var pending = Pending();
+        var json = RawGenerate(pending, "{\"10.steps\":25}");
+
+        var multiple = ConnectorProtocol.Parse($"first {json}\nsecond {json}", pending);
+        var unsupported = ConnectorProtocol.Parse($"```javascript\n{json}\n```", pending);
+
+        Assert.False(multiple.IsValid);
+        Assert.Contains(multiple.Errors, error => error.Contains("JSON objectを1つ", StringComparison.Ordinal));
+        Assert.False(unsupported.IsValid);
+        Assert.Contains(unsupported.Errors, error => error.Contains("未対応", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void RejectsRawNonObjectAndProtocolMismatch()
+    {
+        var pending = Pending();
+        var nonObject = ConnectorProtocol.Parse("[1, 2, 3]", pending);
+        var wrongProtocol = ConnectorProtocol.Parse(RawGenerate(pending, "{\"10.steps\":25}").Replace(ConnectorProtocol.Version, "comfy-connector/2", StringComparison.Ordinal), pending);
+
+        Assert.False(nonObject.IsValid);
+        Assert.False(wrongProtocol.IsValid);
+        Assert.Contains(wrongProtocol.Errors, error => error.Contains("protocol", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("wrong-handoff", false)]
     [InlineData("wrong-session", true)]
@@ -368,4 +442,7 @@ public sealed class ProtocolTests
 
     private static string Generate(PendingHandoffSnapshot pending, string slots)
         => $"```connector-command\n{{\"protocol\":\"comfy-connector/1\",\"action\":\"generate\",\"handoff_id\":\"{pending.HandoffId}\",\"session_id\":\"{pending.SessionId}\",\"slots\":{slots}}}\n```";
+
+    private static string RawGenerate(PendingHandoffSnapshot pending, string slots)
+        => $"{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"generate\",\"handoff_id\":\"{pending.HandoffId}\",\"session_id\":\"{pending.SessionId}\",\"slots\":{slots}}}";
 }

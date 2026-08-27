@@ -103,6 +103,19 @@ public enum HandoffTransportState
     Failed,
 }
 
+/// <summary>
+/// The immutable boundary a Pending Handoff represents.  This is kept on the
+/// snapshot instead of inferred from the mutable pipeline stages so a response
+/// can still be classified after command validation has started resetting
+/// transient stages.
+/// </summary>
+public enum PendingHandoffPurpose
+{
+    Unknown,
+    Bootstrap,
+    Review,
+}
+
 public enum CreationStage
 {
     // Keep the persisted v1 numeric values stable. Display/execution order is
@@ -372,6 +385,12 @@ public static class WorkflowSlotTypeClassifier
 
 public sealed class PendingHandoffSnapshot
 {
+    /// <summary>
+    /// Purpose captured when the Handoff was issued.  Unknown is retained for
+    /// snapshots written before this field existed; PendingHandoffReuse uses
+    /// the allowed actions as a compatibility fallback for those records.
+    /// </summary>
+    public PendingHandoffPurpose Purpose { get; set; } = PendingHandoffPurpose.Unknown;
     public string HandoffId { get; set; } = Guid.NewGuid().ToString("N");
     public string SessionId { get; set; } = string.Empty;
     public string BoundaryId { get; set; } = Guid.NewGuid().ToString("N");
@@ -408,6 +427,28 @@ public sealed class OutputArtifact
            extensions.Contains(Path.GetExtension(FullPath).TrimStart('.'), StringComparer.OrdinalIgnoreCase);
 }
 
+/// <summary>
+/// Output identity reported by ComfyUI for a completed Job.  The filename and
+/// subfolder are relative to ComfyUI's output root; a URL is retained only as
+/// runtime provenance.  Keeping this separate from <see cref="OutputArtifact"/>
+/// lets the Connector resolve the real local file without treating a download
+/// staging name (for example, a prompt-id prefix) as the generated filename.
+/// </summary>
+public sealed class JobOutputReference
+{
+    public string FileName { get; set; } = string.Empty;
+    public string Subfolder { get; set; } = string.Empty;
+    public string Type { get; set; } = "output";
+    public string? Url { get; set; }
+
+    /// <summary>
+    /// A local source path may be supplied by an older runtime.  It is never
+    /// sent to ChatGPT and is used only when it is already inside OutputRoot.
+    /// </summary>
+    [JsonIgnore]
+    public string? SourcePath { get; set; }
+}
+
 public sealed class JobSnapshot
 {
     public string JobId { get; set; } = string.Empty;
@@ -416,6 +457,14 @@ public sealed class JobSnapshot
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? CompletedAt { get; set; }
     public List<OutputArtifact> Outputs { get; set; } = [];
+
+    /// <summary>
+    /// ComfyUI's filename/subfolder metadata from the latest status response.
+    /// This is runtime-only metadata used by WorkflowCatalog to resolve outputs
+    /// without flattening workflow-relative directories during download.
+    /// </summary>
+    [JsonIgnore]
+    public List<JobOutputReference> OutputReferences { get; set; } = [];
 }
 
 public sealed class ProjectChatBindingSnapshot

@@ -28,7 +28,13 @@ public sealed class SlotEditorItem : INotifyPropertyChanged
     public string Label { get; }
     public string Type { get; }
     public WorkflowSlotType Kind { get; }
-    public JsonNode? CurrentValue { get; }
+    /// <summary>
+    /// The last value confirmed by the Workflow apply/validate boundary. This
+    /// is deliberately separate from <see cref="ValueText"/> so unchanged
+    /// slots (notably filename_prefix) are not sent back to ComfyUI on every
+    /// generation.
+    /// </summary>
+    public JsonNode? CurrentValue { get; private set; }
     public double? Minimum { get; }
     public double? Maximum { get; }
     public IReadOnlyList<string> Choices { get; }
@@ -60,6 +66,14 @@ public sealed class SlotEditorItem : INotifyPropertyChanged
             WorkflowSlotType.String or WorkflowSlotType.Enum or WorkflowSlotType.File => JsonValue.Create(ValueText),
             _ => TryParseUnknown(ValueText),
         };
+    }
+
+    public void AcceptCurrentValue()
+    {
+        var value = ToJsonNode();
+        if (JsonNode.DeepEquals(CurrentValue, value)) return;
+        CurrentValue = value?.DeepClone();
+        OnPropertyChanged(nameof(CurrentValue));
     }
 
     private static JsonNode? TryParseUnknown(string value)

@@ -645,6 +645,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
             _loadedFingerprint = WorkflowCatalog.ComputeFingerprint(path);
             IsDirty = false;
+            foreach (var item in Slots.Where(item => changes.ContainsKey(item.Address))) item.AcceptCurrentValue();
             if (trackApply) CreationPipelineStateMachine.ApplyCompleted(CurrentSession!);
             foreach (var backup in await _store.ListWorkflowBackupsAsync(SelectedWorkflow)) { if (!Backups.Contains(backup)) Backups.Add(backup); }
             StatusMessage = "Workflowをbackup → apply → validateしました。";
@@ -1061,7 +1062,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         if (iteration.Status != JobStatus.Completed || iteration.Outputs.All(output => output.IsMissing)) throw new InvalidOperationException("成功した生成結果だけをChatGPTへ渡せます。");
         EnsureSlotSchemaAvailable();
-        CurrentSession.PendingHandoff = PendingHandoffFactory.Create(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
+        CurrentSession.PendingHandoff = PendingHandoffFactory.CreateReview(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
         var payload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, CurrentSession.PendingHandoff);
         if (existingMessage is not null) existingMessage.Payload = payload;
         await SaveActiveSessionAsync();
@@ -1268,7 +1269,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             {
                 try
                 {
-                    iteration.Outputs = (await _catalog.FetchOutputsAsync(job.JobId, OutputRoot)).ToList();
+                    iteration.Outputs = (await _catalog.FetchOutputsAsync(job.JobId, OutputRoot, CurrentJob.OutputReferences)).ToList();
                     CreationPipelineStateMachine.OutputCompleted(CurrentSession!, iteration.Outputs);
                 }
                 catch (Exception ex)
@@ -1300,7 +1301,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 CurrentJob.CompletedAt = DateTimeOffset.UtcNow;
                 StatusMessage = $"Iteration {iteration.Number} が完了しました。出力 {iteration.Outputs.Count} 件。";
                 EnsureSlotSchemaAvailable();
-                CurrentSession!.PendingHandoff = PendingHandoffFactory.Create(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
+                CurrentSession!.PendingHandoff = PendingHandoffFactory.CreateReview(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
                 var resultPayload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, CurrentSession.PendingHandoff);
                 await RecordHandoffAsync(new HandoffMessage
                 {
@@ -1760,8 +1761,39 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(JobStatusDetailText));
     }
 
-    private Dictionary<string, JsonNode?> BuildChanges() => Slots.ToDictionary(x => x.Address, x => x.ToJsonNode(), StringComparer.OrdinalIgnoreCase);
-    private string? FindPrompt(Dictionary<string, JsonNode?> changes) => changes.FirstOrDefault(x => x.Key.Contains("prompt", StringComparison.OrdinalIgnoreCase)).Value is JsonValue value && value.TryGetValue<string>(out var prompt) ? prompt : null;
+    private Dictionary<string, JsonNode?> BuildChanges()
+        => Slots
+            .Select(item => (item, value: item.ToJsonNode()))
+            .Where(entry => !JsonNode.DeepEquals(entry.item.CurrentValue, entry.value))
+            .ToDictionary(entry => entry.item.Address, entry => entry.value, StringComparer.OrdinalIgnoreCase);
+
+    private string? FindPrompt(Dictionary<string, JsonNode?> changes)
+    {
+        var changedPrompt = changes
+            .FirstOrDefault(item => item.Key.Contains("prompt", StringComparison.OrdinalIgnoreCase))
+            .Value;
+        changedPrompt ??= changes
+            .FirstOrDefault(item => item.Key.Contains("text", StringComparison.OrdinalIgnoreCase))
+            .Value;
+        if (changedPrompt is JsonValue changedValue && changedValue.TryGetValue<string>(out var changedText)) return changedText;
+
+        var currentPrompt = Slots
+            .Where(item => item.Address.Contains("prompt", StringComparison.OrdinalIgnoreCase)
+                          || item.Label.Contains("prompt", StringComparison.OrdinalIgnoreCase))
+            .Select(item => item.ToJsonNode())
+            .OfType<JsonValue>()
+            .Select(value => value.TryGetValue<string>(out var text) ? text : null)
+            .FirstOrDefault(text => !string.IsNullOrWhiteSpace(text));
+        if (!string.IsNullOrWhiteSpace(currentPrompt)) return currentPrompt;
+
+        return Slots
+            .Where(item => item.Address.Contains("text", StringComparison.OrdinalIgnoreCase)
+                          || item.Label.Contains("text", StringComparison.OrdinalIgnoreCase))
+            .Select(item => item.ToJsonNode())
+            .OfType<JsonValue>()
+            .Select(value => value.TryGetValue<string>(out var text) ? text : null)
+            .FirstOrDefault(text => !string.IsNullOrWhiteSpace(text));
+    }
     private static WorkflowSlot ToWorkflowSlot(SlotEditorItem item) => new()
     {
         Address = item.Address,
@@ -1807,7 +1839,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private static string BuildPersistedResultPayload(CreationSession session, SessionIteration iteration)
     {
-        session.PendingHandoff ??= PendingHandoffFactory.Create(session, [], "generate", "complete");
+        session.PendingHandoff ??= PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
         return ConnectorContextBuilder.BuildResult(session, iteration, session.PendingHandoff);
     }
 

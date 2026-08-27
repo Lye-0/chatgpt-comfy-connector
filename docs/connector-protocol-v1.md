@@ -6,15 +6,23 @@ ProtocolはMCP tool surfaceではない。shell、filesystem操作、Workflow選
 
 ## Connector Response
 
-1回のResponseは次の2要素だけで構成する。
+1回のResponseは次の2要素で構成する。Commandは従来どおり厳格に1つだけだが、
+ChatGPTのコードブロックCopyで言語名が落ちる／`json`になる場合と、説明文付きの
+raw JSONになる場合を受理できる。
 
 ```text
 Connector Response
-├─ exactly 1 connector-command JSON block
+├─ exactly 1 JSON object
+│  ├─ preferred: `connector-command` code fence
+│  ├─ accepted: `json` (または言語名なし) code fence
+│  └─ accepted: fence-less raw JSON, optionally surrounded by short explanation
 └─ 0..N referenced COMFY_PAYLOAD blocks
 ```
 
-説明文、別のcode fence、参照されないPayloadはResponse外ノイズとして許容しない。制御情報と短い構造値は小さなJSONへ置き、自由入力stringや複数行PromptはRaw Payloadへ置く。Base64や巨大なJSON stringは標準Transportにしない。
+許可されない言語のcode fence、複数のJSON object、参照されないPayloadは拒否する。
+fence-less形式に限り、JSON objectを囲む短い説明文を許容する。制御情報と短い
+構造値は小さなJSONへ置き、自由入力stringや複数行PromptはRaw Payloadへ置く。
+Base64や巨大なJSON stringは標準Transportにしない。
 
 ### generate
 
@@ -90,6 +98,7 @@ Slot discoveryは `NotLoaded`、`Loading`、`Loaded`、`Failed` を区別する�
 
 ChatGPTへ渡す各Handoffは次を永続化する。
 
+- `Purpose` (`Bootstrap` or `Review`; older snapshots infer Review from `complete` permission)
 - `HandoffId`
 - `SessionId`
 - `BoundaryId`
@@ -108,8 +117,8 @@ ChatGPTへ渡す各Handoffは次を永続化する。
 Importerは次の順序を保つ。
 
 1. Raw Responseを保持する
-2. `connector-command` blockが正確に1つか確認する
-3. `System.Text.Json` でJSONをparseする
+2. 許可された表現からJSON objectを安全に1つ抽出する（braces inside strings／nested object対応）
+3. `System.Text.Json` で抽出したJSONをparseする
 4. `protocol`、`action`、`handoff_id`、`session_id`、`AllowedActions` を検証する
 5. payload referenceを収集し、supplied boundaryでRaw blockを解析する
 6. Pending Handoffのslot schemaに対してwritable、address、transport、type、choice、range、changed-onlyを検証する

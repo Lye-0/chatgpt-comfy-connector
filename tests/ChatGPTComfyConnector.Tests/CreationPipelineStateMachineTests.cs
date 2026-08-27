@@ -224,6 +224,72 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
+    public void ReviewValidationUsesImmutablePendingPurposeAndPreservesSuccessfulOutput()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        var pending = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        Assert.Equal(PendingHandoffPurpose.Review, pending.Purpose);
+        session.PendingHandoff = pending;
+        CreationPipelineStateMachine.ReviewCopied(session);
+
+        var outputState = CreationPipelineStateMachine.Get(session, CreationStage.Output);
+        var reviewState = CreationPipelineStateMachine.Get(session, CreationStage.Review);
+        var handoffId = pending.HandoffId;
+
+        CreationPipelineStateMachine.BeginCommandValidation(session);
+
+        Assert.Equal(CreationStageState.Completed, outputState.State);
+        Assert.Equal(CreationStageState.WaitingUser, reviewState.State);
+        Assert.Equal(handoffId, session.PendingHandoff.HandoffId);
+
+        CreationPipelineStateMachine.CommandValidationFailed(session, "不正なCommand");
+
+        AssertStage(session, CreationStage.Command, CreationStageState.Error);
+        AssertStage(session, CreationStage.Output, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Review, CreationStageState.WaitingUser);
+        Assert.Equal(handoffId, session.PendingHandoff.HandoffId);
+        Assert.Single(session.Iterations);
+    }
+
+    [Fact]
+    public void ReviewCompleteIsAcceptedEvenWhenTransientReviewStateWasCleared()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        session.PendingHandoff = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        var review = CreationPipelineStateMachine.Get(session, CreationStage.Review);
+        review.State = CreationStageState.NotReached;
+        review.WaitingReason = CreationWaitingReason.None;
+        var output = CreationPipelineStateMachine.Get(session, CreationStage.Output);
+        Assert.Equal(CreationStageState.Completed, output.State);
+
+        CreationPipelineStateMachine.BeginCommandValidation(session);
+        CreationPipelineStateMachine.CommandValidated(session, "complete");
+
+        AssertStage(session, CreationStage.Command, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Review, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Output, CreationStageState.Completed);
+        Assert.Equal("complete", session.Pipeline.AcceptedCommandAction);
+    }
+
+    [Fact]
+    public void ReviewGenerateUsesImmutablePendingPurposeAndKeepsIterationHistory()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        session.PendingHandoff = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        CreationPipelineStateMachine.ReviewCopied(session);
+        var previous = session.Iterations.Single();
+
+        CreationPipelineStateMachine.BeginCommandValidation(session);
+        CreationPipelineStateMachine.CommandValidated(session, "generate");
+
+        AssertStage(session, CreationStage.Command, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Apply, CreationStageState.Current);
+        Assert.Same(previous, session.Iterations.Single());
+        Assert.Equal(JobStatus.Completed, previous.Status);
+        Assert.Equal(CreationStageState.NotReached, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+    }
+
+    [Fact]
     public void ExplicitContextRebindStalesThePreviousPendingHandoff()
     {
         var session = SentIdeaSession();

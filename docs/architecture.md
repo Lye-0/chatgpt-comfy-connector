@@ -39,11 +39,22 @@ draft in UI
   → validate_workflow(valid=true required)
   → run_workflow(wait=false)
   → job(action=status/cancel)
-  → fetch_outputs
+  → resolve job output metadata (filename/subfolder/type)
+  → resolve the existing ComfyUI output path
+  → fetch_outputs only when needed, using an isolated staging directory
+    and restoring each file to its reported relative subfolder
   → Session Iteration persistence
 ```
 
 If slot application or validation fails, the pre-save backup is restored. Backup retention is three JSON generations per logical Workflow. Restore itself first creates a backup of the current file.
+
+`filename_prefix` is a ComfyUI-relative prefix, not a Connector filename. The
+Connector does not replace it with a prompt or handoff id: unchanged slots are
+not resent on every Apply, and an explicit prefix override retains the original
+relative directory (for example, `video/`) while allowing its leaf name to
+change. Output artifacts keep their actual local `FullPath` for preview,
+history, OPEN, and resume; the public Handoff serializer continues to expose
+only safe output metadata.
 
 ## Creation Session and pipeline
 
@@ -136,9 +147,12 @@ retains its immediate direct preflight as the final ComfyUI gate.
 v0.1 uses a manual clipboard transport: Connector creates a Bootstrap / Review
 Handoff, the user pastes it into the selected ChatGPT conversation, and ChatGPT's validated
 `comfy-connector/1` Connector Response is pasted back into the Connector. A Response
-contains exactly one small `connector-command` JSON block and zero or more referenced
-raw `COMFY_PAYLOAD` blocks. Connector-generated `handoff_id`, `session_id`, and
-`boundary_id` bind the response to a persisted Pending Handoff snapshot containing
+contains exactly one small JSON object (preferably in a `connector-command` fence; `json`,
+an unlabeled fence, or fence-less raw JSON are accepted) and zero or more referenced raw
+`COMFY_PAYLOAD` blocks. A fence-less object may be surrounded by short explanatory text;
+unsupported fences and multiple objects remain rejected. Connector-generated `handoff_id`, `session_id`, and
+`boundary_id` bind the response to a persisted Pending Handoff snapshot containing its
+immutable `Purpose` (Bootstrap or Review),
 AllowedActions, Workflow identity, Project / Chat provider and context keys,
 Iteration, kickoff instruction, and the MCP-discovered slot schema plus its
 ChatGPT exposure policy.

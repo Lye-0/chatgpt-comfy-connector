@@ -162,21 +162,15 @@ public static partial class ConnectorProtocol
     {
         var lines = EnumerateLines(raw).ToArray();
         var payloads = new Dictionary<string, string>(StringComparer.Ordinal);
-        string? json = null;
-        var commandCount = 0;
+        var payloadSpans = new List<(int StartLine, int EndLine)>();
+
+        // Payload blocks are parsed first and removed from the command scan.
+        // This keeps arbitrary braces and Markdown fences inside a raw payload
+        // from being mistaken for a second command object.
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
             if (string.IsNullOrWhiteSpace(line.Content)) continue;
-            if (line.Content == "```connector-command")
-            {
-                commandCount++;
-                var end = FindExactLine(lines, i + 1, "```");
-                if (end < 0) { errors.Add("connector-command code fenceの終端がありません。"); break; }
-                if (json is null) json = ExtractBody(raw, line, lines[end]);
-                i = end;
-                continue;
-            }
 
             var startMatch = PayloadStartRegex().Match(line.Content);
             if (startMatch.Success)
@@ -194,19 +188,205 @@ public static partial class ConnectorProtocol
                         errors.Add($"COMFY_PAYLOAD {id} にnestedまたはoverlapしたmarkerがあります。"); end = j; break;
                     }
                 }
-                if (end < 0) { errors.Add($"COMFY_PAYLOAD {id} の終端markerがありません。"); break; }
+                if (end < 0)
+                {
+                    errors.Add($"COMFY_PAYLOAD {id} の終端markerがありません。");
+                    payloadSpans.Add((i, lines.Length - 1));
+                    break;
+                }
+
                 if (lines[end].Content == expectedEnd && !payloads.TryAdd(id, ExtractBody(raw, line, lines[end]))) errors.Add($"COMFY_PAYLOADが重複しています: {id}");
+                payloadSpans.Add((i, end));
                 i = end;
                 continue;
             }
 
-            if (line.Content.StartsWith("```", StringComparison.Ordinal)) errors.Add($"未対応または重複したcode fenceです: {line.Content}");
-            else if (line.Content.StartsWith("<<<COMFY_PAYLOAD:", StringComparison.Ordinal) || line.Content.StartsWith("<<<END_COMFY_PAYLOAD:", StringComparison.Ordinal)) errors.Add($"COMFY_PAYLOAD markerが不正です: {line.Content}");
-            else errors.Add("Connector Responseにはconnector-commandと参照されたCOMFY_PAYLOAD以外の説明文を含めないでください。");
+            if (line.Content.StartsWith("<<<COMFY_PAYLOAD:", StringComparison.Ordinal) || line.Content.StartsWith("<<<END_COMFY_PAYLOAD:", StringComparison.Ordinal)) errors.Add($"COMFY_PAYLOAD markerが不正です: {line.Content}");
         }
-        if (commandCount != 1) errors.Add("Connector Responseにはconnector-command code fenceが正確に1つ必要です。");
+
+        var commandText = RemoveLineSpans(raw, lines, payloadSpans);
+        var commandLines = EnumerateLines(commandText).ToArray();
+        var fenceBodies = new List<string>();
+        var outsideFence = new StringBuilder();
+        var hasCodeFence = false;
+
+        for (var i = 0; i < commandLines.Length; i++)
+        {
+            var line = commandLines[i];
+            if (!line.Content.StartsWith("```", StringComparison.Ordinal))
+            {
+                outsideFence.AppendLine(line.Content);
+                continue;
+            }
+
+            hasCodeFence = true;
+            var language = line.Content[3..].Trim();
+            var end = FindExactLine(commandLines, i + 1, "```");
+            if (end < 0)
+            {
+                errors.Add($"{(string.IsNullOrEmpty(language) ? "JSON" : language)} code fenceの終端がありません。");
+                break;
+            }
+
+            if (language is not ("" or "connector-command" or "json"))
+            {
+                errors.Add($"未対応のConnector Response code fenceです: {line.Content}");
+            }
+            else
+            {
+                fenceBodies.Add(ExtractBody(commandText, line, commandLines[end]));
+            }
+
+            i = end;
+        }
+
+        string? json = null;
+        if (hasCodeFence)
+        {
+            // The fenced forms retain the original strict envelope boundary:
+            // only the command fence and parsed Payload blocks may be present
+            // outside it.  The more permissive explanatory-text form is
+            // reserved for fence-less raw JSON below.
+            if (!string.IsNullOrWhiteSpace(outsideFence.ToString()))
+            {
+                errors.Add("code fence外には説明文を含めず、JSON objectまたは許可されたPayloadだけを指定してください。");
+            }
+
+            if (fenceBodies.Count != 1)
+            {
+                errors.Add("Connector Responseには許可されたJSON code fenceを1つだけ指定してください。");
+            }
+
+            var candidates = fenceBodies
+                .SelectMany(body => ExtractJsonCandidates(body).Select(candidate => (Body: body, Candidate: candidate)))
+                .ToList();
+            if (candidates.Count == 1)
+            {
+                var candidate = candidates[0].Candidate;
+                // A fenced command is intentionally strict: the allowed fence
+                // contains one JSON object and nothing else.  Explanatory
+                // prose is supported in the fence-less form below.
+                var body = candidates[0].Body;
+                if (!IsOnlyWhitespace(body[..candidate.Start]) || !IsOnlyWhitespace(body[candidate.EndExclusive..]))
+                {
+                    errors.Add("Connector ResponseのJSON code fenceにはJSON object以外の本文を含めないでください。");
+                }
+                else
+                {
+                    json = candidate.Json;
+                }
+            }
+            else if (candidates.Count == 0)
+            {
+                errors.Add("許可されたJSON code fenceにJSON objectがありません。");
+            }
+            else
+            {
+                errors.Add("Connector ResponseにはJSON objectを1つだけ指定してください。");
+            }
+        }
+        else
+        {
+            // ChatGPT may copy a raw object with a short explanation around
+            // it.  The balanced scanner understands nested objects and braces
+            // inside JSON strings, while still rejecting multiple candidates.
+            var candidates = ExtractJsonCandidates(commandText);
+            if (candidates.Count == 1)
+            {
+                json = candidates[0].Json;
+            }
+            else if (candidates.Count == 0)
+            {
+                errors.Add("Connector ResponseからJSON objectを検出できませんでした。");
+            }
+            else
+            {
+                errors.Add("Connector ResponseにはJSON objectを1つだけ指定してください。");
+            }
+        }
+
         return new ParsedEnvelope(json, payloads);
     }
+
+    private static string RemoveLineSpans(string raw, IReadOnlyList<TextLine> lines, IReadOnlyCollection<(int StartLine, int EndLine)> spans)
+    {
+        if (spans.Count == 0) return raw;
+
+        var builder = new StringBuilder(raw.Length);
+        var cursor = 0;
+        foreach (var span in spans.OrderBy(item => item.StartLine))
+        {
+            if (span.StartLine < 0 || span.EndLine < span.StartLine || span.StartLine >= lines.Count) continue;
+            var start = lines[span.StartLine].Start;
+            var endLine = Math.Min(span.EndLine, lines.Count - 1);
+            var end = lines[endLine].NextStart;
+            if (start > cursor) builder.Append(raw[cursor..start]);
+            cursor = Math.Max(cursor, end);
+        }
+
+        if (cursor < raw.Length) builder.Append(raw[cursor..]);
+        return builder.ToString();
+    }
+
+    private static List<JsonCandidate> ExtractJsonCandidates(string text)
+    {
+        var candidates = new List<JsonCandidate>();
+        for (var start = 0; start < text.Length; start++)
+        {
+            if (text[start] != '{' || !TryReadBalancedObject(text, start, out var endExclusive)) continue;
+
+            var candidate = text[start..endExclusive];
+            try
+            {
+                if (JsonNode.Parse(candidate) is JsonObject)
+                {
+                    candidates.Add(new JsonCandidate(start, endExclusive, candidate));
+                }
+            }
+            catch (JsonException)
+            {
+                // A brace in surrounding prose is not a command candidate;
+                // continue scanning for the single valid object.
+            }
+
+            // Skip the complete balanced object so nested JSON properties are
+            // not counted as separate commands.
+            start = endExclusive - 1;
+        }
+
+        return candidates;
+    }
+
+    private static bool TryReadBalancedObject(string text, int start, out int endExclusive)
+    {
+        endExclusive = start;
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+        for (var index = start; index < text.Length; index++)
+        {
+            var ch = text[index];
+            if (inString)
+            {
+                if (escaped) escaped = false;
+                else if (ch == '\\') escaped = true;
+                else if (ch == '"') inString = false;
+                continue;
+            }
+
+            if (ch == '"') { inString = true; continue; }
+            if (ch == '{') { depth++; continue; }
+            if (ch != '}' || --depth != 0) continue;
+
+            endExclusive = index + 1;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsOnlyWhitespace(string text)
+        => text.All(char.IsWhiteSpace);
 
     private static IEnumerable<TextLine> EnumerateLines(string text)
     {
@@ -274,14 +454,26 @@ public static partial class ConnectorProtocol
     [GeneratedRegex("^[A-Za-z0-9._-]{1,64}$", RegexOptions.CultureInvariant)] private static partial Regex PayloadIdRegex();
     [GeneratedRegex("^<<<COMFY_PAYLOAD:([A-Za-z0-9._-]{1,64}):([A-Za-z0-9._-]{1,128})>>>$", RegexOptions.CultureInvariant)] private static partial Regex PayloadStartRegex();
     private sealed record ParsedEnvelope(string? Json, IReadOnlyDictionary<string, string> Payloads);
+    private sealed record JsonCandidate(int Start, int EndExclusive, string Json);
     private sealed record TextLine(int Start, int NextStart, string Content);
 }
 
 public static class PendingHandoffFactory
 {
     public static PendingHandoffSnapshot Create(CreationSession session, IEnumerable<WorkflowSlot> slots, params string[] allowedActions)
+        => CreateCore(
+            session,
+            slots,
+            allowedActions.Contains("complete", StringComparer.Ordinal) ? PendingHandoffPurpose.Review : PendingHandoffPurpose.Bootstrap,
+            allowedActions);
+
+    public static PendingHandoffSnapshot CreateReview(CreationSession session, IEnumerable<WorkflowSlot> slots, params string[] allowedActions)
+        => CreateCore(session, slots, PendingHandoffPurpose.Review, allowedActions);
+
+    private static PendingHandoffSnapshot CreateCore(CreationSession session, IEnumerable<WorkflowSlot> slots, PendingHandoffPurpose purpose, IEnumerable<string> allowedActions)
         => new()
         {
+            Purpose = purpose,
             SessionId = session.Id,
             WorkflowIdentity = session.BoundWorkflow?.RelativePath ?? string.Empty,
             ContextProviderId = session.EffectiveContextProviderId,

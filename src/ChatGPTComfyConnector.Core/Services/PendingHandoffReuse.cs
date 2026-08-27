@@ -53,8 +53,22 @@ public static class PendingHandoffReuse
 
     public static bool IsBootstrap(PendingHandoffSnapshot? pending)
         => pending is not null
+            && !IsReview(pending)
             && pending.AllowedActions.Count == 1
             && pending.AllowedActions.Contains("generate", StringComparer.Ordinal);
+
+    /// <summary>
+    /// Identifies a response to a Review Handoff from the immutable snapshot
+    /// that issued it.  Older snapshots did not persist a purpose field, so a
+    /// review's distinct <c>complete</c> permission remains a safe migration
+    /// fallback.  New snapshots always carry <see cref="PendingHandoffPurpose.Review"/>
+    /// explicitly.
+    /// </summary>
+    public static bool IsReview(PendingHandoffSnapshot? pending)
+        => pending is not null
+            && (pending.Purpose == PendingHandoffPurpose.Review
+                || (pending.Purpose == PendingHandoffPurpose.Unknown
+                    && pending.AllowedActions.Contains("complete", StringComparer.Ordinal)));
 
     /// <summary>
     /// Confirms that a generated Bootstrap payload belongs to the currently

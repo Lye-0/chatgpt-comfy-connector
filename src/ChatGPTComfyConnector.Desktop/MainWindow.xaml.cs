@@ -29,7 +29,7 @@ public partial class MainWindow : Window
         IdeaInputBox.AddHandler(TextCompositionManager.PreviewTextInputUpdateEvent,
             new TextCompositionEventHandler(IdeaInput_TextInputUpdate), true);
         IdeaInputBox.AddHandler(TextCompositionManager.PreviewTextInputEvent,
-            new TextCompositionEventHandler(IdeaInput_TextInput), true);
+            new TextCompositionEventHandler(IdeaInput_PreviewTextInput), true);
         IdeaInputBox.AddHandler(TextCompositionManager.TextInputStartEvent,
             new TextCompositionEventHandler(IdeaInput_TextInputStart), true);
         IdeaInputBox.AddHandler(TextCompositionManager.TextInputUpdateEvent,
@@ -247,6 +247,9 @@ public partial class MainWindow : Window
         => ViewModel.SetIdeaCompositionState(true);
 
     private void IdeaInput_TextInputUpdate(object sender, TextCompositionEventArgs e)
+        => ViewModel.SetIdeaCompositionState(true);
+
+    private void IdeaInput_PreviewTextInput(object sender, TextCompositionEventArgs e)
         => ViewModel.SetIdeaCompositionState(true);
 
     private void IdeaInput_TextInput(object sender, TextCompositionEventArgs e)

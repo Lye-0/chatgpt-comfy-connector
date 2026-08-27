@@ -48,8 +48,9 @@ If slot application or validation fails, the pre-save backup is restored. Backup
 ## Creation Session and pipeline
 
 `CreationSession` is the durable unit of a production. It binds the GUI-selected
-`WorkflowIdentity`, a provider-neutral Project / Chat reference, the original idea,
-iteration history, Handoff messages, and the current pipeline snapshot. Sessions are
+`WorkflowIdentity`, a provider-neutral Project / Chat reference, and an optional
+kickoff instruction, iteration history, Handoff messages, and the current pipeline
+snapshot. Sessions are
 stored as JSON files below `data/sessions/`; rebuilding the application does not clear
 this history.
 
@@ -78,10 +79,12 @@ decision stop rather than silently starting another iteration.
 The initial `SEND TO CHATGPT` action is governed by the Core
 `CreationWorkspacePolicy` and is exposed by the ViewModel as
 `CanSendToChatGpt`. It requires an explicitly activated, Context-bound session,
-loaded slot schema, connected MCP, a non-empty idea, an IDEA stage that is still
-current (or waiting for user input), and no active Job. ComfyUI runtime readiness
-is intentionally excluded because the initial handoff does not execute a
-ComfyUI-dependent operation.
+loaded slot schema, connected MCP, an IDEA stage that is still current (or
+waiting for user input), and no active Job. The Idea field is an optional
+kickoff/additional instruction, so an empty value is valid and tells ChatGPT to
+use the selected conversation's existing messages as the production context.
+ComfyUI runtime readiness is intentionally excluded because the initial handoff
+does not execute a ComfyUI-dependent operation.
 
 At startup, persisted sessions are loaded only as internal data for provider
 bindings and future recovery. They are not expanded into the visible Workspace:
@@ -109,7 +112,7 @@ The small helper text at the top-right of the Creation Pipeline is resolved by
 CreationPipelineLoopText. It selects the most recently updated active stage in
 the ordered Core state machine and combines that stage with its state, the
 current idea input, or a structured waiting reason. This keeps messages such as
-"IDEA → 制作アイデアを入力", "GENERATE → 生成中", and
+"IDEA → SEND TO CHATGPT（入力は任意）", "GENERATE → 生成中", and
 "REVIEW → レビュー返答待ち" aligned with the actual pipeline state instead
 of using the broad Active session status as a shortcut.
 
@@ -130,14 +133,17 @@ retains its immediate direct preflight as the final ComfyUI gate.
 
 ## Manual Handoff and timeline
 
-v0.1 uses a manual clipboard transport: Connector creates a self-contained Bootstrap
-/ Review Handoff, the user pastes it into ChatGPT, and ChatGPT's validated
+v0.1 uses a manual clipboard transport: Connector creates a Bootstrap / Review
+Handoff, the user pastes it into the selected ChatGPT conversation, and ChatGPT's validated
 `comfy-connector/1` Connector Response is pasted back into the Connector. A Response
 contains exactly one small `connector-command` JSON block and zero or more referenced
 raw `COMFY_PAYLOAD` blocks. Connector-generated `handoff_id`, `session_id`, and
 `boundary_id` bind the response to a persisted Pending Handoff snapshot containing
 AllowedActions, Workflow identity, Iteration, and the MCP-discovered slot schema plus
 its ChatGPT exposure policy.
+The Handoff uses the existing ChatGPT conversation as context when available;
+the optional kickoff instruction is prioritized as an additional instruction, and
+Workflow / slot schema data remains sufficient for a new Chat with no history.
 Validation therefore does not trust stale clipboard text or transient UI state.
 
 Free-form string slots use payload references; numeric, boolean, and choice values
@@ -207,7 +213,8 @@ Creative intensity is concentrated in the production surface: session idea, work
   — stage ordering, MCP/ComfyUI connection gate, execution guards, iteration safety
   stop, Review/complete rules, and persisted-session resume semantics.
 - `src/ChatGPTComfyConnector.Core/Services/ProtocolAndContext.cs` and
-  `docs/connector-protocol-v1.md` — Bootstrap / Result Context and command contract.
+  `docs/connector-protocol-v1.md` — Bootstrap / Result Context, optional kickoff
+  instruction, and command contract.
 - `src/ChatGPTComfyConnector.Infrastructure/Workflows/WorkflowCatalog.cs` and
   `src/ChatGPTComfyConnector.Infrastructure/Storage/PortableStore.cs` — dynamic
   slots, backup/rollback, output fetching, and atomic Portable persistence.

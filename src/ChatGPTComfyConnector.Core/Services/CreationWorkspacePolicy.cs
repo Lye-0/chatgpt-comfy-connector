@@ -10,7 +10,9 @@ namespace ChatGPTComfyConnector.Core.Services;
 public static class CreationWorkspacePolicy
 {
     /// <summary>
-    /// Determines whether the initial idea handoff may be sent to ChatGPT.
+    /// Determines whether the initial context handoff may be sent to ChatGPT.
+    /// The idea field is an optional kickoff instruction; an empty value means
+    /// that the selected ChatGPT conversation should provide the creative context.
     /// ComfyUI runtime readiness is deliberately not part of this policy;
     /// only MCP connectivity and the context/session prerequisites are needed.
     /// </summary>
@@ -23,8 +25,7 @@ public static class CreationWorkspacePolicy
         bool isJobActive)
     {
         if (!mcpConnected || !isSessionActivated || isJobActive ||
-            slotDiscoveryState != SlotDiscoveryState.Loaded ||
-            string.IsNullOrWhiteSpace(idea) || session is null)
+            slotDiscoveryState != SlotDiscoveryState.Loaded || session is null)
         {
             return false;
         }

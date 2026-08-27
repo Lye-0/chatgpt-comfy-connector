@@ -92,7 +92,7 @@ public static class CreationPipelineLoopText
             CreationStage.Connect => "CONNECT → MCPへ接続",
             CreationStage.Context => "CONTEXT → 制作設定を確認",
             CreationStage.Idea => string.IsNullOrWhiteSpace(idea)
-                ? "IDEA → 制作アイデアを入力"
+                ? "IDEA → SEND TO CHATGPT（入力は任意）"
                 : "IDEA → SEND TO CHATGPT",
             CreationStage.ToChatGpt => "TO CHATGPT → ChatGPTへ送信",
             CreationStage.Command => "COMMAND → ChatGPTの返答を読み込む",

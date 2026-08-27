@@ -104,6 +104,19 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
+    public void BootstrapCanBeCopiedWithoutAKickoffInstruction()
+    {
+        var session = BoundSession(3);
+
+        CreationPipelineStateMachine.BootstrapCopied(session, string.Empty);
+
+        Assert.Equal(CreationStageState.Completed, CreationPipelineStateMachine.Get(session, CreationStage.Idea).State);
+        Assert.Equal(CreationStageState.WaitingUser, CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).State);
+        Assert.Equal(string.Empty, session.Pipeline.SentIdeaSnapshot);
+        Assert.Equal(CreationWaitingReason.ChatGptResponseRequired, CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).WaitingReason);
+    }
+
+    [Fact]
     public void NormalFlowReachesCompletedReviewAndSession()
     {
         var session = BoundSession(maximumIterations: 2);

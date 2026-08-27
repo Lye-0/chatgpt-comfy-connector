@@ -348,7 +348,12 @@ public static class ConnectorContextBuilder
         var sb = new StringBuilder();
         sb.AppendLine("# ChatGPT Comfy Connector Handoff");
         sb.AppendLine("You are the creative director and iteration partner for ChatGPT Comfy Connector.");
-        sb.AppendLine("This Handoff is self-contained; do not rely on earlier chat context.");
+        sb.AppendLine("This Handoff is designed to be pasted into the selected ChatGPT conversation.");
+        sb.AppendLine("When earlier messages are available, use that conversation history as the production context.");
+        sb.AppendLine("Use that production context to create detailed generation instructions for the selected Workflow.");
+        sb.AppendLine("If a Kickoff instruction is provided below, treat it as an additional instruction and prioritize it when it clarifies the requested direction.");
+        sb.AppendLine("If the Kickoff instruction is blank, begin from the existing conversation context.");
+        sb.AppendLine("If this is a new Chat with no earlier messages, use the Workflow, slot schema, and other context below as the production basis.");
         sb.AppendLine();
         sb.AppendLine("## Response contract (strict)");
         sb.AppendLine($"Protocol: {ConnectorProtocol.Version}");
@@ -388,8 +393,10 @@ public static class ConnectorContextBuilder
         sb.AppendLine($"Workflow: {session.BoundWorkflow?.RelativePath ?? "(not selected)"}");
         sb.AppendLine($"Maximum iterations: {session.MaximumIterations}");
         sb.AppendLine($"Current iteration: {session.CurrentIteration}");
-        sb.AppendLine("Original idea:");
-        sb.AppendLine(session.OriginalIdea);
+        sb.AppendLine("Kickoff instruction (optional):");
+        sb.AppendLine(string.IsNullOrWhiteSpace(session.OriginalIdea)
+            ? "(none — use the existing ChatGPT conversation)"
+            : session.OriginalIdea);
         if (iteration is not null)
         {
             sb.AppendLine();

@@ -151,7 +151,7 @@ public sealed class ProtocolTests
     }
 
     [Fact]
-    public void ContextIsSelfContainedAndUsesSnapshotIdentifiers()
+    public void ContextUsesExistingConversationAndOptionalKickoffInstruction()
     {
         var session = new CreationSession
         {
@@ -164,7 +164,13 @@ public sealed class ProtocolTests
         Assert.Contains(pending.BoundaryId, text);
         Assert.Contains("Available writable slot schema", text);
         Assert.Contains("transport=payload", text);
-        Assert.Contains("do not rely on earlier chat context", text);
+        Assert.Contains("use that conversation history as the production context", text);
+        Assert.Contains("Use that production context to create detailed generation instructions for the selected Workflow.", text);
+        Assert.Contains("If a Kickoff instruction is provided below, treat it as an additional instruction", text);
+        Assert.Contains("Kickoff instruction (optional):", text);
+        Assert.Contains("夜の東京", text);
+        Assert.DoesNotContain("Original idea:", text);
+        Assert.DoesNotContain("self-contained; do not rely on earlier chat context", text);
         Assert.DoesNotContain("Complete response grammar", text);
         Assert.DoesNotContain("\\# ChatGPT", text);
         Assert.Contains("```connector-command", text);
@@ -276,6 +282,24 @@ public sealed class ProtocolTests
     {
         Assert.True(new OutputArtifact { FullPath = "C:\\output\\frame.png", Type = "png" }.IsImage);
         Assert.True(new OutputArtifact { FullPath = "C:\\output\\clip.mp4", Type = "mp4" }.IsVideo);
+    }
+
+    [Fact]
+    public void BlankKickoffInstructionUsesExistingConversationContext()
+    {
+        var session = new CreationSession
+        {
+            Id = "session-blank-kickoff", ProjectLabel = "Project", ChatLabel = "Chat",
+            OriginalIdea = string.Empty, BoundWorkflow = WorkflowIdentity.Create("folder/workflow.json"),
+            MaximumIterations = 10,
+        };
+        var pending = PendingHandoffFactory.Create(session, [], "generate");
+
+        var text = ConnectorContextBuilder.BuildBootstrap(session, pending);
+
+        Assert.Contains("If the Kickoff instruction is blank, begin from the existing conversation context.", text);
+        Assert.Contains("(none — use the existing ChatGPT conversation)", text);
+        Assert.DoesNotContain("Original idea:", text);
     }
 
     private static PendingHandoffSnapshot Pending(params string[] actions)

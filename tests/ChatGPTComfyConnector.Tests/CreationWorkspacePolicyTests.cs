@@ -30,12 +30,13 @@ public sealed class CreationWorkspacePolicyTests
     }
 
     [Fact]
-    public void SendRequiresIdeaSchemaAndIdleJob()
+    public void SendRequiresSchemaAndIdleJobButNotAnIdea()
     {
         var session = BoundSession();
 
         Assert.False(CreationWorkspacePolicy.CanSendToChatGpt(session, true, true, SlotDiscoveryState.Loading, "idea", false));
-        Assert.False(CreationWorkspacePolicy.CanSendToChatGpt(session, true, true, SlotDiscoveryState.Loaded, "  ", false));
+        Assert.True(CreationWorkspacePolicy.CanSendToChatGpt(session, true, true, SlotDiscoveryState.Loaded, string.Empty, false));
+        Assert.True(CreationWorkspacePolicy.CanSendToChatGpt(session, true, true, SlotDiscoveryState.Loaded, "  ", false));
         Assert.False(CreationWorkspacePolicy.CanSendToChatGpt(session, true, true, SlotDiscoveryState.Loaded, "idea", true));
 
         CreationPipelineStateMachine.BootstrapCopied(session, "already sent");

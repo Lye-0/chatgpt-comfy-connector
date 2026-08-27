@@ -109,7 +109,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<ProjectContextOption> ProjectOptions { get; }
     public ObservableCollection<ChatContextOption> ChatOptions { get; }
     public ObservableCollection<HandoffTimelineItem> HandoffItems { get; }
-    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyPipelineStateChanged(); } }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyPipelineStateChanged(); } }
     public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); NotifyContextSelectionChanged(); } }
     public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
@@ -201,7 +201,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
             NotifyPipelineStateChanged();
         }
     }
-    public string Idea { get => _idea; set { if (string.Equals(_idea, value, StringComparison.Ordinal)) return; _idea = value; if (CurrentSession is not null) CreationPipelineStateMachine.IdeaChanged(CurrentSession, value); OnPropertyChanged(); NotifyPipelineStateChanged(); } }
+    public string Idea
+    {
+        get => _idea;
+        set
+        {
+            if (string.Equals(_idea, value, StringComparison.Ordinal)) return;
+            _idea = value;
+            if (CurrentSession is not null) CreationPipelineStateMachine.IdeaChanged(CurrentSession, value);
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(HasIdeaInput));
+            OnPropertyChanged(nameof(ShowIdeaPlaceholder));
+            NotifyPipelineStateChanged();
+        }
+    }
     public string? SlotLoadError { get => _slotLoadError; private set { _slotLoadError = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasSlotLoadError)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
     public string ProjectLabel { get => CurrentSession?.ProjectLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ProjectLabel = value; OnPropertyChanged(); } }
     public string ChatLabel { get => CurrentSession?.ChatLabel ?? string.Empty; set { if (CurrentSession is null) return; CurrentSession.ChatLabel = value; OnPropertyChanged(); } }
@@ -304,7 +317,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool CanStartNewCreation => IsCreationConnectionReady && SlotDiscoveryState == SlotDiscoveryState.Loaded && HasSelectedWorkflow && HasSelectedProject && HasSelectedChat && SessionMaximumIterations is >= 1 and <= 1000 && !IsJobActive;
     public bool CanResumeSession => _isCurrentSessionActivated && IsCreationConnectionReady && CurrentSession?.Status is SessionStatus.Completed or SessionStatus.Paused or SessionStatus.Stopped or SessionStatus.Error;
     public bool IsIdeaInputEnabled => _isCurrentSessionActivated && CurrentSession?.Pipeline.ContextBound == true && !IsJobActive;
-    public string IdeaInputHint => IsIdeaInputEnabled ? "制作アイデアを入力し、SEND TO CHATGPTで渡します。" : "左側の設定から新しい制作を開始してください。";
+    public bool HasIdeaInput => !string.IsNullOrWhiteSpace(Idea);
+    public bool ShowIdeaPlaceholder => IsIdeaInputEnabled && !HasIdeaInput;
+    public string IdeaInputPlaceholder => $"任意：既存のChatGPT会話への開始指示・補足{Environment.NewLine}空欄：これまでの会話内容をもとに生成を開始";
+    public string IdeaInputHint => IsIdeaInputEnabled
+        ? "開始指示・補足は任意です。空欄なら既存ChatGPT会話をもとに開始します。"
+        : "左側の設定から新しい制作を開始してください。";
     public bool CanSendToChatGpt => CreationWorkspacePolicy.CanSendToChatGpt(CurrentSession, _isCurrentSessionActivated, IsConnected, SlotDiscoveryState, Idea, IsJobActive);
     public string SendToChatGptHint
         => CanSendToChatGpt
@@ -317,9 +335,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                         ? "制作ContextをSessionへBindingしてください。"
                         : SlotDiscoveryState != SlotDiscoveryState.Loaded
                             ? "WorkflowのSlot Schema取得を完了してください。"
-                            : string.IsNullOrWhiteSpace(Idea)
-                                ? "制作アイデアを入力してください。"
-                                : IsJobActive
+                            : IsJobActive
                                     ? "生成中は送信できません。"
                                     : "IDEA Stageを確認してください。";
     public bool CanApplyCommand => IsCreationConnectionReady && _isCurrentSessionActivated && _pendingValidation is { IsValid: true, Command: not null } command && command.Command.Action == "generate" && !HasIterationSafetyStop;
@@ -718,7 +734,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ResetSessionWorkspace(session);
         await _store.SaveSessionAsync(session);
         NotifyPipelineStateChanged();
-        StatusMessage = "新しい制作を開始しました。中央の制作アイデアから進めてください。";
+        StatusMessage = "新しい制作を開始しました。中央の開始指示・補足から進めてください。入力は任意です。";
     }
 
     public async Task ApplySelectedContextToCurrentSessionAsync()
@@ -936,9 +952,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Kind = HandoffMessageKind.CreationRequest,
             State = HandoffTransportState.Copied,
             Title = "制作コンテキストを送信",
-            DisplayText = string.IsNullOrWhiteSpace(Idea) ? "制作アイデア未入力" : Idea,
+            DisplayText = string.IsNullOrWhiteSpace(Idea) ? "既存ChatGPT会話をもとに制作を開始" : Idea,
             Metadata = $"Workflow: {CurrentSession.BoundWorkflow?.DisplayName ?? SelectedWorkflowName}{Environment.NewLine}{CurrentSession.ProjectLabel} / {CurrentSession.ChatLabel}",
-            Summary = "制作アイデアとConnector ProtocolをChatGPTへ渡します。",
+            Summary = "既存ChatGPT会話を制作文脈として使用し、Workflow向けの生成指示を作成します。",
             Payload = payload,
         });
         NotifyPipelineStateChanged();
@@ -1399,7 +1415,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             message.Direction = HandoffDirection.ConnectorToChatGpt;
             message.Kind = HandoffMessageKind.CreationRequest;
-            if (string.IsNullOrWhiteSpace(message.DisplayText)) message.DisplayText = string.IsNullOrWhiteSpace(CurrentSession?.OriginalIdea) ? "制作アイデア未入力" : CurrentSession.OriginalIdea;
+            if (string.IsNullOrWhiteSpace(message.DisplayText)) message.DisplayText = string.IsNullOrWhiteSpace(CurrentSession?.OriginalIdea) ? "既存ChatGPT会話をもとに制作を開始" : CurrentSession.OriginalIdea;
             if (CurrentSession is not null) message.Metadata = $"Workflow: {CurrentSession.BoundWorkflow?.DisplayName ?? SelectedWorkflowName}{Environment.NewLine}{CurrentSession.ProjectLabel} / {CurrentSession.ChatLabel}";
             changed = true;
         }
@@ -1574,7 +1590,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         EnsureSlotSchemaAvailable();
         if (IsJobActive) throw new InvalidOperationException("生成中はChatGPTへ送信できません。");
-        if (string.IsNullOrWhiteSpace(Idea)) throw new InvalidOperationException("制作アイデアを入力してください。");
         var ideaState = CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Idea).State;
         if (ideaState is not (CreationStageState.Current or CreationStageState.WaitingUser))
         {
@@ -1612,6 +1627,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CanStartNewCreation));
         OnPropertyChanged(nameof(CanResumeSession));
         OnPropertyChanged(nameof(IsIdeaInputEnabled));
+        OnPropertyChanged(nameof(HasIdeaInput));
+        OnPropertyChanged(nameof(ShowIdeaPlaceholder));
         OnPropertyChanged(nameof(IdeaInputHint));
         OnPropertyChanged(nameof(CanSendToChatGpt));
         OnPropertyChanged(nameof(SendToChatGptHint));
@@ -1719,6 +1736,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(PipelineLoopText));
         OnPropertyChanged(nameof(HasIterationSafetyStop));
         OnPropertyChanged(nameof(IsIdeaInputEnabled));
+        OnPropertyChanged(nameof(HasIdeaInput));
+        OnPropertyChanged(nameof(ShowIdeaPlaceholder));
         OnPropertyChanged(nameof(IdeaInputHint));
         OnPropertyChanged(nameof(CanSendToChatGpt));
         OnPropertyChanged(nameof(SendToChatGptHint));
@@ -1734,7 +1753,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             [CreationStage.Connect] = ("CONNECT", "Connect", "MCP接続 / 制作通信Gate"),
             [CreationStage.Context] = ("CONTEXT", "Context", "Workflow / Project / Chat / Maximum Iterations / Session Binding"),
-            [CreationStage.Idea] = ("IDEA", "アイデア", "制作の核となるイメージ"),
+            [CreationStage.Idea] = ("IDEA", "開始指示・補足", "既存ChatGPT会話への任意の開始指示・補足"),
             [CreationStage.ToChatGpt] = ("TO CHATGPT", "To ChatGPT", "制作ContextをManual Handoff"),
             [CreationStage.Command] = ("COMMAND", "Command", "Connector Commandを解析・検証"),
             [CreationStage.Apply] = ("APPLY", "Apply", "Backup・slot反映・保存・validate"),

@@ -23,12 +23,12 @@ public sealed class CreationPipelineLoopTextTests : IDisposable
     }
 
     [Fact]
-    public void IdeaTextReflectsWhetherTheIdeaHasBeenEntered()
+    public void IdeaTextTreatsTheKickoffInstructionAsOptional()
     {
         var session = BoundSession();
 
         Assert.Equal(
-            "IDEA → 制作アイデアを入力",
+            "IDEA → SEND TO CHATGPT（入力は任意）",
             CreationPipelineLoopText.Resolve(session, true, ConnectionState.Connected, string.Empty));
 
         const string idea = "夜の東京を走る車";

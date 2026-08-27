@@ -928,23 +928,33 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,7">
-                                    <TextBlock Text="CREATION IDEA"
+                                    <TextBlock Text="CREATION KICKOFF"
                                                FontSize="10"
                                                Foreground="{StaticResource AccentBrush}"
                                                FontWeight="SemiBold" />
-                                    <TextBlock Text="  作りたいイメージ"
+                                    <TextBlock Text="  開始指示・補足（任意）"
                                                FontSize="14"
                                                FontWeight="SemiBold" />
                                 </StackPanel>
-                                <TextBox Text="{Binding Idea, UpdateSourceTrigger=PropertyChanged}"
-                                         AcceptsReturn="True"
-                                         TextWrapping="Wrap"
-                                         Height="62"
-                                         VerticalScrollBarVisibility="Auto"
-                                         IsEnabled="{Binding IsIdeaInputEnabled}"
-                                         AutomationProperties.Name="制作アイデア入力"
-                                         ToolTip="{Binding IdeaInputHint}"
-                                         ToolTipService.ShowOnDisabled="True" />
+                                <Grid>
+                                    <TextBox Text="{Binding Idea, UpdateSourceTrigger=PropertyChanged}"
+                                             AcceptsReturn="True"
+                                             TextWrapping="Wrap"
+                                             Height="62"
+                                             VerticalScrollBarVisibility="Auto"
+                                             IsEnabled="{Binding IsIdeaInputEnabled}"
+                                             AutomationProperties.Name="開始指示・補足入力"
+                                             ToolTip="{Binding IdeaInputHint}"
+                                             ToolTipService.ShowOnDisabled="True" />
+                                    <TextBlock Text="{Binding IdeaInputPlaceholder}"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               TextWrapping="Wrap"
+                                               Margin="12,9,12,9"
+                                               VerticalAlignment="Top"
+                                               IsHitTestVisible="False"
+                                               Visibility="{Binding ShowIdeaPlaceholder, Converter={StaticResource BoolToVisibility}}" />
+                                </Grid>
                                 <TextBlock Text="{Binding IdeaInputHint}"
                                            Foreground="{StaticResource MutedTextBrush}"
                                            FontSize="10"

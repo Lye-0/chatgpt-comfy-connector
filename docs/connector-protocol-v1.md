@@ -118,14 +118,14 @@ Importerは次の順序を保つ。
 
 ## Handoff ContextとTimeline
 
-BootstrapとReviewの各Handoffは、それ1件だけで新しいChatGPTが応答できるよう、role、そのHandoffで許可されたactionだけのresponse grammar、IDs、boundary、AllowedActions、Project / Chat / Workflow、Iteration、idea、該当Output、Writable slot schemaを含む。説明用current / choicesは人間とLLMが読めるUnicodeのまま出力し、JSON / HTML / Markdown escapeを重ねない。Protocol fenceとPayload markerは実Clipboard上でもescapeしない。
+BootstrapとReviewの各Handoffは、選択したChatGPT会話へ貼り付けて使えるよう、role、そのHandoffで許可されたactionだけのresponse grammar、IDs、boundary、AllowedActions、Project / Chat / Workflow、Iteration、任意のKickoff instruction、該当Output、Writable slot schemaを含む。既存会話のメッセージがある場合はそれを制作文脈として利用し、Kickoff instructionがある場合は追加指示として優先する。新規Chatで履歴がない場合も、Workflow / slot schemaなどのHandoff情報だけで動作できる。説明用current / choicesは人間とLLMが読めるUnicodeのまま出力し、JSON / HTML / Markdown escapeを重ねない。Protocol fenceとPayload markerは実Clipboard上でもescapeしない。
 
 Timelineは `CONNECTOR → CHATGPT`、`CHATGPT → COMFY`、`COMFY → CHATGPT` を維持する。ChatGPT → COMFYカードは解決済みPromptを主表示へ使い、Raw JSONを主役にしない。表示を短縮しても `HandoffMessage.Payload` と `ProtocolValidationResult.RawResponse` は破壊せず、Copyはconnector-commandと全Payloadを含むResponse全文を使う。
 
 ## Verification anchors
 
-- `src/ChatGPTComfyConnector.Core/Services/ProtocolAndContext.cs` — envelope / JSON / payload / slot validation、snapshot factory、自己完結Context
+- `src/ChatGPTComfyConnector.Core/Services/ProtocolAndContext.cs` — envelope / JSON / payload / slot validation、snapshot factory、既存会話対応Context
 - `src/ChatGPTComfyConnector.Core/Models/AppModels.cs` — Pending Handoff、slot transport、Raw / resolved command model
 - `src/ChatGPTComfyConnector.Desktop/ViewModels/MainViewModel.cs` — discovery state、clipboard Handoff、State Machine / Timeline統合
-- `tests/ChatGPTComfyConnector.Tests/ProtocolTests.cs` — Raw text、identity、boundary、slot、complete、self-contained Context
+- `tests/ChatGPTComfyConnector.Tests/ProtocolTests.cs` — Raw text、identity、boundary、slot、complete、既存会話対応のContext
 - `tests/ChatGPTComfyConnector.Tests/CreationPipelineStateMachineTests.cs` — allowed state、invalid command、replacement、Apply gating

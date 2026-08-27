@@ -156,7 +156,7 @@ public static class CreationPipelineStateMachine
         session.Pipeline.MaximumIterationSafetyStop = false;
         SetAllFrom(session, CreationStage.Context, CreationStageState.NotReached);
         Set(session, CreationStage.Context, CreationStageState.Completed, "制作セッションへContextをBinding済み");
-        Set(session, CreationStage.Idea, CreationStageState.Current, "制作アイデアを入力してください");
+        Set(session, CreationStage.Idea, CreationStageState.Current, "開始指示・補足は任意です · SEND TO CHATGPTで開始");
         session.Status = SessionStatus.Active;
         session.UpdatedAt = DateTimeOffset.UtcNow;
     }
@@ -167,7 +167,7 @@ public static class CreationPipelineStateMachine
         if (!session.Pipeline.ContextBound) return;
         if (session.Pipeline.SentIdeaSnapshot is null)
         {
-            Set(session, CreationStage.Idea, CreationStageState.Current, string.IsNullOrWhiteSpace(idea) ? "制作アイデアを入力してください" : "入力中 · SEND TO CHATGPTで確定");
+            Set(session, CreationStage.Idea, CreationStageState.Current, string.IsNullOrWhiteSpace(idea) ? "開始指示・補足は任意です · SEND TO CHATGPTで開始" : "開始指示を入力中 · SEND TO CHATGPTで開始");
             return;
         }
         if (string.Equals(session.Pipeline.SentIdeaSnapshot, idea, StringComparison.Ordinal)) return;
@@ -180,10 +180,14 @@ public static class CreationPipelineStateMachine
         session.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
+    /// <summary>
+    /// Records that the initial Handoff was copied. The kickoff instruction is
+    /// optional; an empty value delegates the creative brief to the selected
+    /// ChatGPT conversation's existing history.
+    /// </summary>
     public static void BootstrapCopied(CreationSession session, string idea)
     {
         RequireContext(session);
-        if (string.IsNullOrWhiteSpace(idea)) throw new InvalidOperationException("制作アイデアを入力してください。");
         session.Pipeline.SentIdeaSnapshot = idea;
         session.Pipeline.AcceptedCommandAction = null;
         Set(session, CreationStage.Idea, CreationStageState.Completed, "制作ContextをClipboardへ生成済み");
@@ -365,7 +369,7 @@ public static class CreationPipelineStateMachine
         }
         session.Pipeline.ContextBound = true;
         Set(session, CreationStage.Context, CreationStageState.Completed, "既存SessionのContextを復元");
-        Set(session, CreationStage.Idea, CreationStageState.Current, "制作アイデアを確認してください");
+        Set(session, CreationStage.Idea, CreationStageState.Current, "開始指示・補足は任意です · SEND TO CHATGPTで開始");
         var latest = session.Iterations.LastOrDefault();
         if (latest is null) return;
         Set(session, CreationStage.Idea, CreationStageState.Completed, "既存Sessionから復元");

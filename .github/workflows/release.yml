@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release ${{ github.ref_name }}
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$') {
+            throw "Tag '$tag' must be a v-prefixed SemVer, such as v0.1.0-alpha."
+          }
+
+          $version = $Matches.version
+          $isPrerelease = $version -match '(?i)-(alpha|beta|rc)(?:[0-9A-Za-z.+-]*)$'
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "prerelease=$($isPrerelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Restore
+        run: dotnet restore ChatGPTComfyConnector.slnx --runtime win-x64
+
+      - name: Build
+        run: dotnet build ChatGPTComfyConnector.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test ChatGPTComfyConnector.slnx --configuration Release --no-build --no-restore --verbosity normal
+
+      - name: Publish Desktop application
+        id: publish
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $publishDirectory = Join-Path $env:RUNNER_TEMP "chatgpt-comfy-connector-publish-$env:GITHUB_RUN_ID"
+          New-Item -ItemType Directory -Force -Path $publishDirectory | Out-Null
+
+          dotnet publish 'src/ChatGPTComfyConnector.Desktop/ChatGPTComfyConnector.Desktop.csproj' `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            --no-restore `
+            --output $publishDirectory `
+            "-p:Version=$env:RELEASE_VERSION" `
+            '-p:PublishSingleFile=false' `
+            '-p:DebugType=None' `
+            '-p:DebugSymbols=false' `
+            '-p:IncludeSourceRevisionInInformationalVersion=false'
+
+          if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory 'ChatGPTComfyConnector.Desktop.exe'))) {
+            throw 'The self-contained Desktop publish did not produce the application executable.'
+          }
+
+          "publish_directory=$publishDirectory" >> $env:GITHUB_OUTPUT
+
+      - name: Create ZIP and SHA-256
+        id: package
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          PUBLISH_DIRECTORY: ${{ steps.publish.outputs.publish_directory }}
+        run: |
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP "chatgpt-comfy-connector-release-$env:GITHUB_RUN_ID"
+          New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
+
+          $zipName = "ChatGPT-Comfy-Connector-v$($env:RELEASE_VERSION)-win-x64.zip"
+          $sha256Name = "$zipName.sha256"
+          $zipPath = Join-Path $artifactDirectory $zipName
+          $sha256Path = Join-Path $artifactDirectory $sha256Name
+
+          Compress-Archive `
+            -Path (Join-Path $env:PUBLISH_DIRECTORY '*') `
+            -DestinationPath $zipPath `
+            -CompressionLevel Optimal
+
+          $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText(
+            $sha256Path,
+            "$hash  $zipName`n",
+            [System.Text.Encoding]::ASCII)
+
+          "zip_name=$zipName" >> $env:GITHUB_OUTPUT
+          "sha256_name=$sha256Name" >> $env:GITHUB_OUTPUT
+          "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
+          "sha256_path=$sha256Path" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          ZIP_PATH: ${{ steps.package.outputs.zip_path }}
+          SHA256_PATH: ${{ steps.package.outputs.sha256_path }}
+        run: |
+          $ghArguments = @(
+            'release',
+            'create',
+            $env:RELEASE_TAG,
+            '--title',
+            "ChatGPT-Comfy-Connector $($env:RELEASE_TAG)",
+            '--generate-notes',
+            '--verify-tag'
+          )
+
+          if ($env:PRERELEASE -eq 'true') {
+            $ghArguments += '--prerelease'
+          }
+
+          $ghArguments += @($env:ZIP_PATH, $env:SHA256_PATH)
+          gh @ghArguments

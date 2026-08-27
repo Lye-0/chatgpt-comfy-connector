@@ -43,6 +43,7 @@ ScaffoldingReadMe.txt
 ~$*
 *~
 CodeCoverage/
+.vs/
 
 # MSBuild Binary and Structured Log
 *.binlog
@@ -55,3 +56,17 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Portable runtime state and generated artifacts
+/config/
+/data/
+/logs/
+/backups/
+/cache/
+/artifacts/
+**/config/
+**/data/sessions/
+**/logs/
+**/backups/
+**/cache/
+*.user

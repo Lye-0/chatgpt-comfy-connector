@@ -1,0 +1,1948 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window x:Class="ChatGPTComfyConnector.Desktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="ChatGPT Comfy Connector"
+        Width="1680"
+        Height="1040"
+        MinWidth="1180"
+        MinHeight="760"
+        Language="ja-JP"
+        FontFamily="{StaticResource UiFont}"
+        Background="{StaticResource CanvasBrush}"
+        Foreground="{StaticResource TextBrush}"
+        Loaded="Window_Loaded"
+        Closing="Window_Closing">
+    <Window.Resources>
+        <DataTemplate x:Key="SlotEditorTemplate">
+            <Border x:Name="SlotChrome"
+                    Background="{StaticResource PanelSoftBrush}"
+                    BorderBrush="{StaticResource LineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="9"
+                    Padding="10"
+                    Margin="0,0,0,7">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="176" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0"
+                                VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Label}"
+                                   FontWeight="SemiBold"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding PriorityLabel}"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="10"
+                                   Margin="0,3,0,0" />
+                        <TextBlock Text="{Binding Address}"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="10"
+                                   Margin="0,2,0,0"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding Address}" />
+                    </StackPanel>
+                    <Grid Grid.Column="1"
+                          Margin="14,0,14,0">
+                        <TextBox x:Name="ValueEditor"
+                                 Text="{Binding ValueText, UpdateSourceTrigger=PropertyChanged}"
+                                 VerticalContentAlignment="Center"
+                                 ToolTip="Workflow slotの値。変更は保存前に確認できます。" />
+                        <ComboBox x:Name="ChoiceEditor"
+                                  ItemsSource="{Binding Choices}"
+                                  Text="{Binding ValueText, UpdateSourceTrigger=PropertyChanged}"
+                                  IsEditable="True"
+                                  Visibility="Collapsed"
+                                  ToolTip="候補から選択、または値を入力" />
+                    </Grid>
+                    <StackPanel Grid.Column="2"
+                                Width="70"
+                                VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Type}"
+                                   Foreground="{StaticResource AccentBrush}"
+                                   FontSize="10"
+                                   HorizontalAlignment="Right" />
+                        <TextBlock Text="要確認"
+                                   Foreground="{StaticResource DangerBrush}"
+                                   FontSize="10"
+                                   HorizontalAlignment="Right"
+                                   Visibility="{Binding PairingSuspect, Converter={StaticResource BoolToVisibility}}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding HasChoices}" Value="True">
+                    <Setter TargetName="ValueEditor" Property="Visibility" Value="Collapsed" />
+                    <Setter TargetName="ChoiceEditor" Property="Visibility" Value="Visible" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding PairingSuspect}" Value="True">
+                    <Setter TargetName="SlotChrome" Property="BorderBrush" Value="{StaticResource DangerBrush}" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <DataTemplate x:Key="PipelineStageTemplate">
+            <StackPanel Orientation="Horizontal"
+                        VerticalAlignment="Center"
+                        AutomationProperties.Name="{Binding Label}"
+                        ToolTip="{Binding Description}">
+                <StackPanel Width="72"
+                            HorizontalAlignment="Center">
+                    <Grid x:Name="PipelineNode"
+                          Width="28"
+                          Height="28"
+                          HorizontalAlignment="Center">
+                        <Ellipse Fill="#101D2B"
+                                 Stroke="{Binding VisualState, Converter={StaticResource StateToBrush}}"
+                                 StrokeThickness="1.5"
+                                 Opacity="0.95" />
+                        <TextBlock Text="{Binding StateSymbol}"
+                                   Foreground="{Binding VisualState, Converter={StaticResource StateToBrush}}"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                    </Grid>
+                    <TextBlock Text="{Binding Key}"
+                               Foreground="{Binding VisualState, Converter={StaticResource StateToBrush}}"
+                               FontSize="9"
+                               FontWeight="SemiBold"
+                               HorizontalAlignment="Center"
+                               Margin="0,5,0,0" />
+                    <TextBlock Text="{Binding StateLabel}"
+                               Foreground="{StaticResource MutedTextBrush}"
+                               FontSize="8"
+                               HorizontalAlignment="Center"
+                               Margin="0,2,0,0" />
+                </StackPanel>
+                <Border Width="26"
+                        Height="2"
+                        Background="{Binding VisualState, Converter={StaticResource StateToBrush}}"
+                        Opacity="0.68"
+                        VerticalAlignment="Top"
+                        Margin="0,13,0,0"
+                        Visibility="{Binding IsLast, Converter={StaticResource InverseBoolToVisibility}}" />
+            </StackPanel>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                    <Setter TargetName="PipelineNode" Property="Effect">
+                        <Setter.Value>
+                            <DropShadowEffect Color="#63E6E2"
+                                              BlurRadius="13"
+                                              ShadowDepth="0"
+                                              Opacity="0.72" />
+                        </Setter.Value>
+                    </Setter>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsInProgress}" Value="True">
+                    <DataTrigger.EnterActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetName="PipelineNode"
+                                                  Storyboard.TargetProperty="Opacity"
+                                                  From="0.72"
+                                                  To="1"
+                                                  Duration="0:0:2.4"
+                                                  AutoReverse="True"
+                                                  RepeatBehavior="Forever" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </DataTrigger.EnterActions>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsComfyUiStarting}" Value="True">
+                    <Setter TargetName="PipelineNode" Property="Effect">
+                        <Setter.Value>
+                            <DropShadowEffect Color="#F5C96A"
+                                              BlurRadius="13"
+                                              ShadowDepth="0"
+                                              Opacity="0.72" />
+                        </Setter.Value>
+                    </Setter>
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <Style x:Key="HistoryListBoxItemStyle"
+               TargetType="ListBoxItem"
+               BasedOn="{StaticResource {x:Type ListBoxItem}}">
+            <Setter Property="Margin" Value="0,0,0,8" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="HistoryChrome"
+                                Background="#0C1523"
+                                BorderBrush="{StaticResource LineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="9"
+                                Padding="2">
+                            <ContentPresenter />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="HistoryChrome" Property="Background" Value="#13243A" />
+                                <Setter TargetName="HistoryChrome" Property="BorderBrush" Value="{StaticResource LineStrongBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="HistoryChrome" Property="Background" Value="#153440" />
+                                <Setter TargetName="HistoryChrome" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                                <Setter TargetName="HistoryChrome" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="HistoryChrome" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="HistoryChrome" Property="Opacity" Value="0.42" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="LoopButtonStyle"
+               TargetType="Button"
+               BasedOn="{StaticResource IconButtonStyle}">
+            <Setter Property="Width" Value="66" />
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Padding" Value="10,5" />
+            <Setter Property="FontSize" Value="10" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding RelativeSource={RelativeSource Self}, Path=Tag}"
+                             Value="True">
+                    <Setter Property="Background" Value="#17444D" />
+                    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                    <Setter Property="Foreground" Value="{StaticResource AccentStrongBrush}" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="VideoPlayButtonStyle"
+               TargetType="Button">
+            <Setter Property="Width" Value="56" />
+            <Setter Property="Height" Value="56" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Foreground" Value="{StaticResource AccentStrongBrush}" />
+            <Setter Property="Background" Value="#C00B1421" />
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontSize" Value="22" />
+            <Setter Property="FocusVisualStyle" Value="{StaticResource FocusVisualStyle}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="PlayChrome"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="28">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Content="{TemplateBinding Content}"
+                                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="PlayChrome" Property="Background" Value="#E01A3545" />
+                                <Setter TargetName="PlayChrome" Property="BorderBrush" Value="{StaticResource AccentStrongBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="PlayChrome" Property="Background" Value="#F02B5363" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="PlayChrome" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
+                                <Setter TargetName="PlayChrome" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="PlayChrome" Property="Opacity" Value="0.42" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <DataTemplate x:Key="HistoryIterationTemplate">
+            <Border x:Name="HistoryCard"
+                    MinHeight="132"
+                    Background="Transparent"
+                    CornerRadius="8"
+                    Padding="8">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="70" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid>
+                        <TextBlock Text="{Binding Number, StringFormat=ITERATION {0:00}}"
+                                   Foreground="{StaticResource AccentBrush}"
+                                   FontSize="10"
+                                   FontWeight="SemiBold" />
+                        <Border HorizontalAlignment="Right"
+                                Background="#173B4A"
+                                BorderBrush="{StaticResource AccentBrush}"
+                                BorderThickness="1"
+                                CornerRadius="5"
+                                Padding="5,2"
+                                Visibility="{Binding HasBadge, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Text="{Binding BadgeText}"
+                                       Foreground="{StaticResource AccentStrongBrush}"
+                                       FontSize="8"
+                                       FontWeight="Bold" />
+                        </Border>
+                    </Grid>
+                    <Border Grid.Row="1"
+                            Background="#070C15"
+                            BorderBrush="{StaticResource LineBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Margin="0,7,0,7">
+                        <Grid>
+                            <Image Source="{Binding PrimaryOutput.FullPath}"
+                                   Visibility="{Binding HasImage, Converter={StaticResource BoolToVisibility}}"
+                                   Stretch="UniformToFill"
+                                   Opacity="0.88"
+                                   ImageFailed="OutputImageFailed" />
+                            <Grid Visibility="{Binding HasVideo, Converter={StaticResource BoolToVisibility}}">
+                                <Image Source="{Binding ThumbnailImage}"
+                                       Visibility="{Binding HasThumbnail, Converter={StaticResource BoolToVisibility}}"
+                                       Stretch="UniformToFill"
+                                       Opacity="0.94" />
+                                <MediaElement Source="{Binding PrimaryOutput.FullPath}"
+                                              LoadedBehavior="Manual"
+                                              UnloadedBehavior="Stop"
+                                              Volume="0"
+                                              Stretch="UniformToFill"
+                                              ScrubbingEnabled="True"
+                                              Visibility="{Binding HasThumbnail, Converter={StaticResource InverseBoolToVisibility}}"
+                                              IsHitTestVisible="False"
+                                              MediaOpened="HistoryVideoMediaOpened"
+                                              MediaFailed="HistoryVideoMediaFailed" />
+                                <Button Style="{StaticResource VideoPlayButtonStyle}"
+                                        Width="28"
+                                        Height="28"
+                                        FontSize="12"
+                                        Content="▶"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Click="HistoryPlay_Click"
+                                        ToolTip="このIterationをOUTPUT VIEWERで再生"
+                                        AutomationProperties.Name="Iterationの動画を再生"
+                                        Panel.ZIndex="2" />
+                            </Grid>
+                            <StackPanel x:Name="HistoryGeneratingState"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisibility}}">
+                                <ProgressBar Width="88"
+                                             Height="4"
+                                             IsIndeterminate="True"
+                                             Foreground="{StaticResource AccentBrush}"
+                                             Background="#1A3140"
+                                             Margin="0,0,0,8" />
+                                <TextBlock Text="{Binding ActivityText}"
+                                           Foreground="{StaticResource AccentStrongBrush}"
+                                           FontSize="11"
+                                           FontWeight="SemiBold"
+                                           HorizontalAlignment="Center" />
+                                <TextBlock Text="{Binding StatusDetailText}"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="9"
+                                           HorizontalAlignment="Center"
+                                           Margin="0,3,0,0" />
+                                <TextBlock Text="{Binding StatusText}"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontSize="8"
+                                           FontWeight="SemiBold"
+                                           HorizontalAlignment="Center"
+                                           Margin="0,3,0,0" />
+                            </StackPanel>
+                            <TextBlock Text="出力なし"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="10"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Visibility="{Binding ShowNoOutput, Converter={StaticResource BoolToVisibility}}" />
+                        </Grid>
+                    </Border>
+                    <Grid Grid.Row="2">
+                        <TextBlock Text="{Binding StatusText}"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="9"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding CreatedAtText}"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="9"
+                                   HorizontalAlignment="Right" />
+                    </Grid>
+                </Grid>
+            </Border>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsGenerating}" Value="True">
+                    <Setter TargetName="HistoryCard" Property="Background" Value="#102A35" />
+                    <DataTrigger.EnterActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetName="HistoryGeneratingState"
+                                                  Storyboard.TargetProperty="Opacity"
+                                                  From="0.72"
+                                                  To="1"
+                                                  Duration="0:0:1.6"
+                                                  AutoReverse="True"
+                                                  RepeatBehavior="Forever" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </DataTrigger.EnterActions>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsFailed}" Value="True">
+                    <Setter TargetName="HistoryCard" Property="Background" Value="#2B141E" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsFinal}" Value="True">
+                    <Setter TargetName="HistoryCard" Property="Background" Value="#10261D" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <DataTemplate x:Key="PreviewOutputTemplate">
+            <Border Width="520"
+                    Height="324"
+                    Background="#080E19"
+                    BorderBrush="{StaticResource LineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Margin="0,0,12,0">
+                <Grid>
+                    <Image Source="{Binding FullPath}"
+                           Visibility="{Binding IsImage, Converter={StaticResource BoolToVisibility}}"
+                           Stretch="Uniform"
+                           Margin="8"
+                           ImageFailed="OutputImageFailed" />
+                    <MediaElement Source="{Binding FullPath}"
+                                  Visibility="{Binding IsVideo, Converter={StaticResource BoolToVisibility}}"
+                                  LoadedBehavior="Play"
+                                  UnloadedBehavior="Stop"
+                                  Stretch="Uniform"
+                                  Margin="8"
+                                  MediaFailed="OutputMediaFailed" />
+                    <StackPanel HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                Visibility="{Binding IsMissing, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="PREVIEW UNAVAILABLE"
+                                   Foreground="{StaticResource WarningBrush}"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   HorizontalAlignment="Center" />
+                        <TextBlock Text="OPENで既定アプリから確認できます"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="10"
+                                   Margin="0,5,0,0" />
+                    </StackPanel>
+                    <Border VerticalAlignment="Bottom"
+                            Background="#D8070A12"
+                            Padding="10,8">
+                        <Grid>
+                            <TextBlock Text="{Binding FileName}"
+                                       TextTrimming="CharacterEllipsis"
+                                       Margin="0,0,64,0" />
+                            <Button Content="OPEN"
+                                    Tag="{Binding FullPath}"
+                                    Click="OpenOutput_Click"
+                                    Padding="8,4"
+                                    HorizontalAlignment="Right"
+                                    Margin="0" />
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="HandoffTimelineItemTemplate">
+            <Grid Margin="0,0,0,12">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <Grid Grid.Column="0">
+                    <Border Width="2" Background="#28405A" HorizontalAlignment="Center" />
+                    <Ellipse Width="9"
+                             Height="9"
+                             Fill="{Binding Message.Direction, Converter={StaticResource HandoffDirectionToBrush}}"
+                             Stroke="#08101B"
+                             StrokeThickness="2"
+                             VerticalAlignment="Top"
+                             Margin="0,18,0,0" />
+                </Grid>
+                <Border x:Name="MessageChrome"
+                        Grid.Column="1"
+                        Background="#0C1726"
+                        BorderBrush="{Binding Message.Direction, Converter={StaticResource HandoffDirectionToBrush}}"
+                        BorderThickness="1"
+                        CornerRadius="11"
+                        Padding="11">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding DirectionLabel}"
+                                           Foreground="{Binding Message.Direction, Converter={StaticResource HandoffDirectionToBrush}}"
+                                           FontSize="9"
+                                           FontWeight="Bold" />
+                                <TextBlock Text="{Binding TimeText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" Margin="8,0,0,0" />
+                            </StackPanel>
+                            <Button Grid.Column="1" Style="{StaticResource IconButtonStyle}" Width="28" Height="26" Margin="0" Tag="{Binding}" Click="CopyHandoff_Click" ToolTip="{Binding CopyToolTip}" AutomationProperties.Name="メッセージをコピー">
+                                <Viewbox Width="14" Height="14">
+                                    <Canvas Width="24" Height="24">
+                                        <Rectangle Width="12" Height="12" Canvas.Left="7" Canvas.Top="3" Fill="Transparent" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" StrokeThickness="1.8" />
+                                        <Rectangle Width="12" Height="12" Canvas.Left="3" Canvas.Top="8" Fill="Transparent" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" StrokeThickness="1.8" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
+                        </Grid>
+                        <TextBlock Grid.Row="1" Text="{Binding KindLabel}" FontSize="12" FontWeight="SemiBold" Margin="0,7,0,0" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="2"
+                                   Text="{Binding DisplayText}"
+                                   Foreground="{StaticResource TextBrush}"
+                                   FontSize="11"
+                                   Margin="0,5,0,0"
+                                   TextWrapping="Wrap"
+                                   TextTrimming="CharacterEllipsis"
+                                   MaxHeight="32">
+                            <ToolTipService.ToolTip>
+                                <ToolTip>
+                                    <TextBlock Text="{Binding BodyTooltip}"
+                                               TextWrapping="Wrap"
+                                               MaxWidth="420"
+                                               MaxHeight="260" />
+                                </ToolTip>
+                            </ToolTipService.ToolTip>
+                        </TextBlock>
+                        <Grid Grid.Row="3" Margin="0,6,0,0">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding MetadataText}"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="9"
+                                       TextWrapping="Wrap"
+                                       TextTrimming="CharacterEllipsis"
+                                       MaxHeight="28" />
+                            <Border Grid.Column="1"
+                                    Background="#172738"
+                                    BorderBrush="{Binding StateLabel, Converter={StaticResource StateToBrush}}"
+                                    BorderThickness="1"
+                                    CornerRadius="5"
+                                    Padding="5,2"
+                                    VerticalAlignment="Bottom"
+                                    Margin="7,0,0,0">
+                                <TextBlock Text="{Binding StateLabel}"
+                                           Foreground="{Binding StateLabel, Converter={StaticResource StateToBrush}}"
+                                           FontSize="8"
+                                           FontWeight="SemiBold" />
+                            </Border>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Grid>
+            <DataTemplate.Triggers>
+                <Trigger SourceName="MessageChrome" Property="IsMouseOver" Value="True">
+                    <Setter TargetName="MessageChrome" Property="Background" Value="#13243A" />
+                </Trigger>
+                <Trigger SourceName="MessageChrome" Property="IsKeyboardFocusWithin" Value="True">
+                    <Setter TargetName="MessageChrome" Property="BorderThickness" Value="2" />
+                </Trigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="96" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="36" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0"
+                Background="{StaticResource PanelBrush}"
+                CornerRadius="15"
+                Padding="14,11"
+                BorderBrush="{StaticResource LineBrush}"
+                BorderThickness="1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="200" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0"
+                            VerticalAlignment="Center">
+                    <TextBlock Text="COMFY / CHATGPT"
+                               FontSize="11"
+                               Foreground="{StaticResource AccentBrush}"
+                               FontWeight="SemiBold" />
+                    <TextBlock Text="Connector"
+                               FontSize="24"
+                               FontWeight="SemiBold"
+                               Margin="0,2,0,0" />
+                </StackPanel>
+                <Border Grid.Column="1"
+                        Width="700"
+                        HorizontalAlignment="Left"
+                        Background="#0A111D"
+                        BorderBrush="{StaticResource LineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="10"
+                        Padding="10,6"
+                        Margin="10,0,18,0"
+                        AutomationProperties.Name="SYSTEM CONNECTION">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid Grid.Row="0">
+                            <TextBlock Text="SYSTEM CONNECTION"
+                                       Foreground="{StaticResource AccentBrush}"
+                                       FontSize="9"
+                                       FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding SystemConnectionSummary}"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="9"
+                                       TextTrimming="CharacterEllipsis"
+                                       HorizontalAlignment="Right"
+                                       Margin="12,0,0,0" />
+                        </Grid>
+                        <Grid Grid.Row="1"
+                              Margin="0,5,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0"
+                                        Orientation="Horizontal"
+                                        AutomationProperties.Name="Connector">
+                                <Ellipse Width="8"
+                                         Height="8"
+                                         Fill="{Binding ConnectorSystemState, Converter={StaticResource StateToBrush}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,5,0" />
+                                <StackPanel>
+                                    <TextBlock Text="Connector"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding ConnectorSystemState}"
+                                               Foreground="{Binding ConnectorSystemState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="8"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </StackPanel>
+                            <Border Grid.Column="1"
+                                    Height="1"
+                                    Margin="9,0"
+                                    VerticalAlignment="Center"
+                                    Background="{StaticResource LineStrongBrush}"
+                                    Opacity="0.55" />
+                            <StackPanel Grid.Column="2"
+                                        Orientation="Horizontal"
+                                        AutomationProperties.Name="MCP">
+                                <Ellipse Width="8"
+                                         Height="8"
+                                         Fill="{Binding McpSystemState, Converter={StaticResource StateToBrush}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,5,0" />
+                                <StackPanel>
+                                    <TextBlock Text="MCP"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding McpSystemState}"
+                                               Foreground="{Binding McpSystemState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="8"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </StackPanel>
+                            <Border Grid.Column="3"
+                                    Height="1"
+                                    Margin="9,0"
+                                    VerticalAlignment="Center"
+                                    Background="{StaticResource LineStrongBrush}"
+                                    Opacity="0.55" />
+                            <StackPanel Grid.Column="4"
+                                        Orientation="Horizontal"
+                                        AutomationProperties.Name="ComfyUI">
+                                <Ellipse Width="8"
+                                         Height="8"
+                                         Fill="{Binding ComfyUiSystemState, Converter={StaticResource StateToBrush}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,5,0" />
+                                <StackPanel>
+                                    <TextBlock Text="ComfyUI"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding ComfyUiSystemState}"
+                                               Foreground="{Binding ComfyUiSystemState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="8"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </StackPanel>
+                            <Border Grid.Column="5"
+                                    Height="1"
+                                    Margin="9,0"
+                                    VerticalAlignment="Center"
+                                    Background="{StaticResource LineStrongBrush}"
+                                    Opacity="0.55" />
+                            <StackPanel Grid.Column="6"
+                                        Orientation="Horizontal"
+                                        AutomationProperties.Name="GPU">
+                                <Ellipse Width="8"
+                                         Height="8"
+                                         Fill="{Binding GpuSystemState, Converter={StaticResource StateToBrush}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,5,0" />
+                                <StackPanel>
+                                    <TextBlock Text="GPU"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding GpuSystemState}"
+                                               Foreground="{Binding GpuSystemState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="8"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock Grid.Row="2"
+                                   Text="{Binding SelectedWorkflowText}"
+                                   Foreground="{StaticResource WarmBrush}"
+                                   FontSize="9"
+                                   TextTrimming="CharacterEllipsis"
+                                   HorizontalAlignment="Right"
+                                   Margin="0,5,0,0" />
+                    </Grid>
+                </Border>
+                <StackPanel Grid.Column="2"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Center">
+                    <Button Content="SETUP"
+                            ToolTip="接続先とPortableパスを設定"
+                            Click="Setup_Click" />
+                    <Button Content="CONNECT"
+                            ToolTip="comfy-mcpへ接続"
+                            Click="Connect_Click" />
+                    <Button Content="START COMFYUI"
+                            ToolTip="ComfyUIを起動（Connectorは終了させません）"
+                            Click="StartComfy_Click"
+                            Margin="0" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1"
+              Margin="0,14,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="320" />
+                <ColumnDefinition Width="12" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="12" />
+                <ColumnDefinition Width="410" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0"
+                    Background="{StaticResource PanelBrush}"
+                    CornerRadius="14"
+                    Padding="13"
+                    BorderBrush="{StaticResource LineBrush}"
+                    BorderThickness="1">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <StackPanel Grid.Row="0"
+                                Margin="0,0,0,10">
+                        <TextBlock Text="WORKFLOW"
+                                   FontSize="11"
+                                   Foreground="{StaticResource AccentBrush}"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="制作に使うWorkflow"
+                                   FontSize="18"
+                                   FontWeight="SemiBold"
+                                   Margin="0,4,0,9" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Style="{StaticResource IconButtonStyle}"
+                                    ToolTip="ワークフロー一覧を更新"
+                                    AutomationProperties.Name="ワークフロー一覧を更新"
+                                    Click="Refresh_Click">
+                                <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                    <Canvas Width="24" Height="24">
+                                        <Path Data="M19,9 C18,5 15,3 11,3 C6,3 3,7 3,12"
+                                              Fill="Transparent"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                              StrokeThickness="2"
+                                              StrokeStartLineCap="Round"
+                                              StrokeEndLineCap="Round" />
+                                        <Polygon Points="16,5 20,9 15,10"
+                                                 Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" />
+                                        <Path Data="M5,15 C6,19 9,21 13,21 C18,21 21,17 21,12"
+                                              Fill="Transparent"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                              StrokeThickness="2"
+                                              StrokeStartLineCap="Round"
+                                              StrokeEndLineCap="Round" />
+                                        <Polygon Points="8,19 4,15 9,14"
+                                                 Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
+                            <Button Style="{StaticResource IconButtonStyle}"
+                                    ToolTip="ワークフローフォルダを開く"
+                                    AutomationProperties.Name="ワークフローフォルダを開く"
+                                    Click="OpenWorkflowFolder_Click">
+                                <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                    <Path Data="M2,5 L9,5 L11,7 L22,7 L22,19 L2,19 Z"
+                                          Fill="Transparent"
+                                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                          StrokeThickness="1.8"
+                                          StrokeLineJoin="Round" />
+                                </Viewbox>
+                            </Button>
+                            <Button Style="{StaticResource IconButtonStyle}"
+                                    ToolTip="選択中のワークフローを複製"
+                                    AutomationProperties.Name="選択中のワークフローを複製"
+                                    Click="Duplicate_Click"
+                                    IsEnabled="{Binding HasSelectedWorkflow}">
+                                <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                    <Canvas Width="24" Height="24">
+                                        <Rectangle Width="13" Height="14"
+                                                   Canvas.Left="8" Canvas.Top="3"
+                                                   RadiusX="1.5" RadiusY="1.5"
+                                                   Fill="Transparent"
+                                                   Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                                   StrokeThickness="1.8" />
+                                        <Rectangle Width="13" Height="14"
+                                                   Canvas.Left="3" Canvas.Top="7"
+                                                   RadiusX="1.5" RadiusY="1.5"
+                                                   Fill="Transparent"
+                                                   Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                                   StrokeThickness="1.8" />
+                                        <Line X1="6.5" Y1="14" X2="12.5" Y2="14"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                              StrokeThickness="1.8"
+                                              StrokeStartLineCap="Round"
+                                              StrokeEndLineCap="Round" />
+                                        <Line X1="9.5" Y1="11" X2="9.5" Y2="17"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                              StrokeThickness="1.8"
+                                              StrokeStartLineCap="Round"
+                                              StrokeEndLineCap="Round" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
+                            <Button Style="{StaticResource IconButtonStyle}"
+                                    ToolTip="選択中のワークフロー名を変更"
+                                    AutomationProperties.Name="選択中のワークフロー名を変更"
+                                    Click="Rename_Click"
+                                    IsEnabled="{Binding HasSelectedWorkflow}">
+                                <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                    <Path Data="M4,17 L5,20 L8,19 L19,8 L15,4 Z M13.5,5.5 L17.5,9.5"
+                                          Fill="Transparent"
+                                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                          StrokeThickness="1.8"
+                                          StrokeLineJoin="Round" />
+                                </Viewbox>
+                            </Button>
+                            <Button Style="{StaticResource IconButtonStyle}"
+                                    ToolTip="選択中ワークフローの設定を開く"
+                                    AutomationProperties.Name="選択中ワークフローの設定を開く"
+                                    Click="OpenWorkflowEditor_Click"
+                                    IsEnabled="{Binding HasSelectedWorkflow}"
+                                    Margin="0">
+                                <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                    <Canvas Width="24" Height="24">
+                                        <Ellipse Width="8" Height="8"
+                                                 Canvas.Left="8" Canvas.Top="8"
+                                                 Fill="Transparent"
+                                                 Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                                 StrokeThickness="1.8" />
+                                        <Path Data="M12,2 L12,6 M12,18 L12,22 M2,12 L6,12 M18,12 L22,12 M4.9,4.9 L7.8,7.8 M16.2,16.2 L19.1,19.1 M19.1,4.9 L16.2,7.8 M7.8,16.2 L4.9,19.1"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                              StrokeThickness="1.8"
+                                              StrokeStartLineCap="Round"
+                                              StrokeEndLineCap="Round" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal"
+                                    Margin="0,8,0,0"
+                                    Visibility="{Binding IsWorkflowRenameVisible, Converter={StaticResource BoolToVisibility}}">
+                            <TextBox x:Name="WorkflowRenameBox"
+                                     Text="{Binding WorkflowRenameText, UpdateSourceTrigger=PropertyChanged}"
+                                     ToolTip="Enterで確定 / Escでキャンセル（拡張子は不要）"
+                                     KeyDown="WorkflowRenameBox_KeyDown"
+                                     MinWidth="150"
+                                     Padding="7,5" />
+                            <TextBlock Text="Enterで確定 · Escでキャンセル"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="9"
+                                       VerticalAlignment="Center"
+                                       Margin="7,0,0,0" />
+                        </StackPanel>
+                    </StackPanel>
+                    <Border Grid.Row="1"
+                            Background="#0A101C"
+                            CornerRadius="10"
+                            Padding="7"
+                            BorderBrush="{StaticResource LineBrush}"
+                            BorderThickness="1">
+                        <Grid>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <TreeView x:Name="WorkflowTree"
+                                          ItemsSource="{Binding TreeNodes}"
+                                          SelectedItemChanged="WorkflowTree_SelectedItemChanged">
+                                    <TreeView.ItemTemplate>
+                                        <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                            <TextBlock Text="{Binding Name}"
+                                                       Margin="2,3"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       AutomationProperties.Name="{Binding Name}"
+                                                       ToolTip="{Binding RelativePath}" />
+                                        </HierarchicalDataTemplate>
+                                    </TreeView.ItemTemplate>
+                                </TreeView>
+                            </ScrollViewer>
+                            <StackPanel HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Visibility="{Binding HasTreeNodes, Converter={StaticResource InverseBoolToVisibility}}">
+                                <TextBlock Text="Workflowがありません"
+                                           HorizontalAlignment="Center"
+                                           Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBlock Text="SetupのパスとREFRESHを確認してください"
+                                           FontSize="10"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           TextAlignment="Center"
+                                           Margin="8,5,8,0" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <Border Grid.Row="2"
+                            Background="#0B1624"
+                            CornerRadius="10"
+                            Padding="10"
+                            Margin="0,9,0,0"
+                            BorderBrush="{StaticResource LineBrush}"
+                            BorderThickness="1">
+                        <StackPanel>
+                            <TextBlock Text="CHATGPT CONTEXT" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="SemiBold" />
+                            <TextBlock Text="制作開始前の設定" FontSize="14" FontWeight="SemiBold" Margin="0,3,0,8" />
+                            <TextBlock Text="Project" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
+                            <Grid Margin="0,3,0,5">
+                                <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" DisplayMemberPath="DisplayName" ToolTip="ローカルProjectを選択、または新規作成" />
+                                <TextBlock Text="{Binding ProjectPlaceholderText}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="10,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False" />
+                            </Grid>
+                            <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsProjectCreateVisible, Converter={StaticResource BoolToVisibility}}">
+                                <StackPanel>
+                                    <TextBox Text="{Binding NewProjectName, UpdateSourceTrigger=PropertyChanged}" ToolTip="新しいProject名" />
+                                    <TextBlock Text="{Binding ProjectValidationMessage}" Foreground="{StaticResource DangerBrush}" FontSize="9" Margin="0,4,0,0" Visibility="{Binding HasProjectValidationMessage, Converter={StaticResource BoolToVisibility}}" />
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,0,0">
+                                        <Button Content="キャンセル" Click="CancelProjectCreation_Click" Padding="7,4" />
+                                        <Button Content="作成" Click="CreateProject_Click" Padding="9,4" Margin="0" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                            <TextBlock Text="Chat" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
+                            <Grid Margin="0,3,0,5">
+                                <ComboBox ItemsSource="{Binding ChatOptions}" SelectedItem="{Binding SelectedChat}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanCreateChat}" ToolTip="選択したProject内のChat" />
+                                <TextBlock Text="{Binding ChatPlaceholderText}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="10,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False" />
+                            </Grid>
+                            <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsChatCreateVisible, Converter={StaticResource BoolToVisibility}}">
+                                <StackPanel>
+                                    <TextBox Text="{Binding NewChatName, UpdateSourceTrigger=PropertyChanged}" ToolTip="新しいChat名" />
+                                    <TextBlock Text="{Binding ChatValidationMessage}" Foreground="{StaticResource DangerBrush}" FontSize="9" Margin="0,4,0,0" Visibility="{Binding HasChatValidationMessage, Converter={StaticResource BoolToVisibility}}" />
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,0,0">
+                                        <Button Content="キャンセル" Click="CancelChatCreation_Click" Padding="7,4" />
+                                        <Button Content="作成" Click="CreateChat_Click" Padding="9,4" Margin="0" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                            <Grid Margin="0,1,0,7">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="72" /></Grid.ColumnDefinitions>
+                                <TextBlock Text="Maximum Iterations" Foreground="{StaticResource MutedTextBrush}" FontSize="9" VerticalAlignment="Center" />
+                                <TextBox Grid.Column="1" Text="{Binding SessionMaximumIterations, UpdateSourceTrigger=PropertyChanged}" HorizontalContentAlignment="Center" Padding="6,4" ToolTip="1〜1000" />
+                            </Grid>
+                            <TextBlock Text="{Binding ContextReadinessText}" Foreground="{StaticResource MutedTextBrush}" FontSize="8" LineHeight="12" Margin="0,0,0,6" ToolTip="CONTEXTの準備状況" />
+                            <Button Content="新しい制作を開始" Click="NewSession_Click" IsEnabled="{Binding CanStartNewCreation}" Background="{StaticResource AccentBrush}" Foreground="#071117" FontWeight="SemiBold" Margin="0" ToolTip="{Binding ContextReadinessText}" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="2"
+                    Background="{StaticResource PanelBrush}"
+                    CornerRadius="14"
+                    Padding="16"
+                    BorderBrush="{StaticResource LineBrush}"
+                    BorderThickness="1">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Border Background="#0D1725"
+                            BorderBrush="{StaticResource LineBrush}"
+                            BorderThickness="1"
+                            CornerRadius="12"
+                            Padding="11"
+                            AutomationProperties.Name="CREATION PIPELINE">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="CREATION PIPELINE"
+                                               FontSize="10"
+                                               Foreground="{StaticResource AccentBrush}"
+                                               FontWeight="SemiBold"
+                                               VerticalAlignment="Center" />
+                                    <TextBlock Text="  制作を進める一本のライン"
+                                               FontSize="13"
+                                               FontWeight="SemiBold"
+                                               VerticalAlignment="Center" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                    <TextBlock Text="{Binding CurrentIterationLabel}"
+                                               Foreground="{StaticResource WarmBrush}"
+                                               FontSize="9"
+                                               Margin="0,0,9,0" />
+                                    <TextBlock Text="{Binding PipelineLoopText}"
+                                               Foreground="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="9"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </Grid>
+                            <Grid Grid.Row="1" Margin="0,8,0,0">
+                                <Viewbox Stretch="Uniform" StretchDirection="DownOnly" HorizontalAlignment="Left">
+                                    <ItemsControl ItemsSource="{Binding PipelineStages}"
+                                                  ItemTemplate="{StaticResource PipelineStageTemplate}">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <StackPanel Orientation="Horizontal" />
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                    </ItemsControl>
+                                </Viewbox>
+                            </Grid>
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Row="1"
+                            Background="#101C2C"
+                            BorderBrush="{StaticResource AccentBrush}"
+                            BorderThickness="1"
+                            CornerRadius="12"
+                            Padding="11"
+                            Margin="0,10,0,0">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,7">
+                                    <TextBlock Text="CREATION KICKOFF"
+                                               FontSize="10"
+                                               Foreground="{StaticResource AccentBrush}"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="  開始指示・補足（任意）"
+                                               FontSize="14"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                                <Grid>
+                                    <TextBox x:Name="IdeaInputBox"
+                                             Text="{Binding Idea, UpdateSourceTrigger=PropertyChanged}"
+                                             AcceptsReturn="True"
+                                             TextWrapping="Wrap"
+                                             Height="62"
+                                             VerticalScrollBarVisibility="Auto"
+                                             IsEnabled="{Binding IsIdeaInputEnabled}"
+                                             AutomationProperties.Name="開始指示・補足入力"
+                                             ToolTip="{Binding IdeaInputHint}"
+                                             ToolTipService.ShowOnDisabled="True" />
+                                    <TextBlock Text="{Binding IdeaInputPlaceholder}"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               TextWrapping="Wrap"
+                                               Margin="12,9,12,9"
+                                               VerticalAlignment="Top"
+                                               IsHitTestVisible="False">
+                                        <TextBlock.Style>
+                                            <Style TargetType="{x:Type TextBlock}">
+                                                <!--
+                                                    WPF renders an IME pre-edit string directly in the TextBox
+                                                    before TextBox.Text (and therefore ShowIdeaPlaceholder) is
+                                                    updated. Do not place the watermark over an active editor:
+                                                    while the field owns keyboard focus the IME owns this visual
+                                                    surface, so the watermark stays collapsed for the whole
+                                                    composition, including Japanese conversion/candidate mode.
+                                                -->
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                <Style.Triggers>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding ShowIdeaPlaceholder}" Value="True" />
+                                                            <Condition Binding="{Binding RelativeSource={RelativeSource AncestorType={x:Type Grid}}, Path=IsKeyboardFocusWithin}" Value="False" />
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Visibility" Value="Visible" />
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+                                <TextBlock Text="{Binding IdeaInputHint}"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="10"
+                                           TextWrapping="Wrap"
+                                           Margin="0,5,0,0" />
+                            </StackPanel>
+                            <Button Grid.Column="1"
+                                    Content="SEND TO CHATGPT"
+                                    Click="CopyBootstrap_Click"
+                                    IsEnabled="{Binding CanSendToChatGpt}"
+                                    ToolTip="{Binding SendToChatGptHint}"
+                                    ToolTipService.ShowOnDisabled="True"
+                                    Background="{StaticResource AccentBrush}"
+                                    Foreground="#071117"
+                                    FontWeight="SemiBold"
+                                    VerticalAlignment="Bottom"
+                                    Margin="10,0,0,0" />
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Row="2"
+                            Background="#0A111D"
+                            BorderBrush="{StaticResource LineBrush}"
+                            BorderThickness="1"
+                            CornerRadius="12"
+                            Padding="12"
+                            Margin="0,10,0,0"
+                            AutomationProperties.Name="OUTPUT VIEWER">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="OUTPUT VIEWER"
+                                               FontSize="10"
+                                               Foreground="{StaticResource AccentBrush}"
+                                               FontWeight="SemiBold" />
+                                    <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
+                                        <TextBlock Text="{Binding ViewingIterationText}"
+                                                   FontSize="16"
+                                                   FontWeight="SemiBold" />
+                                        <TextBlock Text="  /  " Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBlock Text="{Binding LatestIterationText}"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   FontSize="11"
+                                                   VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1"
+                                            Orientation="Horizontal"
+                                            VerticalAlignment="Center">
+                                    <Button x:Name="VideoLoopButton"
+                                            Style="{StaticResource LoopButtonStyle}"
+                                            Content="LOOP"
+                                            Tag="False"
+                                            Click="VideoLoop_Click"
+                                            ToolTip="動画の自動ループを切り替え"
+                                            AutomationProperties.Name="動画の自動ループ"
+                                            Visibility="Collapsed" />
+                                    <Button Content="SAVE COPY"
+                                            Padding="9,5"
+                                            Margin="0,0,8,0"
+                                            Click="SaveOutputCopy_Click"
+                                            IsEnabled="{Binding CanSaveSelectedOutputCopy}"
+                                            ToolTip="表示中のOutputを別の場所にコピー保存"
+                                            ToolTipService.ShowOnDisabled="True"
+                                            AutomationProperties.Name="表示中のOutputを別の場所にコピー保存" />
+                                    <Button Content="最新へ戻る"
+                                            Padding="8,5"
+                                            Margin="0,0,8,0"
+                                            Click="ReturnToLatest_Click"
+                                            IsEnabled="{Binding CanReturnToLatest}"
+                                            Visibility="{Binding CanReturnToLatest, Converter={StaticResource BoolToVisibility}}"
+                                            ToolTip="最新IterationのOutputを表示"
+                                            AutomationProperties.Name="最新Iterationへ戻る" />
+                                    <Button Style="{StaticResource IconButtonStyle}"
+                                            ToolTip="生成物の保存フォルダを開く（未生成時はComfyUI output）"
+                                            AutomationProperties.Name="生成物の保存フォルダを開く"
+                                            Tag="{Binding CurrentOutputFolderPath}"
+                                            Click="OpenOutputFolder_Click">
+                                        <Viewbox Width="16" Height="16" Stretch="Uniform">
+                                            <Path Data="M2,5 L9,5 L11,7 L22,7 L22,19 L2,19 Z"
+                                                  Fill="Transparent"
+                                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                                                  StrokeThickness="1.8"
+                                                  StrokeLineJoin="Round" />
+                                        </Viewbox>
+                                    </Button>
+                                    <Border Background="#162A3A"
+                                            BorderBrush="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
+                                            BorderThickness="1"
+                                            CornerRadius="7"
+                                            Padding="8,5">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding ViewingStateText}"
+                                                       Foreground="{StaticResource AccentStrongBrush}"
+                                                       FontSize="9"
+                                                       FontWeight="SemiBold"
+                                                       Margin="0,0,9,0" />
+                                            <TextBlock Text="{Binding JobStatusText}"
+                                                       Foreground="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}"
+                                                       FontSize="9"
+                                                       FontWeight="SemiBold" />
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </Grid>
+
+                            <Grid Grid.Row="1" Margin="0,10,0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" MinWidth="120" />
+                                    <ColumnDefinition Width="10" />
+                                    <ColumnDefinition Width="280" MinWidth="240" />
+                                </Grid.ColumnDefinitions>
+                                <Border Background="#050912"
+                                        BorderBrush="{StaticResource LineBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="9"
+                                        ClipToBounds="True">
+                                    <Grid x:Name="CurrentOutputPreviewSurface"
+                                          MouseEnter="CurrentOutputPreviewSurface_MouseEnter"
+                                          MouseLeave="CurrentOutputPreviewSurface_MouseLeave">
+                                        <Image Source="{Binding SelectedPreviewOutput.FullPath}"
+                                               Visibility="{Binding SelectedPreviewOutput.IsImage, Converter={StaticResource BoolToVisibility}}"
+                                               Stretch="Uniform"
+                                               Margin="8"
+                                               ImageFailed="OutputImageFailed" />
+                                        <MediaElement x:Name="CurrentOutputVideo"
+                                                      Source="{Binding SelectedPreviewOutput.FullPath}"
+                                                      Visibility="{Binding SelectedPreviewOutput.IsVideo, Converter={StaticResource BoolToVisibility}}"
+                                                      LoadedBehavior="Manual"
+                                                      UnloadedBehavior="Stop"
+                                                      Volume="0"
+                                                      Stretch="Uniform"
+                                                      Margin="8"
+                                                      MediaOpened="CurrentOutputVideo_MediaOpened"
+                                                      MediaEnded="CurrentOutputVideo_MediaEnded"
+                                                      MediaFailed="OutputMediaFailed" />
+                                        <Button x:Name="VideoReplayButton"
+                                                Style="{StaticResource VideoPlayButtonStyle}"
+                                                Content="▶"
+                                                Click="VideoReplay_Click"
+                                                ToolTip="動画を先頭から再生"
+                                                AutomationProperties.Name="動画を再生"
+                                                Panel.ZIndex="4"
+                                                Visibility="Collapsed"
+                                                IsHitTestVisible="False" />
+                                        <StackPanel HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    Visibility="{Binding ShowOutputEmptyState, Converter={StaticResource BoolToVisibility}}">
+                                            <TextBlock Text="VIDEO / IMAGE PREVIEW"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       FontSize="14"
+                                                       FontWeight="SemiBold"
+                                                       HorizontalAlignment="Center" />
+                                            <TextBlock Text="まだ生成結果はありません"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       FontSize="10"
+                                                       HorizontalAlignment="Center"
+                                                       Margin="0,6,0,0" />
+                                            <TextBlock Text="最初の映像を生成すると、ここにプレビューが表示されます。"
+                                                       Foreground="{StaticResource LineStrongBrush}"
+                                                       FontSize="10"
+                                                       TextAlignment="Center"
+                                                       TextWrapping="Wrap"
+                                                       MaxWidth="260"
+                                                       Margin="0,5,0,0" />
+                                        </StackPanel>
+                                        <StackPanel x:Name="OutputGeneratingState"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    Visibility="{Binding ShowOutputGeneratingState, Converter={StaticResource BoolToVisibility}}">
+                                            <ProgressBar Width="170"
+                                                         Height="5"
+                                                         IsIndeterminate="True"
+                                                         Foreground="{StaticResource AccentBrush}"
+                                                         Background="#1A3140"
+                                                         Margin="0,0,0,12" />
+                                            <TextBlock Text="{Binding CurrentOutputGenerationLabel}"
+                                                       Foreground="{StaticResource AccentStrongBrush}"
+                                                       FontSize="15"
+                                                       FontWeight="SemiBold"
+                                                       HorizontalAlignment="Center" />
+                                            <TextBlock Text="{Binding CurrentOutputGenerationDetail}"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       FontSize="11"
+                                                       HorizontalAlignment="Center"
+                                                       Margin="0,6,0,0" />
+                                            <TextBlock Text="{Binding CurrentOutputGenerationHint}"
+                                                       Foreground="{StaticResource LineStrongBrush}"
+                                                       FontSize="10"
+                                                       TextAlignment="Center"
+                                                       TextWrapping="Wrap"
+                                                       MaxWidth="300"
+                                                       Margin="0,5,0,0" />
+                                        </StackPanel>
+                                        <StackPanel HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    Visibility="{Binding IsSelectedPreviewMissing, Converter={StaticResource BoolToVisibility}}">
+                                            <TextBlock Text="PREVIEW UNAVAILABLE"
+                                                       Foreground="{StaticResource WarningBrush}"
+                                                       FontSize="12"
+                                                       FontWeight="SemiBold" />
+                                            <TextBlock Text="OPENで既定アプリから確認できます"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       FontSize="9"
+                                                       Margin="0,4,0,0" />
+                                        </StackPanel>
+                                        <Border HorizontalAlignment="Left"
+                                                VerticalAlignment="Top"
+                                                Background="#D90B1421"
+                                                BorderBrush="{StaticResource AccentBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="7"
+                                                Padding="8,6"
+                                                Panel.ZIndex="2"
+                                                Visibility="{Binding ShowOutputUpdatingState, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel>
+                                                <TextBlock Text="NEXT ITERATION · GENERATING"
+                                                           Foreground="{StaticResource AccentStrongBrush}"
+                                                           FontSize="9"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock Text="直前の完成結果を表示中"
+                                                           Foreground="{StaticResource MutedTextBrush}"
+                                                           FontSize="9"
+                                                           Margin="0,3,0,0" />
+                                            </StackPanel>
+                                        </Border>
+                                        <Border VerticalAlignment="Bottom"
+                                                Background="#DD070A12"
+                                                Padding="9,7"
+                                                Visibility="{Binding HasSelectedPreviewOutput, Converter={StaticResource BoolToVisibility}}">
+                                            <Grid>
+                                                <TextBlock Text="{Binding SelectedPreviewOutput.FileName}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Margin="0,0,60,0" />
+                                                <Button Content="OPEN"
+                                                        Tag="{Binding SelectedPreviewOutput.FullPath}"
+                                                        Click="OpenOutput_Click"
+                                                        Padding="8,4"
+                                                        HorizontalAlignment="Right"
+                                                        Margin="0" />
+                                            </Grid>
+                                        </Border>
+                                    </Grid>
+                                </Border>
+
+                                <Border Grid.Column="2"
+                                        Background="#0B1421"
+                                        BorderBrush="{StaticResource LineBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="9"
+                                        Padding="9">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="*" />
+                                        </Grid.RowDefinitions>
+                                        <Grid>
+                                            <StackPanel>
+                                                <TextBlock Text="HISTORY"
+                                                           Foreground="{StaticResource AccentBrush}"
+                                                           FontSize="10"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock Text="表示するIterationを選択"
+                                                           Foreground="{StaticResource MutedTextBrush}"
+                                                           FontSize="9"
+                                                           Margin="0,2,0,0" />
+                                            </StackPanel>
+                                            <TextBlock Text="{Binding SessionProgressText}"
+                                                       Foreground="{StaticResource WarmBrush}"
+                                                       FontSize="8"
+                                                       HorizontalAlignment="Right" />
+                                        </Grid>
+                                        <ListBox Grid.Row="1"
+                                                 ItemsSource="{Binding HistoryItems}"
+                                                 SelectedItem="{Binding SelectedHistoryItem, Mode=TwoWay}"
+                                                 ItemTemplate="{StaticResource HistoryIterationTemplate}"
+                                                 ItemContainerStyle="{StaticResource HistoryListBoxItemStyle}"
+                                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                                 Margin="0,9,0,0"
+                                                 AutomationProperties.Name="Generation History" />
+                                        <TextBlock Grid.Row="1"
+                                                   Text="履歴はまだありません"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   FontSize="10"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"
+                                                   Visibility="{Binding HasHistoryItems, Converter={StaticResource InverseBoolToVisibility}}" />
+                                    </Grid>
+                                </Border>
+                            </Grid>
+
+                            <Grid Grid.Row="2" Visibility="{Binding HasIterationSafetyStop, Converter={StaticResource InverseBoolToVisibility}}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ProgressBar Width="130"
+                                                 Height="7"
+                                                 IsIndeterminate="{Binding IsGenerationInProgress}"
+                                                 Margin="0,0,10,0" />
+                                    <TextBlock Text="{Binding JobStatusDetailText}"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               VerticalAlignment="Center" />
+                                </StackPanel>
+                                <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
+                                    <Button Content="GENERATE"
+                                            ToolTip="validate後に1件のJobを生成"
+                                            Background="{StaticResource WarmBrush}"
+                                            Foreground="#21151A"
+                                            FontWeight="SemiBold"
+                                            Click="Generate_Click"
+                                            IsEnabled="{Binding CanRunWorkflow}" />
+                                    <Button Content="CANCEL"
+                                            ToolTip="実行中のJobへcancelを要求"
+                                            Click="CancelJob_Click"
+                                            IsEnabled="{Binding IsJobActive}"
+                                            Margin="0" />
+                                </WrapPanel>
+                            </Grid>
+                            <Border Grid.Row="2" Background="#2A2113" BorderBrush="{StaticResource WarningBrush}" BorderThickness="1" CornerRadius="8" Padding="9" Visibility="{Binding HasIterationSafetyStop, Converter={StaticResource BoolToVisibility}}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="最大反復回数に達しました" Foreground="{StaticResource WarningBrush}" FontSize="11" FontWeight="SemiBold" />
+                                        <TextBlock Text="自動では次Iterationへ進みません。続行または制作終了を選択してください。" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                        <Button Content="続行" Click="ContinueIteration_Click" Padding="10,5" />
+                                        <Button Content="この制作を終了" Click="EndIteration_Click" Padding="10,5" Margin="0" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="4"
+                    Background="{StaticResource PanelBrush}"
+                    CornerRadius="14"
+                    Padding="14"
+                    BorderBrush="{StaticResource LineBrush}"
+                    BorderThickness="1">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <Border Background="#0C1726" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="11" Padding="11" Margin="0,0,0,10">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="CHATGPT ↔ COMFY" FontSize="11" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+                                <TextBlock Text="Handoff Timeline" FontSize="18" FontWeight="SemiBold" Margin="0,3,0,2" />
+                                <TextBlock Text="{Binding CurrentSessionContextText}" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" HorizontalAlignment="Right">
+                                <Border Background="#162A3A" BorderBrush="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}" BorderThickness="1" CornerRadius="7" Padding="7,4" HorizontalAlignment="Right">
+                                    <TextBlock Text="{Binding SessionStatusText}" Foreground="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}" FontSize="9" />
+                                </Border>
+                                <Button Content="RESUME" Click="Resume_Click" IsEnabled="{Binding CanResumeSession}" Padding="7,4" Margin="0,6,0,0" ToolTip="完了・停止した制作を再開" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Grid Grid.Row="1">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <ItemsControl ItemsSource="{Binding HandoffItems}" ItemTemplate="{StaticResource HandoffTimelineItemTemplate}" Margin="0,2,2,6" />
+                        </ScrollViewer>
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{Binding HasHandoffItems, Converter={StaticResource InverseBoolToVisibility}}">
+                            <Ellipse Width="36" Height="36" Fill="#102436" Stroke="{StaticResource LineStrongBrush}" StrokeThickness="1" />
+                            <TextBlock Text="まだHandoffはありません" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,10,0,0" />
+                            <TextBlock Text="中央のSEND TO CHATGPTから制作コンテキストをコピーすると、ここに記録されます。" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap" Width="270" Margin="0,5,0,0" />
+                        </StackPanel>
+                    </Grid>
+
+                    <Border Grid.Row="2" Background="#102C31" BorderBrush="#2F8E89" BorderThickness="1" CornerRadius="11" Padding="11" Margin="0,10,0,0">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="CHATGPT COMMAND" Foreground="{StaticResource AccentStrongBrush}" FontSize="10" FontWeight="SemiBold" />
+                                <TextBlock Text="貼り付け → 確認 → 適用" Foreground="{StaticResource MutedTextBrush}" FontSize="9" HorizontalAlignment="Right" />
+                            </Grid>
+                            <TextBox x:Name="CommandBox" Text="{Binding CommandText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="108" MaxHeight="180" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono" FontSize="10" ToolTip="ChatGPTから返されたconnector-command + COMFY_PAYLOAD全文を貼り付け" />
+                            <WrapPanel Margin="0,7,0,0">
+                                <Button Content="読み込んで確認" ToolTip="Connector Response、Handoff ID、Payload、slotを検証" Click="ImportCommand_Click" />
+                                <Button Content="適用" ToolTip="検証済みCommandをslotへ反映" Click="ApplyCommand_Click" IsEnabled="{Binding CanApplyCommand}" />
+                                <Button Content="適用して生成" ToolTip="反映後に1件のJobを生成" Click="ApplyGenerateCommand_Click" IsEnabled="{Binding CanApplyCommand}" Margin="0" />
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <Grid Grid.Row="2">
+            <TextBlock Text="{Binding StatusMessage}"
+                       Foreground="{StaticResource MutedTextBrush}"
+                       VerticalAlignment="Center"
+                       TextTrimming="CharacterEllipsis" />
+        </Grid>
+
+        <Border Grid.RowSpan="3"
+                Background="#B6070A12"
+                Visibility="{Binding IsWorkflowEditorVisible, Converter={StaticResource BoolToVisibility}}"
+                Panel.ZIndex="15">
+            <Border Width="640"
+                    MaxHeight="900"
+                    Background="{StaticResource PanelBrush}"
+                    BorderBrush="{StaticResource AccentBrush}"
+                    BorderThickness="1"
+                    CornerRadius="16"
+                    Padding="18"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Stretch">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid Grid.Row="0">
+                        <StackPanel>
+                            <TextBlock Text="WORKFLOW SETTINGS"
+                                       FontSize="11"
+                                       Foreground="{StaticResource AccentBrush}"
+                                       FontWeight="SemiBold" />
+                            <TextBlock Text="確認・微調整・詳細編集"
+                                       FontSize="22"
+                                       FontWeight="SemiBold"
+                                       Margin="0,3,0,0" />
+                            <TextBlock Text="制作キャンバスを占有しないWorkflow編集ビュー"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="10"
+                                       Margin="0,4,0,0" />
+                        </StackPanel>
+                        <Button Content="閉じる"
+                                Click="CloseWorkflowEditor_Click"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Top"
+                                Margin="0" />
+                    </Grid>
+                    <ScrollViewer Grid.Row="1"
+                                  VerticalScrollBarVisibility="Auto"
+                                  Margin="0,14,0,14">
+                        <StackPanel>
+                            <Border Background="{StaticResource PanelSoftBrush}"
+                                    BorderBrush="{StaticResource LineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="10"
+                                    Padding="12">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding SelectedWorkflowName}"
+                                                   FontSize="16"
+                                                   FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding WorkflowSlotSummaryText}"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   FontSize="10"
+                                                   Margin="0,4,0,0" />
+                                    </StackPanel>
+                                    <WrapPanel Grid.Column="1">
+                                        <Button Content="SAVE"
+                                                ToolTip="変更を保存してWorkflowをvalidate"
+                                                Click="Save_Click"
+                                                IsEnabled="{Binding CanRunWorkflow}" />
+                                        <Button Content="VALIDATE"
+                                                ToolTip="現在のWorkflowをvalidate"
+                                                Click="Validate_Click"
+                                                IsEnabled="{Binding CanRunWorkflow}"
+                                                Margin="0" />
+                                    </WrapPanel>
+                                </Grid>
+                            </Border>
+
+                            <Border Background="#261C25"
+                                    BorderBrush="{StaticResource WarningBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="10"
+                                    Padding="12"
+                                    Margin="0,11,0,0"
+                                    Visibility="{Binding ShowDisconnectedState, Converter={StaticResource BoolToVisibility}}">
+                                <StackPanel>
+                                    <TextBlock Text="MCP未接続"
+                                               FontSize="15"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="slotを編集するにはCONNECTが必要です。"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               Margin="0,5,0,0" />
+                                </StackPanel>
+                            </Border>
+                            <Border Background="{StaticResource PanelSoftBrush}"
+                                    BorderBrush="{StaticResource AccentBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="10"
+                                    Padding="12"
+                                    Margin="0,11,0,0"
+                                    Visibility="{Binding ShowSlotLoadingState, Converter={StaticResource BoolToVisibility}}">
+                                <StackPanel>
+                                    <TextBlock Text="slotを読み込み中"
+                                               FontSize="15"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="MCPから編集可能な項目を取得しています。"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               Margin="0,5,0,9" />
+                                    <ProgressBar Height="6"
+                                                 IsIndeterminate="True" />
+                                </StackPanel>
+                            </Border>
+                            <Border Background="#281B25"
+                                    BorderBrush="{StaticResource DangerBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="10"
+                                    Padding="12"
+                                    Margin="0,11,0,0"
+                                    Visibility="{Binding ShowSlotErrorState, Converter={StaticResource BoolToVisibility}}">
+                                <StackPanel>
+                                    <TextBlock Text="slotの読み込みに失敗しました"
+                                               FontSize="15"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding SlotLoadError}"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               TextWrapping="Wrap"
+                                               Margin="0,5,0,9" />
+                                    <Button Content="RETRY"
+                                            Click="RetryWorkflow_Click"
+                                            HorizontalAlignment="Left" />
+                                </StackPanel>
+                            </Border>
+                            <Border Background="{StaticResource PanelSoftBrush}"
+                                    BorderBrush="{StaticResource LineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="10"
+                                    Padding="12"
+                                    Margin="0,11,0,0"
+                                    Visibility="{Binding ShowNoSlotState, Converter={StaticResource BoolToVisibility}}">
+                                <TextBlock Text="編集可能なslotはありません。必要ならVALIDATEで実行前チェックを行えます。"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="10"
+                                           TextWrapping="Wrap" />
+                            </Border>
+
+                            <Border Background="{StaticResource PanelBrush}"
+                                    BorderBrush="{StaticResource LineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="11"
+                                    Padding="12"
+                                    Margin="0,11,0,0"
+                                    Visibility="{Binding ShowReadyState, Converter={StaticResource BoolToVisibility}}">
+                                <StackPanel>
+                                    <TextBlock Text="基本設定"
+                                               FontSize="15"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="Prompt・Duration・構図・Resolution・Seedなど、制作ごとに触る項目"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               TextWrapping="Wrap"
+                                               Margin="0,4,0,10" />
+                                    <ItemsControl ItemsSource="{Binding PrimarySlots}"
+                                                  ItemTemplate="{StaticResource SlotEditorTemplate}" />
+                                    <Border Background="#0E1725"
+                                            CornerRadius="8"
+                                            Padding="10"
+                                            Margin="0,3,0,0"
+                                            Visibility="{Binding HasPrimarySlots, Converter={StaticResource InverseBoolToVisibility}}">
+                                        <TextBlock Text="基本設定に分類できるslotはありません。詳細設定を確認してください。"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   FontSize="10"
+                                                   TextWrapping="Wrap" />
+                                    </Border>
+                                </StackPanel>
+                            </Border>
+                            <Border Background="{StaticResource PanelBrush}"
+                                    BorderBrush="{StaticResource LineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="11"
+                                    Padding="12"
+                                    Margin="0,11,0,0"
+                                    Visibility="{Binding HasTuningSlots, Converter={StaticResource BoolToVisibility}}">
+                                <StackPanel>
+                                    <TextBlock Text="調整"
+                                               FontSize="14"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="Steps・Denoise・Guidanceなど、仕上がりを調整する項目"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               Margin="0,4,0,10" />
+                                    <ItemsControl ItemsSource="{Binding TuningSlots}"
+                                                  ItemTemplate="{StaticResource SlotEditorTemplate}" />
+                                </StackPanel>
+                            </Border>
+                            <Expander Margin="0,11,0,0"
+                                      Background="{StaticResource PanelBrush}"
+                                      BorderBrush="{StaticResource LineBrush}"
+                                      BorderThickness="1"
+                                      IsExpanded="False"
+                                      Visibility="{Binding HasAdvancedSlots, Converter={StaticResource BoolToVisibility}}">
+                                <Expander.Header>
+                                    <StackPanel>
+                                        <TextBlock Text="詳細設定 / ADVANCED"
+                                                   FontSize="14"
+                                                   FontWeight="SemiBold" />
+                                        <TextBlock Text="Sampler・Scheduler・VAE・Codec・Format・Filename Prefixなど"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   FontSize="10"
+                                                   Margin="0,3,0,0" />
+                                    </StackPanel>
+                                </Expander.Header>
+                                <Border Background="#0A101C"
+                                        Padding="10"
+                                        BorderBrush="{StaticResource LineBrush}"
+                                        BorderThickness="0,1,0,0">
+                                    <ItemsControl ItemsSource="{Binding AdvancedSlots}"
+                                                  ItemTemplate="{StaticResource SlotEditorTemplate}" />
+                                </Border>
+                            </Expander>
+
+                            <Border Background="{StaticResource PanelSoftBrush}"
+                                    BorderBrush="{StaticResource LineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="10"
+                                    Padding="12"
+                                    Margin="0,11,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="BACKUP / RESTORE"
+                                                   FontSize="11"
+                                                   Foreground="{StaticResource AccentBrush}"
+                                                   FontWeight="SemiBold" />
+                                        <TextBlock Text="直近3世代を保持。復元前に現在状態を保存します。"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   FontSize="10"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,3,0,0" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1"
+                                                Orientation="Horizontal"
+                                                VerticalAlignment="Center">
+                                        <ComboBox x:Name="BackupCombo"
+                                                  ItemsSource="{Binding Backups}"
+                                                  Width="180"
+                                                  Margin="0,0,6,0" />
+                                        <Button Content="RESTORE"
+                                                ToolTip="選択した世代を復元"
+                                                Click="Restore_Click"
+                                                Margin="0" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <StackPanel Grid.Row="2"
+                                Orientation="Horizontal"
+                                HorizontalAlignment="Right">
+                        <Button Content="閉じる"
+                                Click="CloseWorkflowEditor_Click"
+                                Margin="0" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Border>
+
+        <Border Grid.RowSpan="3"
+                Background="#DE070B14"
+                Visibility="{Binding IsSetupVisible, Converter={StaticResource BoolToVisibility}}"
+                Panel.ZIndex="20">
+            <Border Width="660"
+                    MaxHeight="780"
+                    Background="{StaticResource PanelBrush}"
+                    BorderBrush="{StaticResource AccentBrush}"
+                    BorderThickness="1"
+                    CornerRadius="18"
+                    Padding="28"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <TextBlock Text="初回設定 / 接続設定"
+                                   FontSize="12"
+                                   Foreground="{StaticResource AccentBrush}"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="ローカルの制作環境を接続"
+                                   FontSize="28"
+                                   FontWeight="SemiBold"
+                                   Margin="0,5,0,5" />
+                        <TextBlock Text="ComfyUIとcomfy-mcpの場所を指定します。ConnectorはComfyUIを自動終了しません。"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Margin="0,0,0,20"
+                                   TextWrapping="Wrap" />
+                        <Label Content="ComfyUI Portableの場所" />
+                        <TextBox Text="{Binding Settings.PortableRoot, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,4,0,12" />
+                        <Label Content="comfy-mcpの実行ファイル" />
+                        <TextBox Text="{Binding Settings.ComfyMcpPath, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,4,0,12" />
+                        <Label Content="接続先Endpoint" />
+                        <TextBox Text="{Binding Settings.Endpoint, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,4,0,12" />
+                        <Label Content="最大反復回数" />
+                        <TextBox Text="{Binding Settings.MaximumIterations, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,4,0,20" />
+                        <Border Background="{StaticResource PanelSoftBrush}"
+                                BorderBrush="{StaticResource LineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="9"
+                                Padding="12"
+                                Margin="0,0,0,18">
+                            <StackPanel>
+                                <TextBlock Text="主要パス"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontSize="11"
+                                           FontWeight="SemiBold" />
+                                <TextBlock Text="Portable Rootから解決した保存先を確認できます。"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="10"
+                                           Margin="0,3,0,10"
+                                           TextWrapping="Wrap" />
+                                <Grid Margin="0,0,0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Workflow"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               VerticalAlignment="Center"
+                                               Width="82" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding WorkflowRoot}"
+                                               Foreground="{StaticResource TextBrush}"
+                                               FontSize="10"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding WorkflowRoot}"
+                                               VerticalAlignment="Center" />
+                                    <Button Grid.Column="2"
+                                            Content="開く"
+                                            ToolTip="Workflow保存フォルダを開く"
+                                            Click="OpenWorkflowFolder_Click"
+                                            Padding="8,4"
+                                            Margin="8,0,0,0" />
+                                </Grid>
+                                <Grid Margin="0,0,0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Output"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               VerticalAlignment="Center"
+                                               Width="82" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding OutputRoot}"
+                                               Foreground="{StaticResource TextBrush}"
+                                               FontSize="10"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding OutputRoot}"
+                                               VerticalAlignment="Center" />
+                                    <Button Grid.Column="2"
+                                            Content="開く"
+                                            ToolTip="生成出力フォルダを開く"
+                                            Tag="{Binding OutputRoot}"
+                                            Click="OpenOutputFolder_Click"
+                                            Padding="8,4"
+                                            Margin="8,0,0,0" />
+                                </Grid>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Video"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10"
+                                               VerticalAlignment="Center"
+                                               Width="82" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding VideoOutputRoot}"
+                                               Foreground="{StaticResource TextBrush}"
+                                               FontSize="10"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding VideoOutputRoot}"
+                                               VerticalAlignment="Center" />
+                                    <Button Grid.Column="2"
+                                            Content="開く"
+                                            ToolTip="動画出力フォルダを開く"
+                                            Tag="{Binding VideoOutputRoot}"
+                                            Click="OpenOutputFolder_Click"
+                                            Padding="8,4"
+                                            Margin="8,0,0,0" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="設定を保存"
+                                    Background="{StaticResource AccentBrush}"
+                                    Foreground="#071117"
+                                    FontWeight="SemiBold"
+                                    Click="SaveSetup_Click" />
+                            <Button Content="ログフォルダを開く"
+                                    Click="OpenLogs_Click"
+                                    Margin="0" />
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+        </Border>
+    </Grid>
+</Window>

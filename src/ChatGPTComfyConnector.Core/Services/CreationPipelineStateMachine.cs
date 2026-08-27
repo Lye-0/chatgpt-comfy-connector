@@ -148,6 +148,29 @@ public static class CreationPipelineStateMachine
         throw new InvalidOperationException("ComfyUI起動待ちです。ComfyUIを起動してからもう一度実行してください。");
     }
 
+    /// <summary>
+    /// Marks a ComfyUI-dependent stage as actively starting the runtime.  This
+    /// is intentionally different from <see cref="RequireComfyUi"/>: the
+    /// normal GENERATE path starts ComfyUI itself, so it is not waiting for a
+    /// user action while the endpoint becomes ready.
+    /// </summary>
+    public static void BeginComfyUiStartup(CreationSession session, CreationStage stage)
+    {
+        RequireConnection(session);
+        Set(session, stage, CreationStageState.InProgress, "ComfyUI起動中");
+    }
+
+    /// <summary>
+    /// Records a failed automatic/manual startup on the stage that requested
+    /// ComfyUI.  Do not reset downstream stages here: a later iteration may
+    /// still have a successful Output/Review that must remain visible.
+    /// </summary>
+    public static void ComfyUiStartupFailed(CreationSession session, CreationStage stage, string detail)
+    {
+        EnsureInitialized(session);
+        Set(session, stage, CreationStageState.Error, detail);
+    }
+
     public static void PrepareContext(CreationSession session, string detail = "CONNECTで制作通信を確認してください")
     {
         EnsureInitialized(session);
@@ -411,8 +434,20 @@ public static class CreationPipelineStateMachine
 
     public static void Resume(CreationSession session)
     {
+        var invalidatesConsumedReviewHandoff = session.Status == SessionStatus.Completed
+            && PendingHandoffReuse.IsReview(session.PendingHandoff);
         session.Resume();
         session.Pipeline.MaximumIterationSafetyStop = false;
+        // A completed response has already crossed its protocol boundary.
+        // Keep the timeline and generated media, but invalidate that consumed
+        // Pending Handoff so an old `complete` response cannot be replayed
+        // after RESUME.  The next review Handoff will issue a fresh identity
+        // for the same session.
+        if (invalidatesConsumedReviewHandoff)
+        {
+            session.PendingHandoff = null;
+        }
+        session.Pipeline.AcceptedCommandAction = null;
         Set(session, CreationStage.Review, CreationStageState.Current, "制作を再開しました · 次の指示をChatGPTと検討してください");
     }
 

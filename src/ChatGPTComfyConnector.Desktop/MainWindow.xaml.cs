@@ -8,6 +8,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using Microsoft.Win32;
 using ChatGPTComfyConnector.Core.Models;
 using ChatGPTComfyConnector.Desktop.ViewModels;
 
@@ -207,6 +208,49 @@ public partial class MainWindow : Window
     private void OpenOutput_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { Tag: string path }) RunSync("出力を開く", () => ViewModel.OpenOutputFile(path));
+    }
+
+    private void SaveOutputCopy_Click(object sender, RoutedEventArgs e)
+    {
+        var output = ViewModel.SelectedPreviewOutput;
+        if (output is null || output.IsMissing)
+        {
+            RunSync("Outputを別名保存", () => ViewModel.SaveSelectedOutputCopy(string.Empty));
+            return;
+        }
+
+        var fileName = GetOutputFileName(output);
+        var extension = Path.GetExtension(fileName);
+        var extensionWithoutDot = extension.TrimStart('.');
+        var filter = string.IsNullOrWhiteSpace(extensionWithoutDot)
+            ? "すべてのファイル|*.*"
+            : $"{extensionWithoutDot.ToUpperInvariant()} ファイル|*{extension}|すべてのファイル|*.*";
+        var dialog = new SaveFileDialog
+        {
+            Title = "表示中のOutputを別名保存",
+            FileName = fileName,
+            Filter = filter,
+            DefaultExt = extensionWithoutDot,
+            AddExtension = !string.IsNullOrWhiteSpace(extensionWithoutDot),
+            CheckPathExists = true,
+            OverwritePrompt = true,
+        };
+
+        // Cancel is an expected, non-error outcome. SaveFileDialog itself
+        // handles the standard Windows overwrite confirmation.
+        if (dialog.ShowDialog(this) != true) return;
+        // The dialog has just obtained the user's explicit overwrite choice;
+        // allow the copy operation to honor it while retaining a safe
+        // no-overwrite default for non-UI callers.
+        RunSync("Outputを別名保存", () => ViewModel.SaveSelectedOutputCopy(dialog.FileName, overwriteExisting: true));
+    }
+
+    private static string GetOutputFileName(OutputArtifact output)
+    {
+        var candidate = string.IsNullOrWhiteSpace(output.FileName) ? output.FullPath : output.FileName;
+        candidate = candidate.Replace('/', '\\');
+        var fileName = Path.GetFileName(candidate);
+        return string.IsNullOrWhiteSpace(fileName) ? "output" : fileName;
     }
 
     private void OpenOutputFolder_Click(object sender, RoutedEventArgs e)

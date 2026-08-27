@@ -15,12 +15,16 @@ namespace ChatGPTComfyConnector.Desktop.ViewModels;
 
 public sealed class MainViewModel : INotifyPropertyChanged
 {
+    private static readonly TimeSpan ComfyUiStartupTimeout = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan ComfyUiStartupPollInterval = TimeSpan.FromSeconds(1);
     private readonly PortableLayout _layout;
     private readonly PortableStore _store;
     private readonly ComfyMcpClientProxy _mcp;
     private readonly IComfyUiHealthProbe _comfyUiHealthProbe;
     private readonly WorkflowCatalog _catalog;
     private readonly SemaphoreSlim _comfyUiStatusGate = new(1, 1);
+    private readonly SemaphoreSlim _comfyUiStartGate = new(1, 1);
+    private readonly SemaphoreSlim _generationGate = new(1, 1);
     private readonly SemaphoreSlim _bootstrapHandoffGate = new(1, 1);
     private CreationSession? _currentSession;
     private WorkflowIdentity? _selectedWorkflow;
@@ -255,6 +259,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(SelectedPreviewOutput));
             OnPropertyChanged(nameof(HasSelectedPreviewOutput));
             OnPropertyChanged(nameof(IsSelectedPreviewMissing));
+            OnPropertyChanged(nameof(CanSaveSelectedOutputCopy));
             OnPropertyChanged(nameof(ViewingIterationText));
             OnPropertyChanged(nameof(IsViewingLatest));
             OnPropertyChanged(nameof(ViewingStateText));
@@ -270,6 +275,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public OutputArtifact? SelectedPreviewOutput => PreviewHistoryItem?.PrimaryOutput;
     public bool HasSelectedPreviewOutput => SelectedPreviewOutput is not null;
     public bool IsSelectedPreviewMissing => SelectedPreviewOutput?.IsMissing == true;
+    // Keep the action available for an artifact whose source disappeared so
+    // the click can report a clear user-facing missing-file error.  It is
+    // disabled only when the viewer has no selected artifact at all.
+    public bool CanSaveSelectedOutputCopy => SelectedPreviewOutput is not null;
     public string ViewingIterationText => PreviewHistoryItem is null ? "VIEWING —" : $"VIEWING ITERATION {PreviewHistoryItem.Number:00}";
     public string LatestIterationText => HistoryItems.LastOrDefault() is { } latest ? $"LATEST ITERATION {latest.Number:00}" : "LATEST —";
     public bool IsViewingLatest => SelectedHistoryItem is not null && ReferenceEquals(SelectedHistoryItem, HistoryItems.LastOrDefault());
@@ -871,12 +880,30 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (CurrentSession is null || !CurrentSession.Pipeline.ContextBound) throw new InvalidOperationException("左側から新しい制作を開始してください。");
         if (CurrentSession.BoundWorkflow is null || !string.Equals(CurrentSession.BoundWorkflow.RelativePath, SelectedWorkflow.RelativePath, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("セッションに紐づくWorkflowと選択中Workflowが異なります。");
         if (CurrentSession.Pipeline.MaximumIterationSafetyStop) throw new InvalidOperationException("最大反復回数に達しました。続行するか制作を終了するか選択してください。");
+        // Keep the whole request (including the ComfyUI startup wait) inside
+        // one gate.  A second click while the first request is starting must
+        // not launch another process or submit the same workflow twice.
+        if (!await _generationGate.WaitAsync(0)) throw new InvalidOperationException("生成処理を実行中です。完了するまでお待ちください。");
+        try
+        {
+            await GenerateCoreAsync(applyFirst);
+        }
+        finally
+        {
+            _generationGate.Release();
+        }
+    }
+
+    private async Task GenerateCoreAsync(bool applyFirst)
+    {
+        var session = CurrentSession ?? throw new InvalidOperationException("左側から新しい制作を開始してください。");
+        var workflow = SelectedWorkflow ?? throw new InvalidOperationException("Workflowを選択してください。");
         var changes = BuildChanges();
-        if (applyFirst && (IsDirty || CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Apply).State != CreationStageState.Completed)) await ApplySlotsAsync();
-        await EnsureComfyUiForStageAsync(CurrentSession, CreationStage.Generate);
-        CreationPipelineStateMachine.BeginGenerate(CurrentSession);
+        if (applyFirst && (IsDirty || CreationPipelineStateMachine.Get(session, CreationStage.Apply).State != CreationStageState.Completed)) await ApplySlotsAsync();
+        await EnsureComfyUiForStageAsync(session, CreationStage.Generate);
+        CreationPipelineStateMachine.BeginGenerate(session);
         var prompt = FindPrompt(changes) ?? Idea;
-        var iteration = CurrentSession.StartIteration(prompt, changes);
+        var iteration = session.StartIteration(prompt, changes);
         await SaveActiveSessionAsync();
         OnPropertyChanged(nameof(SessionStatusText));
         OnPropertyChanged(nameof(SessionProgressText));
@@ -895,10 +922,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         IsBusy = true;
         try
         {
-            CurrentJob = await _catalog.RunAsync(SelectedWorkflow, WorkflowRoot);
+            CurrentJob = await _catalog.RunAsync(workflow, WorkflowRoot);
             iteration.JobId = CurrentJob.JobId;
             iteration.Status = CurrentJob.Status;
-            CreationPipelineStateMachine.JobStatusChanged(CurrentSession, CurrentJob.Status, CurrentJob.Message);
+            CreationPipelineStateMachine.JobStatusChanged(session, CurrentJob.Status, CurrentJob.Message);
             await SaveActiveSessionAsync();
             StatusMessage = $"Job {CurrentJob.JobId} を投入しました。進捗率は推測せず状態だけ表示します。";
             await MonitorJobAsync(iteration);
@@ -908,12 +935,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
             MarkConnectionFailureIfTransportClosed(ex);
             iteration.Status = JobStatus.Failed;
             iteration.Error = ex.Message;
-            CurrentSession.Status = SessionStatus.Error;
-            CurrentSession.LastError = ex.Message;
-            if (CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Generate).State != CreationStageState.Completed)
-                CreationPipelineStateMachine.JobStatusChanged(CurrentSession, JobStatus.Failed, ex.Message);
+            session.Status = SessionStatus.Error;
+            session.LastError = ex.Message;
+            if (CreationPipelineStateMachine.Get(session, CreationStage.Generate).State != CreationStageState.Completed)
+                CreationPipelineStateMachine.JobStatusChanged(session, JobStatus.Failed, ex.Message);
             else
-                CreationPipelineStateMachine.OutputFailed(CurrentSession, ex.Message);
+                CreationPipelineStateMachine.OutputFailed(session, ex.Message);
             CurrentJob = null;
             await SaveActiveSessionAsync();
             RefreshHistoryFlags();
@@ -965,7 +992,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 Summary = BuildCommandTimelineSummary(command),
                 Payload = CommandText,
             });
-            if (command.Action == "complete") await CompleteSessionAsync(command.Reason ?? "ChatGPT completed the session.");
+            if (command.Action == "complete")
+            {
+                await CompleteSessionAsync(command.Reason ?? "ChatGPT completed the session.");
+                // The accepted command remains in the timeline above, while
+                // the editor is only a temporary buffer for an unprocessed
+                // response.  Clear it only after the complete transition and
+                // persistence have succeeded; all validation/error paths keep
+                // the user's text intact.
+                ClearAppliedCommandInput();
+            }
         }
         catch (Exception ex)
         {
@@ -1086,7 +1122,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var existingMessage = CurrentSession.HandoffMessages.LastOrDefault(item =>
             item.Direction == HandoffDirection.ComfyToChatGpt &&
             item.IterationNumber == iteration.Number);
-        if (HandoffPayloadReuse.TryGetSavedPayload(existingMessage, out var savedPayload))
+        var canReuseSavedResult = CurrentSession.Status == SessionStatus.Completed
+            || (CurrentSession.PendingHandoff is { } pendingReview
+                && PendingHandoffReuse.IsReview(pendingReview));
+        if (canReuseSavedResult
+            && HandoffPayloadReuse.TryGetSavedPayload(existingMessage, out var savedPayload)
+            && (CurrentSession.Status == SessionStatus.Completed
+                || PendingHandoffReuse.MatchesPayload(CurrentSession.PendingHandoff!, savedPayload)))
         {
             // Result Handoff payloads are immutable copy material once
             // persisted. Re-copying must not rotate the PendingHandoff or
@@ -1097,8 +1139,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
         EnsureSlotSchemaAvailable();
         CurrentSession.PendingHandoff = PendingHandoffFactory.CreateReview(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
         var payload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, CurrentSession.PendingHandoff);
-        if (existingMessage is not null) existingMessage.Payload = payload;
-        await SaveActiveSessionAsync();
+        // A new review boundary (for example after RESUME) is a new timeline
+        // message. Never rewrite the payload of the previous result card: it
+        // is the immutable handoff that was issued for that earlier boundary.
+        // Re-copying within the same boundary was handled above, so this path
+        // only records a genuinely new result handoff.
+        await RecordHandoffAsync(new HandoffMessage
+        {
+            Direction = HandoffDirection.ComfyToChatGpt,
+            Kind = HandoffMessageKind.GenerationResult,
+            State = HandoffTransportState.Waiting,
+            Title = $"Iteration {iteration.Number:00} の生成結果",
+            DisplayText = BuildResultTimelineDisplay(iteration),
+            Metadata = BuildResultTimelineMetadata(iteration),
+            Summary = BuildResultTimelineSummary(iteration),
+            Payload = payload,
+            IterationNumber = iteration.Number,
+        });
         return payload;
     }
 
@@ -1192,6 +1249,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CreationPipelineStateMachine.Complete(CurrentSession, reason);
         RefreshHistoryFlags();
         OnPropertyChanged(nameof(SessionStatusText));
+        OnPropertyChanged(nameof(CanResumeSession));
         NotifyPipelineStateChanged();
         StatusMessage = "セッションをCOMPLETEDにしました。履歴と出力は保持されています。必要ならRESUMEできます。";
         await SaveActiveSessionAsync();
@@ -1210,6 +1268,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RefreshHistoryFlags();
         await SaveActiveSessionAsync();
         OnPropertyChanged(nameof(SessionStatusText));
+        OnPropertyChanged(nameof(CanResumeSession));
         NotifyPipelineStateChanged();
         StatusMessage = "セッションを再開しました。";
     }
@@ -1260,33 +1319,112 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task StartComfyUiAsync()
     {
-        // The visual state belongs to the ViewModel. Set it before launching
-        // the asynchronous batch so the header immediately reflects startup,
-        // regardless of whether MCP is currently connected.
-        SetComfyUiRuntimeState(ComfyUiRuntimeState.Starting);
-        var batch = Path.Combine(Settings.PortableRoot, "run_nvidia_gpu.bat");
+        // Header START COMFYUI is an explicit runtime action. It shares the
+        // same state/health-check coordinator as GENERATE, but it never
+        // touches the MCP/Creation Pipeline gates.
+        StatusMessage = "ComfyUIの状態を確認しています…";
         try
         {
-            if (!File.Exists(batch)) throw new FileNotFoundException("ComfyUI起動batchが見つかりません。", batch);
-            var process = Process.Start(new ProcessStartInfo(batch)
-            {
-                UseShellExecute = true,
-                WorkingDirectory = Path.GetDirectoryName(batch),
-            });
-            if (process is null) throw new InvalidOperationException("ComfyUI起動プロセスを開始できませんでした。");
+            await EnsureComfyUiReadyAsync(allowStartFromError: true);
+            StatusMessage = "ComfyUIがREADYです。生成を実行できます。";
         }
         catch (Exception ex)
         {
             SetComfyUiRuntimeState(ComfyUiRuntimeState.Error);
-            StatusMessage = $"ComfyUIの起動要求に失敗しました: {ex.Message}";
+            StatusMessage = "ComfyUIを起動できませんでした。";
             await _store.LogAsync("connection", StatusMessage, ex);
+            throw new InvalidOperationException(StatusMessage, ex);
+        }
+    }
+
+    /// <summary>
+    /// Coordinates every ComfyUI start request in the desktop process. A
+    /// direct endpoint probe is always the source of truth; the MCP transport
+    /// is intentionally not consulted here. The semaphore makes a manual
+    /// START and a GENERATE arriving at the same time share one startup wait
+    /// instead of launching two batch files.
+    /// </summary>
+    private async Task EnsureComfyUiReadyAsync(
+        bool allowStartFromError,
+        CancellationToken cancellationToken = default)
+    {
+        await _comfyUiStartGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (await RefreshComfyUiStatusAsync(cancellationToken)) return;
+
+            if (_comfyUiRuntimeState == ComfyUiRuntimeState.Error)
+            {
+                if (!allowStartFromError)
+                    throw new InvalidOperationException("ComfyUIを起動できませんでした。Endpointまたは起動状態を確認してください。");
+
+                if (!Uri.TryCreate(Settings.Endpoint?.Trim(), UriKind.Absolute, out var endpoint)
+                    || endpoint.Scheme is not ("http" or "https"))
+                    throw new InvalidOperationException("ComfyUI Endpointが不正です。");
+
+                // An explicit header retry may recover from a previous start
+                // failure. GENERATE itself does not silently retry an Error;
+                // it only auto-starts the normal STOPPED path.
+                SetComfyUiRuntimeState(ComfyUiRuntimeState.Stopped);
+            }
+
+            if (_comfyUiRuntimeState is ComfyUiRuntimeState.Stopped or ComfyUiRuntimeState.Unknown)
+            {
+                SetComfyUiRuntimeState(ComfyUiRuntimeState.Starting);
+                StatusMessage = "ComfyUIを起動しています…";
+                LaunchComfyUiProcess();
+            }
+            else if (_comfyUiRuntimeState == ComfyUiRuntimeState.Starting)
+            {
+                StatusMessage = "ComfyUIを起動しています…";
+            }
+
+            await WaitForComfyUiReadyAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
             throw;
         }
+        catch
+        {
+            SetComfyUiRuntimeState(ComfyUiRuntimeState.Error);
+            throw;
+        }
+        finally
+        {
+            _comfyUiStartGate.Release();
+        }
+    }
 
-        StatusMessage = "ComfyUIの起動を要求しました。起動状態を確認しています…";
-        // The immediate probe handles the already-running/fast-start case;
-        // the window timer keeps retrying while the process loads models.
-        if (await RefreshComfyUiStatusAsync()) StatusMessage = "ComfyUIが起動しました。生成を実行できます。";
+    private void LaunchComfyUiProcess()
+    {
+        var batch = Path.Combine(Settings.PortableRoot, "run_nvidia_gpu.bat");
+        if (!File.Exists(batch)) throw new FileNotFoundException("ComfyUI起動batchが見つかりません。", batch);
+
+        var process = Process.Start(new ProcessStartInfo(batch)
+        {
+            UseShellExecute = true,
+            WorkingDirectory = Path.GetDirectoryName(batch),
+        });
+        if (process is null) throw new InvalidOperationException("ComfyUI起動プロセスを開始できませんでした。");
+    }
+
+    private async Task WaitForComfyUiReadyAsync(CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + ComfyUiStartupTimeout;
+        while (true)
+        {
+            if (await RefreshComfyUiStatusAsync(cancellationToken)) return;
+            if (_comfyUiRuntimeState == ComfyUiRuntimeState.Error)
+                throw new InvalidOperationException("ComfyUIを起動できませんでした。Endpointがエラーを返しました。");
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                SetComfyUiRuntimeState(ComfyUiRuntimeState.Error);
+                throw new TimeoutException("ComfyUIを起動できませんでした。起動確認がタイムアウトしました。");
+            }
+
+            await Task.Delay(ComfyUiStartupPollInterval, cancellationToken);
+        }
     }
 
     private async Task MonitorJobAsync(SessionIteration iteration)
@@ -1764,6 +1902,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(SelectedPreviewOutput));
         OnPropertyChanged(nameof(HasSelectedPreviewOutput));
         OnPropertyChanged(nameof(IsSelectedPreviewMissing));
+        OnPropertyChanged(nameof(CanSaveSelectedOutputCopy));
         OnPropertyChanged(nameof(ViewingIterationText));
         OnPropertyChanged(nameof(IsViewingLatest));
         OnPropertyChanged(nameof(ViewingStateText));
@@ -1781,6 +1920,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(SelectedPreviewOutput));
         OnPropertyChanged(nameof(HasSelectedPreviewOutput));
         OnPropertyChanged(nameof(IsSelectedPreviewMissing));
+        OnPropertyChanged(nameof(CanSaveSelectedOutputCopy));
         OnPropertyChanged(nameof(ViewingIterationText));
         OnPropertyChanged(nameof(ViewingStateText));
         OnPropertyChanged(nameof(IsGenerationInProgress));
@@ -1935,17 +2075,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private async Task EnsureComfyUiForStageAsync(CreationSession session, CreationStage stage)
     {
         EnsureMcpConnectionReady();
-        var comfyUiReachable = await RefreshComfyUiStatusAsync();
         try
         {
-            CreationPipelineStateMachine.RequireComfyUi(session, stage, comfyUiReachable);
-        }
-        catch (InvalidOperationException)
-        {
-            await _store.SaveSessionAsync(session);
-            StatusMessage = "ComfyUI起動待ちです。ComfyUIを起動してからもう一度実行してください。";
+            if (await RefreshComfyUiStatusAsync()) return;
+
+            // STOPPED/STARTING is an internal runtime condition, not a user
+            // confirmation step. Reflect the automatic startup directly on
+            // GENERATE and keep the original request alive until READY.
+            CreationPipelineStateMachine.BeginComfyUiStartup(session, stage);
             NotifyPipelineStateChanged();
-            throw;
+            StatusMessage = "ComfyUIを起動しています…";
+            await EnsureComfyUiReadyAsync(allowStartFromError: false);
+            StatusMessage = "ComfyUIはREADYです。Jobを投入しています…";
+            NotifyPipelineStateChanged();
+        }
+        catch (Exception ex)
+        {
+            const string detail = "ComfyUIを起動できませんでした。";
+            CreationPipelineStateMachine.ComfyUiStartupFailed(session, stage, detail);
+            await _store.SaveSessionAsync(session);
+            StatusMessage = detail;
+            NotifyPipelineStateChanged();
+            await _store.LogAsync("generation", $"{detail} {ex.Message}", ex);
+            throw new InvalidOperationException(detail, ex);
         }
     }
 
@@ -2162,6 +2314,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
         PathSafety.RequireWithin(OutputRoot, fullPath);
         if (!File.Exists(fullPath)) throw new FileNotFoundException("出力ファイルが見つかりません。", fullPath);
         Process.Start(new ProcessStartInfo(fullPath) { UseShellExecute = true });
+    }
+
+    /// <summary>
+    /// Copies the artifact currently shown in OUTPUT VIEWER.  The selected
+    /// history item (and the generation fallback while a later iteration is
+    /// running) is resolved by <see cref="SelectedPreviewOutput"/>; no latest
+    /// output shortcut is used here.
+    /// </summary>
+    public void SaveSelectedOutputCopy(string destinationPath, bool overwriteExisting = false)
+    {
+        var output = SelectedPreviewOutput;
+        if (output is null) throw new InvalidOperationException("表示中のOutputがありません。");
+        OutputCopyService.Copy(output, destinationPath, overwriteExisting);
+        StatusMessage = $"Outputのコピーを保存しました: {Path.GetFileName(destinationPath)}";
     }
 
     public void OpenOutputFolder(string path)

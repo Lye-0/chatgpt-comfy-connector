@@ -84,8 +84,12 @@ validated. A validated `generate` command enters Apply, where slot changes are
 backed up, written, saved, and validated before Generate is enabled. A completed Job
 must produce at least one existing output before Review becomes available. `complete`
 is accepted only from a Review state after a successful output; it preserves all
-iterations and outputs. Reaching the iteration limit creates an explicit user
-decision stop rather than silently starting another iteration.
+iterations and outputs. A completed Session can be explicitly resumed without
+clearing its Output Viewer or iteration history. RESUME changes the Session back
+to Active, reopens Review, and invalidates the consumed Pending Handoff so the
+next Review Handoff receives fresh `handoff_id` / `boundary_id` values while
+retaining the same `session_id`. Reaching the iteration limit creates an
+explicit user decision stop rather than silently starting another iteration.
 
 The initial `SEND TO CHATGPT` action is governed by the Core
 `CreationWorkspacePolicy` and is exposed by the ViewModel as
@@ -104,8 +108,8 @@ handoff timeline, output, and iteration history, and the pipeline starts at
 Connect. `StartNewCreationAsync` is the explicit activation boundary: it creates
 and persists a new session only after the MCP, Workflow/slot schema, Project,
 Chat, and maximum-iteration prerequisites pass. `ResumeSessionAsync` remains the
-explicit reactivation path for an already active session and is not an automatic
-startup recovery mechanism.
+explicit reactivation path for a completed/paused/stopped/error session and is
+not an automatic startup recovery mechanism.
 
 Connection loss never resets the Session, Workflow selection, Project / Chat, original
 idea, iterations, or outputs. It moves Connect back to `WaitingUser` or `Error` and
@@ -114,10 +118,11 @@ the same gate and resumes the existing Session from its retained production stag
 
 `WaitingUser` is a shared state, while `CreationStageStatus.WaitingReason` carries the
 specific reason. The Core projection resolves that pair into concise UI text: a
-ComfyUI-dependent stage uses `ComfyUI起動待ち`, a disconnected MCP gate uses `再接続待ち`,
-ToChatGpt uses `ChatGPT返答待ち`, Review uses `レビュー返答待ち`, and the iteration
-safety stop uses `続行判断待ち`. The UI must not display the enum name or a generic
-`ユーザー待ち` label.
+defensive/manual ComfyUI gate may use `ComfyUI起動待ち`, a disconnected MCP gate uses
+`再接続待ち`, ToChatGpt uses `ChatGPT返答待ち`, Review uses `レビュー返答待ち`, and the
+iteration safety stop uses `続行判断待ち`. The automatic GENERATE startup path is
+`InProgress` with `ComfyUI起動中`, so the UI must not display the enum name or a generic
+`ユーザー待ち` label while the runtime is simply loading.
 
 The small helper text at the top-right of the Creation Pipeline is resolved by
 CreationPipelineLoopText. It selects the most recently updated active stage in
@@ -127,20 +132,28 @@ current idea input, or a structured waiting reason. This keeps messages such as
 "REVIEW → レビュー返答待ち" aligned with the actual pipeline state instead
 of using the broad Active session status as a shortcut.
 
-ComfyUI readiness is checked immediately before operations that need it, through
-`CreationPipelineStateMachine.RequireComfyUi`. If the running check is false, only that
-stage becomes `WaitingUser`; Context, Idea, and Manual Handoff remain usable while the
-user starts ComfyUI. CONNECT itself is never downgraded merely because ComfyUI is stopped.
+ComfyUI readiness is checked immediately before operations that need it, through the
+ViewModel's shared direct-health coordinator. GENERATE uses the same coordinator for
+both Apply + Generate and standalone Generate: a READY endpoint proceeds immediately,
+while STOPPED starts the configured ComfyUI batch once, keeps GENERATE `InProgress` with
+`ComfyUI起動中`, polls `AppSettings.Endpoint`, and submits the original Job only after
+READY. A startup timeout or launch error becomes a GENERATE error with a retryable
+message; the normal path never asks the user to start ComfyUI and try again. The
+defensive `RequireComfyUi` transition remains available for non-generating callers and
+legacy snapshots, but is not used by the automatic GENERATE path. Context, Idea, and
+Manual Handoff remain usable while ComfyUI is stopped, and CONNECT itself is never
+downgraded merely because ComfyUI is stopped.
 
 The Desktop header owns one independent `ComfyUiRuntimeState` and refreshes it with a
 lightweight direct HTTP health check against `AppSettings.Endpoint` (`/system_stats`).
 This check runs whether MCP is connected or disconnected, so `MCP未接続 · ComfyUI READY`
 is represented without conflating the two facts. `START COMFYUI` sets `STARTING`
-immediately; an unavailable endpoint keeps that state while the periodic probe retries,
-and a successful response changes it to `READY`. Normal unavailable probes resolve to
-`STOPPED`, launch/probe configuration failures to `ERROR`, and `server_info` remains
-available only for optional MCP-provided details such as GPU information. Generate
-retains its immediate direct preflight as the final ComfyUI gate.
+immediately and shares the same single-flight launch/poll operation; an unavailable
+endpoint keeps that state while the bounded startup probe retries, and a successful
+response changes it to `READY`. Normal unavailable probes resolve to `STOPPED`,
+launch/probe configuration failures to `ERROR`, and `server_info` remains available
+only for optional MCP-provided details such as GPU information. CONNECT never launches
+ComfyUI and only reflects MCP transport readiness.
 
 ## Manual Handoff and timeline
 
@@ -204,14 +217,22 @@ metadata. `OutputArtifact.FullPath` remains internal to the Connector for previe
 history, OPEN, and resume operations and is never serialized into ChatGPT-facing
 Review Handoffs.
 
+The OUTPUT VIEWER's `SAVE COPY` action is a non-destructive local copy of the
+currently displayed `SelectedPreviewOutput`, including a History-selected older
+iteration. The Windows standard SaveFileDialog supplies the initial basename,
+extension, and overwrite confirmation; the source Output is never moved or
+deleted. The copy operation rejects missing sources and silent overwrites so
+filesystem errors are surfaced to the user.
+
 ## Production UI information architecture
 
 Timeline Copy is a pure re-copy operation: when a card has a persisted
 Payload, the Desktop ViewModel returns that exact string without creating a new
 handoff, rotating PendingHandoff, validating the current IDEA stage, or
 changing the pipeline. Result Handoff copying follows the same reuse rule;
-payload generation is only a fallback for an iteration whose saved Handoff
-payload is absent.
+payload generation is only a fallback when the current review boundary is new
+(for example after RESUME) or an iteration has no saved Handoff payload yet;
+the previous result card is never rewritten.
 
 The desktop surface keeps three responsibilities distinct:
 
@@ -221,6 +242,13 @@ The desktop surface keeps three responsibilities distinct:
   and iteration history;
 - right: Handoff Timeline, ChatGPT command import/validation/apply, and Session
   resume controls.
+
+Timeline direction is a separate visual semantic from transport status: Connector →
+ChatGPT uses cyan, ChatGPT → Comfy uses a restrained purple-blue, and Comfy →
+ChatGPT uses green. The card border, direction label, and timeline dot share that
+direction palette, while RECEIVED / COPIED / WAITING / COMPLETED / ERROR badges
+continue to resolve through the state palette. Hover and keyboard focus do not
+replace the direction border colour.
 
 The header's `Connector → MCP → ComfyUI → GPU` indicators describe detailed system
 connectivity. Pipeline Connect is a concise gate derived from the same Core connection

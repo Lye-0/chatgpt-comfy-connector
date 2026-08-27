@@ -98,18 +98,18 @@
                           Height="28"
                           HorizontalAlignment="Center">
                         <Ellipse Fill="#101D2B"
-                                 Stroke="{Binding State, Converter={StaticResource StateToBrush}}"
+                                 Stroke="{Binding VisualState, Converter={StaticResource StateToBrush}}"
                                  StrokeThickness="1.5"
                                  Opacity="0.95" />
                         <TextBlock Text="{Binding StateSymbol}"
-                                   Foreground="{Binding State, Converter={StaticResource StateToBrush}}"
+                                   Foreground="{Binding VisualState, Converter={StaticResource StateToBrush}}"
                                    FontSize="14"
                                    FontWeight="SemiBold"
                                    HorizontalAlignment="Center"
                                    VerticalAlignment="Center" />
                     </Grid>
                     <TextBlock Text="{Binding Key}"
-                               Foreground="{Binding State, Converter={StaticResource StateToBrush}}"
+                               Foreground="{Binding VisualState, Converter={StaticResource StateToBrush}}"
                                FontSize="9"
                                FontWeight="SemiBold"
                                HorizontalAlignment="Center"
@@ -122,7 +122,7 @@
                 </StackPanel>
                 <Border Width="26"
                         Height="2"
-                        Background="{Binding State, Converter={StaticResource StateToBrush}}"
+                        Background="{Binding VisualState, Converter={StaticResource StateToBrush}}"
                         Opacity="0.68"
                         VerticalAlignment="Top"
                         Margin="0,13,0,0"
@@ -153,6 +153,16 @@
                             </Storyboard>
                         </BeginStoryboard>
                     </DataTrigger.EnterActions>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsComfyUiStarting}" Value="True">
+                    <Setter TargetName="PipelineNode" Property="Effect">
+                        <Setter.Value>
+                            <DropShadowEffect Color="#F5C96A"
+                                              BlurRadius="13"
+                                              ShadowDepth="0"
+                                              Opacity="0.72" />
+                        </Setter.Value>
+                    </Setter>
                 </DataTrigger>
             </DataTemplate.Triggers>
         </DataTemplate>
@@ -457,15 +467,30 @@
                 <Grid.ColumnDefinitions><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                 <Grid Grid.Column="0">
                     <Border Width="2" Background="#28405A" HorizontalAlignment="Center" />
-                    <Ellipse x:Name="DirectionNode" Width="9" Height="9" Fill="{StaticResource AccentBrush}" Stroke="#08101B" StrokeThickness="2" VerticalAlignment="Top" Margin="0,18,0,0" />
+                    <Ellipse Width="9"
+                             Height="9"
+                             Fill="{Binding Message.Direction, Converter={StaticResource HandoffDirectionToBrush}}"
+                             Stroke="#08101B"
+                             StrokeThickness="2"
+                             VerticalAlignment="Top"
+                             Margin="0,18,0,0" />
                 </Grid>
-                <Border x:Name="MessageChrome" Grid.Column="1" Background="#0C1726" BorderBrush="#234968" BorderThickness="1" CornerRadius="11" Padding="11">
+                <Border x:Name="MessageChrome"
+                        Grid.Column="1"
+                        Background="#0C1726"
+                        BorderBrush="{Binding Message.Direction, Converter={StaticResource HandoffDirectionToBrush}}"
+                        BorderThickness="1"
+                        CornerRadius="11"
+                        Padding="11">
                     <Grid>
                         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock x:Name="DirectionLabel" Text="{Binding DirectionLabel}" Foreground="{StaticResource AccentBrush}" FontSize="9" FontWeight="Bold" />
+                                <TextBlock Text="{Binding DirectionLabel}"
+                                           Foreground="{Binding Message.Direction, Converter={StaticResource HandoffDirectionToBrush}}"
+                                           FontSize="9"
+                                           FontWeight="Bold" />
                                 <TextBlock Text="{Binding TimeText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" Margin="8,0,0,0" />
                             </StackPanel>
                             <Button Grid.Column="1" Style="{StaticResource IconButtonStyle}" Width="28" Height="26" Margin="0" Tag="{Binding}" Click="CopyHandoff_Click" ToolTip="{Binding CopyToolTip}" AutomationProperties.Name="メッセージをコピー">
@@ -503,38 +528,28 @@
                                        TextWrapping="Wrap"
                                        TextTrimming="CharacterEllipsis"
                                        MaxHeight="28" />
-                            <Border Grid.Column="1" Background="#172738" CornerRadius="5" Padding="5,2" VerticalAlignment="Bottom" Margin="7,0,0,0">
-                                <TextBlock Text="{Binding StateLabel}" Foreground="{StaticResource MutedTextBrush}" FontSize="8" FontWeight="SemiBold" />
+                            <Border Grid.Column="1"
+                                    Background="#172738"
+                                    BorderBrush="{Binding StateLabel, Converter={StaticResource StateToBrush}}"
+                                    BorderThickness="1"
+                                    CornerRadius="5"
+                                    Padding="5,2"
+                                    VerticalAlignment="Bottom"
+                                    Margin="7,0,0,0">
+                                <TextBlock Text="{Binding StateLabel}"
+                                           Foreground="{Binding StateLabel, Converter={StaticResource StateToBrush}}"
+                                           FontSize="8"
+                                           FontWeight="SemiBold" />
                             </Border>
                         </Grid>
                     </Grid>
                 </Border>
             </Grid>
             <DataTemplate.Triggers>
-                <DataTrigger Binding="{Binding IsConnectorToChatGpt}" Value="True">
-                    <Setter TargetName="DirectionNode" Property="Fill" Value="{StaticResource AccentBrush}" />
-                    <Setter TargetName="DirectionLabel" Property="Foreground" Value="{StaticResource AccentBrush}" />
-                    <Setter TargetName="MessageChrome" Property="BorderBrush" Value="#245477" />
-                    <Setter TargetName="MessageChrome" Property="Background" Value="#0C1726" />
-                </DataTrigger>
-                <DataTrigger Binding="{Binding IsChatGptToComfy}" Value="True">
-                    <Setter TargetName="DirectionNode" Property="Fill" Value="{StaticResource AccentStrongBrush}" />
-                    <Setter TargetName="DirectionLabel" Property="Foreground" Value="{StaticResource AccentStrongBrush}" />
-                    <Setter TargetName="MessageChrome" Property="BorderBrush" Value="#304C78" />
-                    <Setter TargetName="MessageChrome" Property="Background" Value="#0D1728" />
-                </DataTrigger>
-                <DataTrigger Binding="{Binding IsComfyToChatGpt}" Value="True">
-                    <Setter TargetName="DirectionNode" Property="Fill" Value="{StaticResource SuccessBrush}" />
-                    <Setter TargetName="DirectionLabel" Property="Foreground" Value="{StaticResource SuccessBrush}" />
-                    <Setter TargetName="MessageChrome" Property="BorderBrush" Value="#245C57" />
-                    <Setter TargetName="MessageChrome" Property="Background" Value="#0D201F" />
-                </DataTrigger>
                 <Trigger SourceName="MessageChrome" Property="IsMouseOver" Value="True">
                     <Setter TargetName="MessageChrome" Property="Background" Value="#13243A" />
-                    <Setter TargetName="MessageChrome" Property="BorderBrush" Value="{StaticResource LineStrongBrush}" />
                 </Trigger>
                 <Trigger SourceName="MessageChrome" Property="IsKeyboardFocusWithin" Value="True">
-                    <Setter TargetName="MessageChrome" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
                     <Setter TargetName="MessageChrome" Property="BorderThickness" Value="2" />
                 </Trigger>
             </DataTemplate.Triggers>
@@ -1165,6 +1180,14 @@
                                             ToolTip="動画の自動ループを切り替え"
                                             AutomationProperties.Name="動画の自動ループ"
                                             Visibility="Collapsed" />
+                                    <Button Content="SAVE COPY"
+                                            Padding="9,5"
+                                            Margin="0,0,8,0"
+                                            Click="SaveOutputCopy_Click"
+                                            IsEnabled="{Binding CanSaveSelectedOutputCopy}"
+                                            ToolTip="表示中のOutputを別の場所にコピー保存"
+                                            ToolTipService.ShowOnDisabled="True"
+                                            AutomationProperties.Name="表示中のOutputを別の場所にコピー保存" />
                                     <Button Content="最新へ戻る"
                                             Padding="8,5"
                                             Margin="0,0,8,0"

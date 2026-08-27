@@ -78,7 +78,7 @@ public static class CreationPipelineLoopText
         return status.State switch
         {
             CreationStageState.Current => ResolveCurrentText(status.Stage, idea),
-            CreationStageState.InProgress => $"{stage} → {GetInProgressText(status.Stage)}",
+            CreationStageState.InProgress => $"{stage} → {GetInProgressText(status)}",
             CreationStageState.WaitingUser => ResolveWaitingText(status),
             CreationStageState.Error => $"{stage} → {GetErrorText(status.Stage)}",
             CreationStageState.Cancelled => $"{stage} → {GetCancelledText(status.Stage)}",
@@ -127,12 +127,15 @@ public static class CreationPipelineLoopText
         return compact.Length <= 80 ? compact : compact[..77] + "…";
     }
 
-    private static string GetInProgressText(CreationStage stage)
-        => stage switch
+    private static string GetInProgressText(CreationStageStatus status)
+        => status.Stage switch
         {
             CreationStage.Connect => "MCP接続中",
             CreationStage.Command => "コマンド確認中",
             CreationStage.Apply => "反映・検証中",
+            // Automatic runtime startup is still an active GENERATE stage,
+            // but users need to know why the job has not been submitted yet.
+            CreationStage.Generate when string.Equals(status.Detail, "ComfyUI起動中", StringComparison.Ordinal) => "ComfyUI起動中",
             CreationStage.Generate => "生成中",
             CreationStage.Output => "生成結果を取得・確認中",
             _ => "処理中",

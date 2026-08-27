@@ -677,6 +677,7 @@ public sealed class CreationSession
         Status = SessionStatus.Active;
         PauseReason = null;
         LastError = null;
+        CompletionReason = null;
         UpdatedAt = DateTimeOffset.UtcNow;
     }
 

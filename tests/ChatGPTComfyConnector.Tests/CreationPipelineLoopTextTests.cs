@@ -78,6 +78,11 @@ public sealed class CreationPipelineLoopTextTests : IDisposable
             "GENERATE → 生成を開始",
             CreationPipelineLoopText.Resolve(session, true, ConnectionState.Connected, session.OriginalIdea));
 
+        CreationPipelineStateMachine.BeginComfyUiStartup(session, CreationStage.Generate);
+        Assert.Equal(
+            "GENERATE → ComfyUI起動中",
+            CreationPipelineLoopText.Resolve(session, true, ConnectionState.Connected, session.OriginalIdea));
+
         Assert.Throws<InvalidOperationException>(() => CreationPipelineStateMachine.RequireComfyUi(session, CreationStage.Generate, false));
         Assert.Equal(
             "GENERATE → ComfyUI起動待ち",

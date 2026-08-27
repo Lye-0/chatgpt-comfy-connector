@@ -7,6 +7,7 @@
         <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
         <conv:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibility" />
         <conv:StateToBrushConverter x:Key="StateToBrush" />
+        <conv:HandoffDirectionToBrushConverter x:Key="HandoffDirectionToBrush" />
         <FontFamily x:Key="UiFont">Segoe UI, Yu Gothic UI, Meiryo UI</FontFamily>
 
         <SolidColorBrush x:Key="CanvasBrush" Color="#070A12" />
@@ -24,6 +25,11 @@
         <SolidColorBrush x:Key="WarningBrush" Color="#F5C96A" />
         <SolidColorBrush x:Key="SuccessBrush" Color="#7BE6A2" />
         <SolidColorBrush x:Key="FocusBrush" Color="#A9FFFA" />
+        <!-- Timeline direction colours are semantic transport colours. Keep
+             them independent from StateToBrushConverter status colours. -->
+        <SolidColorBrush x:Key="HandoffConnectorBrush" Color="#56C8D1" />
+        <SolidColorBrush x:Key="HandoffChatGptBrush" Color="#9A86D8" />
+        <SolidColorBrush x:Key="HandoffComfyBrush" Color="#62C88A" />
 
         <Style x:Key="FocusVisualStyle"
                TargetType="{x:Type Control}">

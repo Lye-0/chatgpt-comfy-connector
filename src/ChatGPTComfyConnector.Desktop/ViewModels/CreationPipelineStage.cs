@@ -12,6 +12,16 @@ public sealed record CreationPipelineStage(
     string StateLabel,
     bool IsLast)
 {
+    /// <summary>
+    /// Presentation-only brush state. The persisted Core state remains
+    /// INPROGRESS during automatic startup, while this projection lets the
+    /// pipeline use the existing amber STARTING brush for that specific detail.
+    /// </summary>
+    public bool IsComfyUiStarting => State == "INPROGRESS"
+        && Description.Contains("ComfyUI起動中", StringComparison.Ordinal);
+
+    public string VisualState => IsComfyUiStarting ? "STARTING" : State;
+
     public string StateSymbol => State switch
     {
         "COMPLETED" => "✓",

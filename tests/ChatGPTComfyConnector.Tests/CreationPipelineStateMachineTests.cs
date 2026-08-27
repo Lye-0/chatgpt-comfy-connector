@@ -73,6 +73,29 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
+    public void AutomaticComfyUiStartupUsesInProgressAndFailureDoesNotEraseHistory()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        var output = session.Iterations.Single().Outputs.Single();
+
+        CreationPipelineStateMachine.BeginComfyUiStartup(session, CreationStage.Generate);
+        var starting = CreationPipelineStateMachine.Get(session, CreationStage.Generate);
+        Assert.Equal(CreationStageState.InProgress, starting.State);
+        Assert.Equal("ComfyUI起動中", starting.Detail);
+        Assert.Equal(CreationStageState.Completed, CreationPipelineStateMachine.Get(session, CreationStage.Output).State);
+        Assert.Equal(CreationStageState.Current, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+
+        CreationPipelineStateMachine.ComfyUiStartupFailed(session, CreationStage.Generate, "ComfyUIを起動できませんでした。");
+        var failed = CreationPipelineStateMachine.Get(session, CreationStage.Generate);
+        Assert.Equal(CreationStageState.Error, failed.State);
+        Assert.NotEqual(CreationStageState.WaitingUser, failed.State);
+        Assert.Equal("ComfyUIを起動できませんでした。", failed.Detail);
+        Assert.Equal(output.FileName, session.Iterations.Single().Outputs.Single().FileName);
+        Assert.Equal(CreationStageState.Completed, CreationPipelineStateMachine.Get(session, CreationStage.Output).State);
+        Assert.Equal(CreationStageState.Current, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+    }
+
+    [Fact]
     public void PersistedHandoffPayloadCanBeReusedWithoutRebuilding()
     {
         const string saved = "  {\"handoff_id\":\"original\"}\n";
@@ -269,6 +292,43 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         AssertStage(session, CreationStage.Review, CreationStageState.Completed);
         AssertStage(session, CreationStage.Output, CreationStageState.Completed);
         Assert.Equal("complete", session.Pipeline.AcceptedCommandAction);
+    }
+
+    [Fact]
+    public void ResumePreservesCompletedOutputAndInvalidatesConsumedReviewHandoff()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        session.PendingHandoff = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        var oldHandoffId = session.PendingHandoff.HandoffId;
+        var oldBoundaryId = session.PendingHandoff.BoundaryId;
+        CreationPipelineStateMachine.ReviewCopied(session);
+        CreationPipelineStateMachine.BeginCommandValidation(session);
+        CreationPipelineStateMachine.CommandValidated(session, "complete");
+        CreationPipelineStateMachine.Complete(session, "approved");
+
+        var iteration = Assert.Single(session.Iterations);
+        var output = Assert.Single(iteration.Outputs);
+        Assert.Equal(SessionStatus.Completed, session.Status);
+
+        CreationPipelineStateMachine.Resume(session);
+
+        Assert.Equal(SessionStatus.Active, session.Status);
+        Assert.Null(session.PendingHandoff);
+        Assert.Same(iteration, Assert.Single(session.Iterations));
+        Assert.Same(output, Assert.Single(iteration.Outputs));
+        Assert.Equal(CreationStageState.Completed, CreationPipelineStateMachine.Get(session, CreationStage.Output).State);
+        Assert.Equal(CreationStageState.Current, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+        Assert.Null(session.CompletionReason);
+        Assert.Null(session.Pipeline.AcceptedCommandAction);
+
+        // A fresh review boundary is allowed to use the same Session ID, but
+        // must not accidentally reuse the consumed complete response identity.
+        var fresh = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        Assert.Equal(session.Id, fresh.SessionId);
+        Assert.NotEqual(oldHandoffId, fresh.HandoffId);
+        Assert.NotEqual(oldBoundaryId, fresh.BoundaryId);
+        var oldResponse = $"```connector-command\n{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"complete\",\"handoff_id\":\"{oldHandoffId}\",\"session_id\":\"{session.Id}\",\"reason\":\"approved\"}}\n```";
+        Assert.False(ConnectorProtocol.Parse(oldResponse, fresh).IsValid);
     }
 
     [Fact]

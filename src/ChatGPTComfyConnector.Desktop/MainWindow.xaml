@@ -195,6 +195,69 @@
             </Setter>
         </Style>
 
+        <Style x:Key="LoopButtonStyle"
+               TargetType="Button"
+               BasedOn="{StaticResource IconButtonStyle}">
+            <Setter Property="Width" Value="66" />
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Padding" Value="10,5" />
+            <Setter Property="FontSize" Value="10" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding RelativeSource={RelativeSource Self}, Path=Tag}"
+                             Value="True">
+                    <Setter Property="Background" Value="#17444D" />
+                    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                    <Setter Property="Foreground" Value="{StaticResource AccentStrongBrush}" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="VideoPlayButtonStyle"
+               TargetType="Button">
+            <Setter Property="Width" Value="56" />
+            <Setter Property="Height" Value="56" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Foreground" Value="{StaticResource AccentStrongBrush}" />
+            <Setter Property="Background" Value="#C00B1421" />
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontSize" Value="22" />
+            <Setter Property="FocusVisualStyle" Value="{StaticResource FocusVisualStyle}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="PlayChrome"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="28">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Content="{TemplateBinding Content}"
+                                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="PlayChrome" Property="Background" Value="#E01A3545" />
+                                <Setter TargetName="PlayChrome" Property="BorderBrush" Value="{StaticResource AccentStrongBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="PlayChrome" Property="Background" Value="#F02B5363" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="PlayChrome" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
+                                <Setter TargetName="PlayChrome" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="PlayChrome" Property="Opacity" Value="0.42" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <DataTemplate x:Key="HistoryIterationTemplate">
             <Border x:Name="HistoryCard"
                     MinHeight="132"
@@ -237,18 +300,32 @@
                                    Stretch="UniformToFill"
                                    Opacity="0.88"
                                    ImageFailed="OutputImageFailed" />
-                            <StackPanel HorizontalAlignment="Center"
-                                        VerticalAlignment="Center"
-                                        Visibility="{Binding HasVideo, Converter={StaticResource BoolToVisibility}}">
-                                <TextBlock Text="▶"
-                                           Foreground="{StaticResource AccentBrush}"
-                                           FontSize="18"
-                                           HorizontalAlignment="Center" />
-                                <TextBlock Text="VIDEO"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           FontSize="8"
-                                           Margin="0,2,0,0" />
-                            </StackPanel>
+                            <Grid Visibility="{Binding HasVideo, Converter={StaticResource BoolToVisibility}}">
+                                <MediaElement Source="{Binding PrimaryOutput.FullPath}"
+                                              LoadedBehavior="Manual"
+                                              UnloadedBehavior="Stop"
+                                              Volume="0"
+                                              Stretch="UniformToFill"
+                                              IsHitTestVisible="False"
+                                              MediaOpened="HistoryVideoMediaOpened"
+                                              MediaFailed="HistoryVideoMediaFailed" />
+                                <Border Width="26"
+                                        Height="26"
+                                        HorizontalAlignment="Left"
+                                        VerticalAlignment="Bottom"
+                                        Margin="7"
+                                        Background="#CC07111C"
+                                        BorderBrush="{StaticResource AccentBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="13"
+                                        IsHitTestVisible="False">
+                                    <TextBlock Text="▶"
+                                               Foreground="{StaticResource AccentStrongBrush}"
+                                               FontSize="11"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                                </Border>
+                            </Grid>
                             <StackPanel x:Name="HistoryGeneratingState"
                                         HorizontalAlignment="Center"
                                         VerticalAlignment="Center"
@@ -1079,6 +1156,14 @@
                                 <StackPanel Grid.Column="1"
                                             Orientation="Horizontal"
                                             VerticalAlignment="Center">
+                                    <Button x:Name="VideoLoopButton"
+                                            Style="{StaticResource LoopButtonStyle}"
+                                            Content="LOOP"
+                                            Tag="False"
+                                            Click="VideoLoop_Click"
+                                            ToolTip="動画の自動ループを切り替え"
+                                            AutomationProperties.Name="動画の自動ループ"
+                                            Visibility="Collapsed" />
                                     <Button Style="{StaticResource IconButtonStyle}"
                                             ToolTip="生成物の保存フォルダを開く（未生成時はComfyUI output）"
                                             AutomationProperties.Name="生成物の保存フォルダを開く"
@@ -1123,19 +1208,34 @@
                                         BorderThickness="1"
                                         CornerRadius="9"
                                         ClipToBounds="True">
-                                    <Grid>
+                                    <Grid x:Name="CurrentOutputPreviewSurface"
+                                          MouseEnter="CurrentOutputPreviewSurface_MouseEnter"
+                                          MouseLeave="CurrentOutputPreviewSurface_MouseLeave">
                                         <Image Source="{Binding SelectedPreviewOutput.FullPath}"
                                                Visibility="{Binding SelectedPreviewOutput.IsImage, Converter={StaticResource BoolToVisibility}}"
                                                Stretch="Uniform"
                                                Margin="8"
                                                ImageFailed="OutputImageFailed" />
-                                        <MediaElement Source="{Binding SelectedPreviewOutput.FullPath}"
+                                        <MediaElement x:Name="CurrentOutputVideo"
+                                                      Source="{Binding SelectedPreviewOutput.FullPath}"
                                                       Visibility="{Binding SelectedPreviewOutput.IsVideo, Converter={StaticResource BoolToVisibility}}"
-                                                      LoadedBehavior="Play"
+                                                      LoadedBehavior="Manual"
                                                       UnloadedBehavior="Stop"
+                                                      Volume="0"
                                                       Stretch="Uniform"
                                                       Margin="8"
+                                                      MediaOpened="CurrentOutputVideo_MediaOpened"
+                                                      MediaEnded="CurrentOutputVideo_MediaEnded"
                                                       MediaFailed="OutputMediaFailed" />
+                                        <Button x:Name="VideoReplayButton"
+                                                Style="{StaticResource VideoPlayButtonStyle}"
+                                                Content="▶"
+                                                Click="VideoReplay_Click"
+                                                ToolTip="動画を先頭から再生"
+                                                AutomationProperties.Name="動画を再生"
+                                                Panel.ZIndex="4"
+                                                Visibility="Collapsed"
+                                                IsHitTestVisible="False" />
                                         <StackPanel HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
                                                     Visibility="{Binding ShowOutputEmptyState, Converter={StaticResource BoolToVisibility}}">

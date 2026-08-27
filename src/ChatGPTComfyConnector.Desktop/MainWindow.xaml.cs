@@ -18,12 +18,19 @@ public partial class MainWindow : Window
     private bool _refreshingComfyUiStatus;
     private bool _closeAfterDisconnect;
     private bool _disconnectingForClose;
+    private bool _videoLoopEnabled;
+    private bool _currentOutputVideoReady;
+    private bool _currentOutputVideoPlaying;
+    private bool _currentOutputVideoFailed;
+    private bool _currentOutputPreviewHovering;
+    private string? _lastCurrentOutputVideoPath;
     private MainViewModel ViewModel => (MainViewModel)DataContext;
 
     public MainWindow()
     {
         InitializeComponent();
         DataContext = new MainViewModel(AppContext.BaseDirectory);
+        ViewModel.PropertyChanged += ViewModel_PropertyChanged;
         IdeaInputBox.AddHandler(TextCompositionManager.PreviewTextInputStartEvent,
             new TextCompositionEventHandler(IdeaInput_TextInputStart), true);
         IdeaInputBox.AddHandler(TextCompositionManager.PreviewTextInputUpdateEvent,
@@ -204,11 +211,159 @@ public partial class MainWindow : Window
         if (sender is FrameworkElement { Tag: string path }) RunSync("出力フォルダを開く", () => ViewModel.OpenOutputFolder(path));
     }
 
+    private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(MainViewModel.SelectedPreviewOutput) || Dispatcher.HasShutdownStarted) return;
+        // Let the binding update MediaElement.Source before resetting playback
+        // so an old video cannot continue after a history selection change.
+        Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(SynchronizeCurrentOutputVideo));
+    }
+
+    private void SynchronizeCurrentOutputVideo()
+    {
+        var currentPath = ViewModel.SelectedPreviewOutput?.FullPath;
+        if (string.Equals(_lastCurrentOutputVideoPath, currentPath, StringComparison.OrdinalIgnoreCase))
+        {
+            UpdateVideoControls();
+            return;
+        }
+
+        _lastCurrentOutputVideoPath = currentPath;
+        ResetCurrentOutputVideo();
+    }
+
+    private void ResetCurrentOutputVideo()
+    {
+        _currentOutputVideoReady = false;
+        _currentOutputVideoPlaying = false;
+        _currentOutputVideoFailed = false;
+        VideoReplayButton.Visibility = Visibility.Collapsed;
+        VideoReplayButton.IsHitTestVisible = false;
+        try { CurrentOutputVideo.Stop(); }
+        catch (InvalidOperationException) { }
+        UpdateVideoControls();
+    }
+
+    private void CurrentOutputPreviewSurface_MouseEnter(object sender, MouseEventArgs e)
+    {
+        _currentOutputPreviewHovering = true;
+        UpdateVideoControls();
+    }
+
+    private void CurrentOutputPreviewSurface_MouseLeave(object sender, MouseEventArgs e)
+    {
+        _currentOutputPreviewHovering = false;
+        UpdateVideoControls();
+    }
+
+    private void VideoLoop_Click(object sender, RoutedEventArgs e)
+    {
+        _videoLoopEnabled = !_videoLoopEnabled;
+        UpdateVideoControls();
+        if (_videoLoopEnabled) StartCurrentOutputVideo(restart: true);
+    }
+
+    private void VideoReplay_Click(object sender, RoutedEventArgs e)
+        => StartCurrentOutputVideo(restart: true);
+
+    private void CurrentOutputVideo_MediaOpened(object sender, RoutedEventArgs e)
+    {
+        _currentOutputVideoReady = true;
+        _currentOutputVideoFailed = false;
+        // Preserve the existing first-play experience; LOOP only changes what
+        // happens after the first pass completes.
+        StartCurrentOutputVideo(restart: true);
+    }
+
+    private void CurrentOutputVideo_MediaEnded(object sender, RoutedEventArgs e)
+    {
+        _currentOutputVideoPlaying = false;
+        if (_videoLoopEnabled) StartCurrentOutputVideo(restart: true);
+        else UpdateVideoControls();
+    }
+
+    private void StartCurrentOutputVideo(bool restart)
+    {
+        if (!_currentOutputVideoReady
+            || _currentOutputVideoFailed
+            || ViewModel.SelectedPreviewOutput?.IsVideo != true)
+        {
+            UpdateVideoControls();
+            return;
+        }
+
+        try
+        {
+            if (restart) CurrentOutputVideo.Position = TimeSpan.Zero;
+            CurrentOutputVideo.Play();
+            _currentOutputVideoPlaying = true;
+        }
+        catch (InvalidOperationException)
+        {
+            _currentOutputVideoPlaying = false;
+        }
+        UpdateVideoControls();
+    }
+
+    private void UpdateVideoControls()
+    {
+        var isVideo = ViewModel.SelectedPreviewOutput?.IsVideo == true;
+        VideoLoopButton.Tag = _videoLoopEnabled;
+        VideoLoopButton.Content = _videoLoopEnabled ? "LOOP ON" : "LOOP";
+        VideoLoopButton.Visibility = isVideo ? Visibility.Visible : Visibility.Collapsed;
+
+        var canReplay = isVideo
+            && _currentOutputVideoReady
+            && !_currentOutputVideoFailed
+            && !_currentOutputVideoPlaying
+            && _currentOutputPreviewHovering;
+        VideoReplayButton.Visibility = canReplay ? Visibility.Visible : Visibility.Collapsed;
+        VideoReplayButton.IsHitTestVisible = canReplay;
+    }
+
     private void OutputImageFailed(object sender, ExceptionRoutedEventArgs e)
         => ViewModel.StatusMessage = "画像プレビューに失敗しました。OPENでOSの既定アプリを使用できます。";
 
     private void OutputMediaFailed(object sender, ExceptionRoutedEventArgs e)
-        => ViewModel.StatusMessage = "動画プレビューに対応していません。OPENでOSの既定アプリを使用できます。";
+    {
+        _currentOutputVideoReady = false;
+        _currentOutputVideoPlaying = false;
+        _currentOutputVideoFailed = true;
+        UpdateVideoControls();
+        ViewModel.StatusMessage = "動画プレビューに対応していません。OPENでOSの既定アプリを使用できます。";
+    }
+
+    private async void HistoryVideoMediaOpened(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MediaElement media) return;
+        try
+        {
+            // A short offset avoids an all-black first frame when the output
+            // starts with a fade or an encoder initialization frame.
+            var source = media.Source;
+            media.Position = GetThumbnailPosition(media);
+            media.Play();
+            await Task.Delay(220);
+            if (media.IsLoaded && Equals(media.Source, source)) media.Pause();
+        }
+        catch (InvalidOperationException)
+        {
+            // The card may have been virtualized/unloaded while the media was
+            // opening; the history item itself remains usable.
+        }
+    }
+
+    private void HistoryVideoMediaFailed(object sender, ExceptionRoutedEventArgs e)
+        => ViewModel.StatusMessage = "履歴の動画サムネイルを読み込めません。CURRENT OUTPUTまたはOPENで確認できます。";
+
+    private static TimeSpan GetThumbnailPosition(MediaElement media)
+    {
+        if (!media.NaturalDuration.HasTimeSpan) return TimeSpan.FromMilliseconds(250);
+        var durationMilliseconds = media.NaturalDuration.TimeSpan.TotalMilliseconds;
+        if (durationMilliseconds <= 0) return TimeSpan.Zero;
+        var preferred = Math.Clamp(durationMilliseconds * 0.12, 250, 750);
+        return TimeSpan.FromMilliseconds(Math.Min(preferred, Math.Max(0, durationMilliseconds - 50)));
+    }
 
     private void OpenLogs_Click(object sender, RoutedEventArgs e) => OpenFolder(Path.Combine(AppContext.BaseDirectory, "logs"));
 

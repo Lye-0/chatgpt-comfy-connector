@@ -411,9 +411,11 @@ public static class ConnectorContextBuilder
             sb.AppendLine($"Iteration: {iteration.Number}");
             sb.AppendLine($"Status: {iteration.Status}");
             sb.AppendLine($"Prompt: {iteration.Prompt}");
-            sb.AppendLine("Outputs (local metadata; do not claim you read these files unless the user attaches them):");
-            foreach (var output in iteration.Outputs) sb.AppendLine($"- {output.FileName} ({output.Type}) | {output.FullPath} | {(output.IsMissing ? "Missing" : "Available")}");
-            sb.AppendLine("Evaluate user-attached media. Use generate for a changed next iteration, or complete only if allowed and the goal is met.");
+            sb.AppendLine("Output media (local metadata; do not claim you read these files unless the user attaches them):");
+            foreach (var output in iteration.Outputs) sb.AppendLine($"- {BuildChatGptOutputMetadata(output)}");
+            sb.AppendLine("Evaluate user-attached media.");
+            sb.AppendLine("Do not claim to have inspected local-only media unless it is actually attached to the ChatGPT conversation.");
+            sb.AppendLine("Use generate for a changed next iteration, or complete only if allowed and the goal is met.");
         }
         sb.AppendLine();
         sb.AppendLine("## Available writable slot schema");
@@ -426,6 +428,60 @@ public static class ConnectorContextBuilder
             sb.AppendLine($"- {slot.Address} | label={slot.Label} | type={slot.Type} | current={ToHandoffJson(slot.CurrentValue)} | transport={slot.Transport.ToString().ToLowerInvariant()} | writable=true{choices}{range}");
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Builds the deliberately reduced output representation used in a
+    /// ChatGPT-facing Review Handoff.  OutputArtifact.FullPath remains an
+    /// internal-only value for the Viewer, History and OPEN actions; it must
+    /// never cross the Handoff boundary.
+    /// </summary>
+    private static string BuildChatGptOutputMetadata(OutputArtifact output)
+    {
+        var fileName = GetSafeOutputFileName(output);
+        var mediaType = ResolveMediaType(output, fileName);
+        var available = (!output.IsMissing).ToString().ToLowerInvariant();
+        return $"{fileName} | type={mediaType} | local_only=true | available={available}";
+    }
+
+    private static string GetSafeOutputFileName(OutputArtifact output)
+    {
+        // OutputArtifact instances normally receive a basename from
+        // WorkflowCatalog.  Normalize both separators here as a defense for
+        // older or hand-authored persisted sessions whose FileName may still
+        // contain a full Windows path.
+        var candidate = string.IsNullOrWhiteSpace(output.FileName) ? output.FullPath : output.FileName;
+        candidate = candidate.Replace('\\', '/');
+        var separator = candidate.LastIndexOf('/');
+        var fileName = separator >= 0 ? candidate[(separator + 1)..] : candidate;
+        return string.IsNullOrWhiteSpace(fileName) ? "(unnamed output)" : fileName;
+    }
+
+    private static string ResolveMediaType(OutputArtifact output, string fileName)
+    {
+        var declaredType = output.Type?.Trim() ?? string.Empty;
+        if (declaredType.Contains('/', StringComparison.Ordinal)
+            && declaredType.All(character => char.IsLetterOrDigit(character) || character is '/' or '.' or '+' or '-'))
+        {
+            return declaredType.ToLowerInvariant();
+        }
+
+        var extension = Path.GetExtension(fileName).TrimStart('.').ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(extension)) extension = declaredType.TrimStart('.').ToLowerInvariant();
+        return extension switch
+        {
+            "mp4" => "video/mp4",
+            "webm" => "video/webm",
+            "mov" => "video/quicktime",
+            "avi" => "video/x-msvideo",
+            "mkv" => "video/x-matroska",
+            "png" => "image/png",
+            "jpg" or "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            "bmp" => "image/bmp",
+            _ => "application/octet-stream",
+        };
     }
 
     private static string ToHandoffJson(JsonNode? node)

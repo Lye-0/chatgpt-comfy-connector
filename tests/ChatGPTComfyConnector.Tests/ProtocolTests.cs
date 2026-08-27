@@ -285,6 +285,55 @@ public sealed class ProtocolTests
     }
 
     [Fact]
+    public void ReviewHandoffPublishesSafeOutputMetadataWithoutLocalPath()
+    {
+        var localPath = Path.Combine("C:\\AI", "ComfyUI_windows_portable", "ComfyUI", "output", "e5730de5_000.mp4");
+        var session = new CreationSession
+        {
+            Id = "session-review-output", ProjectLabel = "Project", ChatLabel = "Chat",
+            OriginalIdea = string.Empty, BoundWorkflow = WorkflowIdentity.Create("folder/workflow.json"),
+            MaximumIterations = 10, CurrentIteration = 1,
+        };
+        var pending = PendingHandoffFactory.Create(session, [], "generate", "complete");
+        var iteration = new SessionIteration
+        {
+            Number = 1,
+            Status = JobStatus.Completed,
+            Prompt = "A polished night drive",
+            Outputs = [new OutputArtifact { FileName = "e5730de5_000.mp4", FullPath = localPath, Type = "mp4" }],
+        };
+
+        var text = ConnectorContextBuilder.BuildResult(session, iteration, pending);
+
+        Assert.Equal(localPath, iteration.Outputs[0].FullPath);
+        Assert.Contains("e5730de5_000.mp4 | type=video/mp4 | local_only=true | available=", text);
+        Assert.DoesNotContain(localPath, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("C:\\AI", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ReviewHandoffStripsPathFromPersistedFileNameAndKeepsMimeType()
+    {
+        var session = new CreationSession
+        {
+            Id = "session-review-output-name", ProjectLabel = "Project", ChatLabel = "Chat",
+            BoundWorkflow = WorkflowIdentity.Create("folder/workflow.json"), MaximumIterations = 10,
+        };
+        var pending = PendingHandoffFactory.Create(session, [], "generate", "complete");
+        var iteration = new SessionIteration
+        {
+            Number = 1,
+            Status = JobStatus.Completed,
+            Outputs = [new OutputArtifact { FileName = "C:\\private\\frame.png", FullPath = "C:\\private\\frame.png", Type = "png" }],
+        };
+
+        var text = ConnectorContextBuilder.BuildResult(session, iteration, pending);
+
+        Assert.Contains("- frame.png | type=image/png | local_only=true | available=false", text);
+        Assert.DoesNotContain("C:\\private", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void BlankKickoffInstructionUsesExistingConversationContext()
     {
         var session = new CreationSession

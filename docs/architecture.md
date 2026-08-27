@@ -178,6 +178,12 @@ The older `Summary` field remains a compatibility fallback for sessions written
 before the content-first card model. Existing messages are normalized when loaded so
 legacy direction, kind, display text, and metadata do not break the timeline.
 
+Review Handoff output metadata is intentionally public-safe: the copied payload
+contains only a basename, MIME type, `local_only=true`, and non-sensitive availability
+metadata. `OutputArtifact.FullPath` remains internal to the Connector for preview,
+history, OPEN, and resume operations and is never serialized into ChatGPT-facing
+Review Handoffs.
+
 ## Production UI information architecture
 
 Timeline Copy is a pure re-copy operation: when a card has a persisted

@@ -122,6 +122,8 @@ Importerは次の順序を保つ。
 
 BootstrapとReviewの各Handoffは、選択したChatGPT会話へ貼り付けて使えるよう、role、そのHandoffで許可されたactionだけのresponse grammar、IDs、boundary、AllowedActions、Project / Chat / Workflow、Iteration、任意のKickoff instruction、該当Output、Writable slot schemaを含む。既存会話のメッセージがある場合はそれを制作文脈として利用し、Kickoff instructionがある場合は追加指示として優先する。新規Chatで履歴がない場合も、Workflow / slot schemaなどのHandoff情報だけで動作できる。説明用current / choicesは人間とLLMが読めるUnicodeのまま出力し、JSON / HTML / Markdown escapeを重ねない。Protocol fenceとPayload markerは実Clipboard上でもescapeしない。
 
+Review HandoffのOutputはChatGPT向けのローカル限定メタデータへ縮約する。ファイル名、MIME type、`local_only=true`、必要に応じて`available`やサイズなどの非機密情報だけを掲載し、絶対パス、ComfyUIのインストール先、Windowsユーザーディレクトリ、Connector内部の保存先は掲載しない。実ファイルパスはConnector内部の`OutputArtifact`に保持し、Output Viewer、HISTORY、OPENでのみ使用する。ChatGPTはユーザーが実ファイルを会話へ添付した場合に限り、そのメディアをレビューしたと主張できる。
+
 Timelineは `CONNECTOR → CHATGPT`、`CHATGPT → COMFY`、`COMFY → CHATGPT` を維持する。ChatGPT → COMFYカードは解決済みPromptを主表示へ使い、Raw JSONを主役にしない。表示を短縮しても `HandoffMessage.Payload` と `ProtocolValidationResult.RawResponse` は破壊せず、Copyはconnector-commandと全Payloadを含むResponse全文を使う。
 
 ## Verification anchors

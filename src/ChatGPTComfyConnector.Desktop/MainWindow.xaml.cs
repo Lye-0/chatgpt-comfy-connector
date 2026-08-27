@@ -24,6 +24,12 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = new MainViewModel(AppContext.BaseDirectory);
+        IdeaInputBox.AddHandler(TextCompositionManager.PreviewTextInputStartEvent,
+            new TextCompositionEventHandler(IdeaInput_TextInputStart), true);
+        IdeaInputBox.AddHandler(TextCompositionManager.PreviewTextInputUpdateEvent,
+            new TextCompositionEventHandler(IdeaInput_TextInputUpdate), true);
+        IdeaInputBox.AddHandler(TextCompositionManager.PreviewTextInputEvent,
+            new TextCompositionEventHandler(IdeaInput_TextInput), true);
         IdeaInputBox.AddHandler(TextCompositionManager.TextInputStartEvent,
             new TextCompositionEventHandler(IdeaInput_TextInputStart), true);
         IdeaInputBox.AddHandler(TextCompositionManager.TextInputUpdateEvent,
@@ -31,7 +37,8 @@ public partial class MainWindow : Window
         IdeaInputBox.AddHandler(TextCompositionManager.TextInputEvent,
             new TextCompositionEventHandler(IdeaInput_TextInput), true);
         IdeaInputBox.TextChanged += IdeaInput_TextChanged;
-        IdeaInputBox.PreviewKeyDown += IdeaInput_PreviewKeyDown;
+        IdeaInputBox.AddHandler(Keyboard.PreviewKeyDownEvent,
+            new KeyEventHandler(IdeaInput_PreviewKeyDown), true);
         IdeaInputBox.LostKeyboardFocus += IdeaInput_LostKeyboardFocus;
         IdeaInputBox.IsEnabledChanged += IdeaInput_IsEnabledChanged;
         _comfyUiStatusTimer.Tick += ComfyUiStatusTimer_Tick;

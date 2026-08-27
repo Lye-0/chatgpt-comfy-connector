@@ -7,6 +7,7 @@ v0.1 AlphaではChatGPTとの通信を自動化しません。Connectorが自己
 ## v0.1の範囲
 
 - .NET 10 / WPF / self-contained win-x64
+- `v*` タグpushによるGitHub Release（win-x64 ZIP + SHA-256）
 - 公式C# Model Context Protocol SDKによるcomfy-mcp stdio接続
 - 初回SetupとPortable JSON/session/log/backup保存
 - ComfyUI Workflow Tree、複製、名前変更、Unicode path
@@ -17,7 +18,7 @@ v0.1 AlphaではChatGPTとの通信を自動化しません。Connectorが自己
 - Manual ChatGPT Handoff、Protocol v1 command validation
 - 画像のin-app preview、動画のbest-effort preview、OS既定アプリで開くfallback
 
-モデル導入、Custom Node導入、ComfyUI更新、ブラウザ自動操作、OpenAI API、ChatGPTへの自動送信、Installer、GitHub Release公開はv0.1の対象外です。
+モデル導入、Custom Node導入、ComfyUI更新、ブラウザ自動操作、OpenAI API、ChatGPTへの自動送信、Installerはv0.1の対象外です。
 
 ## 開発
 
@@ -69,6 +70,13 @@ Remove-Item Env:RUN_LIVE_MCP
 ```
 
 `artifacts/` にself-contained publish folderとPortable ZIPを作成します。GitHubへのpushやRelease作成は行いません。
+
+GitHub Releaseは `v*` タグのpushで `.github/workflows/release.yml` が作成します。たとえば `v0.1.0-alpha` では、次の成果物が添付されます。
+
+```text
+ChatGPT-Comfy-Connector-v0.1.0-alpha-win-x64.zip
+ChatGPT-Comfy-Connector-v0.1.0-alpha-win-x64.zip.sha256
+```
 
 ## 技術文書
 

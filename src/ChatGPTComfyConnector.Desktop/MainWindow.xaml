@@ -301,11 +301,17 @@
                                    Opacity="0.88"
                                    ImageFailed="OutputImageFailed" />
                             <Grid Visibility="{Binding HasVideo, Converter={StaticResource BoolToVisibility}}">
+                                <Image Source="{Binding ThumbnailImage}"
+                                       Visibility="{Binding HasThumbnail, Converter={StaticResource BoolToVisibility}}"
+                                       Stretch="UniformToFill"
+                                       Opacity="0.94" />
                                 <MediaElement Source="{Binding PrimaryOutput.FullPath}"
                                               LoadedBehavior="Manual"
                                               UnloadedBehavior="Stop"
                                               Volume="0"
                                               Stretch="UniformToFill"
+                                              ScrubbingEnabled="True"
+                                              Visibility="{Binding HasThumbnail, Converter={StaticResource InverseBoolToVisibility}}"
                                               IsHitTestVisible="False"
                                               MediaOpened="HistoryVideoMediaOpened"
                                               MediaFailed="HistoryVideoMediaFailed" />

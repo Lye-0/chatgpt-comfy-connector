@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Windows.Media.Imaging;
 using ChatGPTComfyConnector.Core.Models;
 
 namespace ChatGPTComfyConnector.Desktop.ViewModels;
@@ -8,6 +9,7 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
 {
     private bool _isLatest;
     private bool _isFinal;
+    private BitmapSource? _thumbnailImage;
 
     public GenerationHistoryItem(SessionIteration iteration)
     {
@@ -33,6 +35,8 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
     public DateTimeOffset CreatedAt => Iteration.CreatedAt;
     public string CreatedAtText => Iteration.CreatedAt.ToLocalTime().ToString("yyyy/MM/dd HH:mm");
     public OutputArtifact? PrimaryOutput => Iteration.Outputs.FirstOrDefault();
+    public BitmapSource? ThumbnailImage => _thumbnailImage;
+    public bool HasThumbnail => _thumbnailImage is not null;
     public bool HasOutput => PrimaryOutput is not null;
     public bool HasImage => !IsGenerating && PrimaryOutput?.IsImage == true;
     public bool HasVideo => !IsGenerating && PrimaryOutput?.IsVideo == true;
@@ -42,6 +46,14 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
     public bool IsFinal => _isFinal;
     public bool HasBadge => IsLatest || IsFinal;
     public string BadgeText => IsFinal ? "FINAL" : IsLatest ? "LATEST" : string.Empty;
+
+    public void SetThumbnail(BitmapSource thumbnail)
+    {
+        if (thumbnail.CanFreeze && !thumbnail.IsFrozen) thumbnail.Freeze();
+        _thumbnailImage = thumbnail;
+        OnPropertyChanged(nameof(ThumbnailImage));
+        OnPropertyChanged(nameof(HasThumbnail));
+    }
 
     public void UpdateFlags(bool isLatest, bool isFinal)
     {

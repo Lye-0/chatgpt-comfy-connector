@@ -25,6 +25,7 @@ public partial class MainWindow : Window
     private bool _currentOutputVideoPlaying;
     private bool _currentOutputVideoFailed;
     private bool _currentOutputPreviewHovering;
+    private bool _wasGenerationInProgress;
     private string? _lastCurrentOutputVideoPath;
     private string? _requestedHistoryPlaybackPath;
     private readonly Dictionary<string, BitmapSource> _videoThumbnailCache = new(StringComparer.OrdinalIgnoreCase);
@@ -280,7 +281,23 @@ public partial class MainWindow : Window
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName != nameof(MainViewModel.SelectedPreviewOutput) || Dispatcher.HasShutdownStarted) return;
+        if (Dispatcher.HasShutdownStarted) return;
+
+        if (e.PropertyName == nameof(MainViewModel.IsGenerationInProgress))
+        {
+            var isGenerationInProgress = ViewModel.IsGenerationInProgress;
+            if (isGenerationInProgress && !_wasGenerationInProgress && !_videoLoopEnabled)
+            {
+                // A later iteration keeps the previous output visible, but
+                // LOOP OFF must never let that retained MediaElement keep
+                // playing/restarting while the new job is running.
+                PauseCurrentOutputVideo();
+            }
+
+            _wasGenerationInProgress = isGenerationInProgress;
+        }
+
+        if (e.PropertyName != nameof(MainViewModel.SelectedPreviewOutput)) return;
         // Let the binding update MediaElement.Source before resetting playback
         // so an old video cannot continue after a history selection change.
         Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(SynchronizeCurrentOutputVideo));
@@ -316,6 +333,14 @@ public partial class MainWindow : Window
         UpdateVideoControls();
     }
 
+    private void PauseCurrentOutputVideo()
+    {
+        _currentOutputVideoPlaying = false;
+        try { CurrentOutputVideo.Pause(); }
+        catch (InvalidOperationException) { }
+        UpdateVideoControls();
+    }
+
     private void CurrentOutputPreviewSurface_MouseEnter(object sender, MouseEventArgs e)
     {
         _currentOutputPreviewHovering = true;
@@ -331,6 +356,14 @@ public partial class MainWindow : Window
     private void VideoLoop_Click(object sender, RoutedEventArgs e)
     {
         _videoLoopEnabled = !_videoLoopEnabled;
+        if (!_videoLoopEnabled)
+        {
+            // Turning LOOP OFF also stops an already looping element.  The
+            // next explicit replay is still available through the hover
+            // affordance, but no automatic pass may continue in the
+            // background.
+            PauseCurrentOutputVideo();
+        }
         UpdateVideoControls();
         if (_videoLoopEnabled) StartCurrentOutputVideo(restart: true);
     }
@@ -357,6 +390,12 @@ public partial class MainWindow : Window
         else
         {
             // A normal HISTORY selection must not autoplay in LOOP OFF mode.
+            // Pause explicitly as a guard against a MediaElement reopening
+            // an already-playing source when bindings refresh during a later
+            // generation.
+            _currentOutputVideoPlaying = false;
+            try { CurrentOutputVideo.Pause(); }
+            catch (InvalidOperationException) { }
             UpdateVideoControls();
         }
     }

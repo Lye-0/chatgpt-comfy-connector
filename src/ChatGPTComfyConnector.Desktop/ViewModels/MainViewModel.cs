@@ -2160,6 +2160,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void NotifyPipelineStateChanged()
     {
         RefreshPipeline();
+        // IsGenerationInProgress is derived from the pipeline as well as the
+        // active Job. Notify it here so the viewer can pause a retained
+        // previous Output as soon as GENERATE enters startup, before a Job is
+        // submitted to ComfyUI.
+        OnPropertyChanged(nameof(IsGenerationInProgress));
         OnPropertyChanged(nameof(CurrentCreationStageText));
         OnPropertyChanged(nameof(CurrentCreationStageDescription));
         OnPropertyChanged(nameof(CurrentCreationStageState));

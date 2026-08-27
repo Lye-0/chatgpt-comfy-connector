@@ -284,6 +284,12 @@ public static class PendingHandoffFactory
         {
             SessionId = session.Id,
             WorkflowIdentity = session.BoundWorkflow?.RelativePath ?? string.Empty,
+            ContextProviderId = session.EffectiveContextProviderId,
+            ProjectContextKey = session.EffectiveProjectContextKey ?? string.Empty,
+            ChatContextKey = session.EffectiveChatContextKey ?? string.Empty,
+            ProjectLabel = session.ProjectLabel,
+            ChatLabel = session.ChatLabel,
+            KickoffInstruction = session.OriginalIdea,
             Iteration = session.CurrentIteration,
             AllowedActions = allowedActions.Distinct(StringComparer.Ordinal).ToList(),
             Slots = slots.Select(ChatGptSlotPolicy.CreateSnapshot).ToList(),
@@ -394,9 +400,10 @@ public static class ConnectorContextBuilder
         sb.AppendLine($"Maximum iterations: {session.MaximumIterations}");
         sb.AppendLine($"Current iteration: {session.CurrentIteration}");
         sb.AppendLine("Kickoff instruction (optional):");
-        sb.AppendLine(string.IsNullOrWhiteSpace(session.OriginalIdea)
+        var kickoffInstruction = handoff.KickoffInstruction ?? session.OriginalIdea;
+        sb.AppendLine(string.IsNullOrWhiteSpace(kickoffInstruction)
             ? "(none — use the existing ChatGPT conversation)"
-            : session.OriginalIdea);
+            : kickoffInstruction);
         if (iteration is not null)
         {
             sb.AppendLine();

@@ -170,8 +170,9 @@ public partial class MainWindow : Window
     {
         await Run("ChatGPTへ送信", async () =>
         {
-            Clipboard.SetText(await ViewModel.PrepareBootstrapHandoffAsync());
-            await ViewModel.ConfirmBootstrapCopiedAsync(Clipboard.GetText());
+            var payload = await ViewModel.PrepareBootstrapHandoffAsync();
+            Clipboard.SetText(payload);
+            await ViewModel.ConfirmBootstrapCopiedAsync(payload);
             ViewModel.StatusMessage = "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。";
         });
     }

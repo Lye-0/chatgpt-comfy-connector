@@ -34,6 +34,23 @@ public static class CreationPipelineStateMachine
         {
             InferLegacyState(session);
         }
+
+        // A confirmed Bootstrap Handoff is a durable pipeline boundary. If a
+        // refresh or an older persisted snapshot ever leaves the stage at
+        // NotReached while the immutable pending snapshot is still present,
+        // restore the waiting state from the same source of truth. Explicit
+        // kickoff/context edits clear both markers, so this does not mask a
+        // genuine re-send boundary.
+        if (session.Pipeline.ContextBound
+            && session.Pipeline.SentIdeaSnapshot is not null
+            && PendingHandoffReuse.IsBootstrap(session.PendingHandoff))
+        {
+            var handoff = session.Pipeline.Stages.Single(item => item.Stage == CreationStage.ToChatGpt);
+            if (handoff.State == CreationStageState.NotReached)
+            {
+                Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTからの返答待ち", CreationWaitingReason.ChatGptResponseRequired);
+            }
+        }
     }
 
     public static CreationStageStatus Get(CreationSession session, CreationStage stage)
@@ -134,6 +151,7 @@ public static class CreationPipelineStateMachine
     public static void PrepareContext(CreationSession session, string detail = "CONNECTで制作通信を確認してください")
     {
         EnsureInitialized(session);
+        session.PendingHandoff = null;
         session.Pipeline.ContextBound = false;
         session.Pipeline.MaximumIterationSafetyStop = false;
         session.Pipeline.SentIdeaSnapshot = null;
@@ -151,9 +169,16 @@ public static class CreationPipelineStateMachine
             throw new InvalidOperationException("Workflow・Project・Chat・Maximum Iterationsをすべて設定してください。");
         }
         EnsureInitialized(session);
+        // Rebinding Workflow / Project / Chat / iteration context is an
+        // explicit Handoff boundary. Any response issued for the previous
+        // binding must become stale instead of being accepted against the new
+        // context.
+        session.PendingHandoff = null;
         session.Pipeline.ContextBound = true;
         session.Pipeline.IterationNumber = session.CurrentIteration;
         session.Pipeline.MaximumIterationSafetyStop = false;
+        session.Pipeline.SentIdeaSnapshot = null;
+        session.Pipeline.AcceptedCommandAction = null;
         SetAllFrom(session, CreationStage.Context, CreationStageState.NotReached);
         Set(session, CreationStage.Context, CreationStageState.Completed, "制作セッションへContextをBinding済み");
         Set(session, CreationStage.Idea, CreationStageState.Current, "開始指示・補足は任意です · SEND TO CHATGPTで開始");
@@ -167,13 +192,31 @@ public static class CreationPipelineStateMachine
         if (!session.Pipeline.ContextBound) return;
         if (session.Pipeline.SentIdeaSnapshot is null)
         {
+            if (session.PendingHandoff is not null
+                && !string.Equals(
+                    PendingHandoffReuse.NormalizeKickoffInstruction(PendingHandoffReuse.GetKickoffInstruction(session.PendingHandoff, session)),
+                    PendingHandoffReuse.NormalizeKickoffInstruction(idea),
+                    StringComparison.Ordinal))
+            {
+                // A kickoff edit made after Prepare but before confirmation
+                // invalidates that issued snapshot as well. The next explicit
+                // SEND creates a fresh identity for the new instruction.
+                session.PendingHandoff = null;
+            }
             Set(session, CreationStage.Idea, CreationStageState.Current, string.IsNullOrWhiteSpace(idea) ? "開始指示・補足は任意です · SEND TO CHATGPTで開始" : "開始指示を入力中 · SEND TO CHATGPTで開始");
             return;
         }
-        if (string.Equals(session.Pipeline.SentIdeaSnapshot, idea, StringComparison.Ordinal)) return;
+        if (string.Equals(
+                PendingHandoffReuse.NormalizeKickoffInstruction(session.Pipeline.SentIdeaSnapshot),
+                PendingHandoffReuse.NormalizeKickoffInstruction(idea),
+                StringComparison.Ordinal))
+        {
+            return;
+        }
 
         Set(session, CreationStage.Idea, CreationStageState.Current, "送信後に変更されました · 再送信が必要です");
         ResetAfter(session, CreationStage.Idea);
+        session.PendingHandoff = null;
         session.Pipeline.SentIdeaSnapshot = null;
         session.Pipeline.AcceptedCommandAction = null;
         session.Pipeline.MaximumIterationSafetyStop = false;
@@ -188,7 +231,7 @@ public static class CreationPipelineStateMachine
     public static void BootstrapCopied(CreationSession session, string idea)
     {
         RequireContext(session);
-        session.Pipeline.SentIdeaSnapshot = idea;
+        session.Pipeline.SentIdeaSnapshot = PendingHandoffReuse.NormalizeKickoffInstruction(idea);
         session.Pipeline.AcceptedCommandAction = null;
         Set(session, CreationStage.Idea, CreationStageState.Completed, "制作ContextをClipboardへ生成済み");
         Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTからの返答待ち", CreationWaitingReason.ChatGptResponseRequired);

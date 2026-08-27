@@ -21,6 +21,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly IComfyUiHealthProbe _comfyUiHealthProbe;
     private readonly WorkflowCatalog _catalog;
     private readonly SemaphoreSlim _comfyUiStatusGate = new(1, 1);
+    private readonly SemaphoreSlim _bootstrapHandoffGate = new(1, 1);
     private CreationSession? _currentSession;
     private WorkflowIdentity? _selectedWorkflow;
     private JobSnapshot? _currentJob;
@@ -212,7 +213,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (string.Equals(_idea, value, StringComparison.Ordinal)) return;
             _idea = value;
-            if (CurrentSession is not null) CreationPipelineStateMachine.IdeaChanged(CurrentSession, value);
+            if (_isCurrentSessionActivated && CurrentSession is not null) CreationPipelineStateMachine.IdeaChanged(CurrentSession, value);
             OnPropertyChanged();
             OnPropertyChanged(nameof(HasIdeaInput));
             OnPropertyChanged(nameof(ShowIdeaPlaceholder));
@@ -342,7 +343,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string IdeaInputHint => IsIdeaInputEnabled
         ? "開始指示・補足は任意です。空欄なら既存ChatGPT会話をもとに開始します。"
         : "左側の設定から新しい制作を開始してください。";
-    public bool CanSendToChatGpt => CreationWorkspacePolicy.CanSendToChatGpt(CurrentSession, _isCurrentSessionActivated, IsConnected, SlotDiscoveryState, Idea, IsJobActive);
+    public bool CanSendToChatGpt => !HasPendingContextChange
+        && CreationWorkspacePolicy.CanSendToChatGpt(CurrentSession, _isCurrentSessionActivated, IsConnected, SlotDiscoveryState, Idea, IsJobActive);
     public string SendToChatGptHint
         => CanSendToChatGpt
             ? "制作コンテキストをChatGPTへコピー"
@@ -352,6 +354,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     ? "MCP接続を確立してください。"
                     : CurrentSession?.Pipeline.ContextBound != true
                         ? "制作ContextをSessionへBindingしてください。"
+                        : HasPendingContextChange
+                            ? "選択中のContextをSessionへ反映してから送信してください。"
                         : SlotDiscoveryState != SlotDiscoveryState.Loaded
                             ? "WorkflowのSlot Schema取得を完了してください。"
                             : IsJobActive
@@ -855,7 +859,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task ImportCommandAsync()
     {
         if (CurrentSession is null) throw new InvalidOperationException("先に新しい制作を開始してください。");
-        if (CurrentSession.PendingHandoff is not null && !string.Equals(CurrentSession.BoundWorkflow?.RelativePath, CurrentSession.PendingHandoff.WorkflowIdentity, StringComparison.OrdinalIgnoreCase))
+        if (CurrentSession.PendingHandoff is null)
+        {
+            throw new InvalidOperationException("先にSEND TO CHATGPTで制作ContextをHandoffしてください。");
+        }
+        if (HasPendingContextChange
+            || !string.Equals(CurrentSession.BoundWorkflow?.RelativePath, SelectedWorkflow?.RelativePath, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(CurrentSession.BoundWorkflow?.RelativePath, CurrentSession.PendingHandoff.WorkflowIdentity, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Handoff作成後に制作Contextが変更されています。現在のContextをChatGPTへ送り直してください。");
         CreationPipelineStateMachine.BeginCommandValidation(CurrentSession);
         NotifyPipelineStateChanged();
@@ -910,6 +920,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task<string> PrepareBootstrapHandoffAsync()
     {
+        await _bootstrapHandoffGate.WaitAsync();
+        try
+        {
+            return await PrepareBootstrapHandoffCoreAsync();
+        }
+        finally
+        {
+            _bootstrapHandoffGate.Release();
+        }
+    }
+
+    private async Task<string> PrepareBootstrapHandoffCoreAsync()
+    {
         EnsureSendToChatGptAllowed();
         if (CurrentSession is null || CurrentSession.BoundWorkflow is null) throw new InvalidOperationException("左の設定から新しい制作を開始してください。");
         if (SelectedWorkflow is null || !string.Equals(CurrentSession.BoundWorkflow.RelativePath, SelectedWorkflow.RelativePath, StringComparison.OrdinalIgnoreCase))
@@ -918,10 +941,40 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         if (string.IsNullOrWhiteSpace(CurrentSession.ProjectLabel) || string.IsNullOrWhiteSpace(CurrentSession.ChatLabel)) throw new InvalidOperationException("ProjectとChatを設定して新しい制作を開始してください。");
         EnsureSlotSchemaAvailable();
-        CurrentSession.OriginalIdea = Idea;
-        CurrentSession.PendingHandoff = PendingHandoffFactory.Create(CurrentSession, Slots.Select(ToWorkflowSlot), "generate");
+
+        var kickoffInstruction = Idea;
+        var currentSlots = Slots.Select(ToWorkflowSlot).ToList();
+        var pending = CurrentSession.PendingHandoff;
+        var canReusePending = PendingHandoffReuse.MatchesBootstrap(CurrentSession, pending, currentSlots, kickoffInstruction);
+        if (!canReusePending)
+        {
+            // This is the explicit first send (or an explicit re-send after a
+            // context/kickoff change). Only this path is allowed to issue a
+            // replacement handoff identity.
+            CurrentSession.OriginalIdea = kickoffInstruction;
+            pending = PendingHandoffFactory.Create(CurrentSession, currentSlots, "generate");
+            CurrentSession.PendingHandoff = pending;
+        }
+        else
+        {
+            // Keep the session's editable value current, while the issued
+            // snapshot (including its captured kickoff) remains immutable.
+            CurrentSession.OriginalIdea = kickoffInstruction;
+        }
+
+        var existingMessage = CurrentSession.HandoffMessages.LastOrDefault(item =>
+            item.Direction == HandoffDirection.ConnectorToChatGpt
+            && item.Kind == HandoffMessageKind.CreationRequest
+            && item.IterationNumber is null);
+        if (canReusePending && HandoffPayloadReuse.TryGetSavedPayload(existingMessage, out var savedPayload))
+        {
+            await SaveSessionAsync();
+            return savedPayload;
+        }
+
+        var payload = ConnectorContextBuilder.BuildBootstrap(CurrentSession, pending!);
         await SaveSessionAsync();
-        return ConnectorContextBuilder.BuildBootstrap(CurrentSession, CurrentSession.PendingHandoff);
+        return payload;
     }
 
     public async Task<string> PrepareResultHandoffAsync(SessionIteration? selectedIteration = null)
@@ -962,16 +1015,54 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task ConfirmBootstrapCopiedAsync(string payload)
     {
-        EnsureSendToChatGptAllowed();
+        await _bootstrapHandoffGate.WaitAsync();
+        try
+        {
+            await ConfirmBootstrapCopiedCoreAsync(payload);
+        }
+        finally
+        {
+            _bootstrapHandoffGate.Release();
+        }
+    }
+
+    private async Task ConfirmBootstrapCopiedCoreAsync(string payload)
+    {
         if (CurrentSession is null) return;
-        CreationPipelineStateMachine.BootstrapCopied(CurrentSession, Idea);
+        var pending = CurrentSession.PendingHandoff;
+        if (pending is null || !PendingHandoffReuse.MatchesPayload(pending, payload))
+        {
+            throw new InvalidOperationException("コピー対象のHandoffが現在のPending Handoffと一致しません。最新のHandoffを再送してください。");
+        }
+
+        // A second click should be idempotent. It must not re-run the state
+        // transition or issue a new identity after the first card was saved.
+        if (CurrentSession.HandoffMessages.Any(item =>
+                item.Direction == HandoffDirection.ConnectorToChatGpt
+                && item.Kind == HandoffMessageKind.CreationRequest
+                && string.Equals(item.Payload, payload, StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        EnsureSendToChatGptAllowed();
+        var kickoffInstruction = PendingHandoffReuse.GetKickoffInstruction(pending, CurrentSession);
+        if (!string.Equals(
+                PendingHandoffReuse.NormalizeKickoffInstruction(kickoffInstruction),
+                PendingHandoffReuse.NormalizeKickoffInstruction(Idea),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("開始指示がHandoff作成後に変更されています。現在の内容をChatGPTへ送り直してください。");
+        }
+
+        CreationPipelineStateMachine.BootstrapCopied(CurrentSession, kickoffInstruction);
         await RecordHandoffAsync(new HandoffMessage
         {
             Direction = HandoffDirection.ConnectorToChatGpt,
             Kind = HandoffMessageKind.CreationRequest,
             State = HandoffTransportState.Copied,
             Title = "制作コンテキストを送信",
-            DisplayText = string.IsNullOrWhiteSpace(Idea) ? "既存ChatGPT会話をもとに制作を開始" : Idea,
+            DisplayText = string.IsNullOrWhiteSpace(kickoffInstruction) ? "既存ChatGPT会話をもとに制作を開始" : kickoffInstruction,
             Metadata = $"Workflow: {CurrentSession.BoundWorkflow?.DisplayName ?? SelectedWorkflowName}{Environment.NewLine}{CurrentSession.ProjectLabel} / {CurrentSession.ChatLabel}",
             Summary = "既存ChatGPT会話を制作文脈として使用し、Workflow向けの生成指示を作成します。",
             Payload = payload,
@@ -1602,6 +1693,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (!_isCurrentSessionActivated || CurrentSession is null)
         {
             throw new InvalidOperationException("左側の設定から新しい制作を開始してください。");
+        }
+        if (HasPendingContextChange)
+        {
+            throw new InvalidOperationException("選択中のContextをSessionへ反映してからChatGPTへ送信してください。");
         }
         if (!CurrentSession.Pipeline.ContextBound || CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Context).State != CreationStageState.Completed)
         {

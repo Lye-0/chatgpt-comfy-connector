@@ -95,11 +95,13 @@ ChatGPTへ渡す各Handoffは次を永続化する。
 - `BoundaryId`
 - `AllowedActions`
 - `WorkflowIdentity`
+- Project / Chat provider and context keys
+- Project / Chat labels
 - Slot schemaとChatGPT exposure / writable policy
 - `Iteration`
 - `CreatedAt`
 
-初回は原則 `generate`、成功Output後のReviewは `generate, complete` を許可する。新しいHandoffは古いpending snapshotを置換する。Responseは一時的なUI状態ではなくこのsnapshotと照合し、`handoff_id` 不一致をstale responseとして明示的に拒否する。`session_id` と現在のSession-bound Workflowも一致しなければならない。
+初回は原則 `generate`、成功Output後のReviewは `generate, complete` を許可する。発行済みPending Handoffは、同じWorkflow・slot schema・Iteration・Kickoff instructionの間はimmutableであり、再コピーや接続状態の更新では置換しない。Workflow、Project / Chat、Kickoff instructionなどの制作Contextが明示的に変更されて再送する場合だけ、新しいsnapshotとIDを発行する。Responseは一時的なUI状態ではなくこのsnapshotと照合し、`handoff_id` 不一致をstale responseとして明示的に拒否する。`session_id` と現在のSession-bound Workflowも一致しなければならない。
 
 ## 検証順序
 

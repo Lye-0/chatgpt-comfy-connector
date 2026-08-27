@@ -377,6 +377,17 @@ public sealed class PendingHandoffSnapshot
     public string BoundaryId { get; set; } = Guid.NewGuid().ToString("N");
     public List<string> AllowedActions { get; set; } = [];
     public string WorkflowIdentity { get; set; } = string.Empty;
+    public string ContextProviderId { get; set; } = string.Empty;
+    public string ProjectContextKey { get; set; } = string.Empty;
+    public string ChatContextKey { get; set; } = string.Empty;
+    public string ProjectLabel { get; set; } = string.Empty;
+    public string ChatLabel { get; set; } = string.Empty;
+    /// <summary>
+    /// The kickoff text captured when this Handoff was issued. A nullable
+    /// value keeps snapshots written before this field existed compatible;
+    /// an empty string is a deliberate blank kickoff.
+    /// </summary>
+    public string? KickoffInstruction { get; set; }
     public List<HandoffSlotSnapshot> Slots { get; set; } = [];
     public int Iteration { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;

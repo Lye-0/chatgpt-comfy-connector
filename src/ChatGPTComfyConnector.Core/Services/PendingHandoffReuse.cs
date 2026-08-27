@@ -1,0 +1,98 @@
+using System.Text.Json.Nodes;
+using ChatGPTComfyConnector.Core.Models;
+
+namespace ChatGPTComfyConnector.Core.Services;
+
+/// <summary>
+/// Compatibility and identity checks for an issued Pending Handoff.
+///
+/// A Pending Handoff is an immutable snapshot. These helpers decide whether
+/// the current editor still describes that snapshot; they never mutate it or
+/// generate a replacement ID.
+/// </summary>
+public static class PendingHandoffReuse
+{
+    public static string NormalizeKickoffInstruction(string? value)
+        => (value ?? string.Empty).Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+
+    public static string GetKickoffInstruction(PendingHandoffSnapshot pending, CreationSession session)
+        => pending.KickoffInstruction ?? session.OriginalIdea;
+
+    public static bool MatchesBootstrap(
+        CreationSession session,
+        PendingHandoffSnapshot? pending,
+        IEnumerable<WorkflowSlot> slots,
+        string? kickoffInstruction)
+    {
+        if (pending is null || !IsBootstrap(pending)) return false;
+        if (!string.Equals(pending.SessionId, session.Id, StringComparison.Ordinal)
+            || !string.Equals(pending.WorkflowIdentity, session.BoundWorkflow?.RelativePath ?? string.Empty, StringComparison.OrdinalIgnoreCase)
+            || !MatchesPersistedValue(pending.ContextProviderId, session.EffectiveContextProviderId)
+            || !MatchesPersistedValue(pending.ProjectContextKey, session.EffectiveProjectContextKey)
+            || !MatchesPersistedValue(pending.ChatContextKey, session.EffectiveChatContextKey)
+            || !MatchesPersistedValue(pending.ProjectLabel, session.ProjectLabel)
+            || !MatchesPersistedValue(pending.ChatLabel, session.ChatLabel)
+            || pending.Iteration != session.CurrentIteration)
+        {
+            return false;
+        }
+
+        var issuedKickoff = GetKickoffInstruction(pending, session);
+        if (!string.Equals(
+                NormalizeKickoffInstruction(issuedKickoff),
+                NormalizeKickoffInstruction(kickoffInstruction),
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var current = slots.Select(ChatGptSlotPolicy.CreateSnapshot).ToArray();
+        return pending.Slots.Count == current.Length
+            && pending.Slots.Zip(current).All(pair => SnapshotsEqual(pair.First, pair.Second));
+    }
+
+    public static bool IsBootstrap(PendingHandoffSnapshot? pending)
+        => pending is not null
+            && pending.AllowedActions.Count == 1
+            && pending.AllowedActions.Contains("generate", StringComparer.Ordinal);
+
+    /// <summary>
+    /// Confirms that a generated Bootstrap payload belongs to the currently
+    /// pending snapshot. The fields are emitted as exact standalone lines by
+    /// ConnectorContextBuilder, so a copied payload cannot be accidentally
+    /// associated with a different snapshot.
+    /// </summary>
+    public static bool MatchesPayload(PendingHandoffSnapshot pending, string? payload)
+    {
+        if (string.IsNullOrWhiteSpace(payload)) return false;
+        return HasField(payload, "handoff_id", pending.HandoffId)
+            && HasField(payload, "session_id", pending.SessionId)
+            && HasField(payload, "boundary_id", pending.BoundaryId);
+    }
+
+    private static bool HasField(string payload, string name, string value)
+        => payload.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Any(line => string.Equals(line.Trim(), $"{name}: {value}", StringComparison.Ordinal));
+
+    private static bool SnapshotsEqual(HandoffSlotSnapshot left, HandoffSlotSnapshot right)
+        => string.Equals(left.Address, right.Address, StringComparison.Ordinal)
+            && string.Equals(left.Label, right.Label, StringComparison.Ordinal)
+            && string.Equals(left.Type, right.Type, StringComparison.Ordinal)
+            && JsonEqual(left.CurrentValue, right.CurrentValue)
+            && JsonEqual(left.Choices, right.Choices)
+            && left.Minimum == right.Minimum
+            && left.Maximum == right.Maximum
+            && left.Transport == right.Transport
+            && left.Exposure == right.Exposure
+            && string.Equals(left.PolicyReason, right.PolicyReason, StringComparison.Ordinal);
+
+    private static bool JsonEqual(JsonNode? left, JsonNode? right)
+        => string.Equals(left?.ToJsonString() ?? string.Empty, right?.ToJsonString() ?? string.Empty, StringComparison.Ordinal);
+
+    private static bool MatchesPersistedValue(string? issued, string? current)
+        // Empty values are absent in snapshots written before the context
+        // identity fields were added; retain backward compatibility for those
+        // records while enforcing exact matches for newly issued snapshots.
+        => string.IsNullOrWhiteSpace(issued)
+            || string.Equals(issued, current ?? string.Empty, StringComparison.Ordinal);
+}

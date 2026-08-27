@@ -139,12 +139,20 @@ Handoff, the user pastes it into the selected ChatGPT conversation, and ChatGPT'
 contains exactly one small `connector-command` JSON block and zero or more referenced
 raw `COMFY_PAYLOAD` blocks. Connector-generated `handoff_id`, `session_id`, and
 `boundary_id` bind the response to a persisted Pending Handoff snapshot containing
-AllowedActions, Workflow identity, Iteration, and the MCP-discovered slot schema plus
-its ChatGPT exposure policy.
+AllowedActions, Workflow identity, Project / Chat provider and context keys,
+Iteration, kickoff instruction, and the MCP-discovered slot schema plus its
+ChatGPT exposure policy.
 The Handoff uses the existing ChatGPT conversation as context when available;
 the optional kickoff instruction is prioritized as an additional instruction, and
 Workflow / slot schema data remains sufficient for a new Chat with no history.
 Validation therefore does not trust stale clipboard text or transient UI state.
+
+Once a Bootstrap Handoff is issued, its Pending Handoff identity and captured
+source remain immutable while the Workflow, slot schema, Iteration, and kickoff
+instruction are unchanged. Re-copying or connection/status refreshes never
+rotate that identity. A new Pending Handoff is created only for the first send
+or an explicit re-send after the production Context changes; a response is
+accepted only against the snapshot that issued it.
 
 Free-form string slots use payload references; numeric, boolean, and choice values
 remain direct JSON, but transport capability does not imply ChatGPT writability.

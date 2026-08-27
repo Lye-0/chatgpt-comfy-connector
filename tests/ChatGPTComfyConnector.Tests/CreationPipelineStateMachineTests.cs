@@ -85,6 +85,162 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
+    public void WaitingHandoffSurvivesConnectionRefreshesAndKeepsItsIdentity()
+    {
+        var session = SentIdeaSession();
+        session.PendingHandoff = new PendingHandoffSnapshot
+        {
+            HandoffId = "handoff-stable",
+            BoundaryId = "boundary-stable",
+            SessionId = session.Id,
+            WorkflowIdentity = session.BoundWorkflow!.RelativePath,
+            KickoffInstruction = session.OriginalIdea,
+            AllowedActions = ["generate"],
+        };
+        var originalHandoffId = session.PendingHandoff.HandoffId;
+        var originalBoundaryId = session.PendingHandoff.BoundaryId;
+
+        foreach (var connection in new[]
+                 {
+                     ConnectionState.Connected,
+                     ConnectionState.Connecting,
+                     ConnectionState.Disconnected,
+                     ConnectionState.Error,
+                     ConnectionState.Connected,
+                 })
+        {
+            CreationPipelineStateMachine.SynchronizeConnectionGate(session, connection);
+            AssertStage(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser);
+            Assert.Equal(originalHandoffId, session.PendingHandoff.HandoffId);
+            Assert.Equal(originalBoundaryId, session.PendingHandoff.BoundaryId);
+        }
+    }
+
+    [Fact]
+    public void IdeaChangedIgnoresLineEndingOnlyUpdateButInvalidatesARealEdit()
+    {
+        var session = BoundSession(3);
+        session.OriginalIdea = "line one\nline two";
+        CreationPipelineStateMachine.BootstrapCopied(session, session.OriginalIdea);
+
+        CreationPipelineStateMachine.IdeaChanged(session, "line one\r\nline two");
+        AssertStage(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser);
+        Assert.Equal("line one\nline two", session.Pipeline.SentIdeaSnapshot);
+
+        CreationPipelineStateMachine.IdeaChanged(session, "line one\r\nchanged");
+        AssertStage(session, CreationStage.Idea, CreationStageState.Current);
+        AssertStage(session, CreationStage.ToChatGpt, CreationStageState.NotReached);
+        Assert.Null(session.PendingHandoff);
+    }
+
+    [Fact]
+    public void ConfirmedBootstrapWaitingStateIsRestoredFromItsPendingSnapshot()
+    {
+        var session = SentIdeaSession();
+        session.PendingHandoff = PendingHandoffFactory.Create(session, [], "generate");
+        var handoff = CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt);
+        handoff.State = CreationStageState.NotReached;
+        handoff.WaitingReason = CreationWaitingReason.None;
+
+        CreationPipelineStateMachine.EnsureInitialized(session);
+
+        AssertStage(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser);
+        Assert.Equal(CreationWaitingReason.ChatGptResponseRequired, handoff.WaitingReason);
+    }
+
+    [Fact]
+    public void BootstrapSnapshotCompatibilityReusesIdentityOnlyForTheSameSource()
+    {
+        var session = BoundSession(3);
+        session.OriginalIdea = "night drive\nwith rain";
+        var slots = new[]
+        {
+            new WorkflowSlot
+            {
+                Address = "6.prompt", Label = "Prompt", Type = "STRING",
+                CurrentValue = JsonValue.Create("night drive"),
+            },
+        };
+        var pending = PendingHandoffFactory.Create(session, slots, "generate");
+        var handoffId = pending.HandoffId;
+
+        Assert.True(PendingHandoffReuse.MatchesBootstrap(session, pending, slots, "night drive\r\nwith rain"));
+        Assert.Equal(handoffId, pending.HandoffId);
+
+        session.ChatLabel = "Another Chat";
+        Assert.False(PendingHandoffReuse.MatchesBootstrap(session, pending, slots, session.OriginalIdea));
+        session.ChatLabel = "Chat";
+        slots[0].CurrentValue = JsonValue.Create("changed");
+        Assert.False(PendingHandoffReuse.MatchesBootstrap(session, pending, slots, session.OriginalIdea));
+        Assert.Equal(handoffId, pending.HandoffId);
+    }
+
+    [Fact]
+    public void BootstrapPayloadIdentityMustMatchTheIssuedSnapshot()
+    {
+        var pending = new PendingHandoffSnapshot
+        {
+            HandoffId = "handoff-1",
+            SessionId = "session-1",
+            BoundaryId = "boundary-1",
+        };
+        var payload = "handoff_id: handoff-1\nsession_id: session-1\nboundary_id: boundary-1";
+
+        Assert.True(PendingHandoffReuse.MatchesPayload(pending, payload));
+        Assert.False(PendingHandoffReuse.MatchesPayload(pending, payload.Replace("boundary-1", "boundary-old", StringComparison.Ordinal)));
+        Assert.False(PendingHandoffReuse.MatchesPayload(pending, payload.Replace("handoff-1", "handoff-old", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void EditingKickoffAfterPrepareInvalidatesTheUnconfirmedSnapshot()
+    {
+        var session = BoundSession(3);
+        session.OriginalIdea = "first";
+        session.PendingHandoff = PendingHandoffFactory.Create(session, [], "generate");
+
+        CreationPipelineStateMachine.IdeaChanged(session, "second");
+
+        Assert.Null(session.PendingHandoff);
+        AssertStage(session, CreationStage.Idea, CreationStageState.Current);
+        AssertStage(session, CreationStage.ToChatGpt, CreationStageState.NotReached);
+    }
+
+    [Fact]
+    public void InvalidCommandKeepsWaitingForTheSameChatGptResponse()
+    {
+        var session = SentIdeaSession();
+        session.PendingHandoff = PendingHandoffFactory.Create(session, [], "generate");
+        var handoffId = session.PendingHandoff.HandoffId;
+        var boundaryId = session.PendingHandoff.BoundaryId;
+
+        CreationPipelineStateMachine.BeginCommandValidation(session);
+        CreationPipelineStateMachine.CommandValidationFailed(session, "以前のHandoffへの返信です");
+
+        AssertStage(session, CreationStage.Command, CreationStageState.Error);
+        AssertStage(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser);
+        Assert.Equal(CreationWaitingReason.ChatGptResponseRequired, CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).WaitingReason);
+        Assert.Equal(handoffId, session.PendingHandoff.HandoffId);
+        Assert.Equal(boundaryId, session.PendingHandoff.BoundaryId);
+    }
+
+    [Fact]
+    public void ExplicitContextRebindStalesThePreviousPendingHandoff()
+    {
+        var session = SentIdeaSession();
+        session.PendingHandoff = PendingHandoffFactory.Create(session, [], "generate");
+        session.LocalChatContextId = "chat-2";
+        session.ChatLabel = "Chat 2";
+
+        CreationPipelineStateMachine.BindContext(session);
+
+        Assert.Null(session.PendingHandoff);
+        Assert.Null(session.Pipeline.SentIdeaSnapshot);
+        AssertStage(session, CreationStage.Context, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Idea, CreationStageState.Current);
+        AssertStage(session, CreationStage.ToChatGpt, CreationStageState.NotReached);
+    }
+
+    [Fact]
     public void ContextCanBindWhenOnlyMcpIsReady()
     {
         var session = ConfiguredSession(2);

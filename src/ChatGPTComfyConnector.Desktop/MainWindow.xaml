@@ -483,7 +483,7 @@
                         CornerRadius="11"
                         Padding="11">
                     <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <StackPanel Orientation="Horizontal">
@@ -520,7 +520,13 @@
                                 </ToolTip>
                             </ToolTipService.ToolTip>
                         </TextBlock>
-                        <Grid Grid.Row="3" Margin="0,6,0,0">
+                        <TextBlock Grid.Row="3"
+                                   Text="{Binding TransportFailureText}"
+                                   Foreground="#FF6B8A"
+                                   FontSize="8"
+                                   Margin="0,5,0,0"
+                                   TextWrapping="Wrap" />
+                        <Grid Grid.Row="4" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <TextBlock Text="{Binding MetadataText}"
                                        Foreground="{StaticResource MutedTextBrush}"
@@ -1121,7 +1127,7 @@
                                            Margin="0,5,0,0" />
                             </StackPanel>
                             <Button Grid.Column="1"
-                                    Content="SEND TO CHATGPT"
+                                    Content="{Binding SendToChatGptButtonText}"
                                     Click="CopyBootstrap_Click"
                                     IsEnabled="{Binding CanSendToChatGpt}"
                                     ToolTip="{Binding SendToChatGptHint}"
@@ -1575,7 +1581,7 @@
                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{Binding HasHandoffItems, Converter={StaticResource InverseBoolToVisibility}}">
                             <Ellipse Width="36" Height="36" Fill="#102436" Stroke="{StaticResource LineStrongBrush}" StrokeThickness="1" />
                             <TextBlock Text="まだHandoffはありません" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,10,0,0" />
-                            <TextBlock Text="中央のSEND TO CHATGPTから制作コンテキストをコピーすると、ここに記録されます。" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap" Width="270" Margin="0,5,0,0" />
+                            <TextBlock Text="中央のSEND TO CHATGPTから制作コンテキストを送信すると、ここに記録されます。" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap" Width="270" Margin="0,5,0,0" />
                         </StackPanel>
                     </Grid>
 

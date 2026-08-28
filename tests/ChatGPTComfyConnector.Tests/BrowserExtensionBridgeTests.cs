@@ -27,8 +27,10 @@ public sealed class BrowserExtensionBridgeTests
         Assert.Equal("background.js", root.GetProperty("background").GetProperty("service_worker").GetString());
         Assert.Equal("popup.html", root.GetProperty("action").GetProperty("default_popup").GetString());
         Assert.Contains("http://127.0.0.1:43127/*", root.GetProperty("host_permissions").EnumerateArray().Select(value => value.GetString()));
+        Assert.Contains("https://chatgpt.com/*", root.GetProperty("host_permissions").EnumerateArray().Select(value => value.GetString()));
         Assert.Contains(root.GetProperty("permissions").EnumerateArray().Select(value => value.GetString()), value => value == "alarms");
         Assert.Contains(root.GetProperty("permissions").EnumerateArray().Select(value => value.GetString()), value => value == "storage");
+        Assert.Contains(root.GetProperty("permissions").EnumerateArray().Select(value => value.GetString()), value => value == "scripting");
     }
 
     [Fact]
@@ -49,6 +51,8 @@ public sealed class BrowserExtensionBridgeTests
         Assert.Contains("X-Connector-Client", source, StringComparison.Ordinal);
         Assert.Contains("status: connectionFailureState(error)", source, StringComparison.Ordinal);
         Assert.Contains("desktop_unavailable", source, StringComparison.Ordinal);
+        Assert.Contains("function diagnostic", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sessionToken", source[source.IndexOf("function diagnostic", StringComparison.Ordinal)..source.IndexOf("async function setState", StringComparison.Ordinal)], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -204,6 +208,8 @@ public sealed class BrowserExtensionBridgeTests
     {
         var store = new InMemoryPairingStore();
         await using var bridge = new BrowserExtensionBridge(0, store);
+        var diagnostics = new List<BrowserExtensionBridgeDiagnostic>();
+        bridge.Diagnostic += (_, args) => diagnostics.Add(args.Diagnostic);
         await bridge.StartAsync();
         using var client = CreateHttpClient();
         var pairingCredential = await PairAsync(client, bridge);
@@ -230,6 +236,60 @@ public sealed class BrowserExtensionBridgeTests
         Assert.True(eventMessage.RootElement.GetProperty("data").GetProperty("ok").GetBoolean());
         Assert.Equal(BrowserExtensionConnectionState.Connected, bridge.Status.ConnectionState);
 
+        var handoff = new BrowserExtensionHandoffSendRequest(
+            "request-01",
+            "session-01",
+            "handoff-01",
+            "boundary-01",
+            "## ChatGPT Comfy Connector\nhandoff_id: handoff-01\nsession_id: session-01\nboundary_id: boundary-01");
+        var handoffTask = bridge.SendHandoffAsync(handoff, timeout.Token);
+        using var handoffMessage = await ReceiveJsonAsync(socket, timeout.Token);
+        Assert.Equal("handoff.send", handoffMessage.RootElement.GetProperty("type").GetString());
+        Assert.Equal(handoff.RequestId, handoffMessage.RootElement.GetProperty("request_id").GetString());
+        Assert.Equal(handoff.SessionId, handoffMessage.RootElement.GetProperty("session_id").GetString());
+        Assert.Equal(handoff.HandoffId, handoffMessage.RootElement.GetProperty("handoff_id").GetString());
+        Assert.Equal(handoff.BoundaryId, handoffMessage.RootElement.GetProperty("boundary_id").GetString());
+        Assert.Equal(handoff.Payload, handoffMessage.RootElement.GetProperty("payload").GetString());
+
+        await SendTextAsync(socket, JsonSerializer.Serialize(new
+        {
+            type = "handoff.result",
+            request_id = handoff.RequestId,
+            handoff_id = handoff.HandoffId,
+            status = "sent",
+        }), timeout.Token);
+        var handoffResult = await handoffTask;
+        Assert.True(handoffResult.IsSent);
+        Assert.Equal(handoff.RequestId, handoffResult.RequestId);
+        Assert.Equal(handoff.HandoffId, handoffResult.HandoffId);
+        Assert.Contains(diagnostics, item => item.EventName == "bridge connected");
+        Assert.Contains(diagnostics, item => item.EventName == "handoff.send requested" && item.RequestId == handoff.RequestId && item.HandoffId == handoff.HandoffId);
+        Assert.Contains(diagnostics, item => item.EventName == "websocket send" && item.RequestId == handoff.RequestId && item.HandoffId == handoff.HandoffId);
+        Assert.Contains(diagnostics, item => item.EventName == "result status" && item.RequestId == handoff.RequestId && item.Status == "sent");
+
+        var failedHandoff = handoff with { RequestId = "request-02", HandoffId = "handoff-02" };
+        var failedTask = bridge.SendHandoffAsync(failedHandoff, timeout.Token);
+        using var failedMessage = await ReceiveJsonAsync(socket, timeout.Token);
+        await SendTextAsync(socket, JsonSerializer.Serialize(new
+        {
+            type = "handoff.result",
+            request_id = failedHandoff.RequestId,
+            handoff_id = failedHandoff.HandoffId,
+            status = "error",
+            error_code = BrowserExtensionHandoffErrorCodes.ComposerNotFound,
+            stage = "composer_not_found",
+            message = "ChatGPTの入力欄が見つかりません。",
+        }), timeout.Token);
+        var failedResult = await failedTask;
+        Assert.False(failedResult.IsSent);
+        Assert.Equal(BrowserExtensionHandoffErrorCodes.ComposerNotFound, failedResult.ErrorCode);
+        Assert.Equal("composer_not_found", failedResult.Stage);
+        Assert.Contains(diagnostics, item => item.EventName == "result status"
+            && item.RequestId == failedHandoff.RequestId
+            && item.Status == "error"
+            && item.ErrorCode == BrowserExtensionHandoffErrorCodes.ComposerNotFound
+            && item.Stage == "composer_not_found");
+
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test complete", timeout.Token);
         Assert.True(await WaitForStatusAsync(bridge, BrowserExtensionConnectionState.Disconnected, timeout.Token));
 
@@ -247,6 +307,151 @@ public sealed class BrowserExtensionBridgeTests
         using var restartedReady = await ReceiveJsonAsync(restartedSocket, timeout.Token);
         Assert.Equal("desktop.ready", restartedReady.RootElement.GetProperty("event").GetString());
         await restartedSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test complete", timeout.Token);
+    }
+
+    [Fact]
+    public async Task HandoffSendFailsWithoutConnectedExtensionAndWhenSocketCloses()
+    {
+        await using var bridge = new BrowserExtensionBridge(0);
+        await bridge.StartAsync();
+
+        var disconnected = await bridge.SendHandoffAsync(new BrowserExtensionHandoffSendRequest(
+            "request-disconnected",
+            "session-01",
+            "handoff-01",
+            "boundary-01",
+            "payload"));
+        Assert.False(disconnected.IsSent);
+        Assert.Equal(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, disconnected.ErrorCode);
+
+        using var client = CreateHttpClient();
+        var credential = await PairAsync(client, bridge);
+        var sessionToken = await BootstrapAsync(client, bridge, credential);
+        using var socket = await ConnectSocketAsync(bridge, sessionToken);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var hello = await ReceiveJsonAsync(socket, timeout.Token);
+        using var ready = await ReceiveJsonAsync(socket, timeout.Token);
+
+        var handoffTask = bridge.SendHandoffAsync(new BrowserExtensionHandoffSendRequest(
+            "request-close",
+            "session-01",
+            "handoff-close",
+            "boundary-01",
+            "payload"), timeout.Token);
+        using var request = await ReceiveJsonAsync(socket, timeout.Token);
+        Assert.Equal("handoff.send", request.RootElement.GetProperty("type").GetString());
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test disconnect", timeout.Token);
+
+        var result = await handoffTask;
+        Assert.False(result.IsSent);
+        Assert.Equal(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, result.ErrorCode);
+    }
+
+    [Fact]
+    public void ExtensionContainsThePhase2HandoffRoutingAndDomBoundaries()
+    {
+        var extensionRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "browser-extension"));
+        var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(extensionRoot, "manifest.json"))).RootElement;
+        Assert.Contains("tabs", manifest.GetProperty("permissions").EnumerateArray().Select(value => value.GetString()));
+        var matches = manifest.GetProperty("content_scripts")[0].GetProperty("matches").EnumerateArray().Select(value => value.GetString()).ToArray();
+        Assert.True(matches.Length == 1 && matches[0] == "https://chatgpt.com/*");
+        Assert.Equal("chatgpt-locators.js", manifest.GetProperty("content_scripts")[0].GetProperty("js")[0].GetString());
+
+        var background = File.ReadAllText(Path.Combine(extensionRoot, "background.js"));
+        Assert.Contains("message.type === \"handoff.send\"", background, StringComparison.Ordinal);
+        Assert.Contains("chrome.tabs.query({ active: true, lastFocusedWindow: true })", background, StringComparison.Ordinal);
+        Assert.Contains("chrome.tabs.sendMessage(tabId", background, StringComparison.Ordinal);
+        Assert.Contains("type: \"handoff.result\"", background, StringComparison.Ordinal);
+        Assert.Contains("background received", background, StringComparison.Ordinal);
+        Assert.Contains("content script dispatched", background, StringComparison.Ordinal);
+        Assert.Contains("result status", background, StringComparison.Ordinal);
+        Assert.Contains("chrome.scripting.executeScript", background, StringComparison.Ordinal);
+        Assert.Contains("CONTENT_SCRIPT_TIMEOUT_MS", background, StringComparison.Ordinal);
+        Assert.DoesNotContain("document.querySelector", background, StringComparison.Ordinal);
+
+        var content = File.ReadAllText(Path.Combine(extensionRoot, "content-script.js"));
+        var locators = File.ReadAllText(Path.Combine(extensionRoot, "chatgpt-locators.js"));
+        Assert.Contains("HANDOFF_SEND", content, StringComparison.Ordinal);
+        Assert.Contains("beforeinput", content, StringComparison.Ordinal);
+        Assert.Contains("InputEvent", content, StringComparison.Ordinal);
+        Assert.Contains("execCommand(\"insertText\"", content, StringComparison.Ordinal);
+        Assert.Contains("tryPasteContentEditableValue", content, StringComparison.Ordinal);
+        Assert.Contains("ClipboardEvent", content, StringComparison.Ordinal);
+        Assert.Contains("content script received", content, StringComparison.Ordinal);
+        Assert.Contains("content script result", content, StringComparison.Ordinal);
+        Assert.Contains("captureUserMessageSnapshot", content, StringComparison.Ordinal);
+        Assert.Contains("hasNewUserMessageWithCorrelation", content, StringComparison.Ordinal);
+        Assert.Contains("composer_found", content, StringComparison.Ordinal);
+        Assert.Contains("input_attempted", content, StringComparison.Ordinal);
+        Assert.Contains("input_visible", content, StringComparison.Ordinal);
+        Assert.Contains("send_button_enabled", content, StringComparison.Ordinal);
+        Assert.Contains("send_button_not_enabled", content, StringComparison.Ordinal);
+        Assert.Contains("user_message_observed", content, StringComparison.Ordinal);
+        Assert.Contains("user_message_correlated", content, StringComparison.Ordinal);
+        Assert.DoesNotContain("element.textContent = payload", content, StringComparison.Ordinal);
+        Assert.Contains("send button clicked", content, StringComparison.Ordinal);
+        Assert.Contains("user message confirmed", content, StringComparison.Ordinal);
+        Assert.DoesNotContain("waitForSendAccepted", content, StringComparison.Ordinal);
+        Assert.DoesNotContain("127.0.0.1", content, StringComparison.Ordinal);
+        Assert.DoesNotContain("new WebSocket", content, StringComparison.Ordinal);
+        Assert.Contains("findComposer", locators, StringComparison.Ordinal);
+        Assert.Contains("findSendButton", locators, StringComparison.Ordinal);
+        Assert.Contains("belongsToComposerScope", locators, StringComparison.Ordinal);
+        Assert.Contains("excludedActionPattern", locators, StringComparison.Ordinal);
+        Assert.Contains("attachment", locators, StringComparison.Ordinal);
+        Assert.Contains("plus", locators, StringComparison.Ordinal);
+        Assert.Contains("findUserMessages", locators, StringComparison.Ordinal);
+        Assert.Contains("findNewUserMessages", locators, StringComparison.Ordinal);
+        Assert.Contains("messageContainsMarker", locators, StringComparison.Ordinal);
+        Assert.Contains("contenteditable", locators, StringComparison.Ordinal);
+        Assert.Contains("aria-label", locators, StringComparison.Ordinal);
+        Assert.Contains("data-testid", locators, StringComparison.Ordinal);
+
+        var timeline = File.ReadAllText(Path.Combine(extensionRoot, "..", "src", "ChatGPTComfyConnector.Desktop", "MainWindow.xaml"));
+        Assert.Contains("TransportFailureText", timeline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DesktopSendPathUsesBridgeResultBeforeClipboardFallback()
+    {
+        var desktopSourcePath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "ChatGPTComfyConnector.Desktop", "MainWindow.xaml.cs");
+        var source = File.ReadAllText(Path.GetFullPath(desktopSourcePath));
+        var prepareCall = source.IndexOf("PrepareBootstrapHandoffForSendAsync()", StringComparison.Ordinal);
+        var sendCall = source.IndexOf("TrySendPreparedBootstrapHandoffAsync(payload)", StringComparison.Ordinal);
+        var clipboardCall = source.IndexOf("Clipboard.SetText(payload)", StringComparison.Ordinal);
+
+        Assert.True(prepareCall >= 0);
+        Assert.True(sendCall >= 0);
+        Assert.True(clipboardCall > sendCall);
+        Assert.Contains("if (result.IsSent)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (ViewModel.IsBrowserExtensionConnected)", source, StringComparison.Ordinal);
+
+        var viewModelPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "ChatGPTComfyConnector.Desktop", "ViewModels", "MainViewModel.cs");
+        var viewModel = File.ReadAllText(Path.GetFullPath(viewModelPath));
+        Assert.Contains("CanResendBootstrapHandoff", viewModel, StringComparison.Ordinal);
+        Assert.Contains("TryGetResendableBootstrapPayload", viewModel, StringComparison.Ordinal);
+        Assert.Contains("EnsureBootstrapResendAllowed", viewModel, StringComparison.Ordinal);
+
+        var xamlPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "ChatGPTComfyConnector.Desktop", "MainWindow.xaml");
+        var xaml = File.ReadAllText(Path.GetFullPath(xamlPath));
+        Assert.Contains("Content=\"{Binding SendToChatGptButtonText}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("IsEnabled=\"{Binding CanSendToChatGpt}\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BrowserExtensionReconnectDoesNotTriggerAnImplicitHandoffRetry()
+    {
+        var viewModelPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "ChatGPTComfyConnector.Desktop", "ViewModels", "MainViewModel.cs");
+        var source = File.ReadAllText(Path.GetFullPath(viewModelPath));
+        var handlerStart = source.IndexOf("private void BrowserExtensionBridge_StatusChanged", StringComparison.Ordinal);
+        var handlerEnd = source.IndexOf("private void BrowserExtensionBridge_Diagnostic", handlerStart, StringComparison.Ordinal);
+
+        Assert.True(handlerStart >= 0);
+        Assert.True(handlerEnd > handlerStart);
+        var handler = source[handlerStart..handlerEnd];
+        Assert.DoesNotContain("PrepareBootstrapHandoffForSendAsync", handler, StringComparison.Ordinal);
+        Assert.DoesNotContain("SendPreparedBootstrapHandoffAsync", handler, StringComparison.Ordinal);
+        Assert.Contains("CanResendBootstrapHandoff", handler, StringComparison.Ordinal);
     }
 
     [Fact]

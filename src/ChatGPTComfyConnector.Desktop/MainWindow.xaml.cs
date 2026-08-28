@@ -190,7 +190,26 @@ public partial class MainWindow : Window
     {
         await Run("ChatGPTへ送信", async () =>
         {
-            var payload = await ViewModel.PrepareBootstrapHandoffAsync();
+            var payload = await ViewModel.PrepareBootstrapHandoffForSendAsync();
+            var result = await ViewModel.TrySendPreparedBootstrapHandoffAsync(payload);
+            if (result is not null)
+            {
+                if (result.IsSent)
+                {
+                    ViewModel.StatusMessage = "制作コンテキストをChatGPTへ送信しました。ChatGPTの返答を待っています。";
+                    return;
+                }
+
+                // Keep the exact prepared payload and PendingHandoff when the
+                // automatic route fails. The same SEND button can retry that
+                // saved payload, while the timeline copy action remains the
+                // explicit Clipboard fallback; neither path issues a new ID.
+                var failureCode = result.ErrorCode ?? "send_failed";
+                var failureStage = string.IsNullOrWhiteSpace(result.Stage) ? string.Empty : $", stage={result.Stage}";
+                ViewModel.StatusMessage = $"自動送信に失敗しました。同じHandoffを再送するか、TimelineのコピーでClipboard fallbackを使用できます。({failureCode}{failureStage})";
+                return;
+            }
+
             Clipboard.SetText(payload);
             await ViewModel.ConfirmBootstrapCopiedAsync(payload);
             ViewModel.StatusMessage = "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。";

@@ -154,6 +154,7 @@ public enum CreationWaitingReason
     ComfyUiStartRequired,
     ReconnectRequired,
     ConnectionCheckRequired,
+    ChatGptPasteRequired,
     ChatGptResponseRequired,
     ReviewResponseRequired,
     ContinueDecisionRequired,
@@ -553,6 +554,11 @@ public sealed class HandoffMessage
     // Summary is retained for sessions written before the content-first card model.
     public string Summary { get; set; } = string.Empty;
     public string Payload { get; set; } = string.Empty;
+    // Transport diagnostics are intentionally limited to safe identifiers.
+    // They let a FAILED card explain which Bridge/Content Script stage failed
+    // without persisting the credential or duplicating the Handoff body.
+    public string? TransportErrorCode { get; set; }
+    public string? TransportErrorStage { get; set; }
     public int? IterationNumber { get; set; }
 }
 

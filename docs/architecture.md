@@ -160,7 +160,7 @@ launch/probe configuration failures to `ERROR`, and `server_info` remains availa
 only for optional MCP-provided details such as GPU information. CONNECT never launches
 ComfyUI and only reflects MCP transport readiness.
 
-## Manual Handoff and timeline
+## Handoff transport and timeline
 
 v0.1 uses a manual clipboard transport: Connector creates a Bootstrap / Review
 Handoff, the user pastes it into the selected ChatGPT conversation, and ChatGPT's validated
@@ -201,9 +201,9 @@ Pending Handoffs are rejected as validation errors. Async discovery responses fr
 an older selection/reconnect generation are ignored rather than appended to the
 current collection.
 The detailed grammar and validation invariants are canonicalized in
-`docs/connector-protocol-v1.md`. Clipboard is only the current transport boundary;
-the Protocol and Pending Handoff models remain reusable by a future browser or
-external provider.
+`docs/connector-protocol-v1.md`. Clipboard and the authenticated Browser Extension
+Bridge are transport boundaries; the Protocol and Pending Handoff models remain
+reusable by either provider.
 
 The persisted
 `HandoffMessage` separates transport direction, message kind, display text, secondary
@@ -272,7 +272,8 @@ The app does not call ComfyUI management tools such as model download, node inst
 
 ## Browser Extension Bridge
 
-v0.2 Phase 1 adds a transport-only boundary for the Chromium Extension. The
+v0.2 Phase 1–2 adds a local transport boundary and a narrow ChatGPT Handoff
+delivery path for the Chromium Extension. The
 Core `IBrowserExtensionBridge` contract and shared state/message models are
 implemented by `Infrastructure/Bridge/BrowserExtensionBridge`. The server uses
 the built-in .NET `HttpListener` WebSocket upgrade and binds only to
@@ -289,13 +290,20 @@ lived pairing code; the Extension stores the resulting pairing credential in
 `config/browser-extension-pairing.json`. On every Desktop start, the saved
 credential bootstraps a new short-lived process session token, which is then
 used for the WebSocket hello. The Desktop sends `hello.ack` and one
-`desktop.ready` event; the Extension sends `ping` and receives `pong`.
-Unknown messages are rejected and there is no workflow, MCP, filesystem, or
-process command surface in this phase. CORS reflects only the accepted
-an explicit `chrome-extension://`, `extension://`, or `edge-extension://`
-Origin and never emits wildcard
-CORS. The Service Worker path also uses an explicit `X-Connector-Client`
-header so it does not depend on Origin being present on extension Fetch.
+`desktop.ready` event; the Extension sends `ping` and receives `pong`. Phase 2
+adds an authenticated `handoff.send` message carrying the exact Bootstrap
+Handoff text and a correlated `handoff.result` response. The Background checks
+only the active, last-focused `https://chatgpt.com/*` tab and relays the request
+to its Content Script; DOM discovery and mutation remain outside the
+Background. The Content Script uses separate textarea/contenteditable editor
+paths, waits for the Send control to become enabled, and confirms a new user
+message containing the current Handoff identifiers before returning `sent`.
+Unknown messages are rejected and there is no workflow, MCP,
+filesystem, or process command surface in this phase. CORS reflects only an
+explicit `chrome-extension://`, `extension://`, or `edge-extension://` Origin
+and never emits wildcard CORS. The Service Worker path also uses an explicit
+`X-Connector-Client` header so it does not depend on Origin being present on
+extension Fetch.
 
 `BROWSER EXTENSION / Desktop Bridge` is displayed as a separate card in the
 right Handoff pane. The existing `Connector → MCP → ComfyUI → GPU` indicators
@@ -321,7 +329,8 @@ Creative intensity is concentrated in the production surface: session idea, work
 - `src/ChatGPTComfyConnector.Infrastructure/Bridge/BrowserExtensionBridge.cs`,
   `src/ChatGPTComfyConnector.Infrastructure/Storage/PortableStore.cs`, and
   `docs/browser-extension-bridge.md` — local Extension transport,
-  pairing/bootstrap authentication, event envelope, persistence, and lifecycle.
+  pairing/bootstrap authentication, Handoff delivery envelope, persistence,
+  active-tab routing, and lifecycle.
 - `tests/ChatGPTComfyConnector.Tests/CreationPipelineStateMachineTests.cs`,
   `ProtocolTests.cs`, and `SessionAndStorageTests.cs` — state, protocol, provider,
   persistence, and compatibility behavior.

@@ -4,11 +4,13 @@ const BRIDGE_PAIR_URL = `${BRIDGE_HTTP_ORIGIN}/api/v1/pair`;
 const BRIDGE_BOOTSTRAP_URL = `${BRIDGE_HTTP_ORIGIN}/api/v1/bootstrap`;
 const BRIDGE_WS_URL = "ws://127.0.0.1:43127/bridge";
 const BRIDGE_PROTOCOL = "chatgpt-comfy-connector.bridge/1";
+const HANDOFF_PROTOCOL = "comfy-connector/1";
 const BRIDGE_CLIENT_HEADER = "X-Connector-Client";
 const BRIDGE_CLIENT_VALUE = "browser-extension";
 const RECONNECT_ALARM = "chatgpt-comfy-connector-reconnect";
 const RECONNECT_DELAY_MS = 5000;
 const PING_TIMEOUT_MS = 5000;
+const CONTENT_SCRIPT_TIMEOUT_MS = 15000;
 const PAIRING_STORAGE_KEY = "bridgePairing";
 
 const defaultState = {
@@ -67,6 +69,20 @@ function bridgeError(message, status = 0, code = "bridge_error") {
   error.status = status;
   error.code = code;
   return error;
+}
+
+// Diagnostics deliberately whitelist identifiers and outcome fields. Never
+// include the pairing credential, session token, or Handoff payload here.
+function diagnostic(eventName, fields = {}) {
+  const safe = {};
+  for (const key of ["request_id", "handoff_id", "status", "error_code", "stage"]) {
+    if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
+  }
+  try {
+    console.info(`[ChatGPT Comfy Connector] ${eventName}`, safe);
+  } catch (_) {
+    // Console access must never affect the Bridge transport.
+  }
 }
 
 async function setState(patch) {
@@ -187,7 +203,183 @@ function closePendingPings(error) {
   }
 }
 
-function handleBridgeMessage(message) {
+function isChatGptTab(tab) {
+  try {
+    const url = new URL(tab?.url || "");
+    return url.protocol === "https:" && url.hostname === "chatgpt.com";
+  } catch (_) {
+    return false;
+  }
+}
+
+function handoffResult(message, status, errorCode, text, stage) {
+  const result = {
+    type: "handoff.result",
+    request_id: message?.request_id || "",
+    handoff_id: message?.handoff_id || "",
+    status
+  };
+  if (errorCode) result.error_code = errorCode;
+  if (text) result.message = text;
+  if (stage) result.stage = stage;
+  return result;
+}
+
+function isMissingContentScriptError(error) {
+  const text = error instanceof Error ? error.message : String(error || "");
+  return text.includes("Receiving end does not exist")
+    || text.includes("Could not establish connection");
+}
+
+function sendMessageWithTimeout(tabId, message) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback(value);
+    };
+    const timeout = setTimeout(() => {
+      const timeoutError = bridgeError("ChatGPT Content Script did not respond.", 0, "send_failed");
+      timeoutError.stage = "content_script_timeout";
+      finish(reject, timeoutError);
+    }, CONTENT_SCRIPT_TIMEOUT_MS);
+
+    try {
+      Promise.resolve(chrome.tabs.sendMessage(tabId, message))
+        .then((value) => finish(resolve, value))
+        .catch((error) => finish(reject, error));
+    } catch (error) {
+      finish(reject, error);
+    }
+  });
+}
+
+async function dispatchToContentScript(tabId, message, trace) {
+  diagnostic("content script dispatched", {
+    request_id: trace?.request_id,
+    handoff_id: trace?.handoff_id
+  });
+  try {
+    return await sendMessageWithTimeout(tabId, message);
+  } catch (error) {
+    // A tab that was already open when the unpacked extension was reloaded
+    // may not have received manifest content scripts yet. Inject the same
+    // locator/DOM modules through the MV3 scripting API, then retry the
+    // message. The injected code is still content-script.js; the background
+    // does not inspect or mutate the ChatGPT DOM itself.
+    if (!isMissingContentScriptError(error) || !chrome.scripting?.executeScript) throw error;
+    diagnostic("content script injection requested", {
+      request_id: trace?.request_id,
+      handoff_id: trace?.handoff_id
+    });
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["chatgpt-locators.js", "content-script.js"]
+    });
+    diagnostic("content script injected", {
+      request_id: trace?.request_id,
+      handoff_id: trace?.handoff_id
+    });
+    return await sendMessageWithTimeout(tabId, message);
+  }
+}
+
+async function sendHandoffToActiveTab(message, bridgeSocket) {
+  let result;
+  try {
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const activeTab = tabs?.[0];
+    if (!activeTab || !isChatGptTab(activeTab)) {
+      result = handoffResult(message, "error", "active_tab_not_chatgpt", "アクティブなタブはChatGPTではありません。", "active_tab_check");
+    } else if (activeTab.id === undefined) {
+      result = handoffResult(message, "error", "content_script_unavailable", "アクティブなChatGPTタブを操作できません。", "tab_id_unavailable");
+    } else {
+      let contentResult;
+      try {
+        contentResult = await dispatchToContentScript(activeTab.id, {
+          type: "HANDOFF_SEND",
+          requestId: message.request_id,
+          sessionId: message.session_id,
+          handoffId: message.handoff_id,
+          boundaryId: message.boundary_id,
+          protocol: HANDOFF_PROTOCOL,
+          payload: message.payload
+        }, message);
+      } catch (error) {
+        const errorCode = error?.code === "send_failed" ? "send_failed" : "content_script_unavailable";
+        const stage = error?.stage || (errorCode === "send_failed" ? "content_script_timeout" : "content_script_dispatch");
+        diagnostic("content script dispatch failed", {
+          request_id: message.request_id,
+          handoff_id: message.handoff_id,
+          error_code: errorCode,
+          stage
+        });
+        result = handoffResult(
+          message,
+          "error",
+          errorCode,
+          errorCode === "send_failed"
+            ? "ChatGPTの送信結果を確認できませんでした。"
+            : "ChatGPTのContent Scriptへ接続できません。",
+          stage);
+      }
+
+      if (!result) {
+        if (!contentResult || contentResult.request_id !== message.request_id || contentResult.handoff_id !== message.handoff_id) {
+          result = handoffResult(message, "error", "content_script_unavailable", "Content Scriptから有効な送信結果を受け取れませんでした。", "content_result_invalid");
+        } else if (contentResult.status === "sent") {
+          result = handoffResult(message, "sent", null, null, contentResult.stage);
+        } else if (contentResult.status === "error") {
+          result = handoffResult(
+            message,
+            "error",
+            contentResult.error_code || "send_failed",
+            contentResult.message || "ChatGPTへの送信に失敗しました。",
+            contentResult.stage);
+        } else {
+          result = handoffResult(message, "error", "send_failed", "Content Scriptの送信結果が不正です。", "content_result_invalid");
+        }
+      }
+    }
+  } catch (_) {
+    result = handoffResult(message, "error", "content_script_unavailable", "アクティブなChatGPTタブを確認できませんでした。", "active_tab_check");
+  }
+
+  diagnostic("result status", {
+    request_id: result.request_id,
+    handoff_id: result.handoff_id,
+    status: result.status,
+    error_code: result.error_code,
+    stage: result.stage
+  });
+  if (bridgeSocket.readyState !== WebSocket.OPEN || socket !== bridgeSocket) {
+    diagnostic("handoff.result dropped", {
+      request_id: result.request_id,
+      handoff_id: result.handoff_id,
+      status: result.status,
+      error_code: result.error_code || "bridge_disconnected",
+      stage: result.stage || "bridge_disconnected"
+    });
+    return;
+  }
+  try {
+    bridgeSocket.send(JSON.stringify(result));
+    diagnostic("handoff.result sent", {
+      request_id: result.request_id,
+      handoff_id: result.handoff_id,
+      status: result.status,
+      error_code: result.error_code,
+      stage: result.stage
+    });
+  } catch (_) {
+    // The Desktop side reports bridge_disconnected when the response cannot
+    // be delivered. Do not expose the Handoff body in extension logs.
+  }
+}
+
+function handleBridgeMessage(message, bridgeSocket) {
   if (!message || typeof message !== "object") return;
 
   if (message.type === "pong" && message.id && pendingPings.has(message.id)) {
@@ -201,6 +393,17 @@ function handleBridgeMessage(message) {
 
   if (message.type === "event") {
     void setState({ lastEvent: message, lastError: null });
+    return;
+  }
+
+  if (message.type === "handoff.send") {
+    // Background only selects the active tab and relays the request. All DOM
+    // discovery and mutation remains in the ChatGPT Content Script.
+    diagnostic("background received", {
+      request_id: message.request_id,
+      handoff_id: message.handoff_id
+    });
+    void sendHandoffToActiveTab(message, bridgeSocket);
   }
 }
 
@@ -237,12 +440,17 @@ function openSocket(nextSessionToken) {
     };
 
     candidate.onopen = () => {
-      candidate.send(JSON.stringify({
-        type: "hello",
-        protocol: BRIDGE_PROTOCOL,
-        client: "browser-extension",
-        token: nextSessionToken
-      }));
+      diagnostic("websocket hello sent");
+      try {
+        candidate.send(JSON.stringify({
+          type: "hello",
+          protocol: BRIDGE_PROTOCOL,
+          client: "browser-extension",
+          token: nextSessionToken
+        }));
+      } catch (_) {
+        fail(bridgeError("Desktop Bridge hello could not be sent.", 0, "websocket_error"));
+      }
     };
 
     candidate.onmessage = (event) => {
@@ -254,13 +462,14 @@ function openSocket(nextSessionToken) {
         return;
       }
 
-      handleBridgeMessage(message);
+      handleBridgeMessage(message, candidate);
       if (message.type === "hello.ack") {
         if (message.protocol !== BRIDGE_PROTOCOL) {
           fail(bridgeError("Desktop Bridge protocol is unavailable.", 0, "invalid_protocol"));
           return;
         }
         acknowledged = true;
+        diagnostic("bridge connected");
         if (!settled) {
           settled = true;
           resolve(message);
@@ -279,8 +488,12 @@ function openSocket(nextSessionToken) {
       if (socket === candidate) {
         socket = null;
         sessionToken = null;
+        diagnostic("bridge disconnected");
         closePendingPings(new Error("Desktop Bridge WebSocket closed."));
         void setState({ status: "DISCONNECTED", lastError: manualDisconnect ? null : "Desktop Connectorから切断されました。", connectedAt: null, sessionExpiresAt: null });
+        if (!acknowledged) {
+          fail(bridgeError("Desktop Bridge closed before hello.ack.", 0, "hello_not_acknowledged"));
+        }
         if (!manualDisconnect) scheduleReconnect();
       } else if (!acknowledged) {
         fail(bridgeError("Desktop Bridge WebSocket closed before hello.ack.", 0, "hello_not_acknowledged"));

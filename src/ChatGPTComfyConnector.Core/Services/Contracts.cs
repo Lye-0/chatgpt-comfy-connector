@@ -59,15 +59,19 @@ public interface IComfyUiHealthProbe
 /// <summary>
 /// Local-only transport boundary for the Chromium Browser Extension. The
 /// implementation owns HTTP/WebSocket details; Core consumers only observe
-/// state and send explicitly shaped server events.
+/// state and send explicitly shaped server events or Handoff requests.
 /// </summary>
 public interface IBrowserExtensionBridge : IAsyncDisposable
 {
     BrowserExtensionBridgeStatus Status { get; }
     event EventHandler<BrowserExtensionBridgeStatusChangedEventArgs>? StatusChanged;
+    event EventHandler<BrowserExtensionBridgeDiagnosticEventArgs>? Diagnostic;
     Task StartAsync(CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
     Task<bool> SendEventAsync(BrowserExtensionBridgeEvent bridgeEvent, CancellationToken cancellationToken = default);
+    Task<BrowserExtensionHandoffSendResult> SendHandoffAsync(
+        BrowserExtensionHandoffSendRequest request,
+        CancellationToken cancellationToken = default);
 }
 
 public interface IClipboardService

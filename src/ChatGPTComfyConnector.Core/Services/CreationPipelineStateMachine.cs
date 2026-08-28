@@ -43,12 +43,35 @@ public static class CreationPipelineStateMachine
         // genuine re-send boundary.
         if (session.Pipeline.ContextBound
             && session.Pipeline.SentIdeaSnapshot is not null
-            && PendingHandoffReuse.IsBootstrap(session.PendingHandoff))
+            && session.PendingHandoff is { } pending
+            && PendingHandoffReuse.IsBootstrap(pending))
         {
             var handoff = session.Pipeline.Stages.Single(item => item.Stage == CreationStage.ToChatGpt);
             if (handoff.State == CreationStageState.NotReached)
             {
-                Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTからの返答待ち", CreationWaitingReason.ChatGptResponseRequired);
+                var delivery = session.HandoffMessages.LastOrDefault(item =>
+                    item.Direction == HandoffDirection.ConnectorToChatGpt
+                    && item.Kind == HandoffMessageKind.CreationRequest
+                    && PendingHandoffReuse.MatchesPayload(pending, item.Payload));
+                if (delivery?.State is HandoffTransportState.Waiting or HandoffTransportState.Failed)
+                {
+                    Set(session, CreationStage.Idea, CreationStageState.Current, "送信エラー · 同じHandoffを再送できます");
+                    Set(session, CreationStage.ToChatGpt, CreationStageState.Error, "自動送信が完了していません · 同じHandoffを再送できます");
+                    ResetAfter(session, CreationStage.ToChatGpt);
+                }
+                else
+                {
+                    var wasSent = delivery?.State == HandoffTransportState.Sent;
+                    var detail = wasSent
+                        ? "Handoff送信済み · ChatGPTからの返答待ち"
+                        : "Clipboardへコピー済み · ChatGPTへ貼り付け待ち";
+                    Set(
+                        session,
+                        CreationStage.ToChatGpt,
+                        CreationStageState.WaitingUser,
+                        detail,
+                        wasSent ? CreationWaitingReason.ChatGptResponseRequired : CreationWaitingReason.ChatGptPasteRequired);
+                }
             }
         }
     }
@@ -97,6 +120,7 @@ public static class CreationPipelineStateMachine
             CreationWaitingReason.ComfyUiStartRequired => "ComfyUI起動待ち",
             CreationWaitingReason.ReconnectRequired => "再接続待ち",
             CreationWaitingReason.ConnectionCheckRequired => "接続確認待ち",
+            CreationWaitingReason.ChatGptPasteRequired => "ChatGPTへ貼り付け待ち",
             CreationWaitingReason.ChatGptResponseRequired => "ChatGPT返答待ち",
             CreationWaitingReason.ReviewResponseRequired => "レビュー返答待ち",
             CreationWaitingReason.ContinueDecisionRequired => "続行判断待ち",
@@ -252,12 +276,53 @@ public static class CreationPipelineStateMachine
     /// ChatGPT conversation's existing history.
     /// </summary>
     public static void BootstrapCopied(CreationSession session, string idea)
+        => BootstrapTransported(
+            session,
+            idea,
+            "制作ContextをClipboardへ生成済み",
+            "Clipboardへコピー済み · ChatGPTへ貼り付け待ち",
+            CreationWaitingReason.ChatGptPasteRequired);
+
+    /// <summary>
+    /// Records that the initial Handoff was delivered by the authenticated
+    /// Browser Extension Bridge. This advances exactly the same pipeline
+    /// boundary as the legacy Clipboard path while keeping the transport
+    /// state visible as SENT.
+    /// </summary>
+    public static void BootstrapSent(CreationSession session, string idea)
+        => BootstrapTransported(
+            session,
+            idea,
+            "制作ContextをExtensionへ送信済み",
+            "Handoff送信済み · ChatGPTからの返答待ち",
+            CreationWaitingReason.ChatGptResponseRequired);
+
+    /// <summary>
+    /// Records an automatic Bootstrap delivery failure without destroying the
+    /// issued PendingHandoff. The IDEA stage remains retryable and the
+    /// TO CHATGPT stage carries the error until the user retries or explicitly
+    /// chooses the timeline Clipboard action.
+    /// </summary>
+    public static void BootstrapSendFailed(CreationSession session, string detail)
+    {
+        EnsureInitialized(session);
+        Set(session, CreationStage.Idea, CreationStageState.Current, "送信エラー · 同じHandoffを再送できます");
+        Set(session, CreationStage.ToChatGpt, CreationStageState.Error, detail);
+        ResetAfter(session, CreationStage.ToChatGpt);
+    }
+
+    private static void BootstrapTransported(
+        CreationSession session,
+        string idea,
+        string ideaDetail,
+        string handoffDetail,
+        CreationWaitingReason waitingReason)
     {
         RequireContext(session);
         session.Pipeline.SentIdeaSnapshot = PendingHandoffReuse.NormalizeKickoffInstruction(idea);
         session.Pipeline.AcceptedCommandAction = null;
-        Set(session, CreationStage.Idea, CreationStageState.Completed, "制作ContextをClipboardへ生成済み");
-        Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTからの返答待ち", CreationWaitingReason.ChatGptResponseRequired);
+        Set(session, CreationStage.Idea, CreationStageState.Completed, ideaDetail);
+        Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, handoffDetail, waitingReason);
         ResetAfter(session, CreationStage.ToChatGpt);
     }
 

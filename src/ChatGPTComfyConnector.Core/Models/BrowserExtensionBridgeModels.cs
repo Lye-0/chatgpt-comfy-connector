@@ -40,6 +40,50 @@ public static class BrowserExtensionBridgeProtocol
 }
 
 /// <summary>
+/// Error codes returned by the Extension when the active ChatGPT tab cannot
+/// accept a Handoff. Keeping these values in the shared protocol model makes
+/// the Desktop result handling independent from the Extension implementation.
+/// </summary>
+public static class BrowserExtensionHandoffErrorCodes
+{
+    public const string ActiveTabNotChatGpt = "active_tab_not_chatgpt";
+    public const string ContentScriptUnavailable = "content_script_unavailable";
+    public const string ComposerNotFound = "composer_not_found";
+    public const string ComposerInputFailed = "composer_input_failed";
+    public const string SendButtonNotFound = "send_button_not_found";
+    public const string SendNotReady = "send_not_ready";
+    public const string SendFailed = "send_failed";
+    public const string BridgeDisconnected = "bridge_disconnected";
+}
+
+/// <summary>
+/// A complete, already-rendered Handoff sent over the authenticated Bridge.
+/// The payload is intentionally supplied by the existing Handoff builder;
+/// the Extension must not create a second representation of it.
+/// </summary>
+public sealed record BrowserExtensionHandoffSendRequest(
+    string RequestId,
+    string SessionId,
+    string HandoffId,
+    string BoundaryId,
+    string Payload);
+
+/// <summary>
+/// Result correlated with <see cref="BrowserExtensionHandoffSendRequest.RequestId"/>.
+/// Results never echo the Handoff body.
+/// </summary>
+public sealed record BrowserExtensionHandoffSendResult(
+    string RequestId,
+    string HandoffId,
+    string Status,
+    string? ErrorCode = null,
+    string? Message = null,
+    string? Stage = null)
+{
+    public bool IsSent => string.Equals(Status, "sent", StringComparison.Ordinal);
+}
+
+/// <summary>
 /// Persisted Desktop-side pairing state.  Only the hash is stored; the
 /// bearer credential is returned to the Extension once and remains in the
 /// Extension's local storage.
@@ -72,6 +116,23 @@ public sealed record BrowserExtensionBridgeStatus(
 public sealed class BrowserExtensionBridgeStatusChangedEventArgs(BrowserExtensionBridgeStatus status) : EventArgs
 {
     public BrowserExtensionBridgeStatus Status { get; } = status;
+}
+
+/// <summary>
+/// Safe, non-secret diagnostics for tracing the Browser Extension transport.
+/// Implementations must not put tokens or Handoff payloads in this record.
+/// </summary>
+public sealed record BrowserExtensionBridgeDiagnostic(
+    string EventName,
+    string? RequestId = null,
+    string? HandoffId = null,
+    string? Status = null,
+    string? ErrorCode = null,
+    string? Stage = null);
+
+public sealed class BrowserExtensionBridgeDiagnosticEventArgs(BrowserExtensionBridgeDiagnostic diagnostic) : EventArgs
+{
+    public BrowserExtensionBridgeDiagnostic Diagnostic { get; } = diagnostic;
 }
 
 /// <summary>

@@ -145,6 +145,7 @@ public static class CreationPipelineLoopText
         => stage switch
         {
             CreationStage.Connect => "MCP接続エラー",
+            CreationStage.ToChatGpt => "送信エラー · 再送できます",
             CreationStage.Command => "修正が必要",
             CreationStage.Apply => "反映エラー",
             CreationStage.Generate => "再実行できます",

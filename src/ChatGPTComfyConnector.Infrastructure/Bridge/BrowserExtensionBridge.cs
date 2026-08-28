@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
@@ -15,18 +16,21 @@ namespace ChatGPTComfyConnector.Infrastructure.Bridge;
 ///
 /// The server deliberately has a very small command surface in this phase:
 /// public health metadata, one-time pairing, authenticated bootstrap, an
-/// authenticated HTTP ping, and an authenticated WebSocket carrying ping/pong
-/// plus server-originated events. It does not execute Connector commands and
-/// it never accepts an arbitrary URL or filesystem operation.
+/// authenticated HTTP ping, and an authenticated WebSocket carrying ping/pong,
+/// server-originated events, and the explicitly-shaped Handoff transport. It
+/// does not execute Connector commands and it never accepts an arbitrary URL
+/// or filesystem operation.
 /// </summary>
 public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
 {
     private const int MaxHttpBodyBytes = 8 * 1024;
-    private const int MaxWebSocketMessageBytes = 32 * 1024;
+    private const int MaxWebSocketMessageBytes = 256 * 1024;
+    private const int MaxHandoffPayloadBytes = 192 * 1024;
     private const int MaxPairingAttempts = 5;
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PairingCodeLifetime = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan SessionTokenLifetime = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan HandoffResponseTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(3);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -40,6 +44,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private readonly SemaphoreSlim _pairingGate = new(1, 1);
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly object _clientGate = new();
+    private readonly ConcurrentDictionary<string, PendingHandoffRequest> _pendingHandoffs = new(StringComparer.Ordinal);
     private BrowserExtensionBridgeStatus _status;
     private HttpListener? _listener;
     private CancellationTokenSource? _serverCts;
@@ -77,6 +82,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     public BrowserExtensionBridgeStatus Status => _status;
 
     public event EventHandler<BrowserExtensionBridgeStatusChangedEventArgs>? StatusChanged;
+    public event EventHandler<BrowserExtensionBridgeDiagnosticEventArgs>? Diagnostic;
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -138,6 +144,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 pairingState: GetPairingState(),
                 pairingCode: _pairingCode,
                 pairingCodeExpiresAt: _pairingCodeExpiresAt));
+            PublishDiagnostic("bridge started", status: Status.ConnectionStateText);
             _acceptTask = AcceptLoopAsync(listener, serverCts.Token);
         }
         finally
@@ -169,6 +176,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 socket = _clientSocket;
                 _clientSocket = null;
             }
+            FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeを停止しました。");
 
             serverCts?.Cancel();
             try { listener?.Stop(); } catch (Exception) { }
@@ -200,6 +208,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 pairingState: GetPairingState(),
                 pairingCode: null,
                 pairingCodeExpiresAt: null));
+            PublishDiagnostic("bridge stopped", status: Status.ConnectionStateText);
         }
         finally
         {
@@ -243,6 +252,109 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         {
             RemoveClient(socket);
             return false;
+        }
+    }
+
+    public async Task<BrowserExtensionHandoffSendResult> SendHandoffAsync(
+        BrowserExtensionHandoffSendRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
+
+        if (!IsSafeIdentifier(request.RequestId)
+            || !IsSafeIdentifier(request.SessionId)
+            || !IsSafeIdentifier(request.HandoffId)
+            || !IsSafeIdentifier(request.BoundaryId))
+        {
+            throw new ArgumentException("Handoffの識別子が不正です。", nameof(request));
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Payload))
+        {
+            throw new ArgumentException("Handoff本文が空です。", nameof(request));
+        }
+
+        if (Encoding.UTF8.GetByteCount(request.Payload) > MaxHandoffPayloadBytes)
+        {
+            var result = HandoffError(request.RequestId, request.HandoffId, "handoff_payload_too_large", "Handoff本文が大きすぎます。", "payload_validation");
+            PublishDiagnostic("result status", result.RequestId, result.HandoffId, result.Status, result.ErrorCode, result.Stage);
+            return result;
+        }
+
+        WebSocket? socket;
+        lock (_clientGate) socket = _clientSocket;
+        if (socket is null || socket.State != WebSocketState.Open)
+        {
+            var result = HandoffError(
+                request.RequestId,
+                request.HandoffId,
+                BrowserExtensionHandoffErrorCodes.BridgeDisconnected,
+                "Browser Extension Bridgeに接続されていません。",
+                "bridge_connection");
+            PublishDiagnostic("handoff.send rejected", request.RequestId, request.HandoffId, result.Status, result.ErrorCode, result.Stage);
+            return result;
+        }
+
+        var pending = new PendingHandoffRequest(
+            request.HandoffId,
+            new TaskCompletionSource<BrowserExtensionHandoffSendResult>(TaskCreationOptions.RunContinuationsAsynchronously));
+        if (!_pendingHandoffs.TryAdd(request.RequestId, pending))
+        {
+            throw new ArgumentException("request_idが重複しています。", nameof(request));
+        }
+
+        PublishDiagnostic("handoff.send requested", request.RequestId, request.HandoffId, "requested");
+        try
+        {
+            PublishDiagnostic("websocket send", request.RequestId, request.HandoffId, "sending");
+            await SendJsonAsync(socket, new
+            {
+                type = "handoff.send",
+                request_id = request.RequestId,
+                session_id = request.SessionId,
+                handoff_id = request.HandoffId,
+                boundary_id = request.BoundaryId,
+                payload = request.Payload,
+            }, cancellationToken);
+
+            return await pending.Completion.Task.WaitAsync(HandoffResponseTimeout, cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            var result = HandoffError(request.RequestId, request.HandoffId, BrowserExtensionHandoffErrorCodes.SendFailed, "Browser Extensionから送信結果が返りませんでした。", "bridge_response_timeout");
+            PublishDiagnostic("result status", result.RequestId, result.HandoffId, result.Status, result.ErrorCode, result.Stage);
+            return result;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            var result = HandoffError(request.RequestId, request.HandoffId, BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。", "bridge_connection");
+            PublishDiagnostic("result status", result.RequestId, result.HandoffId, result.Status, result.ErrorCode, result.Stage);
+            return result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var result = HandoffError(request.RequestId, request.HandoffId, BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeへの送信がキャンセルされました。", "bridge_send_cancelled");
+            PublishDiagnostic("result status", result.RequestId, result.HandoffId, result.Status, result.ErrorCode, result.Stage);
+            return result;
+        }
+        catch (WebSocketException)
+        {
+            RemoveClient(socket);
+            var result = HandoffError(request.RequestId, request.HandoffId, BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。", "bridge_connection");
+            PublishDiagnostic("result status", result.RequestId, result.HandoffId, result.Status, result.ErrorCode, result.Stage);
+            return result;
+        }
+        catch (ObjectDisposedException)
+        {
+            RemoveClient(socket);
+            var result = HandoffError(request.RequestId, request.HandoffId, BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。", "bridge_connection");
+            PublishDiagnostic("result status", result.RequestId, result.HandoffId, result.Status, result.ErrorCode, result.Stage);
+            return result;
+        }
+        finally
+        {
+            _pendingHandoffs.TryRemove(request.RequestId, out _);
         }
     }
 
@@ -617,6 +729,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 || !IsAccessTokenValid(suppliedToken))
             {
                 await SendErrorAndCloseAsync(socket, helloError ?? "invalid_session_token");
+                PublishDiagnostic("hello rejected", status: "ERROR", errorCode: helloError ?? "invalid_session_token");
                 PublishStatus(CreateStatus(
                     isRunning: true,
                     BrowserExtensionConnectionState.Error,
@@ -695,6 +808,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
 
         if (previous is not null && !ReferenceEquals(previous, socket))
         {
+            FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extensionの接続が置き換えられました。");
             await CloseSocketAsync(previous, WebSocketCloseStatus.PolicyViolation, "replaced by a newer extension connection", cancellationToken);
         }
 
@@ -708,6 +822,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             pairingState: GetPairingState(),
             pairingCode: _pairingCode,
             pairingCodeExpiresAt: _pairingCodeExpiresAt));
+        PublishDiagnostic("bridge connected", status: Status.ConnectionStateText);
     }
 
     private async Task ReceiveClientMessagesAsync(WebSocket socket, CancellationToken cancellationToken)
@@ -733,13 +848,45 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                         bridge_version = BrowserExtensionBridgeProtocol.BridgeVersion,
                     }, cancellationToken);
                 }
+                else if (type == "handoff.result")
+                {
+                    if (!TryParseHandoffResult(text, out var result, out var resultError))
+                    {
+                        PublishDiagnostic("result rejected", status: "error", errorCode: resultError ?? "invalid_handoff_result");
+                        await SendJsonAsync(socket, new
+                        {
+                            type = "error",
+                            code = resultError ?? "invalid_handoff_result",
+                            message = "Handoff送信結果を解釈できません。",
+                        }, cancellationToken);
+                        continue;
+                    }
+
+                    if (_pendingHandoffs.TryRemove(result.RequestId, out var pending))
+                    {
+                        var completed = string.Equals(result.HandoffId, pending.HandoffId, StringComparison.Ordinal)
+                            ? result
+                            : HandoffError(
+                                result.RequestId,
+                                pending.HandoffId,
+                                BrowserExtensionHandoffErrorCodes.SendFailed,
+                                "Handoff送信結果の識別子が一致しません。",
+                                "result_validation");
+                        PublishDiagnostic("result status", completed.RequestId, completed.HandoffId, completed.Status, completed.ErrorCode, completed.Stage);
+                        pending.Completion.TrySetResult(completed);
+                    }
+                    else
+                    {
+                        PublishDiagnostic("result status", result.RequestId, result.HandoffId, result.Status, result.ErrorCode, result.Stage);
+                    }
+                }
                 else
                 {
                     await SendJsonAsync(socket, new
                     {
                         type = "error",
                         code = "unsupported_message",
-                        message = "このalpha Bridgeはhelloとpingだけを受け付けます。",
+                        message = "このalpha Bridgeはhello、ping、handoff.resultだけを受け付けます。",
                     }, cancellationToken);
                 }
             }
@@ -816,6 +963,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
 
         if (removed && _serverCts is { IsCancellationRequested: false })
         {
+            FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。");
             PublishStatus(CreateStatus(
                 isRunning: true,
                 BrowserExtensionConnectionState.Disconnected,
@@ -826,6 +974,23 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 pairingState: GetPairingState(),
                 pairingCode: _pairingCode,
                 pairingCodeExpiresAt: _pairingCodeExpiresAt));
+            PublishDiagnostic("bridge disconnected", status: Status.ConnectionStateText);
+        }
+    }
+
+    private void FailPendingHandoffs(string errorCode, string message)
+    {
+        foreach (var pair in _pendingHandoffs.ToArray())
+        {
+            if (_pendingHandoffs.TryRemove(pair.Key, out var pending))
+            {
+                pending.Completion.TrySetResult(HandoffError(
+                    pair.Key,
+                    pending.HandoffId,
+                    errorCode,
+                    message,
+                    "bridge_connection"));
+            }
         }
     }
 
@@ -906,6 +1071,19 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     {
         _status = status;
         try { StatusChanged?.Invoke(this, new BrowserExtensionBridgeStatusChangedEventArgs(status)); }
+        catch (Exception) { }
+    }
+
+    private void PublishDiagnostic(
+        string eventName,
+        string? requestId = null,
+        string? handoffId = null,
+        string? status = null,
+        string? errorCode = null,
+        string? stage = null)
+    {
+        var diagnostic = new BrowserExtensionBridgeDiagnostic(eventName, requestId, handoffId, status, errorCode, stage);
+        try { Diagnostic?.Invoke(this, new BrowserExtensionBridgeDiagnosticEventArgs(diagnostic)); }
         catch (Exception) { }
     }
 
@@ -1155,6 +1333,72 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private static bool IsSafeEventName(string value)
         => value.Length is > 0 and <= 64
             && value.All(static character => char.IsLetterOrDigit(character) || character is '.' or '-' or '_');
+
+    private static bool IsSafeIdentifier(string value)
+        => value.Length is > 0 and <= 128
+            && value.All(static character => char.IsLetterOrDigit(character) || character is '.' or '-' or '_');
+
+    private static BrowserExtensionHandoffSendResult HandoffError(
+        string requestId,
+        string handoffId,
+        string errorCode,
+        string message,
+        string? stage = null)
+        => new(requestId, handoffId, "error", errorCode, message, stage);
+
+    private static bool TryParseHandoffResult(
+        string text,
+        out BrowserExtensionHandoffSendResult result,
+        out string? error)
+    {
+        result = new(string.Empty, string.Empty, "error");
+        error = null;
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || GetString(root, "type") != "handoff.result")
+            {
+                error = "invalid_handoff_result";
+                return false;
+            }
+
+            var requestId = GetString(root, "request_id");
+            var handoffId = GetString(root, "handoff_id");
+            var status = GetString(root, "status");
+            if (requestId is null || handoffId is null || status is not ("sent" or "error")
+                || !IsSafeIdentifier(requestId)
+                || !IsSafeIdentifier(handoffId))
+            {
+                error = "invalid_handoff_result";
+                return false;
+            }
+
+            var errorCode = GetString(root, "error_code");
+            var message = GetString(root, "message");
+            var stage = GetString(root, "stage");
+            if (errorCode is { Length: > 64 }
+                || message is { Length: > 1024 }
+                || stage is { Length: > 64 }
+                || (stage is not null && !IsSafeIdentifier(stage)))
+            {
+                error = "invalid_handoff_result";
+                return false;
+            }
+
+            result = new(requestId, handoffId, status, errorCode, message, stage);
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "invalid_json";
+            return false;
+        }
+    }
+
+    private sealed record PendingHandoffRequest(
+        string HandoffId,
+        TaskCompletionSource<BrowserExtensionHandoffSendResult> Completion);
 
     private static int FindAvailablePort()
     {

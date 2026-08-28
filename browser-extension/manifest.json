@@ -5,10 +5,13 @@
   "description": "Connects the ChatGPT Comfy Connector browser surface to its local Desktop Bridge.",
   "permissions": [
     "alarms",
-    "storage"
+    "storage",
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
-    "http://127.0.0.1:43127/*"
+    "http://127.0.0.1:43127/*",
+    "https://chatgpt.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -20,10 +23,10 @@
   "content_scripts": [
     {
       "matches": [
-        "https://chatgpt.com/*",
-        "https://chat.openai.com/*"
+        "https://chatgpt.com/*"
       ],
       "js": [
+        "chatgpt-locators.js",
         "content-script.js"
       ],
       "run_at": "document_idle"

@@ -57,6 +57,36 @@ public static class PendingHandoffReuse
             && pending.AllowedActions.Contains("generate", StringComparer.Ordinal);
 
     /// <summary>
+    /// Finds the exact persisted Bootstrap payload that can be retried after a
+    /// Clipboard or Browser Extension delivery attempt. The pending snapshot
+    /// and payload must still belong to the same boundary; this method never
+    /// rebuilds the Handoff or issues a replacement identity.
+    /// </summary>
+    public static bool TryGetResendableBootstrapPayload(
+        CreationSession? session,
+        out string payload)
+    {
+        payload = string.Empty;
+        if (session?.PendingHandoff is not { } pending || !IsBootstrap(pending)) return false;
+
+        var message = session.HandoffMessages
+            .Where(item => item.Direction == HandoffDirection.ConnectorToChatGpt
+                && item.Kind == HandoffMessageKind.CreationRequest
+                && item.IterationNumber is null
+                && item.State is (HandoffTransportState.Copied or HandoffTransportState.Failed))
+            .OrderByDescending(item => item.CreatedAt)
+            .FirstOrDefault();
+        if (!HandoffPayloadReuse.TryGetSavedPayload(message, out var savedPayload)
+            || !MatchesPayload(pending, savedPayload))
+        {
+            return false;
+        }
+
+        payload = savedPayload;
+        return true;
+    }
+
+    /// <summary>
     /// Identifies a response to a Review Handoff from the immutable snapshot
     /// that issued it.  Older snapshots did not persist a purpose field, so a
     /// review's distinct <c>complete</c> permission remains a safe migration

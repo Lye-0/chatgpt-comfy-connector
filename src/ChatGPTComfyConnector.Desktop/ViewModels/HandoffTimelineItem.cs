@@ -40,6 +40,17 @@ public sealed class HandoffTimelineItem : INotifyPropertyChanged
     public string Summary => Message.Summary;
     public string Payload => Message.Payload;
     public string StateLabel => Message.State.ToString().ToUpperInvariant();
+    public string TransportFailureText
+    {
+        get
+        {
+            if (Message.State != HandoffTransportState.Failed) return string.Empty;
+            var fields = new[] { Message.TransportErrorCode, Message.TransportErrorStage }
+                .Where(value => !string.IsNullOrWhiteSpace(value));
+            var detail = string.Join(" · ", fields);
+            return string.IsNullOrWhiteSpace(detail) ? string.Empty : $"送信エラー: {detail}";
+        }
+    }
     public bool IsCopied => Message.State == HandoffTransportState.Copied;
     public bool IsConnectorToChatGpt => Message.Direction == HandoffDirection.ConnectorToChatGpt;
     public bool IsChatGptToComfy => Message.Direction == HandoffDirection.ChatGptToComfy;

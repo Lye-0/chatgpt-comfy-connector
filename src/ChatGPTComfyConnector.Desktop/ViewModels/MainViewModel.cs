@@ -75,7 +75,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // composition is committed. Keep this presentation-only flag so the
     // custom placeholder does not render over the composition text.
     private bool _isIdeaComposing;
-    private BrowserExtensionBridgeStatus _browserExtensionBridgeStatus;
     private readonly SynchronizationContext? _notificationContext = SynchronizationContext.Current;
 
     public MainViewModel(
@@ -89,8 +88,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _contextProvider = contextProvider ?? new LocalProjectChatProvider(_store);
         _mcp = new ComfyMcpClientProxy(_store);
         _browserExtensionBridge = browserExtensionBridge ?? new BrowserExtensionBridge(pairingStore: _store);
-        _browserExtensionBridgeStatus = _browserExtensionBridge.Status;
         _browserExtensionBridge.StatusChanged += BrowserExtensionBridge_StatusChanged;
+        _browserExtensionBridge.Diagnostic += BrowserExtensionBridge_Diagnostic;
         _comfyUiHealthProbe = comfyUiHealthProbe ?? new ComfyUiEndpointHealthProbe();
         _catalog = new WorkflowCatalog(_mcp, _store);
         Settings = new AppSettings
@@ -132,7 +131,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<ProjectContextOption> ProjectOptions { get; }
     public ObservableCollection<ChatContextOption> ChatOptions { get; }
     public ObservableCollection<HandoffTimelineItem> HandoffItems { get; }
-    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyPipelineStateChanged(); } }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyPipelineStateChanged(); } }
     public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); NotifyContextSelectionChanged(); } }
     public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
@@ -141,7 +140,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsWorkflowEditorVisible { get => _isWorkflowEditorVisible; private set { _isWorkflowEditorVisible = value; OnPropertyChanged(); } }
     public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
-    public SlotDiscoveryState SlotDiscoveryState { get => _slotDiscoveryState; private set { _slotDiscoveryState = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CanStartNewCreation)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyViewStateChanged(); } }
+    public SlotDiscoveryState SlotDiscoveryState { get => _slotDiscoveryState; private set { _slotDiscoveryState = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CanStartNewCreation)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyViewStateChanged(); } }
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
     public bool IsWorkflowRenameVisible { get => _isWorkflowRenameVisible; private set { _isWorkflowRenameVisible = value; OnPropertyChanged(); } }
     public string WorkflowRenameText { get => _workflowRenameText; set { _workflowRenameText = value; OnPropertyChanged(); } }
@@ -320,24 +319,24 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string SelectedWorkflowText => SelectedWorkflow?.RelativePath ?? "Workflow未選択";
     public string SelectedWorkflowName => SelectedWorkflow is null ? "Workflow未選択" : Path.GetFileNameWithoutExtension(SelectedWorkflow.RelativePath);
     public string ConnectionStateText => ConnectionState switch { ConnectionState.Connected => "CONNECTED", ConnectionState.Connecting => "CONNECTING", ConnectionState.Error => "ERROR", _ => "DISCONNECTED" };
-    public BrowserExtensionConnectionState BrowserExtensionConnectionState => _browserExtensionBridgeStatus.ConnectionState;
-    public string BrowserExtensionConnectionStateText => _browserExtensionBridgeStatus.ConnectionStateText;
+    public BrowserExtensionConnectionState BrowserExtensionConnectionState => _browserExtensionBridge.Status.ConnectionState;
+    public string BrowserExtensionConnectionStateText => _browserExtensionBridge.Status.ConnectionStateText;
     public string BrowserExtensionSystemState => BrowserExtensionConnectionStateText;
-    public BrowserExtensionPairingState BrowserExtensionPairingState => _browserExtensionBridgeStatus.PairingState;
-    public string BrowserExtensionPairingStateText => _browserExtensionBridgeStatus.PairingStateText;
-    public bool IsBrowserExtensionPairingRequired => _browserExtensionBridgeStatus.IsPairingRequired;
-    public bool IsBrowserExtensionPairingCodeVisible => !string.IsNullOrWhiteSpace(_browserExtensionBridgeStatus.PairingCode);
-    public string BrowserExtensionPairingCode => _browserExtensionBridgeStatus.PairingCode ?? string.Empty;
-    public bool IsBrowserExtensionConnected => BrowserExtensionConnectionState == BrowserExtensionConnectionState.Connected;
-    public bool IsBrowserExtensionBridgeRunning => _browserExtensionBridgeStatus.IsRunning;
-    public string BrowserExtensionEndpoint => _browserExtensionBridgeStatus.HttpEndpoint;
-    public string BrowserExtensionStatusDetail => _browserExtensionBridgeStatus.LastError is { Length: > 0 } error
+    public BrowserExtensionPairingState BrowserExtensionPairingState => _browserExtensionBridge.Status.PairingState;
+    public string BrowserExtensionPairingStateText => _browserExtensionBridge.Status.PairingStateText;
+    public bool IsBrowserExtensionPairingRequired => _browserExtensionBridge.Status.IsPairingRequired;
+    public bool IsBrowserExtensionPairingCodeVisible => !string.IsNullOrWhiteSpace(_browserExtensionBridge.Status.PairingCode);
+    public string BrowserExtensionPairingCode => _browserExtensionBridge.Status.PairingCode ?? string.Empty;
+    public bool IsBrowserExtensionConnected => _browserExtensionBridge.Status.ConnectionState == BrowserExtensionConnectionState.Connected;
+    public bool IsBrowserExtensionBridgeRunning => _browserExtensionBridge.Status.IsRunning;
+    public string BrowserExtensionEndpoint => _browserExtensionBridge.Status.HttpEndpoint;
+    public string BrowserExtensionStatusDetail => _browserExtensionBridge.Status.LastError is { Length: > 0 } error
         ? error
-        : _browserExtensionBridgeStatus.ClientOrigin is { Length: > 0 } origin
+        : _browserExtensionBridge.Status.ClientOrigin is { Length: > 0 } origin
             ? $"接続元 {origin}"
-            : _browserExtensionBridgeStatus.IsPairingRequired
+            : _browserExtensionBridge.Status.IsPairingRequired
                 ? "PopupへPairing codeを入力してください"
-            : _browserExtensionBridgeStatus.IsRunning
+            : _browserExtensionBridge.Status.IsRunning
                 ? "Extensionの接続を待機中"
                 : "Desktop終了時に停止します";
     public bool IsSystemProcessing => IsBusy || IsJobActive;
@@ -418,12 +417,49 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string IdeaInputHint => IsIdeaInputEnabled
         ? "開始指示・補足は任意です。空欄なら既存ChatGPT会話をもとに開始します。"
         : "左側の設定から新しい制作を開始してください。";
-    public bool CanSendToChatGpt => !HasPendingContextChange
-        && CreationWorkspacePolicy.CanSendToChatGpt(CurrentSession, _isCurrentSessionActivated, IsConnected, SlotDiscoveryState, Idea, IsJobActive);
+    public bool CanResendBootstrapHandoff
+        => _isCurrentSessionActivated
+            && !HasPendingContextChange
+            && !IsJobActive
+            && PendingHandoffReuse.TryGetResendableBootstrapPayload(CurrentSession, out _);
+    public bool CanSendToChatGpt
+        => CanResendBootstrapHandoff
+            || (!HasPendingContextChange
+                && CurrentSession?.PendingHandoff is null
+                && CreationWorkspacePolicy.CanSendToChatGpt(CurrentSession, _isCurrentSessionActivated, IsConnected, SlotDiscoveryState, Idea, IsJobActive));
+    public string SendToChatGptButtonText
+        => !CanResendBootstrapHandoff
+            ? "SEND TO CHATGPT"
+            : BrowserExtensionConnectionState == BrowserExtensionConnectionState.Disconnected
+                ? "HANDOFFを再コピー"
+                : "CHATGPTへ再送";
     public string SendToChatGptHint
-        => CanSendToChatGpt
-            ? "制作コンテキストをChatGPTへコピー"
-            : !_isCurrentSessionActivated
+    {
+        get
+        {
+            if (CanResendBootstrapHandoff)
+            {
+                return BrowserExtensionConnectionState switch
+                {
+                    BrowserExtensionConnectionState.Connected => "保存済みの同じHandoffを現在アクティブなChatGPTタブへ再送します。IDと本文は変更しません。",
+                    BrowserExtensionConnectionState.Disconnected => "保存済みの同じHandoffをClipboardへ再コピーします。",
+                    BrowserExtensionConnectionState.Connecting => "保存済みの同じHandoffを再送します。接続結果を確認してください。",
+                    _ => "保存済みの同じHandoffを再送します。失敗しても同じHandoffを再試行できます。",
+                };
+            }
+
+            if (CanSendToChatGpt)
+            {
+                return BrowserExtensionConnectionState switch
+                {
+                    BrowserExtensionConnectionState.Connected => "制作コンテキストを現在アクティブなChatGPTタブへ自動送信",
+                    BrowserExtensionConnectionState.Disconnected => "制作コンテキストをClipboardへコピー",
+                    BrowserExtensionConnectionState.Connecting => "Browser Extensionの接続完了を待って自動送信します。",
+                    _ => "Browser Extensionの接続エラーを確認してから送信してください。",
+                };
+            }
+
+            return !_isCurrentSessionActivated
                 ? "左側の設定から新しい制作を開始してください。"
                 : !IsConnected
                     ? "MCP接続を確立してください。"
@@ -434,8 +470,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
                         : SlotDiscoveryState != SlotDiscoveryState.Loaded
                             ? "WorkflowのSlot Schema取得を完了してください。"
                             : IsJobActive
-                                    ? "生成中は送信できません。"
-                                    : "IDEA Stageを確認してください。";
+                                ? "生成中は送信できません。"
+                                : "IDEA Stageを確認してください。";
+        }
+    }
     public bool CanApplyCommand => IsCreationConnectionReady && _isCurrentSessionActivated && _pendingValidation is { IsValid: true, Command: not null } command && command.Command.Action == "generate" && !HasIterationSafetyStop;
     public bool ShowWorkflowEmptyState => !HasSelectedWorkflow;
     public bool ShowDisconnectedState => HasSelectedWorkflow && !IsConnected;
@@ -1118,6 +1156,30 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Prepares the initial Bootstrap Handoff or returns the already persisted
+    /// body for an explicit retry. A retry is deliberately resolved before the
+    /// normal IDEA-stage validation because COPIED/FAILED means that the
+    /// original pipeline boundary has already been issued.
+    /// </summary>
+    public async Task<string> PrepareBootstrapHandoffForSendAsync()
+    {
+        await _bootstrapHandoffGate.WaitAsync();
+        try
+        {
+            if (PendingHandoffReuse.TryGetResendableBootstrapPayload(CurrentSession, out var savedPayload))
+            {
+                return savedPayload;
+            }
+
+            return await PrepareBootstrapHandoffCoreAsync();
+        }
+        finally
+        {
+            _bootstrapHandoffGate.Release();
+        }
+    }
+
     private async Task<string> PrepareBootstrapHandoffCoreAsync()
     {
         EnsureSendToChatGptAllowed();
@@ -1153,7 +1215,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             item.Direction == HandoffDirection.ConnectorToChatGpt
             && item.Kind == HandoffMessageKind.CreationRequest
             && item.IterationNumber is null);
-        if (canReusePending && HandoffPayloadReuse.TryGetSavedPayload(existingMessage, out var savedPayload))
+        if (canReusePending
+            && HandoffPayloadReuse.TryGetSavedPayload(existingMessage, out var savedPayload)
+            && PendingHandoffReuse.MatchesPayload(pending!, savedPayload))
         {
             await SaveSessionAsync();
             return savedPayload;
@@ -1234,6 +1298,104 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Delivers one already-prepared Bootstrap payload through the authenticated
+    /// Browser Extension Bridge. Preparation and delivery are intentionally
+    /// separate so a failed delivery never replaces the PendingHandoff or
+    /// rebuilds the Handoff body.
+    /// </summary>
+    public async Task<BrowserExtensionHandoffSendResult> SendPreparedBootstrapHandoffAsync(string payload)
+    {
+        await _bootstrapHandoffGate.WaitAsync();
+        try
+        {
+            if (CurrentSession is null) throw new InvalidOperationException("制作セッションがありません。");
+            var pending = CurrentSession.PendingHandoff;
+            if (pending is null || !PendingHandoffReuse.MatchesPayload(pending, payload))
+            {
+                throw new InvalidOperationException("送信対象のHandoffが現在のPending Handoffと一致しません。最新のHandoffを再送してください。");
+            }
+
+            var isExplicitResend = PendingHandoffReuse.TryGetResendableBootstrapPayload(CurrentSession, out var savedPayload)
+                && string.Equals(savedPayload, payload, StringComparison.Ordinal);
+            if (isExplicitResend)
+            {
+                EnsureBootstrapResendAllowed(payload);
+            }
+            else
+            {
+                EnsureSendToChatGptAllowed();
+            }
+            var request = new BrowserExtensionHandoffSendRequest(
+                Guid.NewGuid().ToString("N"),
+                pending.SessionId,
+                pending.HandoffId,
+                pending.BoundaryId,
+                payload);
+
+            // Persist the transport attempt before crossing the process
+            // boundary. A restart during the send therefore retains the same
+            // PendingHandoff and gives the next attempt a durable WAITING
+            // timeline entry to update.
+            await RecordBootstrapTransportAsync(payload, HandoffTransportState.Waiting, advancePipeline: false);
+
+            BrowserExtensionHandoffSendResult result;
+            try
+            {
+                result = await _browserExtensionBridge.SendHandoffAsync(request);
+            }
+            catch (Exception)
+            {
+                result = new(
+                    request.RequestId,
+                    request.HandoffId,
+                    "error",
+                    BrowserExtensionHandoffErrorCodes.BridgeDisconnected,
+                    "Browser Extension Bridgeとの通信に失敗しました。",
+                    "bridge_send");
+            }
+
+            await RecordBootstrapTransportAsync(
+                payload,
+                result.IsSent ? HandoffTransportState.Sent : HandoffTransportState.Failed,
+                advancePipeline: result.IsSent,
+                failureDetail: result.IsSent
+                    ? null
+                    : BuildBootstrapFailureDetail(result),
+                failureCode: result.IsSent ? null : result.ErrorCode,
+                failureStage: result.IsSent ? null : result.Stage);
+            return result;
+        }
+        finally
+        {
+            _bootstrapHandoffGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Chooses the transport from the Bridge's live status. The UI projection
+    /// is notified from the same Bridge status, but this decision intentionally
+    /// does not rely on a stale view-model snapshot. A null result is reserved
+    /// for the legacy Clipboard path when the Bridge is actually disconnected;
+    /// every other state is treated as an explicit Extension-route failure.
+    /// </summary>
+    public async Task<BrowserExtensionHandoffSendResult?> TrySendPreparedBootstrapHandoffAsync(string payload)
+    {
+        var status = _browserExtensionBridge.Status;
+        if (status.ConnectionState == BrowserExtensionConnectionState.Disconnected)
+        {
+            await PersistBrowserExtensionDiagnosticAsync(new BrowserExtensionBridgeDiagnostic(
+                "clipboard fallback selected",
+                HandoffId: CurrentSession?.PendingHandoff?.HandoffId,
+                Status: status.ConnectionStateText,
+                ErrorCode: BrowserExtensionHandoffErrorCodes.BridgeDisconnected));
+            return null;
+        }
+
+        StatusMessage = "Browser Extension経由でChatGPTへ送信中…";
+        return await SendPreparedBootstrapHandoffAsync(payload);
+    }
+
     private async Task ConfirmBootstrapCopiedCoreAsync(string payload)
     {
         if (CurrentSession is null) return;
@@ -1243,49 +1405,145 @@ public sealed class MainViewModel : INotifyPropertyChanged
             throw new InvalidOperationException("コピー対象のHandoffが現在のPending Handoffと一致しません。最新のHandoffを再送してください。");
         }
 
+        var existing = FindBootstrapHandoff(payload);
         // A second click should be idempotent. It must not re-run the state
-        // transition or issue a new identity after the first card was saved.
-        if (CurrentSession.HandoffMessages.Any(item =>
-                item.Direction == HandoffDirection.ConnectorToChatGpt
-                && item.Kind == HandoffMessageKind.CreationRequest
-                && string.Equals(item.Payload, payload, StringComparison.Ordinal)))
+        // transition or issue a new identity after a successful transport.
+        if (existing?.State is HandoffTransportState.Copied or HandoffTransportState.Sent)
         {
             return;
         }
 
-        EnsureSendToChatGptAllowed();
-        var kickoffInstruction = PendingHandoffReuse.GetKickoffInstruction(pending, CurrentSession);
-        if (!string.Equals(
-                PendingHandoffReuse.NormalizeKickoffInstruction(kickoffInstruction),
-                PendingHandoffReuse.NormalizeKickoffInstruction(Idea),
-                StringComparison.Ordinal))
+        var isExistingRetry = existing is not null
+            && existing.State is (HandoffTransportState.Failed or HandoffTransportState.Waiting)
+            && PendingHandoffReuse.TryGetResendableBootstrapPayload(CurrentSession, out var savedPayload)
+            && string.Equals(savedPayload, payload, StringComparison.Ordinal);
+        if (isExistingRetry)
         {
-            throw new InvalidOperationException("開始指示がHandoff作成後に変更されています。現在の内容をChatGPTへ送り直してください。");
+            // Re-copying a failed/waiting Bootstrap is also allowed when MCP is
+            // temporarily unavailable: the payload is already persisted and
+            // does not need to be rebuilt from the mutable workspace.
+            EnsureBootstrapResendAllowed(payload);
+        }
+        else
+        {
+            EnsureSendToChatGptAllowed();
+            var kickoffInstruction = PendingHandoffReuse.GetKickoffInstruction(pending, CurrentSession);
+            if (!string.Equals(
+                    PendingHandoffReuse.NormalizeKickoffInstruction(kickoffInstruction),
+                    PendingHandoffReuse.NormalizeKickoffInstruction(Idea),
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("開始指示がHandoff作成後に変更されています。現在の内容をChatGPTへ送り直してください。");
+            }
         }
 
-        CreationPipelineStateMachine.BootstrapCopied(CurrentSession, kickoffInstruction);
-        await RecordHandoffAsync(new HandoffMessage
+        await RecordBootstrapTransportAsync(payload, HandoffTransportState.Copied, advancePipeline: true);
+    }
+
+    private async Task RecordBootstrapTransportAsync(
+        string payload,
+        HandoffTransportState state,
+        bool advancePipeline,
+        string? failureDetail = null,
+        string? failureCode = null,
+        string? failureStage = null)
+    {
+        if (CurrentSession is null) return;
+        var pending = CurrentSession.PendingHandoff;
+        if (pending is null || !PendingHandoffReuse.MatchesPayload(pending, payload))
         {
-            Direction = HandoffDirection.ConnectorToChatGpt,
-            Kind = HandoffMessageKind.CreationRequest,
-            State = HandoffTransportState.Copied,
-            Title = "制作コンテキストを送信",
-            DisplayText = string.IsNullOrWhiteSpace(kickoffInstruction) ? "既存ChatGPT会話をもとに制作を開始" : kickoffInstruction,
-            Metadata = $"Workflow: {CurrentSession.BoundWorkflow?.DisplayName ?? SelectedWorkflowName}{Environment.NewLine}{CurrentSession.ProjectLabel} / {CurrentSession.ChatLabel}",
-            Summary = "既存ChatGPT会話を制作文脈として使用し、Workflow向けの生成指示を作成します。",
-            Payload = payload,
-        });
+            throw new InvalidOperationException("送信対象のHandoffが現在のPending Handoffと一致しません。最新のHandoffを再送してください。");
+        }
+
+        var kickoffInstruction = PendingHandoffReuse.GetKickoffInstruction(pending, CurrentSession);
+        var message = FindBootstrapHandoff(payload);
+        if (message is null)
+        {
+            message = new HandoffMessage
+            {
+                Direction = HandoffDirection.ConnectorToChatGpt,
+                Kind = HandoffMessageKind.CreationRequest,
+                Title = "制作コンテキストを送信",
+                DisplayText = string.IsNullOrWhiteSpace(kickoffInstruction) ? "既存ChatGPT会話をもとに制作を開始" : kickoffInstruction,
+                Metadata = $"Workflow: {CurrentSession.BoundWorkflow?.DisplayName ?? SelectedWorkflowName}{Environment.NewLine}{CurrentSession.ProjectLabel} / {CurrentSession.ChatLabel}",
+                Summary = "既存ChatGPT会話を制作文脈として使用し、Workflow向けの生成指示を作成します。",
+                Payload = payload,
+            };
+            CurrentSession.HandoffMessages.Add(message);
+        }
+
+        message.State = state;
+        message.TransportErrorCode = state == HandoffTransportState.Failed ? failureCode : null;
+        message.TransportErrorStage = state == HandoffTransportState.Failed ? failureStage : null;
+        if (state == HandoffTransportState.Failed)
+        {
+            CreationPipelineStateMachine.BootstrapSendFailed(
+                CurrentSession,
+                failureDetail ?? "自動送信に失敗しました · 同じHandoffを再送できます");
+        }
+        else if (advancePipeline)
+        {
+            if (state == HandoffTransportState.Sent)
+            {
+                CreationPipelineStateMachine.BootstrapSent(CurrentSession, kickoffInstruction);
+            }
+            else if (state == HandoffTransportState.Copied)
+            {
+                CreationPipelineStateMachine.BootstrapCopied(CurrentSession, kickoffInstruction);
+            }
+        }
+
+        RebuildHandoffItems();
+        await SaveActiveSessionAsync();
         NotifyPipelineStateChanged();
     }
 
+    private static string BuildBootstrapFailureDetail(BrowserExtensionHandoffSendResult result)
+    {
+        var code = result.ErrorCode ?? BrowserExtensionHandoffErrorCodes.SendFailed;
+        var stage = string.IsNullOrWhiteSpace(result.Stage) ? string.Empty : $", stage={result.Stage}";
+        return $"自動送信に失敗しました ({code}{stage}) · 同じHandoffを再送できます";
+    }
+
+    private HandoffMessage? FindBootstrapHandoff(string payload)
+        => CurrentSession?.HandoffMessages.LastOrDefault(item =>
+            item.Direction == HandoffDirection.ConnectorToChatGpt
+            && item.Kind == HandoffMessageKind.CreationRequest
+            && item.IterationNumber is null
+            && string.Equals(item.Payload, payload, StringComparison.Ordinal));
+
     public async Task MarkHandoffCopiedAsync(HandoffTimelineItem item)
     {
+        // Copying an already delivered Handoff is an inspection/fallback
+        // operation. It must not rewrite the durable transport result from
+        // SENT back to COPIED or make the pipeline contradict the actual send.
+        if (item.Message.State == HandoffTransportState.Sent)
+        {
+            StatusMessage = "送信済みHandoffをClipboardへコピーしました。";
+            return;
+        }
+
+        if (item.IsConnectorToChatGpt
+            && item.Message.Kind == HandoffMessageKind.CreationRequest
+            && CurrentSession?.PendingHandoff is { } pending
+            && PendingHandoffReuse.MatchesPayload(pending, item.Payload)
+            && item.Message.State is not HandoffTransportState.Sent)
+        {
+            // A persisted WAITING/FAILED Bootstrap can be deliberately
+            // recovered through the legacy Clipboard action. Confirming it
+            // advances the same boundary without issuing a replacement ID.
+            await ConfirmBootstrapCopiedAsync(item.Payload);
+            StatusMessage = "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。";
+            return;
+        }
+
         item.MarkCopied();
         if (CurrentSession is not null)
         {
-            // Copying an existing Timeline payload is transport-only. The
-            // pipeline advances when a new Handoff is created or a Command is
-            // accepted, never when a saved card is copied again.
+            // Existing non-Bootstrap cards are transport-only. The one
+            // exception is a failed/waiting Bootstrap: copying that exact
+            // pending boundary is the explicit legacy fallback and must move
+            // the pipeline to ChatGPT-response waiting.
             await SaveActiveSessionAsync();
             NotifyPipelineStateChanged();
         }
@@ -2035,6 +2293,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (SlotDiscoveryState != SlotDiscoveryState.Loaded) throw new InvalidOperationException("Workflow slot schemaが未取得です。Workflowを再選択して読み込んでください。");
     }
 
+    private void EnsureBootstrapResendAllowed(string payload)
+    {
+        if (!_isCurrentSessionActivated || CurrentSession is null)
+        {
+            throw new InvalidOperationException("左側の設定から新しい制作を開始してください。");
+        }
+        if (HasPendingContextChange)
+        {
+            throw new InvalidOperationException("選択中のContextをSessionへ反映してからHandoffを再送してください。");
+        }
+        if (IsJobActive)
+        {
+            throw new InvalidOperationException("生成中はHandoffを再送できません。");
+        }
+        if (!PendingHandoffReuse.TryGetResendableBootstrapPayload(CurrentSession, out var savedPayload)
+            || !string.Equals(savedPayload, payload, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("再送対象の保存済みHandoffが見つかりません。新しい制作Contextを確認してください。");
+        }
+    }
+
     private void EnsureSendToChatGptAllowed()
     {
         if (!IsConnected) EnsureMcpConnectionReady();
@@ -2083,7 +2362,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         void Apply()
         {
-            _browserExtensionBridgeStatus = e.Status;
             OnPropertyChanged(nameof(BrowserExtensionConnectionState));
             OnPropertyChanged(nameof(BrowserExtensionConnectionStateText));
             OnPropertyChanged(nameof(BrowserExtensionSystemState));
@@ -2096,6 +2374,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(IsBrowserExtensionBridgeRunning));
             OnPropertyChanged(nameof(BrowserExtensionEndpoint));
             OnPropertyChanged(nameof(BrowserExtensionStatusDetail));
+            OnPropertyChanged(nameof(CanResendBootstrapHandoff));
+            OnPropertyChanged(nameof(CanSendToChatGpt));
+            OnPropertyChanged(nameof(SendToChatGptButtonText));
+            OnPropertyChanged(nameof(SendToChatGptHint));
         }
 
         if (_notificationContext is null)
@@ -2106,6 +2388,28 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         try { _notificationContext.Post(static state => ((Action)state!).Invoke(), (Action)Apply); }
         catch (InvalidOperationException) { }
+    }
+
+    private void BrowserExtensionBridge_Diagnostic(object? sender, BrowserExtensionBridgeDiagnosticEventArgs e)
+        => _ = PersistBrowserExtensionDiagnosticAsync(e.Diagnostic);
+
+    private async Task PersistBrowserExtensionDiagnosticAsync(BrowserExtensionBridgeDiagnostic diagnostic)
+    {
+        try
+        {
+            var fields = new List<string>();
+            if (!string.IsNullOrWhiteSpace(diagnostic.RequestId)) fields.Add($"request_id={diagnostic.RequestId}");
+            if (!string.IsNullOrWhiteSpace(diagnostic.HandoffId)) fields.Add($"handoff_id={diagnostic.HandoffId}");
+            if (!string.IsNullOrWhiteSpace(diagnostic.Status)) fields.Add($"status={diagnostic.Status}");
+            if (!string.IsNullOrWhiteSpace(diagnostic.ErrorCode)) fields.Add($"error_code={diagnostic.ErrorCode}");
+            if (!string.IsNullOrWhiteSpace(diagnostic.Stage)) fields.Add($"stage={diagnostic.Stage}");
+            var suffix = fields.Count == 0 ? string.Empty : $" ({string.Join(", ", fields)})";
+            await _store.LogAsync("bridge", $"Browser Extension {diagnostic.EventName}{suffix}");
+        }
+        catch (Exception)
+        {
+            // Diagnostics must never change the transport or UI outcome.
+        }
     }
 
     private void NotifyConnectionStateChanged()
@@ -2126,7 +2430,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(HasIdeaInput));
         OnPropertyChanged(nameof(ShowIdeaPlaceholder));
         OnPropertyChanged(nameof(IdeaInputHint));
+        OnPropertyChanged(nameof(CanResendBootstrapHandoff));
         OnPropertyChanged(nameof(CanSendToChatGpt));
+        OnPropertyChanged(nameof(SendToChatGptButtonText));
         OnPropertyChanged(nameof(SendToChatGptHint));
         OnPropertyChanged(nameof(CanApplyCommand));
         OnPropertyChanged(nameof(CanRunWorkflow));
@@ -2253,7 +2559,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(HasIdeaInput));
         OnPropertyChanged(nameof(ShowIdeaPlaceholder));
         OnPropertyChanged(nameof(IdeaInputHint));
+        OnPropertyChanged(nameof(CanResendBootstrapHandoff));
         OnPropertyChanged(nameof(CanSendToChatGpt));
+        OnPropertyChanged(nameof(SendToChatGptButtonText));
         OnPropertyChanged(nameof(SendToChatGptHint));
         OnPropertyChanged(nameof(CanApplyCommand));
         OnPropertyChanged(nameof(CanRunWorkflow));
@@ -2268,7 +2576,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             [CreationStage.Connect] = ("CONNECT", "Connect", "MCP接続 / 制作通信Gate"),
             [CreationStage.Context] = ("CONTEXT", "Context", "Workflow / Project / Chat / Maximum Iterations / Session Binding"),
             [CreationStage.Idea] = ("IDEA", "開始指示・補足", "既存ChatGPT会話への任意の開始指示・補足"),
-            [CreationStage.ToChatGpt] = ("TO CHATGPT", "To ChatGPT", "制作ContextをManual Handoff"),
+            [CreationStage.ToChatGpt] = ("TO CHATGPT", "To ChatGPT", "Extension送信 / Clipboard fallback"),
             [CreationStage.Command] = ("COMMAND", "Command", "Connector Commandを解析・検証"),
             [CreationStage.Apply] = ("APPLY", "Apply", "Backup・slot反映・保存・validate"),
             [CreationStage.Generate] = ("GENERATE", "Generate", "ComfyUI Jobを実行"),

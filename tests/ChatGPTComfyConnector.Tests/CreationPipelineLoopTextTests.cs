@@ -200,7 +200,7 @@ public sealed class CreationPipelineLoopTextTests : IDisposable
     {
         var session = BoundSession();
         session.OriginalIdea = "idea";
-        CreationPipelineStateMachine.BootstrapCopied(session, session.OriginalIdea);
+        CreationPipelineStateMachine.BootstrapSent(session, session.OriginalIdea);
         return session;
     }
 

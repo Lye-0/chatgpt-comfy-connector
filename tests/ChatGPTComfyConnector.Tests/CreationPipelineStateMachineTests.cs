@@ -107,6 +107,65 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         Assert.False(HandoffPayloadReuse.TryGetSavedPayload(null, out _));
     }
 
+    [Theory]
+    [InlineData(HandoffTransportState.Copied)]
+    [InlineData(HandoffTransportState.Failed)]
+    public void ExplicitBootstrapRetryKeepsTheSamePendingIdentityAndBody(HandoffTransportState transportState)
+    {
+        var session = BoundSession(3);
+        var pending = PendingHandoffFactory.Create(session, [], "generate");
+        session.PendingHandoff = pending;
+        const string bodySuffix = "\n\n# saved bootstrap body";
+        var payload = $"handoff_id: {pending.HandoffId}\nsession_id: {pending.SessionId}\nboundary_id: {pending.BoundaryId}{bodySuffix}";
+        session.HandoffMessages.Add(new HandoffMessage
+        {
+            Direction = HandoffDirection.ConnectorToChatGpt,
+            Kind = HandoffMessageKind.CreationRequest,
+            State = transportState,
+            Payload = payload,
+        });
+
+        var handoffId = pending.HandoffId;
+        var boundaryId = pending.BoundaryId;
+        var sessionId = pending.SessionId;
+        var messageCount = session.HandoffMessages.Count;
+
+        Assert.True(PendingHandoffReuse.TryGetResendableBootstrapPayload(session, out var retryPayload));
+        Assert.Equal(payload, retryPayload);
+        Assert.Equal(sessionId, session.PendingHandoff.SessionId);
+        Assert.Equal(handoffId, session.PendingHandoff.HandoffId);
+        Assert.Equal(boundaryId, session.PendingHandoff.BoundaryId);
+
+        foreach (var connection in new[] { ConnectionState.Connected, ConnectionState.Disconnected, ConnectionState.Connected })
+        {
+            CreationPipelineStateMachine.SynchronizeConnectionGate(session, connection);
+        }
+
+        Assert.Equal(messageCount, session.HandoffMessages.Count);
+        Assert.Equal(transportState, session.HandoffMessages.Single().State);
+        Assert.Equal(payload, session.HandoffMessages.Single().Payload);
+        Assert.Equal(sessionId, session.PendingHandoff.SessionId);
+        Assert.Equal(handoffId, session.PendingHandoff.HandoffId);
+        Assert.Equal(boundaryId, session.PendingHandoff.BoundaryId);
+    }
+
+    [Fact]
+    public void SentBootstrapIsNotEligibleForExplicitRetry()
+    {
+        var session = BoundSession(3);
+        var pending = PendingHandoffFactory.Create(session, [], "generate");
+        session.PendingHandoff = pending;
+        session.HandoffMessages.Add(new HandoffMessage
+        {
+            Direction = HandoffDirection.ConnectorToChatGpt,
+            Kind = HandoffMessageKind.CreationRequest,
+            State = HandoffTransportState.Sent,
+            Payload = $"handoff_id: {pending.HandoffId}\nsession_id: {pending.SessionId}\nboundary_id: {pending.BoundaryId}",
+        });
+
+        Assert.False(PendingHandoffReuse.TryGetResendableBootstrapPayload(session, out _));
+    }
+
     [Fact]
     public void WaitingHandoffSurvivesConnectionRefreshesAndKeepsItsIdentity()
     {
@@ -161,6 +220,14 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     {
         var session = SentIdeaSession();
         session.PendingHandoff = PendingHandoffFactory.Create(session, [], "generate");
+        var pending = session.PendingHandoff!;
+        session.HandoffMessages.Add(new HandoffMessage
+        {
+            Direction = HandoffDirection.ConnectorToChatGpt,
+            Kind = HandoffMessageKind.CreationRequest,
+            State = HandoffTransportState.Sent,
+            Payload = $"handoff_id: {pending.HandoffId}\nsession_id: {pending.SessionId}\nboundary_id: {pending.BoundaryId}",
+        });
         var handoff = CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt);
         handoff.State = CreationStageState.NotReached;
         handoff.WaitingReason = CreationWaitingReason.None;
@@ -382,7 +449,7 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         CreationPipelineStateMachine.IdeaChanged(session, "idea while ComfyUI is stopped");
         CreationPipelineStateMachine.BootstrapCopied(session, "idea while ComfyUI is stopped");
         AssertStage(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser);
-        Assert.Equal(CreationWaitingReason.ChatGptResponseRequired, CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).WaitingReason);
+        Assert.Equal(CreationWaitingReason.ChatGptPasteRequired, CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).WaitingReason);
     }
 
     [Fact]
@@ -395,7 +462,40 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         Assert.Equal(CreationStageState.Completed, CreationPipelineStateMachine.Get(session, CreationStage.Idea).State);
         Assert.Equal(CreationStageState.WaitingUser, CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).State);
         Assert.Equal(string.Empty, session.Pipeline.SentIdeaSnapshot);
+        Assert.Equal(CreationWaitingReason.ChatGptPasteRequired, CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).WaitingReason);
+    }
+
+    [Fact]
+    public void BootstrapCanBeSentThroughTheBrowserExtensionWithoutChangingThePipelineBoundary()
+    {
+        var session = BoundSession(3);
+        var pending = PendingHandoffFactory.Create(session, [], "generate");
+        session.PendingHandoff = pending;
+        CreationPipelineStateMachine.BootstrapSent(session, session.OriginalIdea);
+
+        Assert.Same(pending, session.PendingHandoff);
+        Assert.Equal(CreationStageState.Completed, CreationPipelineStateMachine.Get(session, CreationStage.Idea).State);
+        Assert.Equal("制作ContextをExtensionへ送信済み", CreationPipelineStateMachine.Get(session, CreationStage.Idea).Detail);
+        Assert.Equal(CreationStageState.WaitingUser, CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).State);
+        Assert.Equal("Handoff送信済み · ChatGPTからの返答待ち", CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).Detail);
         Assert.Equal(CreationWaitingReason.ChatGptResponseRequired, CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt).WaitingReason);
+    }
+
+    [Fact]
+    public void BootstrapSendFailureKeepsTheSamePendingHandoffAndMakesToChatGptRetryable()
+    {
+        var session = BoundSession(3);
+        var pending = PendingHandoffFactory.Create(session, [], "generate");
+        session.PendingHandoff = pending;
+
+        CreationPipelineStateMachine.BootstrapSendFailed(session, "自動送信に失敗しました (composer_not_found)");
+
+        Assert.Same(pending, session.PendingHandoff);
+        Assert.Equal(CreationStageState.Current, CreationPipelineStateMachine.Get(session, CreationStage.Idea).State);
+        var handoff = CreationPipelineStateMachine.Get(session, CreationStage.ToChatGpt);
+        Assert.Equal(CreationStageState.Error, handoff.State);
+        Assert.Contains("composer_not_found", handoff.Detail, StringComparison.Ordinal);
+        Assert.Equal("TO CHATGPT → 送信エラー · 再送できます", CreationPipelineLoopText.Resolve(session, true, ConnectionState.Connected, session.OriginalIdea));
     }
 
     [Fact]
@@ -603,7 +703,7 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     {
         var session = BoundSession(3);
         session.OriginalIdea = "idea";
-        CreationPipelineStateMachine.BootstrapCopied(session, session.OriginalIdea);
+        CreationPipelineStateMachine.BootstrapSent(session, session.OriginalIdea);
         return session;
     }
 

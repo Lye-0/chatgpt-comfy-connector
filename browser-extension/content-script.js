@@ -303,6 +303,22 @@
     return candidates.filter((candidate) => !watcher.baselineAssistantElements.has(candidate));
   }
 
+  function responseContextFor(watcher) {
+    return {
+      protocol: watcher.protocol,
+      handoffId: watcher.handoffId,
+      sessionId: watcher.sessionId
+    };
+  }
+
+  function isConnectorResponseCandidate(candidate, watcher) {
+    try {
+      return Boolean(locators.hasConnectorCommandResponse?.(candidate, responseContextFor(watcher)));
+    } catch (_) {
+      return false;
+    }
+  }
+
   function sendAssistantResponseToBackground(watcher, result) {
     const message = {
       type: responseResultMessageType,
@@ -362,16 +378,31 @@
     }
     const now = Date.now();
     const candidates = assistantCandidatesFor(watcher);
-    const candidate = candidates.at(-1) || null;
+    // A visible assistant/status node is not by itself a Connector response.
+    // Only the newest post-anchor assistant message whose own content has a
+    // connector-command block may advance to extraction. This prevents
+    // transient "Thinking"/tool-progress UI from completing the watcher.
+    const latestCandidate = candidates.at(-1) || null;
+    const candidate = latestCandidate && isConnectorResponseCandidate(latestCandidate, watcher)
+      ? latestCandidate
+      : null;
+    if (latestCandidate && !candidate) {
+      watcher.sawAssistantMessage = true;
+      watcher.sawNonConnectorAssistant = true;
+      if (!watcher.ignoredAssistantElements.has(latestCandidate)) {
+        watcher.ignoredAssistantElements.add(latestCandidate);
+        diagnostic("assistant candidate ignored", {
+          request_id: watcher.requestId,
+          handoff_id: watcher.handoffId,
+          stage: "assistant_response_candidate_non_connector"
+        });
+      }
+    }
     if (candidate) {
       watcher.sawAssistantMessage = true;
       let text = "";
       try {
-        text = locators.readAssistantResponseText(candidate, {
-          protocol: watcher.protocol,
-          handoffId: watcher.handoffId,
-          sessionId: watcher.sessionId
-        });
+        text = locators.readAssistantResponseText(candidate, responseContextFor(watcher));
       }
       catch (_) { text = ""; }
       if (candidate !== watcher.candidate || text !== watcher.candidateText) {
@@ -424,6 +455,8 @@
         ? "assistant_message_not_found"
         : watcher.sawGenerating || generating
           ? "assistant_response_streaming"
+          : watcher.sawNonConnectorAssistant
+            ? "assistant_response_non_connector"
           : watcher.extractionWasEmpty
             ? "assistant_response_empty"
             : "assistant_response_stability_timeout";
@@ -506,6 +539,8 @@
       sawAssistantMessage: false,
       sawGenerating: false,
       extractionWasEmpty: false,
+      sawNonConnectorAssistant: false,
+      ignoredAssistantElements: new Set(),
       hasCompletionActions: false,
       observer: null,
       timer: null,

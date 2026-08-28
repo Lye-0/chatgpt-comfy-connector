@@ -90,6 +90,21 @@ class FakeElement {
     if (selector === "*") return descendants;
     if (selector === "pre") return descendants.filter((element) => element.tagName === "PRE");
     if (selector === "code") return descendants.filter((element) => element.tagName === "CODE");
+    if (selector === "[data-message-content]") {
+      return descendants.filter((element) => element.getAttribute("data-message-content") !== null);
+    }
+    if (selector.includes("data-testid*=") && selector.includes("message-content")) {
+      return descendants.filter((element) => (element.getAttribute("data-testid") || "").includes("message-content"));
+    }
+    if (selector.includes("data-testid*=") && selector.includes("markdown")) {
+      return descendants.filter((element) => (element.getAttribute("data-testid") || "").includes("markdown"));
+    }
+    if (selector.includes("class*=") && selector.includes("markdown")) {
+      return descendants.filter((element) => (element.getAttribute("class") || "").includes("markdown"));
+    }
+    if (selector.includes("class*=") && selector.includes("prose")) {
+      return descendants.filter((element) => (element.getAttribute("class") || "").includes("prose"));
+    }
     return descendants.filter((element) => {
       if (selector.includes("textarea")) return element.tagName === "TEXTAREA";
       if (selector.includes("contenteditable")) return element.isContentEditable;
@@ -296,24 +311,51 @@ class FakeDocument {
     return message;
   }
 
-  appendAssistantCodeMessage({ codeText, language = "connector-command", classLanguage = language, header = false, before = "", after = "", rawCodeText = null }) {
+  appendAssistantStatusMessage(statusText) {
+    const message = new FakeElement(this, "div", {
+      "data-message-author-role": "assistant"
+    });
+    message.appendChild(new FakeElement(this, "div", {
+      role: "status",
+      "aria-live": "polite",
+      "data-testid": "assistant-response-status",
+      textContent: statusText
+    }));
+    this.body.appendChild(message);
+    this.assistantMessages.push(message);
+    return message;
+  }
+
+  appendAssistantCodeMessage({ codeText, language = "connector-command", classLanguage = language, header = false, before = "", after = "", rawCodeText = null, statusText = "", contentRoot = false }) {
     const message = new FakeElement(this, "div", {
       "data-message-author-role": "assistant"
     });
     message._textContent = before;
+    if (statusText) {
+      message.appendChild(new FakeElement(this, "div", {
+        role: "status",
+        "aria-live": "polite",
+        "data-testid": "assistant-response-status",
+        textContent: statusText
+      }));
+    }
+    const content = contentRoot
+      ? new FakeElement(this, "div", { "data-message-content": "true" })
+      : message;
     const pre = new FakeElement(this, "pre");
     if (header) {
       pre.appendChild(new FakeElement(this, "div", { textContent: language }));
     }
     const codeAttributes = classLanguage ? { class: `language-${classLanguage}` } : {};
     pre.appendChild(new FakeElement(this, "code", { ...codeAttributes, textContent: codeText }));
-    message.appendChild(pre);
+    content.appendChild(pre);
     if (rawCodeText !== null) {
       const rawPre = new FakeElement(this, "pre");
       rawPre.appendChild(new FakeElement(this, "code", { textContent: rawCodeText }));
-      message.appendChild(rawPre);
+      content.appendChild(rawPre);
     }
-    if (after) message.appendChild(new FakeElement(this, "p", { textContent: after }));
+    if (after) content.appendChild(new FakeElement(this, "p", { textContent: after }));
+    if (contentRoot) message.appendChild(content);
     this.body.appendChild(message);
     this.assistantMessages.push(message);
     return message;
@@ -726,13 +768,77 @@ test("Content Script waits for streaming to stop before reporting assistant resp
     protocol: handoff.protocol
   })).status, "watching");
   const stopButton = harness.document.addStopButton();
-  harness.document.appendAssistantMessage(`connector-command ${handoff.handoffId} ${handoff.boundaryId}`);
+  harness.document.appendAssistantStatusMessage("思考中");
   await new Promise((resolve) => setTimeout(resolve, 40));
   assert.equal(harness.messages.some((message) => message.type === "ASSISTANT_RESPONSE_RESULT"), false);
+  const command = JSON.stringify({
+    protocol: "comfy-connector/1",
+    action: "complete",
+    handoff_id: handoff.handoffId,
+    session_id: handoff.sessionId,
+    reason: "approved"
+  });
+  harness.document.appendAssistantCodeMessage({
+    codeText: command,
+    classLanguage: "connector-command",
+    statusText: "より詳細な画像を生成しています。少々お待ちください。",
+    contentRoot: true
+  });
   harness.document.removeButton(stopButton);
   const result = await harness.waitForRuntimeMessage((message) => message.type === "ASSISTANT_RESPONSE_RESULT");
   assert.equal(result.status, "received");
   assert.equal(result.stage, "assistant_response_complete");
+  assert.equal(result.payload.includes("思考中"), false);
+  assert.equal(result.payload.includes("より詳細な画像を生成しています"), false);
+});
+
+test("Content Script ignores progress-only assistant turns and reports one final response after repeated mutations", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send({
+    type: "WATCH_ASSISTANT_RESPONSE",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol
+  })).status, "watching");
+
+  const statusMessage = harness.document.appendAssistantStatusMessage("より詳細な画像を生成しています。少々お待ちください。");
+  assert.equal(harness.context.ChatGptComfyConnectorLocators.findAssistantMessages(harness.document).includes(statusMessage), false);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(harness.messages.some((message) => message.type === "ASSISTANT_RESPONSE_RESULT"), false);
+
+  const command = JSON.stringify({
+    protocol: "comfy-connector/1",
+    action: "generate",
+    handoff_id: handoff.handoffId,
+    session_id: handoff.sessionId,
+    slots: { "6.text": { payload_id: "prompt-main" } }
+  });
+  const payload = "<<<COMFY_PAYLOAD:prompt-main:boundary-fixture>>>\nraw prompt\n<<<END_COMFY_PAYLOAD:prompt-main:boundary-fixture>>>";
+  const finalMessage = harness.document.appendAssistantCodeMessage({
+    codeText: command,
+    classLanguage: "connector-command",
+    statusText: "思考中",
+    rawCodeText: payload,
+    contentRoot: true
+  });
+  assert.equal(
+    harness.context.ChatGptComfyConnectorLocators.findAssistantContentRoot(finalMessage),
+    finalMessage.children.at(-1));
+
+  const result = await harness.waitForRuntimeMessage((message) =>
+    message.type === "ASSISTANT_RESPONSE_RESULT" && message.status === "received");
+  assert.equal(result.payload.includes("思考中"), false);
+  assert.equal(result.payload.includes("より詳細な画像を生成しています"), false);
+  assert.equal(result.payload.includes(payload), true);
+
+  // A later DOM update to the same assistant turn must not emit a second
+  // response after the watcher has completed.
+  finalMessage.appendChild(new FakeElement(harness.document, "p", { textContent: "追加の表示更新" }));
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(harness.messages.filter((message) => message.type === "ASSISTANT_RESPONSE_RESULT").length, 1);
 });
 
 test("Content Script reports an explicit timeout when no post-anchor assistant response appears", async () => {

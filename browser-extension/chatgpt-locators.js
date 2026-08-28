@@ -63,6 +63,18 @@
     '[role="button"][aria-label]'
   ];
 
+  // ChatGPT renders the answer body inside a narrower content element, while
+  // progress/live-region controls can live beside or inside the assistant
+  // turn.  Prefer the content element when one is available so extraction
+  // never starts from a broad conversation-turn container by accident.
+  const assistantContentSelectors = [
+    '[data-message-content]',
+    '[data-testid*="message-content"]',
+    '[data-testid*="markdown"]',
+    '[class*="markdown"]',
+    '[class*="prose"]'
+  ];
+
   const stopButtonSelectors = [
     'button[data-testid*="stop"]',
     '[role="button"][data-testid*="stop"]',
@@ -77,6 +89,10 @@
   ];
 
   const zeroWidthPattern = /[\u200b\u200c\u200d\u2060\ufeff]/g;
+
+  const transientRolePattern = /^(?:status|progressbar|alert|log|marquee)$/i;
+  const transientSemanticPattern = /(?:^|[\s:_-])(?:status|progress|loading|thinking|generating|generation|streaming|live(?:-|_)?region|tool(?:-|_)?progress|image(?:-|_)?generation|stop(?:-|_)?button|cancel)(?:$|[\s:_-])/i;
+  const transientTextPattern = /^(?:thinking|思考中|generating|生成中|より詳細な画像を生成しています[。.!！]?少々お待ちください[。.!！]?|画像を生成しています[。.!！]?|回答を生成中[。.!！]?|応答を生成中[。.!！]?|streaming[…\.。]*)$/i;
 
   // The composer toolbar contains several visible buttons.  A button that
   // happens to be near the composer is never a safe Send candidate unless its
@@ -175,6 +191,62 @@
       .filter((value) => value !== null && value !== undefined)
       .join(" ")
       .toLowerCase();
+  }
+
+  function semanticElementAttributes(element) {
+    return [
+      attributeValue(element, "data-testid"),
+      attributeValue(element, "data-state"),
+      attributeValue(element, "data-status"),
+      attributeValue(element, "aria-label"),
+      attributeValue(element, "title"),
+      attributeValue(element, "class")
+    ].join(" ").toLowerCase();
+  }
+
+  function isStatusOrProgressElement(element) {
+    if (!element) return false;
+    const role = attributeValue(element, "role").toLowerCase();
+    if (transientRolePattern.test(role)) return true;
+    if (hasAttribute(element, "aria-live")) return true;
+    return transientSemanticPattern.test(semanticElementAttributes(element));
+  }
+
+  function isAssistantActionElement(element) {
+    if (!element) return false;
+    const tagName = element.tagName?.toLowerCase();
+    const role = attributeValue(element, "role").toLowerCase();
+    return tagName === "button"
+      || tagName === "input"
+      || role === "button"
+      || role === "toolbar"
+      || role === "menu"
+      || role === "menuitem";
+  }
+
+  function hasCodeDescendant(element) {
+    if (!element) return false;
+    if (element.tagName?.toLowerCase() === "pre") return true;
+    try {
+      return Boolean(element.querySelector?.("pre"));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isTransientTextElement(element) {
+    if (!element || hasCodeDescendant(element)) return false;
+    const text = normalizeLineEndings(rawElementText(element))
+      .replace(zeroWidthPattern, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    return text.length > 0 && text.length <= 240 && transientTextPattern.test(text);
+  }
+
+  function isAssistantNoiseElement(element) {
+    return isStatusOrProgressElement(element)
+      || isAssistantActionElement(element)
+      || isTransientTextElement(element);
   }
 
   function belongsToComposerScope(element, composer) {
@@ -383,6 +455,14 @@
     }
   }
 
+  function hasAttribute(element, name) {
+    try {
+      return element?.getAttribute?.(name) !== null && element?.getAttribute?.(name) !== undefined;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function hasConnectorCommandLanguage(element) {
     if (!element) return false;
     const semanticValues = [
@@ -471,6 +551,91 @@
     return `\`\`\`connector-command\n${stripCodeBoundaryLineEndings(codeText)}\n\`\`\``;
   }
 
+  function elementDepth(element) {
+    let depth = 0;
+    let current = element?.parentElement;
+    while (current) {
+      depth += 1;
+      current = current.parentElement;
+    }
+    return depth;
+  }
+
+  function assistantContentScore(element, message, responseContext) {
+    if (!element || isStatusOrProgressElement(element) || isAssistantActionElement(element)) return -10000;
+    if (element === message) return hasCodeDescendant(element) ? 100 : 0;
+
+    const testId = attributeValue(element, "data-testid").toLowerCase();
+    const className = attributeValue(element, "class").toLowerCase();
+    let score = 10;
+    if (hasAttribute(element, "data-message-content")) score += 240;
+    if (testId.includes("message-content")) score += 220;
+    if (testId.includes("markdown")) score += 190;
+    if (className.includes("markdown")) score += 180;
+    if (className.includes("prose")) score += 160;
+    if (hasCodeDescendant(element)) score += 100;
+    if (findCodeBlocks(element).some((pre) => isConnectorCommandCodeBlock(pre, findCodeElement(pre), responseContext))) {
+      score += 80;
+    }
+    // If two renderers expose equivalent content wrappers, prefer the more
+    // specific/deeper one. This keeps action/status siblings outside the root.
+    return score + elementDepth(element) / 1000;
+  }
+
+  function findAssistantContentRoot(message, responseContext = null) {
+    if (!message) return null;
+    const candidates = [message, ...uniqueElements(assistantContentSelectors, message)]
+      .filter((element, index, all) => all.indexOf(element) === index)
+      .filter((element) => element === message || (isVisible(element) && !isStatusOrProgressElement(element) && !isAssistantActionElement(element)));
+    // If a renderer places the command block beside (rather than inside) its
+    // preferred text wrapper, keep the message root as the extraction scope.
+    // Conversely, when the block is inside a Markdown wrapper, use that
+    // narrower root and leave sibling status UI out of the clone.
+    const responseCandidates = candidates.filter((element) =>
+      findCodeBlocks(element).some((pre) => isConnectorCommandCodeBlock(pre, findCodeElement(pre), responseContext))
+      || hasRawConnectorCommandFence(element));
+    return (responseCandidates.length > 0 ? responseCandidates : candidates).sort((left, right) =>
+      assistantContentScore(right, message, responseContext) - assistantContentScore(left, message, responseContext))[0] || message;
+  }
+
+  function removeAssistantNoise(root) {
+    if (!root?.querySelectorAll) return;
+    let descendants = [];
+    try {
+      descendants = Array.from(root.querySelectorAll("*"));
+    } catch (_) {
+      descendants = [];
+    }
+    // Remove deepest nodes first. A status/live region can contain several
+    // nested spans; removing the region itself is the important boundary.
+    for (const element of descendants.reverse()) {
+      if (!isAssistantNoiseElement(element)) continue;
+      try {
+        element.parentElement?.removeChild(element);
+      } catch (_) {
+        // A concurrently reconciled message is safe to skip; extraction will
+        // still be gated by the connector-command structural guard.
+      }
+    }
+  }
+
+  function hasRawConnectorCommandFence(root) {
+    const text = normalizeLineEndings(renderedElementText(root));
+    const match = text.match(/```[ \t]*connector-command(?:[ \t]*\r?\n)([\s\S]*?)```/i);
+    if (!match) return false;
+    // This is only a structural guard. Desktop remains responsible for the
+    // strict JSON/slot/payload validation at the transport boundary.
+    return /["']protocol["']\s*:\s*["']comfy-connector\/1["']/i.test(match[1]);
+  }
+
+  function hasConnectorCommandResponse(element, responseContext = null) {
+    const root = findAssistantContentRoot(element, responseContext);
+    if (!root) return false;
+    return findCodeBlocks(root).some((pre) =>
+      isConnectorCommandCodeBlock(pre, findCodeElement(pre), responseContext))
+      || hasRawConnectorCommandFence(root);
+  }
+
   const blockElementTags = new Set([
     "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DD", "DIV", "DL", "DT",
     "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER", "FORM", "H1", "H2", "H3",
@@ -540,8 +705,14 @@
   // restore only the Connector command fence that the Desktop grammar expects.
   function readAssistantResponseText(element, responseContext = null) {
     if (!element) return "";
-    const clone = typeof element.cloneNode === "function" ? element.cloneNode(true) : null;
-    if (!clone) return readMessageText(element);
+    const sourceRoot = findAssistantContentRoot(element, responseContext) || element;
+    const clone = typeof sourceRoot.cloneNode === "function" ? sourceRoot.cloneNode(true) : null;
+    if (!clone) return readMessageText(sourceRoot);
+
+    // The assistant turn may contain a generating/status live region and
+    // action toolbar next to the actual Markdown body. Never include those
+    // UI strings in the response sent to Desktop.
+    removeAssistantNoise(clone);
 
     for (const pre of findCodeBlocks(clone)) {
       const code = findCodeElement(pre);
@@ -562,11 +733,45 @@
     return renderedElementText(clone);
   }
 
+  function isStatusOnlyAssistantMessage(element) {
+    if (!element || findCodeBlocks(element).length > 0) return false;
+    let descendants = [];
+    try {
+      descendants = Array.from(element.querySelectorAll?.("*") || []);
+    } catch (_) {
+      descendants = [];
+    }
+    if (!descendants.some((candidate) => isStatusOrProgressElement(candidate))) return false;
+
+    const clone = typeof element.cloneNode === "function" ? element.cloneNode(true) : null;
+    if (!clone) return false;
+    removeAssistantNoise(clone);
+    return renderedElementText(clone).trim().length === 0;
+  }
+
   function comparableMessageText(value) {
     return normalizeText(value)
       .replace(/\u200b/g, "")
       // ChatGPT may expose a synthetic final newline through innerText.
       .replace(/\n+$/, "");
+  }
+
+  function isAssistantMessageElement(element) {
+    if (!element || isAssistantActionElement(element)) return false;
+    const roles = [
+      attributeValue(element, "data-message-author-role"),
+      attributeValue(element, "data-turn"),
+      attributeValue(element, "data-author-role")
+    ].map((value) => value.toLowerCase());
+    const hasAssistantRole = roles.includes("assistant");
+
+    const testId = attributeValue(element, "data-testid").toLowerCase();
+    const hasAssistantTestId = testId.includes("assistant-message") || testId.includes("conversation-turn-assistant");
+    // An assistant turn may itself be announced with aria-live while it is
+    // streaming. Keep the explicit message container, but reject standalone
+    // status/live-region nodes that only happen to contain assistant text.
+    return (hasAssistantRole || hasAssistantTestId)
+      && (!isStatusOrProgressElement(element) || hasAssistantRole);
   }
 
   function findUserMessages(root = globalThis.document) {
@@ -578,7 +783,9 @@
   function findAssistantMessages(root = globalThis.document) {
     if (!root?.querySelectorAll) return [];
     return sortInDocumentOrder(uniqueElements(assistantMessageSelectors, root)
-      .filter((element) => isVisible(element)));
+      .filter((element) => isVisible(element)
+        && isAssistantMessageElement(element)
+        && !isStatusOnlyAssistantMessage(element)));
   }
 
   function captureUserMessageSnapshot(root = globalThis.document) {
@@ -703,6 +910,10 @@
     getComposerInputMarkerStatus,
     composerContainsInputMarkers,
     readMessageText,
+    assistantContentSelectors: Object.freeze([...assistantContentSelectors]),
+    findAssistantContentRoot,
+    isStatusOrProgressElement,
+    hasConnectorCommandResponse,
     readAssistantResponseText,
     findUserMessages,
     findAssistantMessages,

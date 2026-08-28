@@ -249,10 +249,13 @@ After the `handoff.result` with `status: "sent"` has been delivered, the
 Background asks the same Content Script to watch the current response. The
 watch is anchored to the newly confirmed user message and is never started
 for a copied or failed Handoff. The Content Script uses the assistant-message
-locator, `MutationObserver`, polling, text-stability, and the generating/stop
-control state to distinguish a completed answer from a streaming answer. It
-returns the assistant text only after the response is stable and correlated
-to the anchor:
+locator, a message-content locator, `MutationObserver`, polling,
+text-stability, and the generating/stop control state to distinguish a
+completed answer from a streaming answer. Status/live-region text such as
+thinking, tool progress, and image-generation progress is excluded. A
+candidate is not eligible until that assistant message contains a
+`connector-command` code block (or the equivalent fenced text) and its
+response is stable and correlated to the anchor:
 
 ```json
 {

@@ -1,4 +1,4 @@
-# Browser Extension Bridge (v0.2 Phase 1–3.3)
+# Browser Extension Bridge (v0.2 Phase 1–4)
 
 ## Scope
 
@@ -7,8 +7,12 @@ Connector. Phase 2 adds one narrow action: Desktop can deliver the already
 generated Bootstrap Handoff to the currently active `chatgpt.com` tab, where
 the Content Script fills the composer and submits it. Phase 3.1–3.3 observes
 the completed assistant response, validates it on Desktop as a Connector
-Response, and places it into `CHATGPT COMMAND`; it still does not
-apply/generate workflows automatically or enumerate chats/projects.
+Response, and places it into `CHATGPT COMMAND`. Phase 4 connects a strictly
+validated `generate` Response to the existing Desktop APPLY → ComfyUI READY
+→ GENERATE → OUTPUT path, while retaining the manual controls as a safe
+fallback. A strictly validated `complete` Response completes the session only
+when the existing output/review rules allow it. Chat/project enumeration and
+an autonomous infinite iteration loop remain out of scope.
 
 ```text
 ChatGPT page content script (DOM only: input/send/response observation)
@@ -46,10 +50,13 @@ is idempotent, so both lifecycle paths are safe. The Bridge port is a protocol
 constant rather than a mutable ComfyUI setting and is not written to
 `config/settings.json`.
 
-The existing `Connector → MCP → ComfyUI → GPU` header remains unchanged. The
-right-hand `BROWSER EXTENSION / Desktop Bridge` card is a separate status
-surface. When pairing is required, it displays a one-time pairing code; the
-code is never included in health responses or logs.
+The existing Connector, MCP, ComfyUI, and GPU indicators remain independent.
+The Extension indicator is integrated into the same `SYSTEM CONNECTION`
+header, alongside those four runtime facts. The pairing code is shown there
+only while pairing is required and is hidden after pairing/connection; it is
+never included in health responses or logs. The Timeline and `CHATGPT COMMAND`
+area remain the natural detailed surfaces for Handoff/Response and manual
+recovery actions.
 
 ## Endpoints
 
@@ -87,8 +94,8 @@ safe for ordinary browser diagnostics.
 ### `POST /api/v1/pair`
 
 Pairing is an explicit user-mediated bootstrap. The Desktop generates a
-short-lived, one-time code and displays it in the separate `BROWSER
-EXTENSION` card. The user enters that code in the Extension popup. The
+short-lived, one-time code and displays it in the `SYSTEM CONNECTION` header
+only while pairing is required. The user enters that code in the Extension popup. The
 request must include `X-Connector-Client: browser-extension`; an accepted
 Chromium extension Origin is used when the browser supplies one. The
 Service Worker path also works when Chromium omits Origin for an authorized
@@ -267,8 +274,11 @@ Background relays this envelope without inspecting its DOM or parsing its
 payload. The Desktop then matches all durable IDs and the latest send
 attempt, requires the outgoing Handoff to be `SENT`, and invokes the existing
 `ConnectorProtocol.Parse` strict validator. Only a valid response is copied
-into `CHATGPT COMMAND` and recorded as `RECEIVED`; APPLY and GENERATE remain
-explicit user actions.
+into `CHATGPT COMMAND` and recorded as `RECEIVED`. A valid `generate` response
+then enters the existing Desktop APPLY/GENERATE path automatically; a valid
+`complete` response uses the existing output-and-review completion guard.
+Manual `読み込んで確認`, `適用`, and `適用して生成` remain available for
+inspection, recovery, and explicitly user-controlled operation.
 
 The Content Script performs DOM-aware extraction before this Desktop boundary.
 Because Markdown rendering removes the source fence from a rendered
@@ -361,7 +371,7 @@ attempt's `request_id` is new.
   bootstrap, required for WebSocket hello and HTTP ping, and never persisted;
 - fixed localhost URLs in the background Service Worker; page messages cannot
   supply an arbitrary URL;
-- no command execution surface in this phase;
+- no arbitrary command or MCP execution surface exposed to the Extension;
 - bounded HTTP/WebSocket message sizes and a five-second hello timeout.
 - Handoff delivery is limited to the active, last-focused HTTPS `chatgpt.com`
   tab; the Background cannot choose an arbitrary URL and the Content Script
@@ -371,7 +381,9 @@ attempt's `request_id` is new.
 The pairing credential is the long-lived trust relationship; the session token
 is only a short-lived process capability. A later release can pin pairing to a
 specific Extension ID or add explicit revoke/reset UI without changing the
-message envelope. No command execution surface exists in this phase.
+message envelope. Automatic execution is still limited to the existing
+strictly validated `generate`/`complete` actions; arbitrary commands and MCP
+operations are not exposed to the Extension.
 
 ## Extension layout
 
@@ -410,8 +422,11 @@ browser-extension/
    should show `SENT`. After ChatGPT finishes, its assistant response should
    be delivered through the Bridge, pass the Desktop strict Connector Response
    validation, appear in `CHATGPT COMMAND`, and create a `RECEIVED` timeline
-   item. Press `読み込んで確認` before using the existing manual APPLY or
-   GENERATE controls.
+   item. A `generate` response then automatically applies the validated slots,
+   starts/waits for ComfyUI when needed, runs one Connector-owned Job, and
+   updates OUTPUT/HISTORY. A `complete` response completes only after the
+   existing review/output guard passes. The manual Command buttons remain
+   available for recovery or deliberate inspection.
 6. Make a non-ChatGPT tab active and press `SEND TO CHATGPT` again. The
    Desktop should report `active_tab_not_chatgpt` and retain the same pending
    Handoff; the Clipboard fallback remains available.
@@ -438,8 +453,11 @@ covers sent-boundary correlation, copied/failed rejection, strict Connector
 Response validation, transport errors, and the command confirmation state.
 `CreationPipelineStateMachineTests.cs`
 covers the separate SENT Bootstrap transition, explicit Clipboard waiting state,
-and retryable send failure while retaining the same PendingHandoff. The bridge
-tests use an ephemeral loopback port so they do not collide with production.
+retryable send failure while retaining the same PendingHandoff, the separate
+ComfyUI startup/wait/generation substates, and complete/resume boundaries. The
+automatic-response coordinator tests cover response identity idempotency and
+safe persisted diagnostics. The bridge tests use an ephemeral loopback port so
+they do not collide with production.
 
 `tests/browser-extension/content-script.test.mjs` uses only Node's built-in
 test runner and a small DOM fixture to exercise textarea/contenteditable input,

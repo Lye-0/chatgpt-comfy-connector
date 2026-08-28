@@ -591,6 +591,11 @@
                                FontSize="24"
                                FontWeight="SemiBold"
                                Margin="0,2,0,0" />
+                    <TextBlock Text="{Binding BuildIdentityText}"
+                               Foreground="{StaticResource MutedTextBrush}"
+                               FontSize="9"
+                               Margin="0,4,0,0"
+                               ToolTip="実行中Desktopのversion / commit" />
                 </StackPanel>
                 <Border Grid.Column="1"
                         Width="700"
@@ -604,6 +609,7 @@
                         AutomationProperties.Name="SYSTEM CONNECTION">
                     <Grid>
                         <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
@@ -623,6 +629,8 @@
                         <Grid Grid.Row="1"
                               Margin="0,5,0,0">
                             <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
@@ -681,6 +689,31 @@
                                     Opacity="0.55" />
                             <StackPanel Grid.Column="4"
                                         Orientation="Horizontal"
+                                        AutomationProperties.Name="Extension"
+                                        ToolTip="{Binding BrowserExtensionStatusDetail}">
+                                <Ellipse Width="8"
+                                         Height="8"
+                                         Fill="{Binding BrowserExtensionConnectionState, Converter={StaticResource StateToBrush}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,5,0" />
+                                <StackPanel>
+                                    <TextBlock Text="Extension"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding BrowserExtensionSystemState}"
+                                               Foreground="{Binding BrowserExtensionSystemState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="8"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </StackPanel>
+                            <Border Grid.Column="5"
+                                    Height="1"
+                                    Margin="9,0"
+                                    VerticalAlignment="Center"
+                                    Background="{StaticResource LineStrongBrush}"
+                                    Opacity="0.55" />
+                            <StackPanel Grid.Column="6"
+                                        Orientation="Horizontal"
                                         AutomationProperties.Name="ComfyUI">
                                 <Ellipse Width="8"
                                          Height="8"
@@ -697,13 +730,13 @@
                                                FontWeight="SemiBold" />
                                 </StackPanel>
                             </StackPanel>
-                            <Border Grid.Column="5"
+                            <Border Grid.Column="7"
                                     Height="1"
                                     Margin="9,0"
                                     VerticalAlignment="Center"
                                     Background="{StaticResource LineStrongBrush}"
                                     Opacity="0.55" />
-                            <StackPanel Grid.Column="6"
+                            <StackPanel Grid.Column="8"
                                         Orientation="Horizontal"
                                         AutomationProperties.Name="GPU">
                                 <Ellipse Width="8"
@@ -729,6 +762,30 @@
                                    TextTrimming="CharacterEllipsis"
                                    HorizontalAlignment="Right"
                                    Margin="0,5,0,0" />
+                        <Grid Grid.Row="3"
+                              Margin="0,3,0,0">
+                            <TextBlock Text="{Binding BrowserExtensionEndpoint}"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="8"
+                                       TextTrimming="CharacterEllipsis"
+                                       ToolTip="{Binding BrowserExtensionStatusDetail}" />
+                            <StackPanel HorizontalAlignment="Right"
+                                        Orientation="Horizontal"
+                                        Visibility="{Binding IsBrowserExtensionPairingCodeVisible, Converter={StaticResource BoolToVisibility}}"
+                                        AutomationProperties.Name="Browser Extension Pairing">
+                                <TextBlock Text="PAIRING CODE  "
+                                           Foreground="{StaticResource WarningBrush}"
+                                           FontSize="8"
+                                           FontWeight="SemiBold"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding BrowserExtensionPairingCode}"
+                                           Foreground="{StaticResource TextBrush}"
+                                           FontFamily="Cascadia Mono"
+                                           FontSize="10"
+                                           FontWeight="SemiBold"
+                                           AutomationProperties.Name="Pairing code" />
+                            </StackPanel>
+                        </Grid>
                     </Grid>
                 </Border>
                 <StackPanel Grid.Column="2"
@@ -1431,10 +1488,16 @@
                                                  Height="7"
                                                  IsIndeterminate="{Binding IsGenerationInProgress}"
                                                  Margin="0,0,10,0" />
-                                    <TextBlock Text="{Binding JobStatusDetailText}"
-                                               Foreground="{StaticResource MutedTextBrush}"
-                                               FontSize="10"
-                                               VerticalAlignment="Center" />
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding GenerateExecutionStateText}"
+                                                   Foreground="{Binding CurrentGenerateExecutionState, Converter={StaticResource StateToBrush}}"
+                                                   FontSize="9"
+                                                   FontWeight="SemiBold" />
+                                        <TextBlock Text="{Binding JobStatusDetailText}"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   FontSize="9"
+                                                   Margin="0,2,0,0" />
+                                    </StackPanel>
                                 </StackPanel>
                                 <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
                                     <Button Content="GENERATE"
@@ -1478,7 +1541,6 @@
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
@@ -1499,82 +1561,7 @@
                         </Grid>
                     </Border>
 
-                    <Border Grid.Row="1"
-                            Background="#0B1925"
-                            BorderBrush="{StaticResource LineBrush}"
-                            BorderThickness="1"
-                            CornerRadius="10"
-                            Padding="10"
-                            Margin="0,0,0,10"
-                            AutomationProperties.Name="BROWSER EXTENSION">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel>
-                                <TextBlock Text="BROWSER EXTENSION"
-                                           Foreground="{StaticResource AccentBrush}"
-                                           FontSize="9"
-                                           FontWeight="SemiBold" />
-                                <TextBlock Text="Desktop Bridge"
-                                           FontSize="13"
-                                           FontWeight="SemiBold"
-                                           Margin="0,2,0,0" />
-                                <TextBlock Text="{Binding BrowserExtensionEndpoint}"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           FontSize="9"
-                                           Margin="0,2,0,0"
-                                           TextTrimming="CharacterEllipsis"
-                                           ToolTip="{Binding BrowserExtensionEndpoint}" />
-                                <StackPanel Margin="0,7,0,0"
-                                            Visibility="{Binding IsBrowserExtensionPairingCodeVisible, Converter={StaticResource BoolToVisibility}}"
-                                            AutomationProperties.Name="Browser Extension Pairing">
-                                    <TextBlock Text="PAIRING CODE / RECOVERY"
-                                               Foreground="{StaticResource WarningBrush}"
-                                               FontSize="8"
-                                               FontWeight="SemiBold" />
-                                    <TextBlock Text="{Binding BrowserExtensionPairingCode}"
-                                               Foreground="{StaticResource TextBrush}"
-                                               FontFamily="Cascadia Mono"
-                                               FontSize="14"
-                                               FontWeight="SemiBold"
-                                               Margin="0,2,0,0"
-                                               AutomationProperties.Name="Pairing code" />
-                                    <TextBlock Text="PopupでPAIR DESKTOPを実行してください（10分間有効）"
-                                               Foreground="{StaticResource MutedTextBrush}"
-                                               FontSize="8"
-                                               TextWrapping="Wrap"
-                                               Margin="0,2,0,0" />
-                                </StackPanel>
-                            </StackPanel>
-                            <StackPanel Grid.Column="1"
-                                        HorizontalAlignment="Right"
-                                        VerticalAlignment="Center"
-                                        AutomationProperties.Name="Browser Extension">
-                                <Ellipse Width="8"
-                                         Height="8"
-                                         Fill="{Binding BrowserExtensionConnectionState, Converter={StaticResource StateToBrush}}"
-                                         HorizontalAlignment="Right"
-                                         Margin="0,0,0,4" />
-                                <TextBlock Text="{Binding BrowserExtensionConnectionStateText}"
-                                           Foreground="{Binding BrowserExtensionSystemState, Converter={StaticResource StateToBrush}}"
-                                           FontSize="9"
-                                           FontWeight="SemiBold"
-                                           HorizontalAlignment="Right" />
-                                <TextBlock Text="{Binding BrowserExtensionStatusDetail}"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           FontSize="8"
-                                           MaxWidth="190"
-                                           TextAlignment="Right"
-                                           TextTrimming="CharacterEllipsis"
-                                           ToolTip="{Binding BrowserExtensionStatusDetail}"
-                                           Margin="0,3,0,0" />
-                            </StackPanel>
-                        </Grid>
-                    </Border>
-
-                    <Grid Grid.Row="2">
+                    <Grid Grid.Row="1">
                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                             <ItemsControl ItemsSource="{Binding HandoffItems}" ItemTemplate="{StaticResource HandoffTimelineItemTemplate}" Margin="0,2,2,6" />
                         </ScrollViewer>
@@ -1585,11 +1572,11 @@
                         </StackPanel>
                     </Grid>
 
-                    <Border Grid.Row="3" Background="#102C31" BorderBrush="#2F8E89" BorderThickness="1" CornerRadius="11" Padding="11" Margin="0,10,0,0">
+                    <Border Grid.Row="2" Background="#102C31" BorderBrush="#2F8E89" BorderThickness="1" CornerRadius="11" Padding="11" Margin="0,10,0,0">
                         <StackPanel>
                             <Grid Margin="0,0,0,6">
                                 <TextBlock Text="CHATGPT COMMAND" Foreground="{StaticResource AccentStrongBrush}" FontSize="10" FontWeight="SemiBold" />
-                                <TextBlock Text="貼り付け → 確認 → 適用" Foreground="{StaticResource MutedTextBrush}" FontSize="9" HorizontalAlignment="Right" />
+                                <TextBlock Text="{Binding AutomaticResponseExecutionText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" HorizontalAlignment="Right" />
                             </Grid>
                             <TextBox x:Name="CommandBox" Text="{Binding CommandText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="108" MaxHeight="180" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono" FontSize="10" ToolTip="ChatGPTから返されたconnector-command + COMFY_PAYLOAD全文を貼り付け" />
                             <WrapPanel Margin="0,7,0,0">

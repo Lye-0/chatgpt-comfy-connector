@@ -272,8 +272,8 @@ The app does not call ComfyUI management tools such as model download, node inst
 
 ## Browser Extension Bridge
 
-v0.2 Phase 1–2 adds a local transport boundary and a narrow ChatGPT Handoff
-delivery path for the Chromium Extension. The
+v0.2 Phase 1–4 adds a local transport boundary and a narrow ChatGPT Handoff /
+Response path for the Chromium Extension. The
 Core `IBrowserExtensionBridge` contract and shared state/message models are
 implemented by `Infrastructure/Bridge/BrowserExtensionBridge`. The server uses
 the built-in .NET `HttpListener` WebSocket upgrade and binds only to
@@ -298,16 +298,26 @@ to its Content Script; DOM discovery and mutation remain outside the
 Background. The Content Script uses separate textarea/contenteditable editor
 paths, waits for the Send control to become enabled, and confirms a new user
 message containing the current Handoff identifiers before returning `sent`.
-Unknown messages are rejected and there is no workflow, MCP,
-filesystem, or process command surface in this phase. CORS reflects only an
+Unknown messages are rejected and the Extension has no arbitrary workflow,
+MCP, filesystem, or process command surface. Phase 4's `generate` and
+`complete` actions are accepted only after Desktop-side correlation and strict
+validation. CORS reflects only an
 explicit `chrome-extension://`, `extension://`, or `edge-extension://` Origin
 and never emits wildcard CORS. The Service Worker path also uses an explicit
 `X-Connector-Client` header so it does not depend on Origin being present on
 extension Fetch.
 
-`BROWSER EXTENSION / Desktop Bridge` is displayed as a separate card in the
-right Handoff pane. The existing `Connector → MCP → ComfyUI → GPU` indicators
-and the Creation Pipeline connection gate remain independent. The complete
+The Extension indicator is displayed as a fifth fact in the existing
+`SYSTEM CONNECTION` header; pairing details are shown only while pairing is
+required. The existing Connector, MCP, ComfyUI, and GPU indicators and the
+Creation Pipeline connection gate remain independent. After a valid assistant
+Response, Desktop reuses the strict Core parser and existing Apply/Generate
+workflow: `generate` automatically applies slots, ensures ComfyUI READY,
+runs one Connector-owned Job, and updates OUTPUT/HISTORY; `complete` uses the
+existing successful-output and review guard. `GENERATE` exposes only a
+user-facing internal substate (ready, starting, waiting, generating, failed),
+not a new permanent pipeline stage. The manual Command controls remain
+available for recovery and explicit user operation. The complete
 endpoint/message/install contract is in
 `docs/browser-extension-bridge.md`.
 

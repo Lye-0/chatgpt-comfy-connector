@@ -18,9 +18,11 @@ public sealed class StateToBrushConverter : IValueConverter
         var resourceKey = state switch
         {
             "CONNECTED" or "ONLINE" or "READY" or "DONE" or "SUCCESS" or "COMPLETE" or "COMPLETED" or "SENT" => "SuccessBrush",
-            "PROCESSING" or "NOW" or "CURRENT" or "INPROGRESS" => "AccentStrongBrush",
-            "CONNECTING" or "STARTING" or "WAITING" or "WAITINGUSER" or "WARNING" or "ATTENTION" => "WarningBrush",
-            "ERROR" or "FAILED" => "DangerBrush",
+            "RECEIVED" => "AccentStrongBrush",
+            "COPIED" => "WarningBrush",
+            "PROCESSING" or "NOW" or "CURRENT" or "INPROGRESS" or "GENERATING" => "AccentStrongBrush",
+            "CONNECTING" or "STARTING" or "STARTINGCOMFYUI" or "WAITING" or "WAITINGFORCOMFYUI" or "WAITINGUSER" or "WARNING" or "ATTENTION" => "WarningBrush",
+            "ERROR" or "FAILED" or "GENERATIONFAILED" => "DangerBrush",
             "DISCONNECTED" or "STOPPED" or "UNKNOWN" or "NOTREACHED" or "CANCELLED" or "SKIPPED" or "—" or "-" => "MutedTextBrush",
             _ => "LineStrongBrush",
         };

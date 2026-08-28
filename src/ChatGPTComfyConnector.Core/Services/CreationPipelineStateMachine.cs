@@ -20,7 +20,7 @@ public static class CreationPipelineStateMachine
     public static void EnsureInitialized(CreationSession session)
     {
         session.Pipeline ??= new CreationPipelineSnapshot();
-        session.Pipeline.Version = 3;
+        session.Pipeline.Version = 4;
         foreach (var stage in OrderedStages)
         {
             if (session.Pipeline.Stages.All(item => item.Stage != stage))
@@ -181,7 +181,15 @@ public static class CreationPipelineStateMachine
     public static void BeginComfyUiStartup(CreationSession session, CreationStage stage)
     {
         RequireConnection(session);
+        SetGenerateExecutionState(session, GenerateExecutionState.StartingComfyUi);
         Set(session, stage, CreationStageState.InProgress, "ComfyUI起動中");
+    }
+
+    public static void WaitingForComfyUi(CreationSession session, CreationStage stage)
+    {
+        RequireConnection(session);
+        SetGenerateExecutionState(session, GenerateExecutionState.WaitingForComfyUi);
+        Set(session, stage, CreationStageState.InProgress, "ComfyUIのREADYを待機中");
     }
 
     /// <summary>
@@ -192,6 +200,7 @@ public static class CreationPipelineStateMachine
     public static void ComfyUiStartupFailed(CreationSession session, CreationStage stage, string detail)
     {
         EnsureInitialized(session);
+        SetGenerateExecutionState(session, GenerateExecutionState.GenerationFailed);
         Set(session, stage, CreationStageState.Error, detail);
     }
 
@@ -203,6 +212,8 @@ public static class CreationPipelineStateMachine
         session.Pipeline.MaximumIterationSafetyStop = false;
         session.Pipeline.SentIdeaSnapshot = null;
         session.Pipeline.AcceptedCommandAction = null;
+        session.Pipeline.AutomaticResponseExecution = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         SetAllFrom(session, CreationStage.Connect, CreationStageState.NotReached);
         Set(session, CreationStage.Connect, CreationStageState.Current, detail);
         session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -226,6 +237,8 @@ public static class CreationPipelineStateMachine
         session.Pipeline.MaximumIterationSafetyStop = false;
         session.Pipeline.SentIdeaSnapshot = null;
         session.Pipeline.AcceptedCommandAction = null;
+        session.Pipeline.AutomaticResponseExecution = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         SetAllFrom(session, CreationStage.Context, CreationStageState.NotReached);
         Set(session, CreationStage.Context, CreationStageState.Completed, "制作セッションへContextをBinding済み");
         Set(session, CreationStage.Idea, CreationStageState.Current, "開始指示・補足は任意です · SEND TO CHATGPTで開始");
@@ -266,6 +279,8 @@ public static class CreationPipelineStateMachine
         session.PendingHandoff = null;
         session.Pipeline.SentIdeaSnapshot = null;
         session.Pipeline.AcceptedCommandAction = null;
+        session.Pipeline.AutomaticResponseExecution = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         session.Pipeline.MaximumIterationSafetyStop = false;
         session.UpdatedAt = DateTimeOffset.UtcNow;
     }
@@ -313,16 +328,23 @@ public static class CreationPipelineStateMachine
 
     /// <summary>
     /// Records that the assistant response belonging to the current sent
-    /// Handoff was received and is waiting for the user's normal
-    /// "読み込んで確認" action.  It deliberately does not validate or apply
-    /// the Connector Command and never advances APPLY or GENERATE.
+    /// Handoff was received. The Desktop may then choose the automatic
+    /// strict-validate/apply/generate path or leave the Command waiting for
+    /// the user's manual confirmation controls. This transition itself never
+    /// performs validation or side effects.
     /// </summary>
     public static void ConnectorResponseReceived(CreationSession session)
     {
         EnsureInitialized(session);
+        var isReviewResponse = IsReviewResponse(session);
         Set(session, CreationStage.ToChatGpt, CreationStageState.Completed, "ChatGPTのassistant応答を受信済み");
         Set(session, CreationStage.Command, CreationStageState.WaitingUser, "CHATGPT COMMANDを受信 · 読み込んで確認してください", CreationWaitingReason.UserActionRequired);
-        ResetAfter(session, CreationStage.Command);
+        // A Review response is allowed to decide the next iteration or to
+        // complete the session, so its prior successful Output/Review evidence
+        // must remain available while strict validation and automatic APPLY
+        // begin. Bootstrap responses have no such downstream evidence and keep
+        // the original reset behavior.
+        if (!isReviewResponse) ResetAfter(session, CreationStage.Command);
     }
 
     /// <summary>
@@ -333,8 +355,9 @@ public static class CreationPipelineStateMachine
     public static void ConnectorResponseFailed(CreationSession session, string detail)
     {
         EnsureInitialized(session);
+        var isReviewResponse = IsReviewResponse(session);
         Set(session, CreationStage.Command, CreationStageState.Error, detail);
-        ResetAfter(session, CreationStage.Command);
+        if (!isReviewResponse) ResetAfter(session, CreationStage.Command);
     }
 
     private static void BootstrapTransported(
@@ -347,8 +370,14 @@ public static class CreationPipelineStateMachine
         RequireContext(session);
         session.Pipeline.SentIdeaSnapshot = PendingHandoffReuse.NormalizeKickoffInstruction(idea);
         session.Pipeline.AcceptedCommandAction = null;
+        // A new transport attempt starts a new assistant-response execution
+        // boundary. Keep the session and PendingHandoff identity intact, but
+        // do not let the previous response's terminal idempotency record make
+        // the next explicit send look already processed.
+        session.Pipeline.AutomaticResponseExecution = null;
         Set(session, CreationStage.Idea, CreationStageState.Completed, ideaDetail);
         Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, handoffDetail, waitingReason);
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         ResetAfter(session, CreationStage.ToChatGpt);
     }
 
@@ -410,12 +439,14 @@ public static class CreationPipelineStateMachine
             Set(session, CreationStage.ToChatGpt, CreationStageState.Completed, "有効なConnector Commandを受信");
             Set(session, CreationStage.Command, CreationStageState.Completed, "Protocol・Action・Schema・Workflow整合性を確認済み");
             session.Pipeline.AcceptedCommandAction = action;
+            SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
             return;
         }
 
         Set(session, CreationStage.ToChatGpt, CreationStageState.Completed, "有効なConnector Commandを受信");
         Set(session, CreationStage.Command, CreationStageState.Completed, "Protocol・Action・Schema・Workflow整合性を確認済み");
         session.Pipeline.AcceptedCommandAction = action;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         if (isReviewResponse) Set(session, CreationStage.Review, CreationStageState.Completed, "次のIterationへ進みます");
 
         if (isReviewResponse && session.AtIterationLimit)
@@ -440,6 +471,7 @@ public static class CreationPipelineStateMachine
     public static void ApplyCompleted(CreationSession session)
     {
         Set(session, CreationStage.Apply, CreationStageState.Completed, "Backup・slot反映・保存・validate完了");
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         Set(session, CreationStage.Generate, CreationStageState.Current, "生成を開始できます");
         ResetAfter(session, CreationStage.Generate);
     }
@@ -447,6 +479,9 @@ public static class CreationPipelineStateMachine
     public static void ApplyFailed(CreationSession session, string detail)
     {
         Set(session, CreationStage.Apply, CreationStageState.Error, detail);
+        // APPLY did not reach GENERATE. Keep the GENERATE substate retryable
+        // and let the APPLY stage carry the failure itself.
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         ResetAfter(session, CreationStage.Apply);
     }
 
@@ -454,6 +489,7 @@ public static class CreationPipelineStateMachine
     {
         RequireConnection(session);
         if (session.Pipeline.MaximumIterationSafetyStop) throw new InvalidOperationException("最大反復回数に達しています。続行するか終了するか選択してください。");
+        SetGenerateExecutionState(session, GenerateExecutionState.Generating);
         Set(session, CreationStage.Generate, CreationStageState.InProgress, "Jobを投入しています");
         ResetAfter(session, CreationStage.Generate);
     }
@@ -464,17 +500,21 @@ public static class CreationPipelineStateMachine
         {
             case JobStatus.Queued:
             case JobStatus.Running:
+                SetGenerateExecutionState(session, GenerateExecutionState.Generating);
                 Set(session, CreationStage.Generate, CreationStageState.InProgress, detail ?? status.ToString());
                 break;
             case JobStatus.Completed:
+                SetGenerateExecutionState(session, GenerateExecutionState.Generating);
                 Set(session, CreationStage.Generate, CreationStageState.Completed, "ComfyUI Job完了");
                 Set(session, CreationStage.Output, CreationStageState.InProgress, "出力ファイルを取得・確認中");
                 break;
             case JobStatus.Failed:
+                SetGenerateExecutionState(session, GenerateExecutionState.GenerationFailed);
                 Set(session, CreationStage.Generate, CreationStageState.Error, detail ?? "ComfyUI Job失敗");
                 ResetAfter(session, CreationStage.Generate);
                 break;
             case JobStatus.Cancelled:
+                SetGenerateExecutionState(session, GenerateExecutionState.GenerationFailed);
                 Set(session, CreationStage.Generate, CreationStageState.Cancelled, detail ?? "ユーザーが生成をキャンセル");
                 ResetAfter(session, CreationStage.Generate);
                 break;
@@ -490,12 +530,14 @@ public static class CreationPipelineStateMachine
             return;
         }
         Set(session, CreationStage.Output, CreationStageState.Completed, $"有効な出力 {valid.Length}件を履歴へ登録済み");
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         Set(session, CreationStage.Review, CreationStageState.Current, "生成結果を確認しChatGPTへ渡してください");
         session.Pipeline.IterationNumber = session.CurrentIteration;
     }
 
     public static void OutputFailed(CreationSession session, string detail)
     {
+        SetGenerateExecutionState(session, GenerateExecutionState.GenerationFailed);
         Set(session, CreationStage.Output, CreationStageState.Error, detail);
         Set(session, CreationStage.Review, CreationStageState.NotReached, string.Empty);
     }
@@ -538,9 +580,25 @@ public static class CreationPipelineStateMachine
         {
             session.PendingHandoff = null;
         }
+        // RESUME starts a new user-directed boundary. Do not leave the old
+        // completed assistant response as the active automation status while
+        // the same session prepares its next Review Handoff.
+        session.Pipeline.AutomaticResponseExecution = null;
         session.Pipeline.AcceptedCommandAction = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         Set(session, CreationStage.Review, CreationStageState.Current, "制作を再開しました · 次の指示をChatGPTと検討してください");
     }
+
+    public static string GetGenerateExecutionStateLabel(GenerateExecutionState state)
+        => state switch
+        {
+            GenerateExecutionState.ReadyToGenerate => "生成準備完了",
+            GenerateExecutionState.StartingComfyUi => "ComfyUI起動中",
+            GenerateExecutionState.WaitingForComfyUi => "ComfyUI READY待ち",
+            GenerateExecutionState.Generating => "生成中",
+            GenerateExecutionState.GenerationFailed => "生成失敗",
+            _ => "生成準備完了",
+        };
 
     private static void InferLegacyState(CreationSession session)
     {
@@ -610,6 +668,13 @@ public static class CreationPipelineStateMachine
     {
         var index = Array.IndexOf(OrderedStages, stage);
         for (var i = index; i < OrderedStages.Length; i++) Set(session, OrderedStages[i], state, string.Empty);
+    }
+
+    private static void SetGenerateExecutionState(CreationSession session, GenerateExecutionState state)
+    {
+        EnsureInitialized(session);
+        session.Pipeline.GenerateExecutionState = state;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
     private static void Set(CreationSession session, CreationStage stage, CreationStageState state, string detail, CreationWaitingReason waitingReason = CreationWaitingReason.None)

@@ -101,6 +101,7 @@ public enum HandoffTransportState
     Copied,
     Sent,
     Failed,
+    Completed,
 }
 
 /// <summary>
@@ -159,6 +160,36 @@ public enum CreationWaitingReason
     ReviewResponseRequired,
     ContinueDecisionRequired,
     UserActionRequired,
+}
+
+/// <summary>
+/// Internal execution state for the automatic Response -> APPLY -> GENERATE
+/// path. This is deliberately separate from the persisted pipeline stages so
+/// a duplicate assistant.response can be ignored without rewriting the
+/// user-visible Handoff timeline.
+/// </summary>
+public enum AutomaticResponseExecutionState
+{
+    None,
+    Validating,
+    Applying,
+    Generating,
+    Completed,
+    Failed,
+}
+
+/// <summary>
+/// User-facing substate of the existing GENERATE stage. No permanent pipeline
+/// stage is added for ComfyUI startup/waiting; these states only describe the
+/// current generation request.
+/// </summary>
+public enum GenerateExecutionState
+{
+    ReadyToGenerate,
+    StartingComfyUi,
+    WaitingForComfyUi,
+    Generating,
+    GenerationFailed,
 }
 
 public sealed class AppSettings : INotifyPropertyChanged
@@ -580,13 +611,35 @@ public sealed class CreationStageStatus
 
 public sealed class CreationPipelineSnapshot
 {
-    public int Version { get; set; } = 3;
+    public int Version { get; set; } = 4;
     public int IterationNumber { get; set; }
     public bool ContextBound { get; set; }
     public bool MaximumIterationSafetyStop { get; set; }
     public string? SentIdeaSnapshot { get; set; }
     public string? AcceptedCommandAction { get; set; }
+    public GenerateExecutionState GenerateExecutionState { get; set; } = GenerateExecutionState.ReadyToGenerate;
+    public AutomaticResponseExecutionSnapshot? AutomaticResponseExecution { get; set; }
     public List<CreationStageStatus> Stages { get; set; } = [];
+}
+
+/// <summary>
+/// Durable identity and terminal state for one automatically processed
+/// assistant response. It contains identifiers only, never the Response body,
+/// credential, or session token.
+/// </summary>
+public sealed class AutomaticResponseExecutionSnapshot
+{
+    public string ResponseKey { get; set; } = string.Empty;
+    public string RequestId { get; set; } = string.Empty;
+    public string SessionId { get; set; } = string.Empty;
+    public string HandoffId { get; set; } = string.Empty;
+    public string BoundaryId { get; set; } = string.Empty;
+    public string Action { get; set; } = string.Empty;
+    public AutomaticResponseExecutionState State { get; set; } = AutomaticResponseExecutionState.None;
+    public string? ErrorCode { get; set; }
+    public string? ErrorStage { get; set; }
+    public string? ErrorMessage { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class SessionIteration : INotifyPropertyChanged

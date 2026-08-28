@@ -77,6 +77,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _isIdeaComposing;
     private readonly SynchronizationContext? _notificationContext = SynchronizationContext.Current;
     private readonly object _browserExtensionResponseGate = new();
+    private readonly SemaphoreSlim _automaticResponseExecutionGate = new(1, 1);
     private readonly HashSet<string> _browserExtensionSendRequests = new(StringComparer.Ordinal);
     private readonly Dictionary<string, BrowserExtensionAssistantResponse> _queuedBrowserExtensionResponses = new(StringComparer.Ordinal);
 
@@ -135,7 +136,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<ProjectContextOption> ProjectOptions { get; }
     public ObservableCollection<ChatContextOption> ChatOptions { get; }
     public ObservableCollection<HandoffTimelineItem> HandoffItems { get; }
-    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyPipelineStateChanged(); } }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); OnPropertyChanged(nameof(CurrentGenerateExecutionState)); OnPropertyChanged(nameof(GenerateExecutionStateText)); OnPropertyChanged(nameof(AutomaticResponseExecutionText)); NotifyPipelineStateChanged(); } }
     public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); NotifyContextSelectionChanged(); } }
     public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
@@ -323,6 +324,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string SelectedWorkflowText => SelectedWorkflow?.RelativePath ?? "Workflow未選択";
     public string SelectedWorkflowName => SelectedWorkflow is null ? "Workflow未選択" : Path.GetFileNameWithoutExtension(SelectedWorkflow.RelativePath);
     public string ConnectionStateText => ConnectionState switch { ConnectionState.Connected => "CONNECTED", ConnectionState.Connecting => "CONNECTING", ConnectionState.Error => "ERROR", _ => "DISCONNECTED" };
+    public string BuildVersion => BuildIdentity.Version;
+    public string BuildCommit => BuildIdentity.Commit;
+    public string BuildIdentityText => BuildIdentity.Display;
     public BrowserExtensionConnectionState BrowserExtensionConnectionState => _browserExtensionBridge.Status.ConnectionState;
     public string BrowserExtensionConnectionStateText => _browserExtensionBridge.Status.ConnectionStateText;
     public string BrowserExtensionSystemState => BrowserExtensionConnectionStateText;
@@ -369,12 +373,40 @@ public sealed class MainViewModel : INotifyPropertyChanged
                         ? "MCP接続エラー"
                         : "MCP未接続";
             var gpu = HasGpuEvidence ? " · GPU情報確認済み" : string.Empty;
-            return $"{mcp} · ComfyUI {ComfyUiSystemState}{gpu}";
+            var extension = BrowserExtensionConnectionStateText switch
+            {
+                "CONNECTED" => "Extension接続済み",
+                "CONNECTING" => "Extension接続中",
+                "ERROR" => "Extension接続エラー",
+                _ => "Extension未接続",
+            };
+            return $"{mcp} · {extension} · ComfyUI {ComfyUiSystemState}{gpu}";
         }
     }
     public string CurrentCreationStageText => GetCurrentPipelineStage().Label;
     public string CurrentCreationStageDescription => GetCurrentPipelineStage().Description;
     public string CurrentCreationStageState => GetCurrentPipelineStage().State;
+    public GenerateExecutionState CurrentGenerateExecutionState => _isCurrentSessionActivated && CurrentSession is not null
+        ? CurrentSession.Pipeline.GenerateExecutionState
+        : GenerateExecutionState.ReadyToGenerate;
+    public string GenerateExecutionStateText => CreationPipelineStateMachine.GetGenerateExecutionStateLabel(CurrentGenerateExecutionState);
+    public string AutomaticResponseExecutionText
+    {
+        get
+        {
+            if (!_isCurrentSessionActivated || CurrentSession?.Pipeline.AutomaticResponseExecution is not { } execution)
+                return "Response受信後に自動処理";
+            return execution.State switch
+            {
+                AutomaticResponseExecutionState.Validating => "自動Response検証中",
+                AutomaticResponseExecutionState.Applying => "自動APPLY中",
+                AutomaticResponseExecutionState.Generating => "自動GENERATE中",
+                AutomaticResponseExecutionState.Completed => "自動処理済み",
+                AutomaticResponseExecutionState.Failed => "自動処理失敗 · 再試行可能",
+                _ => "Response受信後に自動処理",
+            };
+        }
+    }
     public string CurrentIterationLabel => !_isCurrentSessionActivated || CurrentSession is null || CurrentSession.Pipeline.IterationNumber == 0 ? "ITERATION —" : CurrentSession.Pipeline.IterationNumber > CurrentSession.CurrentIteration ? $"ITERATION {CurrentSession.Pipeline.IterationNumber:00} · PREP" : $"ITERATION {CurrentSession.CurrentIteration:00}";
     public string PipelineLoopText => CreationPipelineLoopText.Resolve(CurrentSession, _isCurrentSessionActivated, ConnectionState, Idea);
     public string SessionStatusText => CurrentSession?.Status.ToString().ToUpperInvariant() ?? "NEW";
@@ -1086,6 +1118,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (command.Action == "complete")
             {
                 await CompleteSessionAsync(command.Reason ?? "ChatGPT completed the session.");
+                MarkLatestCommandCompleted(CommandText);
+                await SaveActiveSessionAsync();
                 // The accepted command remains in the timeline above, while
                 // the editor is only a temporary buffer for an unprocessed
                 // response.  Clear it only after the complete transition and
@@ -1104,7 +1138,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         NotifyPipelineStateChanged();
     }
 
-    public async Task ApplyCommandAsync(bool generate)
+    public Task ApplyCommandAsync(bool generate)
+        => ApplyCommandCoreAsync(generate, clearCommandOnApply: true);
+
+    private async Task ApplyCommandCoreAsync(
+        bool generate,
+        bool clearCommandOnApply,
+        Action? afterApply = null)
     {
         if (_pendingValidation is not { IsValid: true, Command: not null } validation) { await ImportCommandAsync(); validation = _pendingValidation; }
         if (validation is not { IsValid: true, Command: not null } commandResult) throw new InvalidOperationException(string.Join(" ", validation?.Errors ?? []));
@@ -1114,18 +1154,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
         NotifyPipelineStateChanged();
         if (generate)
         {
-            // Apply first so the temporary command can be cleared at the
-            // exact point where APPLY has succeeded.  GenerateAsync(false)
-            // then performs the normal ComfyUI gate without applying twice;
-            // a later ComfyUI wait/failure must not put the command back.
+            // Apply first. The manual button clears its temporary command at
+            // the exact point where APPLY succeeds, then GenerateAsync(false)
+            // performs the normal ComfyUI gate without applying twice. The
+            // automatic Response path passes clearCommandOnApply:false so a
+            // later startup/generation failure retains the command for retry.
             await ApplySlotsAsync();
-            ClearAppliedCommandInput();
+            afterApply?.Invoke();
+            if (clearCommandOnApply) ClearAppliedCommandInput();
             await GenerateAsync(applyFirst: false);
         }
         else
         {
             await ApplySlotsAsync();
-            ClearAppliedCommandInput();
+            afterApply?.Invoke();
+            if (clearCommandOnApply) ClearAppliedCommandInput();
         }
     }
 
@@ -1523,6 +1566,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
         NotifyPipelineStateChanged();
     }
 
+    private void MarkLatestCommandCompleted(string payload)
+    {
+        if (CurrentSession is null) return;
+        var message = CurrentSession.HandoffMessages.LastOrDefault(item =>
+            item.Direction == HandoffDirection.ChatGptToComfy
+            && string.Equals(item.Payload, payload, StringComparison.Ordinal));
+        if (message is null) return;
+        message.State = HandoffTransportState.Completed;
+        RebuildHandoffItems();
+    }
+
     private static string BuildBootstrapFailureDetail(BrowserExtensionHandoffSendResult result)
     {
         var code = result.ErrorCode ?? BrowserExtensionHandoffErrorCodes.SendFailed;
@@ -1678,7 +1732,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     private async Task EnsureComfyUiReadyAsync(
         bool allowStartFromError,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action? onWaitingForReady = null)
     {
         await _comfyUiStartGate.WaitAsync(cancellationToken);
         try
@@ -1711,6 +1766,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 StatusMessage = "ComfyUIを起動しています…";
             }
 
+            onWaitingForReady?.Invoke();
             await WaitForComfyUiReadyAsync(cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -2399,6 +2455,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(IsBrowserExtensionBridgeRunning));
             OnPropertyChanged(nameof(BrowserExtensionEndpoint));
             OnPropertyChanged(nameof(BrowserExtensionStatusDetail));
+            OnPropertyChanged(nameof(SystemConnectionSummary));
             OnPropertyChanged(nameof(CanResendBootstrapHandoff));
             OnPropertyChanged(nameof(CanSendToChatGpt));
             OnPropertyChanged(nameof(SendToChatGptButtonText));
@@ -2485,12 +2542,255 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        SetCommandTextFromBrowserResponse(payload);
-        CreationPipelineStateMachine.ConnectorResponseReceived(session!);
-        await RecordBrowserExtensionResponseAsync(response, command, payload);
-        StatusMessage = "ChatGPTの返答を受信し、CHATGPT COMMANDへ反映しました。読み込んで確認してください。";
+        await _automaticResponseExecutionGate.WaitAsync();
+        try
+        {
+            var responseKey = string.Empty;
+            if (!AutomaticResponseExecutionCoordinator.TryBegin(session!, response, out responseKey))
+            {
+                // Service Worker reconnects can replay the same assistant
+                // response. The persisted response identity is the guard
+                // against running APPLY or GENERATE twice.
+                _ = _store.LogAsync(
+                    "automation",
+                    $"assistant.response duplicate ignored request_id={response.RequestId} handoff_id={response.HandoffId}");
+                return;
+            }
+
+            try
+            {
+                SetCommandTextFromBrowserResponse(payload);
+                CreationPipelineStateMachine.ConnectorResponseReceived(session!);
+                await RecordBrowserExtensionResponseAsync(response, command, payload);
+                await _store.LogAsync(
+                    "automation",
+                    $"assistant.response accepted request_id={response.RequestId} handoff_id={response.HandoffId} action={command.Action}");
+                OnPropertyChanged(nameof(CanApplyCommand));
+                NotifyPipelineStateChanged();
+
+                await ExecuteBrowserExtensionCommandAutomaticallyAsync(session!, responseKey, command);
+            }
+            catch (Exception ex)
+            {
+                await FailAutomaticResponseAsync(
+                    session!,
+                    responseKey,
+                    command.Action,
+                    ResolveAutomaticErrorCode(session!, ex),
+                    ResolveAutomaticErrorStage(session!, ex),
+                    ex.Message);
+            }
+        }
+        finally
+        {
+            _automaticResponseExecutionGate.Release();
+        }
+    }
+
+    private async Task ExecuteBrowserExtensionCommandAutomaticallyAsync(
+        CreationSession session,
+        string responseKey,
+        ConnectorCommand responseCommand)
+    {
+        // Run the same strict parser and CommandValidated transition used by
+        // the manual "読み込んで確認" action. Browser-side validation is a
+        // transport safety gate; Desktop remains the final authority.
+        await ImportCommandAsync();
+        if (_pendingValidation is not { IsValid: true, Command: not null } validation)
+        {
+            await FailAutomaticResponseAsync(
+                session,
+                responseKey,
+                responseCommand.Action,
+                BrowserExtensionAssistantResponseErrorCodes.ConnectorResponseInvalid,
+                "automatic_validation",
+                "Connector Responseのstrict validationに失敗しました。");
+            return;
+        }
+
+        var command = validation.Command;
+        if (!string.Equals(command.Action, responseCommand.Action, StringComparison.Ordinal))
+        {
+            await FailAutomaticResponseAsync(
+                session,
+                responseKey,
+                responseCommand.Action,
+                BrowserExtensionAssistantResponseErrorCodes.ConnectorResponseInvalid,
+                "automatic_validation",
+                "受信したCommandのactionが相関情報と一致しません。");
+            return;
+        }
+
+        if (command.Action == "complete")
+        {
+            // ImportCommandAsync performs the existing complete safety checks:
+            // successful Output and a Review Handoff are still mandatory.
+            if (session.Status != SessionStatus.Completed)
+            {
+                await FailAutomaticResponseAsync(
+                    session,
+                    responseKey,
+                    command.Action,
+                    "complete_not_accepted",
+                    "complete",
+                    "complete Responseを受理できませんでした。");
+                return;
+            }
+
+            AutomaticResponseExecutionCoordinator.MarkCompleted(session, responseKey, command.Action);
+            await SaveActiveSessionAsync();
+            await _store.LogAsync(
+                "automation",
+                $"automatic complete completed request_id={responseKey.Split('\u001f')[0]}");
+            StatusMessage = "ChatGPTのcomplete Responseを受理し、制作Sessionを完了しました。";
+            OnPropertyChanged(nameof(CanApplyCommand));
+            NotifyPipelineStateChanged();
+            return;
+        }
+
+        if (command.Action != "generate")
+        {
+            await FailAutomaticResponseAsync(
+                session,
+                responseKey,
+                command.Action,
+                BrowserExtensionAssistantResponseErrorCodes.ConnectorResponseInvalid,
+                "automatic_validation",
+                "自動実行できないactionです。");
+            return;
+        }
+
+        AutomaticResponseExecutionCoordinator.MarkApplying(session, responseKey, command.Action);
+        var iterationBefore = session.CurrentIteration;
+        var commandTextBeforeApply = CommandText;
+        var validationBeforeApply = _pendingValidation;
+        try
+        {
+            await ApplyCommandCoreAsync(
+                generate: true,
+                clearCommandOnApply: false,
+                afterApply: () =>
+                {
+                    AutomaticResponseExecutionCoordinator.MarkGenerating(session, responseKey, command.Action);
+                    // Match the established manual contract: a generate
+                    // command is cleared after APPLY succeeds. If GENERATE or
+                    // ComfyUI startup subsequently fails, the catch path below
+                    // restores the exact command buffer and validation result.
+                    ClearAppliedCommandInput();
+                });
+        }
+        catch
+        {
+            RestoreAutomaticCommandInput(commandTextBeforeApply, validationBeforeApply);
+            throw;
+        }
+
+        var iteration = session.Iterations.LastOrDefault();
+        var outputState = CreationPipelineStateMachine.Get(session, CreationStage.Output).State;
+        var generationSucceeded = iteration is not null
+            && iteration.Number > iterationBefore
+            && iteration.Status == JobStatus.Completed
+            && iteration.Outputs.Any(output => !output.IsMissing)
+            && outputState == CreationStageState.Completed;
+        if (!generationSucceeded)
+        {
+            RestoreAutomaticCommandInput(commandTextBeforeApply, validationBeforeApply);
+            await FailAutomaticResponseAsync(
+                session,
+                responseKey,
+                command.Action,
+                ResolveAutomaticGenerationErrorCode(session),
+                ResolveAutomaticErrorStage(session, null),
+                "自動GENERATEが完了しませんでした。Commandを保持して再試行できます。");
+            return;
+        }
+
+        AutomaticResponseExecutionCoordinator.MarkCompleted(session, responseKey, command.Action);
+        await SaveActiveSessionAsync();
+        await _store.LogAsync(
+            "automation",
+            $"automatic apply/generate completed request_id={responseKey.Split('\u001f')[0]} handoff_id={session.PendingHandoff?.HandoffId}");
+        StatusMessage = "ChatGPT Responseをstrict validationし、APPLY・GENERATE・OUTPUTまで完了しました。";
         OnPropertyChanged(nameof(CanApplyCommand));
         NotifyPipelineStateChanged();
+    }
+
+    private async Task FailAutomaticResponseAsync(
+        CreationSession session,
+        string responseKey,
+        string action,
+        string errorCode,
+        string stage,
+        string message)
+    {
+        AutomaticResponseExecutionCoordinator.MarkFailed(session, responseKey, action, errorCode, stage, message);
+        await SaveActiveSessionAsync();
+        await _store.LogAsync(
+            "automation",
+            $"automatic response failed request_id={responseKey.Split('\u001f')[0]} handoff_id={session.PendingHandoff?.HandoffId} error_code={errorCode} stage={stage}");
+        StatusMessage = $"ChatGPT Responseの自動処理に失敗しました。Commandを保持して再試行できます。({errorCode}, stage={stage})";
+        OnPropertyChanged(nameof(CanApplyCommand));
+        NotifyPipelineStateChanged();
+    }
+
+    private void RestoreAutomaticCommandInput(
+        string commandText,
+        ProtocolValidationResult? validation)
+    {
+        if (string.Equals(_commandText, commandText, StringComparison.Ordinal)
+            && ReferenceEquals(_pendingValidation, validation)) return;
+        _commandText = commandText;
+        _pendingValidation = validation;
+        OnPropertyChanged(nameof(CommandText));
+        OnPropertyChanged(nameof(CanApplyCommand));
+    }
+
+    private static string ResolveAutomaticErrorStage(CreationSession session, Exception? exception)
+    {
+        if (CreationPipelineStateMachine.Get(session, CreationStage.Apply).State == CreationStageState.Error)
+            return "apply";
+        var generate = CreationPipelineStateMachine.Get(session, CreationStage.Generate);
+        if (generate.State == CreationStageState.Error && generate.Detail.Contains("ComfyUI", StringComparison.OrdinalIgnoreCase))
+            return "comfy_ui_start";
+        if (generate.State == CreationStageState.Error)
+            return "generate";
+        if (CreationPipelineStateMachine.Get(session, CreationStage.Output).State == CreationStageState.Error)
+            return "output";
+        return exception is TimeoutException ? "comfy_ui_wait" : "automatic_execution";
+    }
+
+    private static string ResolveAutomaticErrorCode(CreationSession session, Exception exception)
+    {
+        if (CreationPipelineStateMachine.Get(session, CreationStage.Apply).State == CreationStageState.Error)
+            return "apply_failed";
+        if (exception is TimeoutException || exception.InnerException is TimeoutException)
+            return "comfy_start_timeout";
+        var generate = CreationPipelineStateMachine.Get(session, CreationStage.Generate);
+        if (generate.State == CreationStageState.Error)
+        {
+            if (generate.Detail.Contains("comfy_start_timeout", StringComparison.OrdinalIgnoreCase)) return "comfy_start_timeout";
+            if (generate.Detail.Contains("comfy_not_ready", StringComparison.OrdinalIgnoreCase)) return "comfy_not_ready";
+            if (generate.Detail.Contains("comfy_start_failed", StringComparison.OrdinalIgnoreCase)) return "comfy_start_failed";
+        }
+        if (generate.State == CreationStageState.Error)
+            return "generation_failed";
+        if (CreationPipelineStateMachine.Get(session, CreationStage.Output).State == CreationStageState.Error)
+            return "output_failed";
+        return "automatic_execution_failed";
+    }
+
+    private static string ResolveAutomaticGenerationErrorCode(CreationSession session)
+    {
+        var generate = CreationPipelineStateMachine.Get(session, CreationStage.Generate);
+        var output = CreationPipelineStateMachine.Get(session, CreationStage.Output);
+        if (generate.State == CreationStageState.Error && generate.Detail.Contains("comfy_start_timeout", StringComparison.OrdinalIgnoreCase))
+            return "comfy_start_timeout";
+        if (generate.State == CreationStageState.Error && generate.Detail.Contains("comfy_start_failed", StringComparison.OrdinalIgnoreCase))
+            return "comfy_start_failed";
+        if (generate.State == CreationStageState.Error && generate.Detail.Contains("comfy_not_ready", StringComparison.OrdinalIgnoreCase))
+            return "comfy_not_ready";
+        if (output.State == CreationStageState.Error) return "output_failed";
+        return "generation_failed";
     }
 
     private bool IsBrowserExtensionSendInProgress(string requestId)
@@ -2518,9 +2818,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void SetCommandTextFromBrowserResponse(string payload)
     {
-        // Keep the existing manual confirmation boundary: the strict parse is
-        // performed on receipt, but the user still explicitly presses
-        // "読み込んで確認" before APPLY becomes available.
+        // Keep the existing Command buffer as the observable response
+        // boundary. Automatic execution reuses the same strict import path,
+        // while the user can still inspect or retry it through the manual
+        // controls when automation fails.
         _pendingValidation = null;
         _commandText = payload;
         OnPropertyChanged(nameof(CommandText));
@@ -2674,13 +2975,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
             CreationPipelineStateMachine.BeginComfyUiStartup(session, stage);
             NotifyPipelineStateChanged();
             StatusMessage = "ComfyUIを起動しています…";
-            await EnsureComfyUiReadyAsync(allowStartFromError: false);
+            await EnsureComfyUiReadyAsync(
+                allowStartFromError: false,
+                onWaitingForReady: () =>
+                {
+                    CreationPipelineStateMachine.WaitingForComfyUi(session, stage);
+                    NotifyPipelineStateChanged();
+                    StatusMessage = "ComfyUIのREADYを待機中です…";
+                });
             StatusMessage = "ComfyUIはREADYです。Jobを投入しています…";
             NotifyPipelineStateChanged();
         }
         catch (Exception ex)
         {
-            const string detail = "ComfyUIを起動できませんでした。";
+            var errorCode = ResolveComfyUiStartupErrorCode(ex);
+            var detail = $"ComfyUIを起動できませんでした。({errorCode})";
             CreationPipelineStateMachine.ComfyUiStartupFailed(session, stage, detail);
             await _store.SaveSessionAsync(session);
             StatusMessage = detail;
@@ -2688,6 +2997,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
             await _store.LogAsync("generation", $"{detail} {ex.Message}", ex);
             throw new InvalidOperationException(detail, ex);
         }
+    }
+
+    private string ResolveComfyUiStartupErrorCode(Exception exception)
+    {
+        if (exception is TimeoutException || exception.InnerException is TimeoutException)
+            return "comfy_start_timeout";
+        if (_comfyUiRuntimeState == ComfyUiRuntimeState.Error)
+            return "comfy_start_failed";
+        return "comfy_not_ready";
     }
 
     public async Task<bool> RefreshComfyUiStatusAsync(CancellationToken cancellationToken = default)
@@ -2757,6 +3075,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CurrentCreationStageText));
         OnPropertyChanged(nameof(CurrentCreationStageDescription));
         OnPropertyChanged(nameof(CurrentCreationStageState));
+        OnPropertyChanged(nameof(CurrentGenerateExecutionState));
+        OnPropertyChanged(nameof(GenerateExecutionStateText));
+        OnPropertyChanged(nameof(AutomaticResponseExecutionText));
         OnPropertyChanged(nameof(CurrentIterationLabel));
         OnPropertyChanged(nameof(PipelineLoopText));
         OnPropertyChanged(nameof(HasIterationSafetyStop));
@@ -2817,6 +3138,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             var state = status.State.ToString().ToUpperInvariant();
             var stateLabel = CreationPipelineStateMachine.GetStageStateLabel(status);
             var description = string.IsNullOrWhiteSpace(status.Detail) ? definition.Description : $"{definition.Description}{Environment.NewLine}{status.Detail}";
+            if (stage == CreationStage.Generate && _isCurrentSessionActivated)
+                description = $"{description}{Environment.NewLine}{GenerateExecutionStateText}";
             PipelineStages.Add(new CreationPipelineStage(index + 1, definition.Key, definition.Label, description, state, stateLabel, index == CreationPipelineStateMachine.OrderedStages.Length - 1));
         }
         OnPropertyChanged(nameof(PipelineStages));

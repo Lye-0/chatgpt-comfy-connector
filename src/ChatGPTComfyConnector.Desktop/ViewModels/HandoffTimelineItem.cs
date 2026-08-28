@@ -68,6 +68,7 @@ public sealed class HandoffTimelineItem : INotifyPropertyChanged
         Message.State = HandoffTransportState.Copied;
         PropertyChanged?.Invoke(this, new(nameof(StateLabel)));
         PropertyChanged?.Invoke(this, new(nameof(IsCopied)));
+        PropertyChanged?.Invoke(this, new(nameof(TransportFailureText)));
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

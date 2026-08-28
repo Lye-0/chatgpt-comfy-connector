@@ -64,6 +64,7 @@ jobs:
             --no-restore `
             --output $publishDirectory `
             "-p:Version=$env:RELEASE_VERSION" `
+            "-p:SourceRevisionId=$env:GITHUB_SHA" `
             '-p:PublishSingleFile=false' `
             '-p:DebugType=None' `
             '-p:DebugSymbols=false' `

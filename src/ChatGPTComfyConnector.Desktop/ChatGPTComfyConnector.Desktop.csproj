@@ -11,6 +11,15 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <VersionPrefix>0.2.0</VersionPrefix>
+    <VersionSuffix>alpha</VersionSuffix>
   </PropertyGroup>
+
+  <!-- CI/release builds may pass SourceRevisionId. The UI reads the generated
+       RepositoryCommit metadata and never relies on a manually hard-coded
+       hash. Local binaries without that metadata display "dev". -->
+  <ItemGroup Condition="'$(SourceRevisionId)' != ''">
+    <AssemblyMetadata Include="RepositoryCommit" Value="$(SourceRevisionId)" />
+  </ItemGroup>
 
 </Project>

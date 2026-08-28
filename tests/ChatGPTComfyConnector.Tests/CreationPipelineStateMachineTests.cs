@@ -96,6 +96,37 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
+    public void GenerateSubstateDistinguishesStartupWaitGenerationAndReadyOutput()
+    {
+        var session = CommandReadySession();
+
+        Assert.Equal(GenerateExecutionState.ReadyToGenerate, session.Pipeline.GenerateExecutionState);
+
+        CreationPipelineStateMachine.BeginComfyUiStartup(session, CreationStage.Generate);
+        Assert.Equal(GenerateExecutionState.StartingComfyUi, session.Pipeline.GenerateExecutionState);
+
+        CreationPipelineStateMachine.WaitingForComfyUi(session, CreationStage.Generate);
+        Assert.Equal(GenerateExecutionState.WaitingForComfyUi, session.Pipeline.GenerateExecutionState);
+        Assert.Contains("READY", CreationPipelineStateMachine.Get(session, CreationStage.Generate).Detail, StringComparison.Ordinal);
+
+        CreationPipelineStateMachine.BeginGenerate(session);
+        Assert.Equal(GenerateExecutionState.Generating, session.Pipeline.GenerateExecutionState);
+        CreationPipelineStateMachine.JobStatusChanged(session, JobStatus.Running);
+        Assert.Equal(GenerateExecutionState.Generating, session.Pipeline.GenerateExecutionState);
+
+        var outputPath = Path.Combine(_temp, "substate-output.mp4");
+        File.WriteAllText(outputPath, "media");
+        var iteration = session.StartIteration("prompt", new Dictionary<string, JsonNode?>());
+        iteration.Status = JobStatus.Completed;
+        iteration.Outputs = [new OutputArtifact { FileName = "substate-output.mp4", FullPath = outputPath, Type = "mp4" }];
+        CreationPipelineStateMachine.JobStatusChanged(session, JobStatus.Completed);
+        CreationPipelineStateMachine.OutputCompleted(session, iteration.Outputs);
+
+        Assert.Equal(GenerateExecutionState.ReadyToGenerate, session.Pipeline.GenerateExecutionState);
+        Assert.Equal(CreationStageState.Completed, CreationPipelineStateMachine.Get(session, CreationStage.Output).State);
+    }
+
+    [Fact]
     public void PersistedHandoffPayloadCanBeReusedWithoutRebuilding()
     {
         const string saved = "  {\"handoff_id\":\"original\"}\n";
@@ -387,6 +418,7 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         Assert.Equal(CreationStageState.Current, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
         Assert.Null(session.CompletionReason);
         Assert.Null(session.Pipeline.AcceptedCommandAction);
+        Assert.Null(session.Pipeline.AutomaticResponseExecution);
 
         // A fresh review boundary is allowed to use the same Session ID, but
         // must not accidentally reuse the consumed complete response identity.
@@ -414,6 +446,21 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         Assert.Same(previous, session.Iterations.Single());
         Assert.Equal(JobStatus.Completed, previous.Status);
         Assert.Equal(CreationStageState.NotReached, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+    }
+
+    [Fact]
+    public void ReceivingReviewResponseKeepsPriorOutputEvidenceUntilValidation()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        session.PendingHandoff = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        CreationPipelineStateMachine.ReviewCopied(session);
+
+        CreationPipelineStateMachine.ConnectorResponseReceived(session);
+
+        AssertStage(session, CreationStage.Command, CreationStageState.WaitingUser);
+        AssertStage(session, CreationStage.Output, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Review, CreationStageState.WaitingUser);
+        Assert.Equal(JobStatus.Completed, session.Iterations.Single().Status);
     }
 
     [Fact]

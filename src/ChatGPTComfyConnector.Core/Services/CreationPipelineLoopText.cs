@@ -136,6 +136,7 @@ public static class CreationPipelineLoopText
             // Automatic runtime startup is still an active GENERATE stage,
             // but users need to know why the job has not been submitted yet.
             CreationStage.Generate when string.Equals(status.Detail, "ComfyUI起動中", StringComparison.Ordinal) => "ComfyUI起動中",
+            CreationStage.Generate when string.Equals(status.Detail, "ComfyUIのREADYを待機中", StringComparison.Ordinal) => "ComfyUI READY待ち",
             CreationStage.Generate => "生成中",
             CreationStage.Output => "生成結果を取得・確認中",
             _ => "処理中",

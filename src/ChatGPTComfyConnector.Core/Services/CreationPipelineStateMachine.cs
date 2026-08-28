@@ -311,6 +311,32 @@ public static class CreationPipelineStateMachine
         ResetAfter(session, CreationStage.ToChatGpt);
     }
 
+    /// <summary>
+    /// Records that the assistant response belonging to the current sent
+    /// Handoff was received and is waiting for the user's normal
+    /// "読み込んで確認" action.  It deliberately does not validate or apply
+    /// the Connector Command and never advances APPLY or GENERATE.
+    /// </summary>
+    public static void ConnectorResponseReceived(CreationSession session)
+    {
+        EnsureInitialized(session);
+        Set(session, CreationStage.ToChatGpt, CreationStageState.Completed, "ChatGPTのassistant応答を受信済み");
+        Set(session, CreationStage.Command, CreationStageState.WaitingUser, "CHATGPT COMMANDを受信 · 読み込んで確認してください", CreationWaitingReason.UserActionRequired);
+        ResetAfter(session, CreationStage.Command);
+    }
+
+    /// <summary>
+    /// Keeps the issued Pending Handoff intact when assistant response
+    /// monitoring or Desktop-side validation fails.  The user can still use
+    /// the existing Command editor or explicitly retry the Handoff boundary.
+    /// </summary>
+    public static void ConnectorResponseFailed(CreationSession session, string detail)
+    {
+        EnsureInitialized(session);
+        Set(session, CreationStage.Command, CreationStageState.Error, detail);
+        ResetAfter(session, CreationStage.Command);
+    }
+
     private static void BootstrapTransported(
         CreationSession session,
         string idea,

@@ -26,19 +26,33 @@ class FakeElement {
   }
 
   get innerText() {
-    return typeof this.readTextTransform === "function"
+    const ownText = typeof this.readTextTransform === "function"
       ? this.readTextTransform(this._textContent)
       : this._textContent;
+    return ownText + this.children.map((child) => child.innerText).join("");
   }
-  set innerText(value) { this._textContent = String(value); }
-  get textContent() { return this._textContent; }
-  set textContent(value) { this._textContent = String(value); }
+  set innerText(value) { this.textContent = value; }
+  get textContent() {
+    return this._textContent + this.children.map((child) => child.textContent).join("");
+  }
+  set textContent(value) {
+    this._textContent = String(value);
+    this.children = [];
+  }
 
   getAttribute(name) { return this.attributes.get(name) ?? null; }
 
   appendChild(child) {
     child.parentElement = this;
     this.children.push(child);
+    return child;
+  }
+
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+    child.parentElement = null;
+    child.isConnected = false;
     return child;
   }
 
@@ -61,13 +75,48 @@ class FakeElement {
   }
 
   querySelector(selector) {
-    if (selector.includes("textarea")) {
-      return this.children.find((child) => child.tagName === "TEXTAREA") || null;
-    }
-    if (selector.includes("contenteditable")) {
-      return this.children.find((child) => child.isContentEditable) || null;
-    }
-    return null;
+    return this.querySelectorAll(selector)[0] || null;
+  }
+
+  querySelectorAll(selector) {
+    const descendants = [];
+    const visit = (element) => {
+      for (const child of element.children) {
+        descendants.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    if (selector === "*") return descendants;
+    if (selector === "pre") return descendants.filter((element) => element.tagName === "PRE");
+    if (selector === "code") return descendants.filter((element) => element.tagName === "CODE");
+    return descendants.filter((element) => {
+      if (selector.includes("textarea")) return element.tagName === "TEXTAREA";
+      if (selector.includes("contenteditable")) return element.isContentEditable;
+      if (selector.includes("button") || selector.includes('role="button"')) {
+        if (element.tagName !== "BUTTON" && element.getAttribute("role") !== "button") return false;
+      if (selector.includes("copy")) return (element.getAttribute("data-testid") || "").includes("copy");
+      if (selector.includes("retry")) return (element.getAttribute("data-testid") || "").includes("retry");
+      if (selector.includes("regenerate")) return (element.getAttribute("data-testid") || "").includes("regenerate");
+        if (selector.includes("stop") || selector.includes("停止")) {
+          return (element.getAttribute("data-testid") || "").includes("stop")
+            || (element.getAttribute("aria-label") || "").toLowerCase().includes("stop")
+            || (element.getAttribute("title") || "").toLowerCase().includes("stop")
+            || (element.getAttribute("aria-label") || "").includes("停止")
+            || (element.getAttribute("title") || "").includes("停止");
+        }
+        return true;
+      }
+      return false;
+    });
+  }
+
+  compareDocumentPosition(other) {
+    const ordered = this.ownerDocument.allElements();
+    const left = ordered.indexOf(this);
+    const right = ordered.indexOf(other);
+    if (left < 0 || right < 0 || left === right) return 0;
+    return right > left ? 4 : 2;
   }
 
   getClientRects() { return [{}]; }
@@ -80,6 +129,20 @@ class FakeElement {
     }
     this.listeners.get(event.type)?.(event);
     return true;
+  }
+
+  cloneNode(deep = false) {
+    const clone = new FakeElement(this.ownerDocument, this.tagName, Object.fromEntries(this.attributes));
+    clone.hidden = this.hidden;
+    clone.disabled = this.disabled;
+    clone.isConnected = this.isConnected;
+    clone.isContentEditable = this.isContentEditable;
+    clone.readTextTransform = this.readTextTransform;
+    clone._textContent = this._textContent;
+    if (deep) {
+      for (const child of this.children) clone.appendChild(child.cloneNode(true));
+    }
+    return clone;
   }
 }
 
@@ -120,12 +183,13 @@ class FakeClipboardEvent extends FakeEvent {
 }
 
 class FakeDocument {
-  constructor({ composer = "textarea", sendButton = "ready", plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", composerReadTransform = null, url = "https://chatgpt.com/c/fixture" } = {}) {
+  constructor({ composer = "textarea", sendButton = "ready", plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", composerReadTransform = null, url = "https://chatgpt.com/c/fixture", initialAssistantMessages = [] } = {}) {
     this.activeElement = null;
     this.composers = [];
     this.sendButtons = [];
     this.buttons = [];
     this.userMessages = [];
+    this.assistantMessages = [];
     this.plusMenuOpened = false;
     this.sendClicked = false;
     this.contentEditableInsert = contentEditableInsert;
@@ -194,6 +258,17 @@ class FakeDocument {
         this.buttons.push(duplicate);
       }
     }
+    for (const payload of initialAssistantMessages) this.appendAssistantMessage(payload);
+  }
+
+  allElements() {
+    const ordered = [];
+    const visit = (element) => {
+      ordered.push(element);
+      for (const child of element.children) visit(child);
+    };
+    visit(this.body);
+    return ordered;
   }
 
   appendUserMessage(payload) {
@@ -205,14 +280,78 @@ class FakeDocument {
     this.userMessages.push(message);
   }
 
+  appendAssistantMessage(payload, { withCopyAction = false } = {}) {
+    const message = new FakeElement(this, "div", {
+      "data-message-author-role": "assistant"
+    });
+    message.textContent = payload;
+    if (withCopyAction) {
+      message.appendChild(new FakeButton(this, {
+        "data-testid": "copy-turn",
+        "aria-label": "Copy"
+      }));
+    }
+    this.body.appendChild(message);
+    this.assistantMessages.push(message);
+    return message;
+  }
+
+  appendAssistantCodeMessage({ codeText, language = "connector-command", classLanguage = language, header = false, before = "", after = "", rawCodeText = null }) {
+    const message = new FakeElement(this, "div", {
+      "data-message-author-role": "assistant"
+    });
+    message._textContent = before;
+    const pre = new FakeElement(this, "pre");
+    if (header) {
+      pre.appendChild(new FakeElement(this, "div", { textContent: language }));
+    }
+    const codeAttributes = classLanguage ? { class: `language-${classLanguage}` } : {};
+    pre.appendChild(new FakeElement(this, "code", { ...codeAttributes, textContent: codeText }));
+    message.appendChild(pre);
+    if (rawCodeText !== null) {
+      const rawPre = new FakeElement(this, "pre");
+      rawPre.appendChild(new FakeElement(this, "code", { textContent: rawCodeText }));
+      message.appendChild(rawPre);
+    }
+    if (after) message.appendChild(new FakeElement(this, "p", { textContent: after }));
+    this.body.appendChild(message);
+    this.assistantMessages.push(message);
+    return message;
+  }
+
+  addStopButton() {
+    const button = new FakeButton(this, {
+      "data-testid": "stop-button",
+      "aria-label": "Stop"
+    });
+    this.body.appendChild(button);
+    this.buttons.push(button);
+    return button;
+  }
+
+  removeButton(button) {
+    this.body.removeChild(button);
+    this.buttons = this.buttons.filter((candidate) => candidate !== button);
+  }
+
   querySelectorAll(selector) {
+    if (selector.includes("assistant")) return this.assistantMessages;
     if (selector.includes("textarea")) return this.composers.filter((element) => element.tagName === "TEXTAREA");
     if (selector.includes("contenteditable") || selector.includes("role=\"textbox\"")) {
       return this.composers.filter((element) => element.isContentEditable);
     }
+    if (selector === "*") return this.allElements();
     if (selector.includes("data-message-author-role")
       || selector.includes("user-message")
       || selector.includes("conversation-turn-user")) return this.userMessages;
+    if (selector.includes("stop") || selector.includes("停止")) {
+      return this.buttons.filter((button) =>
+        (button.getAttribute("data-testid") || "").toLowerCase().includes("stop")
+        || (button.getAttribute("aria-label") || "").toLowerCase().includes("stop")
+        || (button.getAttribute("title") || "").toLowerCase().includes("stop")
+        || (button.getAttribute("aria-label") || "").includes("停止")
+        || (button.getAttribute("title") || "").includes("停止"));
+    }
     if (selector.includes("button") || selector.includes("role=\"button\"")) return this.buttons;
     return [];
   }
@@ -235,6 +374,7 @@ class FakeDocument {
 async function createHarness(options) {
   const document = new FakeDocument(options);
   const runtimeListeners = [];
+  const runtimeMessages = [];
   const context = createContext({
     console,
     URL,
@@ -261,7 +401,10 @@ async function createHarness(options) {
       runtime: {
         id: "fixture-extension",
         onMessage: { addListener: (listener) => runtimeListeners.push(listener) },
-        sendMessage: async () => ({ ok: true })
+        sendMessage: async (message) => {
+          runtimeMessages.push(message);
+          return { ok: true };
+        }
       }
     }
   });
@@ -274,9 +417,19 @@ async function createHarness(options) {
   ).replace(
     "const composerStateTimeoutMs = 1500;",
     "const composerStateTimeoutMs = 50;"
+  ).replace(
+    "const responseTimeoutMs = 120000;",
+    "const responseTimeoutMs = 300;"
+  ).replace(
+    "const responseStabilityMs = 900;",
+    "const responseStabilityMs = 20;"
+  ).replace(
+    "const responsePollIntervalMs = 100;",
+    "const responsePollIntervalMs = 5;"
   );
   new Script(fixtureContentSource).runInContext(context);
   return {
+    context,
     document,
     async send(message) {
       let response;
@@ -284,6 +437,15 @@ async function createHarness(options) {
       assert.ok(listener, "Content Script handler should accept the message");
       while (!response) await new Promise((resolve) => setTimeout(resolve, 0));
       return response;
+    },
+    messages: runtimeMessages,
+    async waitForRuntimeMessage(predicate = () => true) {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const message = runtimeMessages.find(predicate);
+        if (message) return message;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert.fail("Content Script did not report the expected runtime message");
     }
   };
 }
@@ -436,4 +598,156 @@ test("Content Script does not report sent for an unrelated new user message", as
   assert.equal(result.error_code, "send_failed");
   assert.equal(result.stage, "user_message_not_correlated");
   assert.equal(harness.document.userMessages.length, 1);
+});
+
+test("Content Script reconstructs the connector-command fence and preserves a raw payload block", async () => {
+  const command = JSON.stringify({
+    protocol: "comfy-connector/1",
+    action: "generate",
+    handoff_id: handoff.handoffId,
+    session_id: handoff.sessionId,
+    slots: { "6.text": { payload_id: "prompt-main" } }
+  });
+  const payload = "<<<COMFY_PAYLOAD:prompt-main:boundary-fixture>>>\n近未来の都市 {raw: true}\n<<<END_COMFY_PAYLOAD:prompt-main:boundary-fixture>>>";
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  const message = harness.document.appendAssistantCodeMessage({
+    codeText: command,
+    language: "connector-command",
+    header: true,
+    rawCodeText: payload
+  });
+
+  const extracted = harness.context.ChatGptComfyConnectorLocators.readAssistantResponseText(message);
+  assert.equal(extracted, `\`\`\`connector-command\n${command}\n\`\`\`${"\n"}${payload}`);
+  assert.equal(extracted.includes(payload), true);
+});
+
+test("Content Script reconstructs a connector-command fence for a payload-free complete response", async () => {
+  const command = JSON.stringify({
+    protocol: "comfy-connector/1",
+    action: "complete",
+    handoff_id: handoff.handoffId,
+    session_id: handoff.sessionId,
+    reason: "完成"
+  });
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  const message = harness.document.appendAssistantCodeMessage({
+    codeText: command,
+    language: "connector-command",
+    classLanguage: null,
+    header: false
+  });
+
+  const extracted = harness.context.ChatGptComfyConnectorLocators.readAssistantResponseText(message, {
+    protocol: handoff.protocol,
+    handoffId: handoff.handoffId,
+    sessionId: handoff.sessionId
+  });
+  assert.equal(extracted, `\`\`\`connector-command\n${command}\n\`\`\``);
+});
+
+test("Content Script sends the canonical rendered generate response through the watcher", async () => {
+  const command = JSON.stringify({
+    protocol: "comfy-connector/1",
+    action: "generate",
+    handoff_id: handoff.handoffId,
+    session_id: handoff.sessionId,
+    slots: { "6.text": { payload_id: "prompt-main" } }
+  });
+  const payload = "<<<COMFY_PAYLOAD:prompt-main:boundary-fixture>>>\nraw prompt\n<<<END_COMFY_PAYLOAD:prompt-main:boundary-fixture>>>";
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send({
+    type: "WATCH_ASSISTANT_RESPONSE",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol
+  })).status, "watching");
+
+  harness.document.appendAssistantCodeMessage({
+    codeText: command,
+    language: "connector-command",
+    classLanguage: null,
+    rawCodeText: payload
+  });
+  const result = await harness.waitForRuntimeMessage((message) =>
+    message.type === "ASSISTANT_RESPONSE_RESULT" && message.status === "received");
+  assert.equal(result.payload, `\`\`\`connector-command\n${command}\n\`\`\`${"\n"}${payload}`);
+});
+
+test("Content Script watches only the assistant response after the correlated user anchor", async () => {
+  const oldResponse = "```connector-command\n{\"protocol\":\"comfy-connector/1\",\"action\":\"complete\"}\n```";
+  const newResponse = "```connector-command\n"
+    + JSON.stringify({
+      protocol: "comfy-connector/1",
+      action: "complete",
+      handoff_id: handoff.handoffId,
+      boundary_id: handoff.boundaryId
+    })
+    + "\n```";
+  const harness = await createHarness({
+    composer: "textarea",
+    sendButton: "ready",
+    initialAssistantMessages: [oldResponse]
+  });
+  assert.equal(harness.context.ChatGptComfyConnectorLocators.isGenerating(harness.document), false);
+  assert.equal((await harness.send(handoff)).status, "sent");
+  const watching = await harness.send({
+    type: "WATCH_ASSISTANT_RESPONSE",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol
+  });
+  assert.equal(watching.status, "watching");
+
+  harness.document.appendAssistantMessage(newResponse, { withCopyAction: true });
+  const result = await harness.waitForRuntimeMessage((message) =>
+    message.type === "ASSISTANT_RESPONSE_RESULT" && message.status === "received");
+  assert.equal(result.requestId, handoff.requestId);
+  assert.equal(result.handoffId, handoff.handoffId);
+  assert.equal(result.boundaryId, handoff.boundaryId);
+  assert.equal(result.payload, newResponse);
+  assert.equal(result.stage, "assistant_response_complete");
+});
+
+test("Content Script waits for streaming to stop before reporting assistant response", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send({
+    type: "WATCH_ASSISTANT_RESPONSE",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol
+  })).status, "watching");
+  const stopButton = harness.document.addStopButton();
+  harness.document.appendAssistantMessage(`connector-command ${handoff.handoffId} ${handoff.boundaryId}`);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(harness.messages.some((message) => message.type === "ASSISTANT_RESPONSE_RESULT"), false);
+  harness.document.removeButton(stopButton);
+  const result = await harness.waitForRuntimeMessage((message) => message.type === "ASSISTANT_RESPONSE_RESULT");
+  assert.equal(result.status, "received");
+  assert.equal(result.stage, "assistant_response_complete");
+});
+
+test("Content Script reports an explicit timeout when no post-anchor assistant response appears", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send({
+    type: "WATCH_ASSISTANT_RESPONSE",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol
+  })).status, "watching");
+  const result = await harness.waitForRuntimeMessage((message) => message.type === "ASSISTANT_RESPONSE_RESULT");
+  assert.equal(result.status, "error");
+  assert.equal(result.errorCode, "assistant_response_not_found");
+  assert.equal(result.stage, "assistant_message_not_found");
 });

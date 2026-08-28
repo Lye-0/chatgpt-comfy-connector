@@ -16,6 +16,8 @@ async function createHarness() {
   let contentResponse = null;
   let contentError = null;
   let lastSocket = null;
+  let keepaliveCallback = null;
+  let keepaliveDelay = null;
   const runtimeListeners = [];
 
   class FakeWebSocket {
@@ -75,6 +77,15 @@ async function createHarness() {
     chrome,
     setTimeout,
     clearTimeout,
+    setInterval(callback, delay) {
+      keepaliveCallback = callback;
+      keepaliveDelay = delay;
+      return "keepalive-timer";
+    },
+    clearInterval() {
+      keepaliveCallback = null;
+      keepaliveDelay = null;
+    },
     queueMicrotask,
     console
   });
@@ -106,12 +117,21 @@ async function createHarness() {
     setContentError(error) {
       contentError = error;
     },
+    triggerKeepalive() {
+      assert.ok(keepaliveCallback, "Background did not start a WebSocket keepalive");
+      keepaliveCallback();
+    },
+    get keepaliveDelay() { return keepaliveDelay; },
     async waitForResult(previousCount) {
+      return this.waitForSocketMessage(previousCount, (message) => message.type === "handoff.result");
+    },
+    async waitForSocketMessage(previousCount, predicate = () => true) {
       for (let attempt = 0; attempt < 50; attempt += 1) {
-        if (lastSocket.sent.length > previousCount) return lastSocket.sent.at(-1);
+        const message = lastSocket.sent.slice(previousCount).find(predicate);
+        if (message) return message;
         await wait(5);
       }
-      assert.fail("Background did not send a handoff.result");
+      assert.fail("Background did not send the expected WebSocket message");
     }
   };
 }
@@ -125,12 +145,34 @@ const request = {
   payload: "## Handoff\nhandoff_id: handoff-fixture\n"
 };
 
+test("Background keeps an MV3 WebSocket alive below the service-worker idle limit", async () => {
+  const harness = await createHarness();
+
+  assert.equal(harness.keepaliveDelay, 20000);
+  const previousCount = harness.socket.sent.length;
+  harness.triggerKeepalive();
+
+  const keepalive = harness.socket.sent.slice(previousCount).find((message) => message.type === "ping");
+  assert.ok(keepalive);
+  assert.match(keepalive.id, /^keepalive-/);
+});
+
 test("Background relays a Handoff to the active ChatGPT tab and returns sent", async () => {
   const harness = await createHarness();
   harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
   let relayedMessage;
   harness.setContentHandler((message) => {
     relayedMessage = message;
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      return {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching",
+        stage: "response_watch_started"
+      };
+    }
     return {
       request_id: request.request_id,
       handoff_id: request.handoff_id,
@@ -146,6 +188,165 @@ test("Background relays a Handoff to the active ChatGPT tab and returns sent", a
   assert.equal(result.request_id, request.request_id);
   assert.equal(result.handoff_id, request.handoff_id);
   assert.equal(result.status, "sent");
+  assert.equal(relayedMessage.type, "WATCH_ASSISTANT_RESPONSE");
+  assert.equal(relayedMessage.sessionId, request.session_id);
+  assert.equal(relayedMessage.boundaryId, request.boundary_id);
+});
+
+test("Background relays a correlated assistant response without parsing its payload", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  const relayedMessages = [];
+  harness.setContentHandler((message) => {
+    relayedMessages.push(message);
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      return {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching",
+        stage: "response_watch_started"
+      };
+    }
+    return {
+      request_id: request.request_id,
+      handoff_id: request.handoff_id,
+      status: "sent",
+      stage: "user_message_correlated"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await harness.waitForResult(previousCount);
+  assert.equal(relayedMessages.length, 2);
+  assert.equal(relayedMessages[1].type, "WATCH_ASSISTANT_RESPONSE");
+
+  const payload = "```connector-command\n{\"protocol\":\"comfy-connector/1\",\"action\":\"complete\"}\n```";
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: request.request_id,
+    sessionId: request.session_id,
+    handoffId: request.handoff_id,
+    boundaryId: request.boundary_id,
+    status: "received",
+    payload,
+    stage: "assistant_response_complete"
+  }, { tab: { id: 17 } });
+
+  const response = await harness.waitForSocketMessage(previousCount + 1, (message) => message.type === "assistant.response");
+  assert.deepEqual(response, {
+    type: "assistant.response",
+    request_id: request.request_id,
+    session_id: request.session_id,
+    handoff_id: request.handoff_id,
+    boundary_id: request.boundary_id,
+    status: "received",
+    payload,
+    stage: "assistant_response_complete"
+  });
+});
+
+test("Background forwards assistant response diagnostics and rejects another tab", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
+    ? {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      }
+    : { request_id: request.request_id, handoff_id: request.handoff_id, status: "sent" });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await harness.waitForResult(previousCount);
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: request.request_id,
+    sessionId: request.session_id,
+    handoffId: request.handoff_id,
+    boundaryId: request.boundary_id,
+    status: "error",
+    errorCode: "response_timeout",
+    stage: "assistant_response_stability_timeout",
+    message: "応答待機がタイムアウトしました。"
+  }, { tab: { id: 999 } });
+  await wait(10);
+  assert.equal(harness.socket.sent.length, previousCount + 1);
+
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: request.request_id,
+    sessionId: request.session_id,
+    handoffId: request.handoff_id,
+    boundaryId: request.boundary_id,
+    status: "error",
+    errorCode: "response_timeout",
+    stage: "assistant_response_stability_timeout",
+    message: "応答待機がタイムアウトしました。"
+  }, { tab: { id: 17 } });
+  const response = await harness.waitForSocketMessage(previousCount + 1, (message) => message.type === "assistant.response");
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "response_timeout");
+  assert.equal(response.stage, "assistant_response_stability_timeout");
+  assert.equal(response.message, "応答待機がタイムアウトしました。");
+});
+
+test("Background keeps the active tab bound when assistant response arrives", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
+    ? {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      }
+    : { request_id: request.request_id, handoff_id: request.handoff_id, status: "sent" });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await harness.waitForResult(previousCount);
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: request.request_id,
+    sessionId: request.session_id,
+    handoffId: request.handoff_id,
+    boundaryId: request.boundary_id,
+    status: "received",
+    payload: "response payload"
+  }, { tab: { id: 17 } });
+  const response = await harness.waitForSocketMessage(previousCount + 1, (message) => message.type === "assistant.response");
+  assert.equal(response.request_id, request.request_id);
+  assert.equal(response.handoff_id, request.handoff_id);
+  assert.equal(response.payload, "response payload");
+});
+
+test("Background preserves the original Handoff relay shape before response watching", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  let relayedMessage;
+  harness.setContentHandler((message) => {
+    if (message.type === "HANDOFF_SEND") relayedMessage = message;
+    return message.type === "WATCH_ASSISTANT_RESPONSE"
+      ? {
+          request_id: request.request_id,
+          session_id: request.session_id,
+          handoff_id: request.handoff_id,
+          boundary_id: request.boundary_id,
+          status: "watching"
+        }
+      : { request_id: request.request_id, handoff_id: request.handoff_id, status: "sent" };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await harness.waitForResult(previousCount);
   assert.deepEqual({ ...relayedMessage }, {
     type: "HANDOFF_SEND",
     requestId: request.request_id,

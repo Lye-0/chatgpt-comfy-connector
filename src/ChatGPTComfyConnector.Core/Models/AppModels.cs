@@ -412,6 +412,13 @@ public sealed class PendingHandoffSnapshot
     public List<HandoffSlotSnapshot> Slots { get; set; } = [];
     public int Iteration { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    /// <summary>
+    /// Request identity for the latest authenticated Browser Extension send.
+    /// This is transport metadata only; retrying a Handoff may rotate this
+    /// value while Session/Handoff/Boundary and the rendered body remain
+    /// unchanged.
+    /// </summary>
+    public string? LastBrowserExtensionRequestId { get; set; }
 }
 
 public sealed class OutputArtifact

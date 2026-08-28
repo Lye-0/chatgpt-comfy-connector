@@ -66,6 +66,7 @@ public interface IBrowserExtensionBridge : IAsyncDisposable
     BrowserExtensionBridgeStatus Status { get; }
     event EventHandler<BrowserExtensionBridgeStatusChangedEventArgs>? StatusChanged;
     event EventHandler<BrowserExtensionBridgeDiagnosticEventArgs>? Diagnostic;
+    event EventHandler<BrowserExtensionAssistantResponseEventArgs>? AssistantResponseReceived;
     Task StartAsync(CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
     Task<bool> SendEventAsync(BrowserExtensionBridgeEvent bridgeEvent, CancellationToken cancellationToken = default);

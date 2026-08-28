@@ -6,9 +6,16 @@
 
   const statusEventName = "chatgpt-comfy-connector:bridge-status";
   const handoffMessageType = "HANDOFF_SEND";
+  const responseWatchMessageType = "WATCH_ASSISTANT_RESPONSE";
+  const responseResultMessageType = "ASSISTANT_RESPONSE_RESULT";
   const sendAcceptanceTimeoutMs = 8000;
   const composerStateTimeoutMs = 1500;
+  const responseTimeoutMs = 120000;
+  const responseStabilityMs = 900;
+  const responsePollIntervalMs = 100;
   const locators = globalThis.ChatGptComfyConnectorLocators;
+  const responseAnchors = new Map();
+  const responseWatchers = new Map();
 
   // Keep page diagnostics limited to request identity, stage, and the
   // outcome. The session token and Handoff body are never logged by the
@@ -47,6 +54,32 @@
     if (stage) result.stage = stage;
     diagnostic("content script result", result);
     return result;
+  }
+
+  function responseResultFor(message, status, errorCode, text, stage, payload) {
+    const result = {
+      request_id: message?.requestId || "",
+      session_id: message?.sessionId || "",
+      handoff_id: message?.handoffId || "",
+      boundary_id: message?.boundaryId || "",
+      status
+    };
+    if (payload) result.payload = payload;
+    if (errorCode) result.error_code = errorCode;
+    if (text) result.message = text;
+    if (stage) result.stage = stage;
+    return result;
+  }
+
+  function responseCorrelationKey(message) {
+    return [message?.requestId, message?.sessionId, message?.handoffId, message?.boundaryId]
+      .map((value) => String(value || ""))
+      .join("|");
+  }
+
+  function hasResponseContext(message) {
+    return [message?.requestId, message?.sessionId, message?.handoffId, message?.boundaryId, message?.protocol]
+      .every((value) => typeof value === "string" && value.trim().length > 0);
   }
 
   function hasRequiredInputMarkers(markers) {
@@ -219,18 +252,25 @@
             stage: "user_message_observed"
           });
         }
-        if (locators.hasNewUserMessageWithCorrelation(document, {
-          handoffId: message?.handoffId,
-          boundaryId: message?.boundaryId,
-          protocol: message?.protocol
-        }, beforeSnapshot)) {
+        const hasCorrelatedMessage = locators.hasNewUserMessageWithCorrelation(document, {
+          handoffId: message.handoffId,
+          boundaryId: message.boundaryId,
+          protocol: message.protocol
+        }, beforeSnapshot);
+        const correlatedMessage = hasCorrelatedMessage
+          ? locators.findNewUserMessages(document, beforeSnapshot).find((candidate) =>
+            locators.messageContainsMarker(candidate, message.handoffId)
+            && locators.messageContainsMarker(candidate, message.boundaryId)
+            && (!message.protocol || locators.messageContainsMarker(candidate, message.protocol)))
+          : null;
+        if (correlatedMessage) {
           diagnostic("user message correlated", {
             request_id: message?.requestId,
             handoff_id: message?.handoffId,
             status: "sent",
             stage: "user_message_correlated"
           });
-          return { accepted: true, stage: "user_message_correlated" };
+          return { accepted: true, stage: "user_message_correlated", anchor: correlatedMessage };
         }
       }
 
@@ -256,6 +296,224 @@
       accepted: false,
       stage: messageObserved ? "user_message_not_correlated" : "user_message_not_observed"
     };
+  }
+
+  function assistantCandidatesFor(watcher) {
+    const candidates = locators.findAssistantMessagesAfterAnchor(document, watcher.anchor);
+    return candidates.filter((candidate) => !watcher.baselineAssistantElements.has(candidate));
+  }
+
+  function sendAssistantResponseToBackground(watcher, result) {
+    const message = {
+      type: responseResultMessageType,
+      requestId: watcher.requestId,
+      sessionId: watcher.sessionId,
+      handoffId: watcher.handoffId,
+      boundaryId: watcher.boundaryId,
+      status: result.status
+    };
+    if (result.payload) message.payload = result.payload;
+    if (result.errorCode) message.errorCode = result.errorCode;
+    if (result.message) message.message = result.message;
+    if (result.stage) message.stage = result.stage;
+
+    chrome.runtime.sendMessage(message).catch(() => {
+      diagnostic("assistant response delivery failed", {
+        request_id: watcher.requestId,
+        handoff_id: watcher.handoffId,
+        status: "error",
+        error_code: "bridge_disconnected",
+        stage: "response_background_dispatch"
+      });
+    });
+  }
+
+  function finishAssistantResponseWatcher(watcher, result) {
+    if (watcher.finished) return;
+    watcher.finished = true;
+    if (watcher.observer) watcher.observer.disconnect();
+    if (watcher.timer !== null) clearTimeout(watcher.timer);
+    responseWatchers.delete(watcher.key);
+    responseAnchors.delete(watcher.key);
+    if (result.status === "received") {
+      diagnostic("assistant response correlated", {
+        request_id: watcher.requestId,
+        handoff_id: watcher.handoffId,
+        status: "received",
+        stage: result.stage
+      });
+    } else {
+      diagnostic("assistant response failed", {
+        request_id: watcher.requestId,
+        handoff_id: watcher.handoffId,
+        status: "error",
+        error_code: result.errorCode,
+        stage: result.stage
+      });
+    }
+    sendAssistantResponseToBackground(watcher, result);
+  }
+
+  function evaluateAssistantResponseWatcher(watcher) {
+    if (watcher.finished) return;
+    if (watcher.timer !== null) {
+      clearTimeout(watcher.timer);
+      watcher.timer = null;
+    }
+    const now = Date.now();
+    const candidates = assistantCandidatesFor(watcher);
+    const candidate = candidates.at(-1) || null;
+    if (candidate) {
+      watcher.sawAssistantMessage = true;
+      let text = "";
+      try {
+        text = locators.readAssistantResponseText(candidate, {
+          protocol: watcher.protocol,
+          handoffId: watcher.handoffId,
+          sessionId: watcher.sessionId
+        });
+      }
+      catch (_) { text = ""; }
+      if (candidate !== watcher.candidate || text !== watcher.candidateText) {
+        watcher.candidate = candidate;
+        watcher.candidateText = text;
+        watcher.lastChangedAt = now;
+        diagnostic("assistant response observed", {
+          request_id: watcher.requestId,
+          handoff_id: watcher.handoffId,
+          stage: "assistant_message_observed"
+        });
+      }
+      if (!text.trim()) watcher.extractionWasEmpty = true;
+      watcher.hasCompletionActions = Boolean(locators.hasAssistantCompletionActions?.(candidate));
+    }
+
+    const generating = Boolean(locators.isGenerating?.(document));
+    if (generating) {
+      if (!watcher.sawGenerating) {
+        diagnostic("assistant response streaming", {
+          request_id: watcher.requestId,
+          handoff_id: watcher.handoffId,
+          stage: "assistant_response_streaming"
+        });
+      }
+      watcher.sawGenerating = true;
+    }
+
+    if (candidate
+      && watcher.candidateText.trim()
+      && now - watcher.lastChangedAt >= responseStabilityMs
+      && !generating) {
+      finishAssistantResponseWatcher(watcher, {
+        status: "received",
+        payload: watcher.candidateText,
+        stage: "assistant_response_complete"
+      });
+      return;
+    }
+
+    if (now >= watcher.deadline) {
+      const errorCode = !watcher.sawAssistantMessage
+        ? "assistant_response_not_found"
+        : watcher.sawGenerating || generating
+          ? "response_stream_interrupted"
+          : watcher.extractionWasEmpty
+            ? "response_extraction_failed"
+            : "response_timeout";
+      const stage = !watcher.sawAssistantMessage
+        ? "assistant_message_not_found"
+        : watcher.sawGenerating || generating
+          ? "assistant_response_streaming"
+          : watcher.extractionWasEmpty
+            ? "assistant_response_empty"
+            : "assistant_response_stability_timeout";
+      finishAssistantResponseWatcher(watcher, {
+        status: "error",
+        errorCode,
+        message: "ChatGPTのassistant応答を完了状態で取得できませんでした。",
+        stage
+      });
+      return;
+    }
+
+    watcher.timer = setTimeout(() => evaluateAssistantResponseWatcher(watcher), responsePollIntervalMs);
+  }
+
+  function startAssistantResponseWatcher(watcher) {
+    const MutationObserverConstructor = globalThis.MutationObserver;
+    if (typeof MutationObserverConstructor === "function") {
+      watcher.observer = new MutationObserverConstructor(() => evaluateAssistantResponseWatcher(watcher));
+      const observationTarget = document.body || document.documentElement || document;
+      watcher.observer.observe(observationTarget, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ["aria-label", "data-testid", "aria-disabled", "disabled"]
+      });
+    }
+    evaluateAssistantResponseWatcher(watcher);
+  }
+
+  async function handleWatchAssistantResponse(message) {
+    diagnostic("assistant response watch requested", {
+      request_id: message?.requestId,
+      handoff_id: message?.handoffId,
+      stage: "response_watch_requested"
+    });
+    if (!locators || !locators.isChatGptPage()) {
+      return responseResultFor(message, "error", "active_tab_not_chatgpt", "アクティブなタブはChatGPTではありません。", "active_tab_check");
+    }
+    if (!hasResponseContext(message)) {
+      return responseResultFor(message, "error", "response_extraction_failed", "応答監視に必要な識別子がありません。", "response_context_invalid");
+    }
+
+    const key = responseCorrelationKey(message);
+    const existing = responseWatchers.get(key);
+    if (existing) return responseResultFor(message, "watching", null, null, "response_watch_started");
+
+    const savedAnchor = responseAnchors.get(key);
+    const savedAnchorElement = savedAnchor?.anchor?.isConnected === false
+      ? null
+      : savedAnchor?.anchor;
+    // ChatGPT may replace a just-sent user-message node while it reconciles
+    // the conversation. Re-locate the same marker-bearing message instead of
+    // treating that harmless DOM replacement as an extraction failure.
+    const anchor = savedAnchorElement || locators.findUserMessageWithCorrelation(document, {
+      protocol: message.protocol,
+      handoffId: message.handoffId,
+      boundaryId: message.boundaryId
+    });
+    if (!anchor) {
+      return responseResultFor(message, "error", "assistant_response_not_found", "今回のHandoffに対応するChatGPT user messageが見つかりません。", "response_anchor_not_found");
+    }
+
+    const watcher = {
+      key,
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      handoffId: message.handoffId,
+      boundaryId: message.boundaryId,
+      protocol: message.protocol,
+      anchor,
+      baselineAssistantElements: savedAnchor?.assistantElements instanceof Set
+        ? savedAnchor.assistantElements
+        : new Set(),
+      deadline: Date.now() + responseTimeoutMs,
+      lastChangedAt: Date.now(),
+      candidate: null,
+      candidateText: "",
+      sawAssistantMessage: false,
+      sawGenerating: false,
+      extractionWasEmpty: false,
+      hasCompletionActions: false,
+      observer: null,
+      timer: null,
+      finished: false
+    };
+    responseWatchers.set(key, watcher);
+    startAssistantResponseWatcher(watcher);
+    return responseResultFor(message, "watching", null, null, "response_watch_started");
   }
 
   async function handleHandoffSend(message) {
@@ -296,6 +554,8 @@
     }
 
     const beforeUserMessages = locators.captureUserMessageSnapshot(document);
+    const beforeAssistantMessages = locators.captureAssistantMessageSnapshot?.(document)
+      || { count: 0, elements: new Set() };
     diagnostic("input attempted", {
       request_id: message?.requestId,
       handoff_id: message?.handoffId,
@@ -389,6 +649,13 @@
     if (!acceptance.accepted) {
       return resultFor(message, "error", "send_failed", "ChatGPTの送信操作が成立したことを確認できませんでした。", acceptance.stage);
     }
+    if (acceptance.anchor) {
+      responseAnchors.set(responseCorrelationKey(message), {
+        anchor: acceptance.anchor,
+        assistantElements: beforeAssistantMessages.elements,
+        createdAt: Date.now()
+      });
+    }
     diagnostic("user message confirmed", {
       request_id: message?.requestId,
       handoff_id: message?.handoffId,
@@ -403,12 +670,17 @@
       window.dispatchEvent(new CustomEvent(statusEventName, { detail: message.state }));
       return false;
     }
-    if (message?.type !== handoffMessageType) return false;
+    if (message?.type !== handoffMessageType && message?.type !== responseWatchMessageType) return false;
     if (sender?.id && sender.id !== chrome.runtime.id) return false;
 
-    void handleHandoffSend(message)
+    const operation = message?.type === responseWatchMessageType
+      ? handleWatchAssistantResponse(message)
+      : handleHandoffSend(message);
+    void operation
       .then(sendResponse)
-      .catch(() => sendResponse(resultFor(message, "error", "send_failed", "ChatGPTへの送信処理に失敗しました。", "unexpected_error")));
+      .catch(() => sendResponse(message?.type === responseWatchMessageType
+        ? responseResultFor(message, "error", "response_extraction_failed", "assistant応答の監視を開始できませんでした。", "unexpected_error")
+        : resultFor(message, "error", "send_failed", "ChatGPTへの送信処理に失敗しました。", "unexpected_error")));
     return true;
   });
 

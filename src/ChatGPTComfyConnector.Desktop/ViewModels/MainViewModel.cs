@@ -76,6 +76,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // custom placeholder does not render over the composition text.
     private bool _isIdeaComposing;
     private readonly SynchronizationContext? _notificationContext = SynchronizationContext.Current;
+    private readonly object _browserExtensionResponseGate = new();
+    private readonly HashSet<string> _browserExtensionSendRequests = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, BrowserExtensionAssistantResponse> _queuedBrowserExtensionResponses = new(StringComparer.Ordinal);
 
     public MainViewModel(
         string applicationDirectory,
@@ -90,6 +93,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _browserExtensionBridge = browserExtensionBridge ?? new BrowserExtensionBridge(pairingStore: _store);
         _browserExtensionBridge.StatusChanged += BrowserExtensionBridge_StatusChanged;
         _browserExtensionBridge.Diagnostic += BrowserExtensionBridge_Diagnostic;
+        _browserExtensionBridge.AssistantResponseReceived += BrowserExtensionBridge_AssistantResponseReceived;
         _comfyUiHealthProbe = comfyUiHealthProbe ?? new ComfyUiEndpointHealthProbe();
         _catalog = new WorkflowCatalog(_mcp, _store);
         Settings = new AppSettings
@@ -1307,6 +1311,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task<BrowserExtensionHandoffSendResult> SendPreparedBootstrapHandoffAsync(string payload)
     {
         await _bootstrapHandoffGate.WaitAsync();
+        string? sendRequestId = null;
         try
         {
             if (CurrentSession is null) throw new InvalidOperationException("制作セッションがありません。");
@@ -1332,6 +1337,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 pending.HandoffId,
                 pending.BoundaryId,
                 payload);
+            // Persist the latest request identity before the transport call so
+            // an assistant response can be rejected if it belongs to an older
+            // retry attempt. Session/Handoff/Boundary and the body remain
+            // unchanged across retries.
+            pending.LastBrowserExtensionRequestId = request.RequestId;
+            sendRequestId = request.RequestId;
+            lock (_browserExtensionResponseGate) _browserExtensionSendRequests.Add(request.RequestId);
 
             // Persist the transport attempt before crossing the process
             // boundary. A restart during the send therefore retains the same
@@ -1364,10 +1376,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     : BuildBootstrapFailureDetail(result),
                 failureCode: result.IsSent ? null : result.ErrorCode,
                 failureStage: result.IsSent ? null : result.Stage);
+            if (result.IsSent)
+            {
+                await DrainQueuedBrowserExtensionResponseAsync(request.RequestId);
+            }
+            else
+            {
+                RemoveQueuedBrowserExtensionResponse(request.RequestId);
+            }
             return result;
         }
         finally
         {
+            if (sendRequestId is not null)
+            {
+                RemoveQueuedBrowserExtensionResponse(sendRequestId);
+                lock (_browserExtensionResponseGate) _browserExtensionSendRequests.Remove(sendRequestId);
+            }
             _bootstrapHandoffGate.Release();
         }
     }
@@ -2388,6 +2413,186 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         try { _notificationContext.Post(static state => ((Action)state!).Invoke(), (Action)Apply); }
         catch (InvalidOperationException) { }
+    }
+
+    private void BrowserExtensionBridge_AssistantResponseReceived(
+        object? sender,
+        BrowserExtensionAssistantResponseEventArgs e)
+    {
+        void Apply() => _ = HandleBrowserExtensionAssistantResponseAsync(e.Response);
+
+        if (_notificationContext is null)
+        {
+            Apply();
+            return;
+        }
+
+        try { _notificationContext.Post(static state => ((Action)state!).Invoke(), (Action)Apply); }
+        catch (InvalidOperationException) { }
+    }
+
+    private async Task HandleBrowserExtensionAssistantResponseAsync(BrowserExtensionAssistantResponse response)
+    {
+        var session = CurrentSession;
+        var validation = BrowserExtensionResponseCorrelation.Validate(response, session);
+        if (!validation.IsValid)
+        {
+            // The Extension sends assistant.response immediately after the
+            // Phase 2 handoff.result. It can therefore race the Desktop's
+            // asynchronous persistence of the outgoing SENT state. Keep that
+            // response in memory only until the send operation records SENT;
+            // do not weaken the normal correlation gate or accept it after a
+            // failed/finished send attempt.
+            if (session is not null
+                && string.Equals(validation.Stage, "handoff_not_sent", StringComparison.Ordinal)
+                && IsBrowserExtensionSendInProgress(response.RequestId)
+                && BrowserExtensionResponseCorrelation.MatchesPendingIdentity(response, session, out _))
+            {
+                lock (_browserExtensionResponseGate)
+                {
+                    _queuedBrowserExtensionResponses[response.RequestId] = response;
+                }
+                return;
+            }
+
+            // A response for another session/boundary must not alter the
+            // visible workspace. Matched transport/validation failures remain
+            // visible as a FAILED inbound timeline item while PendingHandoff
+            // is deliberately retained for inspection/retry.
+            if (session is null || !BrowserExtensionResponseCorrelation.MatchesPending(response, session, out _))
+            {
+                await _store.LogAsync(
+                    "bridge.response",
+                    $"Assistant response rejected ({validation.ErrorCode ?? "response_rejected"}, stage={validation.Stage ?? "unknown"})");
+                return;
+            }
+
+            CreationPipelineStateMachine.ConnectorResponseFailed(
+                session,
+                $"ChatGPT Response受信エラー ({validation.ErrorCode ?? "response_rejected"}, stage={validation.Stage ?? "unknown"})");
+            await RecordBrowserExtensionResponseFailureAsync(
+                response,
+                validation.ErrorCode ?? BrowserExtensionAssistantResponseErrorCodes.ResponseExtractionFailed,
+                validation.Stage ?? "response_validation",
+                validation.Message);
+            StatusMessage = $"ChatGPTの返答を受信しましたが、Connector Responseを確認できませんでした。({validation.ErrorCode ?? "response_rejected"})";
+            NotifyPipelineStateChanged();
+            return;
+        }
+
+        if (validation.ProtocolResult?.Command is not { } command || response.Payload is not { Length: > 0 } payload)
+        {
+            return;
+        }
+
+        SetCommandTextFromBrowserResponse(payload);
+        CreationPipelineStateMachine.ConnectorResponseReceived(session!);
+        await RecordBrowserExtensionResponseAsync(response, command, payload);
+        StatusMessage = "ChatGPTの返答を受信し、CHATGPT COMMANDへ反映しました。読み込んで確認してください。";
+        OnPropertyChanged(nameof(CanApplyCommand));
+        NotifyPipelineStateChanged();
+    }
+
+    private bool IsBrowserExtensionSendInProgress(string requestId)
+    {
+        lock (_browserExtensionResponseGate) return _browserExtensionSendRequests.Contains(requestId);
+    }
+
+    private void RemoveQueuedBrowserExtensionResponse(string requestId)
+    {
+        lock (_browserExtensionResponseGate) _queuedBrowserExtensionResponses.Remove(requestId);
+    }
+
+    private Task DrainQueuedBrowserExtensionResponseAsync(string requestId)
+    {
+        BrowserExtensionAssistantResponse? response = null;
+        lock (_browserExtensionResponseGate)
+        {
+            if (_queuedBrowserExtensionResponses.Remove(requestId, out var queued)) response = queued;
+        }
+
+        return response is null
+            ? Task.CompletedTask
+            : HandleBrowserExtensionAssistantResponseAsync(response);
+    }
+
+    private void SetCommandTextFromBrowserResponse(string payload)
+    {
+        // Keep the existing manual confirmation boundary: the strict parse is
+        // performed on receipt, but the user still explicitly presses
+        // "読み込んで確認" before APPLY becomes available.
+        _pendingValidation = null;
+        _commandText = payload;
+        OnPropertyChanged(nameof(CommandText));
+        OnPropertyChanged(nameof(CanApplyCommand));
+    }
+
+    private async Task RecordBrowserExtensionResponseAsync(
+        BrowserExtensionAssistantResponse response,
+        ConnectorCommand command,
+        string payload)
+    {
+        if (CurrentSession is null) return;
+        var existing = CurrentSession.HandoffMessages.LastOrDefault(item =>
+            item.Direction == HandoffDirection.ChatGptToComfy
+            && item.State == HandoffTransportState.Received
+            && string.Equals(item.Payload, payload, StringComparison.Ordinal));
+        if (existing is not null)
+        {
+            RebuildHandoffItems();
+            await SaveActiveSessionAsync();
+            return;
+        }
+
+        await RecordHandoffAsync(new HandoffMessage
+        {
+            Direction = HandoffDirection.ChatGptToComfy,
+            Kind = command.Action == "complete" ? HandoffMessageKind.Complete : HandoffMessageKind.GenerationCommand,
+            State = HandoffTransportState.Received,
+            Title = command.Action == "complete" ? "制作完了の指示" : "生成指示",
+            DisplayText = BuildCommandTimelineDisplay(command),
+            Metadata = BuildCommandTimelineMetadata(command),
+            Summary = BuildCommandTimelineSummary(command),
+            Payload = payload,
+        });
+    }
+
+    private async Task RecordBrowserExtensionResponseFailureAsync(
+        BrowserExtensionAssistantResponse response,
+        string errorCode,
+        string stage,
+        string message)
+    {
+        if (CurrentSession is null) return;
+        var existing = CurrentSession.HandoffMessages.LastOrDefault(item =>
+            item.Direction == HandoffDirection.ChatGptToComfy
+            && item.State == HandoffTransportState.Failed
+            && string.Equals(item.TransportErrorCode, errorCode, StringComparison.Ordinal)
+            && string.Equals(item.TransportErrorStage, stage, StringComparison.Ordinal));
+        if (existing is null)
+        {
+            await RecordHandoffAsync(new HandoffMessage
+            {
+                Direction = HandoffDirection.ChatGptToComfy,
+                Kind = HandoffMessageKind.GenerationCommand,
+                State = HandoffTransportState.Failed,
+                Title = "ChatGPT応答の受信エラー",
+                DisplayText = message,
+                Summary = "assistant応答をConnector Responseとして受信できませんでした。",
+                Metadata = $"request_id={response.RequestId}",
+                Payload = response.Payload ?? string.Empty,
+                TransportErrorCode = errorCode,
+                TransportErrorStage = stage,
+            });
+        }
+        else
+        {
+            existing.DisplayText = message;
+            existing.TransportErrorCode = errorCode;
+            existing.TransportErrorStage = stage;
+            RebuildHandoffItems();
+            await SaveActiveSessionAsync();
+        }
     }
 
     private void BrowserExtensionBridge_Diagnostic(object? sender, BrowserExtensionBridgeDiagnosticEventArgs e)

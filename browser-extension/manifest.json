@@ -32,5 +32,5 @@
       "run_at": "document_idle"
     }
   ],
-  "minimum_chrome_version": "110"
+  "minimum_chrome_version": "116"
 }

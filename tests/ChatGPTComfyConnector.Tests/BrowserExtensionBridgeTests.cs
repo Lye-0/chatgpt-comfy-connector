@@ -310,6 +310,55 @@ public sealed class BrowserExtensionBridgeTests
     }
 
     [Fact]
+    public async Task WebSocketPublishesAuthenticatedAssistantResponseWithoutParsingPayload()
+    {
+        var store = new InMemoryPairingStore();
+        await using var bridge = new BrowserExtensionBridge(0, store);
+        var diagnostics = new List<BrowserExtensionBridgeDiagnostic>();
+        bridge.Diagnostic += (_, args) => diagnostics.Add(args.Diagnostic);
+        var received = new TaskCompletionSource<BrowserExtensionAssistantResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bridge.AssistantResponseReceived += (_, args) => received.TrySetResult(args.Response);
+
+        await bridge.StartAsync();
+        using var client = CreateHttpClient();
+        var credential = await PairAsync(client, bridge);
+        var sessionToken = await BootstrapAsync(client, bridge, credential);
+        using var socket = await ConnectSocketAsync(bridge, sessionToken);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var hello = await ReceiveJsonAsync(socket, timeout.Token);
+        using var ready = await ReceiveJsonAsync(socket, timeout.Token);
+
+        const string payload = "```connector-command\n{\"protocol\":\"comfy-connector/1\",\"action\":\"complete\"}\n```";
+        await SendTextAsync(socket, JsonSerializer.Serialize(new
+        {
+            type = "assistant.response",
+            request_id = "request-response-01",
+            session_id = "session-response-01",
+            handoff_id = "handoff-response-01",
+            boundary_id = "boundary-response-01",
+            status = "received",
+            payload,
+            stage = "assistant_response_complete",
+        }), timeout.Token);
+
+        var response = await received.Task.WaitAsync(timeout.Token);
+        Assert.Equal("request-response-01", response.RequestId);
+        Assert.Equal("session-response-01", response.SessionId);
+        Assert.Equal("handoff-response-01", response.HandoffId);
+        Assert.Equal("boundary-response-01", response.BoundaryId);
+        Assert.Equal("received", response.Status);
+        Assert.Equal(payload, response.Payload);
+        Assert.Contains(diagnostics, item => item.EventName == "assistant response received"
+            && item.RequestId == response.RequestId
+            && item.HandoffId == response.HandoffId
+            && item.Status == "received"
+            && item.Stage == "assistant_response_complete");
+        Assert.DoesNotContain(diagnostics, item => item.EventName.Contains(payload, StringComparison.Ordinal));
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test complete", timeout.Token);
+    }
+
+    [Fact]
     public async Task HandoffSendFailsWithoutConnectedExtensionAndWhenSocketCloses()
     {
         await using var bridge = new BrowserExtensionBridge(0);
@@ -388,6 +437,11 @@ public sealed class BrowserExtensionBridgeTests
         Assert.Contains("send_button_not_enabled", content, StringComparison.Ordinal);
         Assert.Contains("user_message_observed", content, StringComparison.Ordinal);
         Assert.Contains("user_message_correlated", content, StringComparison.Ordinal);
+        Assert.Contains("WATCH_ASSISTANT_RESPONSE", content, StringComparison.Ordinal);
+        Assert.Contains("assistant_response_complete", content, StringComparison.Ordinal);
+        Assert.Contains("MutationObserver", content, StringComparison.Ordinal);
+        Assert.Contains("assistant_response_not_found", content, StringComparison.Ordinal);
+        Assert.Contains("response_stream_interrupted", content, StringComparison.Ordinal);
         Assert.DoesNotContain("element.textContent = payload", content, StringComparison.Ordinal);
         Assert.Contains("send button clicked", content, StringComparison.Ordinal);
         Assert.Contains("user message confirmed", content, StringComparison.Ordinal);
@@ -406,6 +460,9 @@ public sealed class BrowserExtensionBridgeTests
         Assert.Contains("contenteditable", locators, StringComparison.Ordinal);
         Assert.Contains("aria-label", locators, StringComparison.Ordinal);
         Assert.Contains("data-testid", locators, StringComparison.Ordinal);
+        Assert.Contains("findAssistantMessagesAfterAnchor", locators, StringComparison.Ordinal);
+        Assert.Contains("hasAssistantCompletionActions", locators, StringComparison.Ordinal);
+        Assert.Contains("isGenerating", locators, StringComparison.Ordinal);
 
         var timeline = File.ReadAllText(Path.Combine(extensionRoot, "..", "src", "ChatGPTComfyConnector.Desktop", "MainWindow.xaml"));
         Assert.Contains("TransportFailureText", timeline, StringComparison.Ordinal);

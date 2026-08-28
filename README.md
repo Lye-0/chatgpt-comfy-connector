@@ -2,7 +2,7 @@
 
 ChatGPTを制作判断・改善役として使い、ローカルのComfyUI Workflowを安全に反復実行するWindows Portable Connectorです。
 
-v0.2 AlphaのPhase 1–2では、Browser Extensionとのlocalhost通信と、現在アクティブな `https://chatgpt.com/` チャットへのBootstrap Handoff送信までを扱います。ChatGPTから返った `comfy-connector/1` Connector Response（小さなCommand JSON + 必要なRaw Payload）は、まだConnectorへ手動で貼り付け、内容を確認してから適用・生成します。
+v0.2 Alphaでは、Browser Extensionとのlocalhost通信、現在アクティブな `https://chatgpt.com/` チャットへのHandoff送信、および回答完了後のConnector Response受信までを扱います。受信したCommandは `CHATGPT COMMAND` で確認してから適用・生成します。
 
 ## v0.2 Alphaの範囲
 
@@ -16,12 +16,13 @@ v0.2 AlphaのPhase 1–2では、Browser Extensionとのlocalhost通信と、現
 - validate、1件だけのConnector-owned Job、cancel、status、output metadata
 - Creation Session、Iteration履歴、最大反復回数（既定10）
 - Manual ChatGPT Handoff、Protocol v1 command validation
-- Chromium Manifest V3 Browser Extensionと`127.0.0.1`専用HTTP/WebSocket Bridge（Phase 1–2）
+- Chromium Manifest V3 Browser Extensionと`127.0.0.1`専用HTTP/WebSocket Bridge（Phase 1–3.3）
 - Extensionの接続状態、ping/pong、Desktop `desktop.ready`イベント確認
 - Extension接続時の現在アクティブなChatGPTチャットへのHandoff自動入力・送信（Phase 2）
+- ChatGPT assistant回答の完了検知、Connector ResponseのDesktop側strict validation、`CHATGPT COMMAND`への反映（Phase 3.1–3.3）
 - 画像のin-app preview、動画のbest-effort preview、OS既定アプリで開くfallback
 
-モデル導入、Custom Node導入、ComfyUI更新、ChatGPT Response取得、Chat一覧／Project一覧、Installerは今回の対象外です。
+モデル導入、Custom Node導入、ComfyUI更新、Chat一覧／Project一覧、APPLY／GENERATEの自動実行、Installerは今回の対象外です。
 
 ## 開発
 
@@ -60,9 +61,9 @@ ConnectorはComfyUIを自動起動しません。必要なときだけ画面の 
 
 Connector commandは高レベルの `generate` / `complete` だけを受け付けます。shell、任意の実行ファイル、絶対Workflow path、未知slot、ComfyUI管理操作は受け付けません。
 
-## Browser Extension Bridge (v0.2 Phase 1–2)
+## Browser Extension Bridge (v0.2 Phase 1–3.3)
 
-Desktop起動中だけ `http://127.0.0.1:43127` を開き、MV3 Extensionのbackground service workerと接続します。初回はDesktopに表示される短命のPairing codeをPopupへ入力します。以後はExtension側の保存済みpairing credentialからDesktop起動ごとのsession tokenをbootstrapし、`CONNECTED`、`PING → PONG`、`desktop.ready`を確認できます。Content Scriptは `https://chatgpt.com/*` の現在アクティブなタブに限り、Desktopから届いた既存Handoff本文を入力して送信します。ChatGPTのResponse自動取得はまだ行いません。
+Desktop起動中だけ `http://127.0.0.1:43127` を開き、MV3 Extensionのbackground service workerと接続します。初回はDesktopに表示される短命のPairing codeをPopupへ入力します。以後はExtension側の保存済みpairing credentialからDesktop起動ごとのsession tokenをbootstrapし、`CONNECTED`、`PING → PONG`、`desktop.ready`を確認できます。Content Scriptは `https://chatgpt.com/*` の現在アクティブなタブに限り、Desktopから届いた既存Handoff本文を入力・送信し、同じHandoff以降に生成されたassistant回答を完了後に取得します。回答はDesktop側のstrict validationを通過した場合だけ `CHATGPT COMMAND` に反映されます。APPLY／GENERATEはまだ手動操作です。
 
 Chrome / Edgeへの開発版読み込み、初回Pairing、bootstrap、endpoint、message仕様、Origin/token境界は[Browser Extension Bridge](docs/browser-extension-bridge.md)を参照してください。
 

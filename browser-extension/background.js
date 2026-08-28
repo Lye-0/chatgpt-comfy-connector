@@ -10,8 +10,15 @@ const BRIDGE_CLIENT_VALUE = "browser-extension";
 const RECONNECT_ALARM = "chatgpt-comfy-connector-reconnect";
 const RECONNECT_DELAY_MS = 5000;
 const PING_TIMEOUT_MS = 5000;
+// MV3 service workers may be suspended after roughly 30 seconds without
+// activity. Chrome 116+ keeps an active WebSocket alive when the extension
+// sends traffic more frequently than that limit. Keep this below 30 seconds
+// so a connected Desktop Bridge does not silently become a stale UI state.
+const SOCKET_KEEPALIVE_INTERVAL_MS = 20000;
 const CONTENT_SCRIPT_TIMEOUT_MS = 15000;
 const PAIRING_STORAGE_KEY = "bridgePairing";
+const RESPONSE_WATCH_MESSAGE_TYPE = "WATCH_ASSISTANT_RESPONSE";
+const ASSISTANT_RESPONSE_RESULT_MESSAGE_TYPE = "ASSISTANT_RESPONSE_RESULT";
 
 const defaultState = {
   status: "DISCONNECTED",
@@ -34,6 +41,9 @@ let connectPromise = null;
 let reconnectTimer = null;
 let manualDisconnect = false;
 const pendingPings = new Map();
+const responseWatches = new Map();
+let socketKeepaliveTimer = null;
+let socketKeepaliveSocket = null;
 
 const stateReady = (async () => {
   const stored = await chrome.storage.local.get(["bridgeState", PAIRING_STORAGE_KEY]);
@@ -203,6 +213,45 @@ function closePendingPings(error) {
   }
 }
 
+function stopSocketKeepalive(bridgeSocket = null) {
+  // An old socket can close after a replacement connection is already live.
+  // It must not clear the replacement socket's keepalive timer.
+  if (bridgeSocket !== null && socketKeepaliveSocket !== bridgeSocket) return;
+  if (socketKeepaliveTimer !== null) clearInterval(socketKeepaliveTimer);
+  socketKeepaliveTimer = null;
+  socketKeepaliveSocket = null;
+}
+
+function startSocketKeepalive(bridgeSocket) {
+  if (socket !== bridgeSocket || bridgeSocket.readyState !== WebSocket.OPEN) return;
+  stopSocketKeepalive();
+  socketKeepaliveSocket = bridgeSocket;
+  socketKeepaliveTimer = setInterval(() => {
+    if (socket !== bridgeSocket || bridgeSocket.readyState !== WebSocket.OPEN) {
+      stopSocketKeepalive(bridgeSocket);
+      return;
+    }
+
+    try {
+      bridgeSocket.send(JSON.stringify({
+        type: "ping",
+        id: `keepalive-${crypto.randomUUID()}`
+      }));
+    } catch (_) {
+      // The close handler will clear this timer and schedule the normal
+      // reconnect path. Keepalive failures do not expose credentials or body.
+      stopSocketKeepalive(bridgeSocket);
+      try { bridgeSocket.close(); } catch (_) { }
+    }
+  }, SOCKET_KEEPALIVE_INTERVAL_MS);
+}
+
+function clearResponseWatchesForSocket(bridgeSocket) {
+  for (const [requestId, pending] of responseWatches) {
+    if (pending.bridgeSocket === bridgeSocket) responseWatches.delete(requestId);
+  }
+}
+
 function isChatGptTab(tab) {
   try {
     const url = new URL(tab?.url || "");
@@ -286,8 +335,162 @@ async function dispatchToContentScript(tabId, message, trace) {
   }
 }
 
+function sendHandoffResultToBridge(result, bridgeSocket) {
+  if (bridgeSocket.readyState !== WebSocket.OPEN || socket !== bridgeSocket) {
+    diagnostic("handoff.result dropped", {
+      request_id: result.request_id,
+      handoff_id: result.handoff_id,
+      status: result.status,
+      error_code: result.error_code || "bridge_disconnected",
+      stage: result.stage || "bridge_disconnected"
+    });
+    return false;
+  }
+  try {
+    bridgeSocket.send(JSON.stringify(result));
+    diagnostic("handoff.result sent", {
+      request_id: result.request_id,
+      handoff_id: result.handoff_id,
+      status: result.status,
+      error_code: result.error_code,
+      stage: result.stage
+    });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function sendAssistantResponseToBridge(response, bridgeSocket) {
+  const envelope = {
+    type: "assistant.response",
+    request_id: response.request_id,
+    session_id: response.session_id,
+    handoff_id: response.handoff_id,
+    boundary_id: response.boundary_id,
+    status: response.status
+  };
+  if (response.status === "received" && typeof response.payload === "string") envelope.payload = response.payload;
+  if (response.error_code) envelope.error_code = response.error_code;
+  if (response.message) envelope.message = response.message;
+  if (response.stage) envelope.stage = response.stage;
+
+  if (bridgeSocket.readyState !== WebSocket.OPEN || socket !== bridgeSocket) {
+    diagnostic("assistant response dropped", {
+      request_id: response.request_id,
+      handoff_id: response.handoff_id,
+      status: response.status,
+      error_code: response.error_code || "bridge_disconnected",
+      stage: response.stage || "bridge_disconnected"
+    });
+    return false;
+  }
+  try {
+    bridgeSocket.send(JSON.stringify(envelope));
+    diagnostic("assistant response sent", {
+      request_id: response.request_id,
+      handoff_id: response.handoff_id,
+      status: response.status,
+      error_code: response.error_code,
+      stage: response.stage
+    });
+    return true;
+  } catch (_) {
+    diagnostic("assistant response delivery failed", {
+      request_id: response.request_id,
+      handoff_id: response.handoff_id,
+      status: "error",
+      error_code: "bridge_disconnected",
+      stage: "response_bridge_send"
+    });
+    return false;
+  }
+}
+
+async function startAssistantResponseWatch(tabId, message, bridgeSocket) {
+  const requestId = message.request_id;
+  responseWatches.set(requestId, {
+    tabId,
+    sessionId: message.session_id,
+    handoffId: message.handoff_id,
+    boundaryId: message.boundary_id,
+    bridgeSocket
+  });
+
+  let watchResult;
+  try {
+    watchResult = await dispatchToContentScript(tabId, {
+      type: RESPONSE_WATCH_MESSAGE_TYPE,
+      requestId: message.request_id,
+      sessionId: message.session_id,
+      handoffId: message.handoff_id,
+      boundaryId: message.boundary_id,
+      protocol: HANDOFF_PROTOCOL
+    }, message);
+  } catch (error) {
+    responseWatches.delete(requestId);
+    const errorCode = "content_script_unavailable";
+    const stage = error?.stage || "response_watch_dispatch";
+    diagnostic("assistant response watch failed", {
+      request_id: requestId,
+      handoff_id: message.handoff_id,
+      status: "error",
+      error_code: errorCode,
+      stage
+    });
+    sendAssistantResponseToBridge({
+      request_id: requestId,
+      session_id: message.session_id,
+      handoff_id: message.handoff_id,
+      boundary_id: message.boundary_id,
+      status: "error",
+      error_code: errorCode,
+      message: "ChatGPTのassistant応答監視を開始できませんでした。",
+      stage
+    }, bridgeSocket);
+    return;
+  }
+
+  if (!watchResult
+    || watchResult.request_id !== requestId
+    || watchResult.session_id !== message.session_id
+    || watchResult.handoff_id !== message.handoff_id
+    || watchResult.boundary_id !== message.boundary_id
+    || watchResult.status !== "watching") {
+    responseWatches.delete(requestId);
+    const errorCode = watchResult?.error_code || "content_script_unavailable";
+    const stage = watchResult?.stage || "response_watch_result_invalid";
+    diagnostic("assistant response watch failed", {
+      request_id: requestId,
+      handoff_id: message.handoff_id,
+      status: "error",
+      error_code: errorCode,
+      stage
+    });
+    sendAssistantResponseToBridge({
+      request_id: requestId,
+      session_id: message.session_id,
+      handoff_id: message.handoff_id,
+      boundary_id: message.boundary_id,
+      status: "error",
+      error_code: errorCode,
+      message: watchResult?.message || "ChatGPTのassistant応答監視を開始できませんでした。",
+      stage
+    }, bridgeSocket);
+    return;
+  }
+
+  diagnostic("assistant response watch started", {
+    request_id: requestId,
+    handoff_id: message.handoff_id,
+    status: "watching",
+    stage: watchResult.stage || "response_watch_started"
+  });
+}
+
 async function sendHandoffToActiveTab(message, bridgeSocket) {
   let result;
+  let activeTabId = null;
   try {
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const activeTab = tabs?.[0];
@@ -296,6 +499,7 @@ async function sendHandoffToActiveTab(message, bridgeSocket) {
     } else if (activeTab.id === undefined) {
       result = handoffResult(message, "error", "content_script_unavailable", "アクティブなChatGPTタブを操作できません。", "tab_id_unavailable");
     } else {
+      activeTabId = activeTab.id;
       let contentResult;
       try {
         contentResult = await dispatchToContentScript(activeTab.id, {
@@ -354,29 +558,80 @@ async function sendHandoffToActiveTab(message, bridgeSocket) {
     error_code: result.error_code,
     stage: result.stage
   });
-  if (bridgeSocket.readyState !== WebSocket.OPEN || socket !== bridgeSocket) {
-    diagnostic("handoff.result dropped", {
-      request_id: result.request_id,
-      handoff_id: result.handoff_id,
-      status: result.status,
-      error_code: result.error_code || "bridge_disconnected",
-      stage: result.stage || "bridge_disconnected"
+  const resultSent = sendHandoffResultToBridge(result, bridgeSocket);
+  if (resultSent && result.status === "sent" && activeTabId !== null) {
+    // Confirm the Phase 2 user message to Desktop first. The response watcher
+    // is started on the same tab only after that boundary is durable there.
+    await startAssistantResponseWatch(activeTabId, message, bridgeSocket);
+  }
+}
+
+function handleAssistantResponseFromContent(message, sender) {
+  const requestId = message?.requestId || message?.request_id;
+  const sessionId = message?.sessionId || message?.session_id;
+  const handoffId = message?.handoffId || message?.handoff_id;
+  const boundaryId = message?.boundaryId || message?.boundary_id;
+  const pending = responseWatches.get(requestId);
+  if (!pending || sender?.tab?.id !== pending.tabId) {
+    diagnostic("assistant response rejected", {
+      request_id: requestId,
+      handoff_id: handoffId,
+      status: "error",
+      error_code: "response_not_correlated",
+      stage: "response_watch_context"
     });
     return;
   }
-  try {
-    bridgeSocket.send(JSON.stringify(result));
-    diagnostic("handoff.result sent", {
-      request_id: result.request_id,
-      handoff_id: result.handoff_id,
-      status: result.status,
-      error_code: result.error_code,
-      stage: result.stage
+  if (sessionId !== pending.sessionId || handoffId !== pending.handoffId || boundaryId !== pending.boundaryId) {
+    diagnostic("assistant response rejected", {
+      request_id: requestId,
+      handoff_id: handoffId,
+      status: "error",
+      error_code: "response_not_correlated",
+      stage: "response_identity_mismatch"
     });
-  } catch (_) {
-    // The Desktop side reports bridge_disconnected when the response cannot
-    // be delivered. Do not expose the Handoff body in extension logs.
+    return;
   }
+
+  responseWatches.delete(requestId);
+  let status = message?.status;
+  let errorCode = message?.errorCode || message?.error_code;
+  let responsePayload = message?.payload;
+  let responseMessage = message?.message;
+  let stage = message?.stage;
+  if (status === "received" && (typeof responsePayload !== "string" || responsePayload.length === 0)) {
+    status = "error";
+    errorCode = "response_extraction_failed";
+    responseMessage = "assistant応答本文を取得できませんでした。";
+    stage = "response_payload_invalid";
+    responsePayload = null;
+  }
+  if (status !== "received" && status !== "error") {
+    status = "error";
+    errorCode = "response_extraction_failed";
+    responseMessage = "assistant応答結果が不正です。";
+    stage = "response_result_invalid";
+    responsePayload = null;
+  }
+
+  diagnostic("assistant response received", {
+    request_id: requestId,
+    handoff_id: handoffId,
+    status,
+    error_code: errorCode,
+    stage
+  });
+  sendAssistantResponseToBridge({
+    request_id: requestId,
+    session_id: sessionId,
+    handoff_id: handoffId,
+    boundary_id: boundaryId,
+    status,
+    payload: responsePayload,
+    error_code: errorCode,
+    message: responseMessage,
+    stage
+  }, pending.bridgeSocket);
 }
 
 function handleBridgeMessage(message, bridgeSocket) {
@@ -469,6 +724,7 @@ function openSocket(nextSessionToken) {
           return;
         }
         acknowledged = true;
+        startSocketKeepalive(candidate);
         diagnostic("bridge connected");
         if (!settled) {
           settled = true;
@@ -485,6 +741,8 @@ function openSocket(nextSessionToken) {
     };
 
     candidate.onclose = () => {
+      stopSocketKeepalive(candidate);
+      clearResponseWatchesForSocket(candidate);
       if (socket === candidate) {
         socket = null;
         sessionToken = null;
@@ -600,7 +858,9 @@ async function disconnect() {
   const current = socket;
   socket = null;
   sessionToken = null;
+  stopSocketKeepalive(current);
   closePendingPings(new Error("Disconnected by the user."));
+  clearResponseWatchesForSocket(current);
   if (current && current.readyState === WebSocket.OPEN) current.close(1000, "user disconnect");
   return setState({ status: "DISCONNECTED", lastError: null, connectedAt: null, sessionExpiresAt: null });
 }
@@ -649,6 +909,12 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === ASSISTANT_RESPONSE_RESULT_MESSAGE_TYPE) {
+    handleAssistantResponseFromContent(message, _sender);
+    sendResponse({ ok: true });
+    return false;
+  }
+
   const operation = (async () => {
     await stateReady;
     switch (message?.type) {

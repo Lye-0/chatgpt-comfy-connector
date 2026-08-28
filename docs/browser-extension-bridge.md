@@ -1,15 +1,17 @@
-# Browser Extension Bridge (v0.2 Phase 1–2)
+# Browser Extension Bridge (v0.2 Phase 1–3.3)
 
 ## Scope
 
 Phase 1 connects the Chromium Browser Extension to the running Desktop
 Connector. Phase 2 adds one narrow action: Desktop can deliver the already
 generated Bootstrap Handoff to the currently active `chatgpt.com` tab, where
-the Content Script fills the composer and submits it. Phase 2 does not read
-the ChatGPT response, enumerate chats/projects, or apply/generate workflows.
+the Content Script fills the composer and submits it. Phase 3.1–3.3 observes
+the completed assistant response, validates it on Desktop as a Connector
+Response, and places it into `CHATGPT COMMAND`; it still does not
+apply/generate workflows automatically or enumerate chats/projects.
 
 ```text
-ChatGPT page content script (DOM only)
+ChatGPT page content script (DOM only: input/send/response observation)
           ⇅ chrome.runtime
 MV3 background service worker
           ⇅ HTTP health / pairing / bootstrap / authenticated WebSocket
@@ -236,9 +238,57 @@ Input verification additionally records only boolean presence for `protocol`,
 These contain only request/handoff identifiers and outcome metadata, never
 credentials or the Handoff body.
 
-The server accepts only `hello`, `ping`, and `handoff.result` from the
-Extension; unknown messages return an error and cannot invoke MCP, filesystem,
-workflow, or process operations.
+After the `handoff.result` with `status: "sent"` has been delivered, the
+Background asks the same Content Script to watch the current response. The
+watch is anchored to the newly confirmed user message and is never started
+for a copied or failed Handoff. The Content Script uses the assistant-message
+locator, `MutationObserver`, polling, text-stability, and the generating/stop
+control state to distinguish a completed answer from a streaming answer. It
+returns the assistant text only after the response is stable and correlated
+to the anchor:
+
+```json
+{
+  "type": "assistant.response",
+  "request_id": "<same-send-attempt-id>",
+  "session_id": "<creation-session-id>",
+  "handoff_id": "<pending-handoff-id>",
+  "boundary_id": "<pending-boundary-id>",
+  "status": "received",
+  "payload": "<assistant response text>",
+  "stage": "assistant_response_complete"
+}
+```
+
+Response failures use `status: "error"` with a safe `error_code` and `stage`,
+including `assistant_response_not_found`, `response_timeout`,
+`response_stream_interrupted`, and `response_extraction_failed`. The
+Background relays this envelope without inspecting its DOM or parsing its
+payload. The Desktop then matches all durable IDs and the latest send
+attempt, requires the outgoing Handoff to be `SENT`, and invokes the existing
+`ConnectorProtocol.Parse` strict validator. Only a valid response is copied
+into `CHATGPT COMMAND` and recorded as `RECEIVED`; APPLY and GENERATE remain
+explicit user actions.
+
+The Content Script performs DOM-aware extraction before this Desktop boundary.
+Because Markdown rendering removes the source fence from a rendered
+`<pre><code>` block, a block explicitly labelled `connector-command` is
+reconstructed as the canonical
+````text
+```connector-command
+{JSON}
+```
+````
+form. If the renderer removes the language label too, the response watcher
+uses the already-correlated `protocol`, `handoff_id`, and `session_id` fields
+of the command-shaped block as a narrow fallback discriminator. Raw
+`COMFY_PAYLOAD` text is preserved as-is. This is extraction formatting only;
+the Desktop strict parser remains the authority and no JSON-plus-Payload
+grammar is accepted by the Extension.
+
+The server accepts only `hello`, `ping`, `handoff.result`, and
+`assistant.response` from the Extension; unknown messages return an error and
+cannot invoke MCP, filesystem, workflow, or process operations.
 
 ### `POST /api/v1/ping`
 
@@ -262,10 +312,11 @@ The Desktop exposes `Disconnected`, `Connecting`, `Connected`, and `Error`
 through `IBrowserExtensionBridge.Status`, along with `Required` / `Paired`
 pairing state. The Extension stores connection state and pairing metadata in
 `chrome.storage.local`, while keeping the short-lived session token only in
-Service Worker memory. It attempts pairing/bootstrap on install/startup,
-retries after a socket close, and uses a one-minute `chrome.alarms` fallback
-so a Desktop restart can be detected even after the Service Worker is
-suspended. A temporary loopback/network failure remains `DISCONNECTED` while
+Service Worker memory. It attempts pairing/bootstrap on install/startup, sends
+a 20-second application-level WebSocket ping to prevent MV3 Service Worker
+idle suspension, retries after a socket close, and uses a one-minute
+`chrome.alarms` fallback so a Desktop restart can be detected even after the
+Service Worker is suspended. A temporary loopback/network failure remains `DISCONNECTED` while
 the reconnect loop is active; protocol or authentication failures are shown as
 `ERROR`.
 
@@ -329,7 +380,7 @@ browser-extension/
 ├─ manifest.json          # Chromium Manifest V3
 ├─ background.js          # health, pairing, bootstrap, WebSocket, reconnect, routing
 ├─ chatgpt-locators.js    # replaceable composer/send locator candidates
-├─ content-script.js      # ChatGPT composer input and send confirmation
+├─ content-script.js      # ChatGPT input/send and assistant response watcher
 ├─ popup.html             # connection and first-pairing UI
 ├─ popup.css
 └─ popup.js
@@ -356,7 +407,11 @@ browser-extension/
 5. Open a target `https://chatgpt.com/` conversation and keep that tab active.
    Press the Desktop `SEND TO CHATGPT` button. The exact existing Bootstrap
    Handoff should appear in the composer and be sent; the Desktop timeline
-   should show `SENT`.
+   should show `SENT`. After ChatGPT finishes, its assistant response should
+   be delivered through the Bridge, pass the Desktop strict Connector Response
+   validation, appear in `CHATGPT COMMAND`, and create a `RECEIVED` timeline
+   item. Press `読み込んで確認` before using the existing manual APPLY or
+   GENERATE controls.
 6. Make a non-ChatGPT tab active and press `SEND TO CHATGPT` again. The
    Desktop should report `active_tab_not_chatgpt` and retain the same pending
    Handoff; the Clipboard fallback remains available.
@@ -364,8 +419,10 @@ browser-extension/
    it again and the Service Worker should bootstrap a new session token and
    reconnect automatically or after the next retry/alarm.
 
-Chrome and Edge both consume the same Chromium Manifest V3 files; no browser
-specific source fork is required.
+Chrome 116+ and Edge 116+ both consume the same Chromium Manifest V3 files;
+no browser-specific source fork is required. The minimum version is explicit
+because the WebSocket activity keepalive used by the Service Worker is
+supported from Chromium 116.
 
 ## Verification
 
@@ -374,8 +431,12 @@ loopback health without token disclosure, exact extension/web-page Origin
 handling, no-Origin Service Worker-style pairing/bootstrap, verifier
 persistence, process-token rotation across restart, WebSocket hello,
 ping/pong, `desktop.ready`, explicit Desktop events, `handoff.send` result
-correlation, disconnect failure, the Desktop SEND-before-Clipboard regression,
-and the MV3/background/Content Script boundaries. `CreationPipelineStateMachineTests.cs`
+correlation, authenticated `assistant.response` transport without payload
+parsing, disconnect failure, the Desktop SEND-before-Clipboard regression,
+and the MV3/background/Content Script boundaries. `BrowserExtensionResponseCorrelationTests.cs`
+covers sent-boundary correlation, copied/failed rejection, strict Connector
+Response validation, transport errors, and the command confirmation state.
+`CreationPipelineStateMachineTests.cs`
 covers the separate SENT Bootstrap transition, explicit Clipboard waiting state,
 and retryable send failure while retaining the same PendingHandoff. The bridge
 tests use an ephemeral loopback port so they do not collide with production.
@@ -391,9 +452,16 @@ handling, and the no-message/unrelated-message failure paths.
 `tests/browser-extension/background.test.mjs` uses a mock WebSocket and
 `chrome.tabs` boundary to exercise active-ChatGPT routing, non-ChatGPT rejection,
 Content Script result relay, tab-disappearance/unavailable-Content-Script
-errors, and safe diagnostic fields.
+errors, assistant response relay/correlation, MV3 WebSocket keepalive, and safe
+diagnostic fields.
+
+`tests/browser-extension/content-script.test.mjs` also covers response
+anchoring after the matching user message, ignoring the previous assistant
+answer, waiting for a stop/generating control to disappear, and explicit
+response timeout reporting.
 
 The locator API accepts an injected document/root in `findComposer` and
 `findSendButton`, so fixture DOMs can exercise locator changes without a live
-ChatGPT session. The Content Script waits for a new matching user message; it
-does not inspect assistant responses.
+ChatGPT session. Assistant locators are similarly isolated and the Content
+Script waits for a new assistant message after the confirmed user anchor; the
+Extension does not duplicate the Desktop Connector Response parser.

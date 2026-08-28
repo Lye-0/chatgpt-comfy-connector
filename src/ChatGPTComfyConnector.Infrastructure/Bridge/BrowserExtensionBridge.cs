@@ -26,6 +26,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private const int MaxHttpBodyBytes = 8 * 1024;
     private const int MaxWebSocketMessageBytes = 256 * 1024;
     private const int MaxHandoffPayloadBytes = 192 * 1024;
+    private const int MaxAssistantResponseBytes = 256 * 1024;
     private const int MaxPairingAttempts = 5;
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PairingCodeLifetime = TimeSpan.FromMinutes(10);
@@ -83,6 +84,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
 
     public event EventHandler<BrowserExtensionBridgeStatusChangedEventArgs>? StatusChanged;
     public event EventHandler<BrowserExtensionBridgeDiagnosticEventArgs>? Diagnostic;
+    public event EventHandler<BrowserExtensionAssistantResponseEventArgs>? AssistantResponseReceived;
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -880,13 +882,37 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                         PublishDiagnostic("result status", result.RequestId, result.HandoffId, result.Status, result.ErrorCode, result.Stage);
                     }
                 }
+                else if (type == "assistant.response")
+                {
+                    if (!TryParseAssistantResponse(text, out var response, out var responseError))
+                    {
+                        PublishDiagnostic("assistant response rejected", status: "error", errorCode: responseError ?? "invalid_assistant_response", stage: "response_envelope");
+                        await SendJsonAsync(socket, new
+                        {
+                            type = "error",
+                            code = responseError ?? "invalid_assistant_response",
+                            message = "Assistant response envelopeを解釈できません。",
+                        }, cancellationToken);
+                        continue;
+                    }
+
+                    if (!IsCurrentClient(socket))
+                    {
+                        PublishDiagnostic("assistant response rejected", response.RequestId, response.HandoffId, response.Status, "stale_bridge_connection", "response_connection");
+                        continue;
+                    }
+
+                    PublishDiagnostic("assistant response received", response.RequestId, response.HandoffId, response.Status, response.ErrorCode, response.Stage);
+                    try { AssistantResponseReceived?.Invoke(this, new BrowserExtensionAssistantResponseEventArgs(response)); }
+                    catch (Exception) { }
+                }
                 else
                 {
                     await SendJsonAsync(socket, new
                     {
                         type = "error",
                         code = "unsupported_message",
-                        message = "このalpha Bridgeはhello、ping、handoff.resultだけを受け付けます。",
+                        message = "このalpha Bridgeはhello、ping、handoff.result、assistant.responseだけを受け付けます。",
                     }, cancellationToken);
                 }
             }
@@ -976,6 +1002,11 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 pairingCodeExpiresAt: _pairingCodeExpiresAt));
             PublishDiagnostic("bridge disconnected", status: Status.ConnectionStateText);
         }
+    }
+
+    private bool IsCurrentClient(WebSocket socket)
+    {
+        lock (_clientGate) return ReferenceEquals(_clientSocket, socket);
     }
 
     private void FailPendingHandoffs(string errorCode, string message)
@@ -1387,6 +1418,86 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             }
 
             result = new(requestId, handoffId, status, errorCode, message, stage);
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "invalid_json";
+            return false;
+        }
+    }
+
+    private static bool TryParseAssistantResponse(
+        string text,
+        out BrowserExtensionAssistantResponse response,
+        out string? error)
+    {
+        response = new(string.Empty, string.Empty, string.Empty, string.Empty, "error");
+        error = null;
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || GetString(root, "type") != "assistant.response")
+            {
+                error = "invalid_assistant_response";
+                return false;
+            }
+
+            var requestId = GetString(root, "request_id");
+            var sessionId = GetString(root, "session_id");
+            var handoffId = GetString(root, "handoff_id");
+            var boundaryId = GetString(root, "boundary_id");
+            var status = GetString(root, "status");
+            if (requestId is null || sessionId is null || handoffId is null || boundaryId is null
+                || status is not ("received" or "error")
+                || !IsSafeIdentifier(requestId)
+                || !IsSafeIdentifier(sessionId)
+                || !IsSafeIdentifier(handoffId)
+                || !IsSafeIdentifier(boundaryId))
+            {
+                error = "invalid_assistant_response";
+                return false;
+            }
+
+            string? payload = null;
+            if (root.TryGetProperty("payload", out var payloadElement))
+            {
+                if (payloadElement.ValueKind != JsonValueKind.String)
+                {
+                    error = "invalid_assistant_response";
+                    return false;
+                }
+
+                payload = payloadElement.GetString();
+            }
+
+            if (status == "received"
+                && (string.IsNullOrWhiteSpace(payload)
+                    || Encoding.UTF8.GetByteCount(payload) > MaxAssistantResponseBytes))
+            {
+                error = "invalid_assistant_response";
+                return false;
+            }
+
+            if (payload is { } responsePayload && Encoding.UTF8.GetByteCount(responsePayload) > MaxAssistantResponseBytes)
+            {
+                error = "invalid_assistant_response";
+                return false;
+            }
+
+            var errorCode = GetString(root, "error_code");
+            var message = GetString(root, "message");
+            var stage = GetString(root, "stage");
+            if (errorCode is { Length: > 64 } || (errorCode is not null && !IsSafeIdentifier(errorCode))
+                || message is { Length: > 1024 }
+                || stage is { Length: > 64 } || (stage is not null && !IsSafeIdentifier(stage)))
+            {
+                error = "invalid_assistant_response";
+                return false;
+            }
+
+            response = new(requestId, sessionId, handoffId, boundaryId, status, payload, errorCode, message, stage);
             return true;
         }
         catch (JsonException)

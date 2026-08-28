@@ -58,6 +58,24 @@ public static class BrowserExtensionHandoffErrorCodes
 }
 
 /// <summary>
+/// Errors reported while the Extension waits for the assistant response to a
+/// Handoff that was already confirmed as sent.  The Extension only reports
+/// DOM/transport facts; Connector Response parsing remains a Desktop concern.
+/// </summary>
+public static class BrowserExtensionAssistantResponseErrorCodes
+{
+    public const string AssistantResponseNotFound = "assistant_response_not_found";
+    public const string ResponseTimeout = "response_timeout";
+    public const string ResponseStreamInterrupted = "response_stream_interrupted";
+    public const string ResponseExtractionFailed = "response_extraction_failed";
+    public const string ResponseAnchorNotFound = "response_anchor_not_found";
+    public const string ContentScriptUnavailable = "content_script_unavailable";
+    public const string BridgeDisconnected = "bridge_disconnected";
+    public const string ResponseNotCorrelated = "response_not_correlated";
+    public const string ConnectorResponseInvalid = "connector_response_invalid";
+}
+
+/// <summary>
 /// A complete, already-rendered Handoff sent over the authenticated Bridge.
 /// The payload is intentionally supplied by the existing Handoff builder;
 /// the Extension must not create a second representation of it.
@@ -82,6 +100,31 @@ public sealed record BrowserExtensionHandoffSendResult(
     string? Stage = null)
 {
     public bool IsSent => string.Equals(Status, "sent", StringComparison.Ordinal);
+}
+
+/// <summary>
+/// Assistant response envelope transported from the authenticated Extension
+/// socket to Desktop.  Payload is present only for a successful
+/// <c>received</c> result; it is never written to transport diagnostics.
+/// </summary>
+public sealed record BrowserExtensionAssistantResponse(
+    string RequestId,
+    string SessionId,
+    string HandoffId,
+    string BoundaryId,
+    string Status,
+    string? Payload = null,
+    string? ErrorCode = null,
+    string? Message = null,
+    string? Stage = null)
+{
+    public bool IsReceived => string.Equals(Status, "received", StringComparison.Ordinal);
+}
+
+public sealed class BrowserExtensionAssistantResponseEventArgs(
+    BrowserExtensionAssistantResponse response) : EventArgs
+{
+    public BrowserExtensionAssistantResponse Response { get; } = response;
 }
 
 /// <summary>

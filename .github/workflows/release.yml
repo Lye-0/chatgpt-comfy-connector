@@ -106,7 +106,7 @@ jobs:
           "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
           "sha256_path=$sha256Path" >> $env:GITHUB_OUTPUT
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -115,19 +115,85 @@ jobs:
           ZIP_PATH: ${{ steps.package.outputs.zip_path }}
           SHA256_PATH: ${{ steps.package.outputs.sha256_path }}
         run: |
-          $ghArguments = @(
+          function Invoke-GhChecked {
+            param([string[]] $Arguments)
+
+            $output = & gh @Arguments 2>&1
+            $exitCode = $LASTEXITCODE
+            $output | ForEach-Object { Write-Output $_ }
+            if ($exitCode -ne 0) {
+              throw "gh $($Arguments -join ' ') failed with exit code $exitCode."
+            }
+          }
+
+          $releaseTitle = "ChatGPT-Comfy-Connector $($env:RELEASE_TAG)"
+          $viewArguments = @(
             'release',
-            'create',
+            'view',
+            $env:RELEASE_TAG,
+            '--json',
+            'tagName'
+          )
+          $viewOutput = & gh @viewArguments 2>&1
+          $viewExitCode = $LASTEXITCODE
+          $releaseExists = $viewExitCode -eq 0
+
+          if (-not $releaseExists) {
+            Write-Host "Release $($env:RELEASE_TAG) does not exist; creating it."
+            $createArguments = @(
+              'release',
+              'create',
+              $env:RELEASE_TAG,
+              '--title',
+              $releaseTitle,
+              '--generate-notes',
+              '--verify-tag'
+            )
+
+            if ($env:PRERELEASE -eq 'true') {
+              $createArguments += '--prerelease'
+            }
+
+            $createOutput = & gh @createArguments 2>&1
+            $createExitCode = $LASTEXITCODE
+            $createOutput | ForEach-Object { Write-Output $_ }
+
+            if ($createExitCode -ne 0) {
+              # Another retry may have created the release after the view check.
+              $viewOutput = & gh @viewArguments 2>&1
+              $viewExitCode = $LASTEXITCODE
+              if ($viewExitCode -ne 0) {
+                throw "Could not create or find release $($env:RELEASE_TAG). gh release create exited with code $createExitCode."
+              }
+
+              Write-Host "Release $($env:RELEASE_TAG) was created concurrently; reusing it."
+            }
+          } else {
+            Write-Host "Release $($env:RELEASE_TAG) already exists; reusing it."
+          }
+
+          $editArguments = @(
+            'release',
+            'edit',
             $env:RELEASE_TAG,
             '--title',
-            "ChatGPT-Comfy-Connector $($env:RELEASE_TAG)",
-            '--generate-notes',
-            '--verify-tag'
+            $releaseTitle
           )
 
           if ($env:PRERELEASE -eq 'true') {
-            $ghArguments += '--prerelease'
+            $editArguments += '--prerelease'
+          } else {
+            $editArguments += '--prerelease=false'
           }
 
-          $ghArguments += @($env:ZIP_PATH, $env:SHA256_PATH)
-          gh @ghArguments
+          Invoke-GhChecked -Arguments $editArguments
+
+          $uploadArguments = @(
+            'release',
+            'upload',
+            $env:RELEASE_TAG,
+            $env:ZIP_PATH,
+            $env:SHA256_PATH,
+            '--clobber'
+          )
+          Invoke-GhChecked -Arguments $uploadArguments

@@ -20,11 +20,16 @@ class FakeElement {
     this.disabled = false;
     this.isConnected = true;
     this.isContentEditable = attributes.contenteditable === "true";
+    this.readTextTransform = attributes.readTextTransform;
     this._textContent = attributes.textContent || "";
     this.listeners = new Map();
   }
 
-  get innerText() { return this._textContent; }
+  get innerText() {
+    return typeof this.readTextTransform === "function"
+      ? this.readTextTransform(this._textContent)
+      : this._textContent;
+  }
   set innerText(value) { this._textContent = String(value); }
   get textContent() { return this._textContent; }
   set textContent(value) { this._textContent = String(value); }
@@ -115,7 +120,7 @@ class FakeClipboardEvent extends FakeEvent {
 }
 
 class FakeDocument {
-  constructor({ composer = "textarea", sendButton = "ready", plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", url = "https://chatgpt.com/c/fixture" } = {}) {
+  constructor({ composer = "textarea", sendButton = "ready", plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", composerReadTransform = null, url = "https://chatgpt.com/c/fixture" } = {}) {
     this.activeElement = null;
     this.composers = [];
     this.sendButtons = [];
@@ -141,7 +146,8 @@ class FakeDocument {
       const contentEditable = new FakeElement(this, "div", {
         contenteditable: "true",
         role: "textbox",
-        "aria-label": "メッセージを入力"
+        "aria-label": "メッセージを入力",
+        readTextTransform: composerReadTransform
       });
       composerForm.appendChild(contentEditable);
       this.composers.push(contentEditable);
@@ -265,6 +271,9 @@ async function createHarness(options) {
   const fixtureContentSource = contentSource.replace(
     "const sendAcceptanceTimeoutMs = 8000;",
     "const sendAcceptanceTimeoutMs = 50;"
+  ).replace(
+    "const composerStateTimeoutMs = 1500;",
+    "const composerStateTimeoutMs = 50;"
   );
   new Script(fixtureContentSource).runInContext(context);
   return {
@@ -309,6 +318,54 @@ test("Content Script also supports a contenteditable composer", async () => {
   const harness = await createHarness({ composer: "contenteditable", sendButton: "ready" });
   const result = await harness.send(handoff);
   assert.equal(result.status, "sent");
+});
+
+test("Content Script accepts structural markers when contenteditable text serialization differs", async () => {
+  const harness = await createHarness({
+    composer: "contenteditable",
+    sendButton: "ready",
+    composerReadTransform: (value) => value
+      .replace(/ /g, "\u00a0")
+      .replace(/\n/g, "\n\n")
+      .replace(/boundary_id:/g, "boundary_id: \u200b")
+  });
+  const result = await harness.send(handoff);
+  assert.equal(result.status, "sent");
+  assert.equal(harness.document.sendClicked, true);
+  assert.equal(harness.document.plusMenuOpened, false);
+});
+
+test("Content Script does not send when the handoff identifier is missing", async () => {
+  const harness = await createHarness({ composer: "contenteditable", sendButton: "ready" });
+  const result = await harness.send({
+    ...handoff,
+    payload: handoff.payload.replace("handoff_id: handoff-fixture\n", "")
+  });
+  assert.equal(result.error_code, "composer_input_verification_failed");
+  assert.equal(result.stage, "input_identifiers_missing");
+  assert.equal(harness.document.sendClicked, false);
+});
+
+test("Content Script does not send when the boundary identifier is missing", async () => {
+  const harness = await createHarness({ composer: "contenteditable", sendButton: "ready" });
+  const result = await harness.send({
+    ...handoff,
+    payload: handoff.payload.replace("boundary_id: boundary-fixture\n", "")
+  });
+  assert.equal(result.error_code, "composer_input_verification_failed");
+  assert.equal(result.stage, "input_identifiers_missing");
+  assert.equal(harness.document.sendClicked, false);
+});
+
+test("Content Script does not send when the protocol marker is missing", async () => {
+  const harness = await createHarness({ composer: "contenteditable", sendButton: "ready" });
+  const result = await harness.send({
+    ...handoff,
+    payload: handoff.payload.replace("Protocol: comfy-connector/1\n", "")
+  });
+  assert.equal(result.error_code, "composer_input_verification_failed");
+  assert.equal(result.stage, "input_identifiers_missing");
+  assert.equal(harness.document.sendClicked, false);
 });
 
 test("Content Script conditionally uses the editor paste route when execCommand is unavailable", async () => {

@@ -201,10 +201,13 @@ On failure, `status` is `error` and the response contains `error_code` and a
 short `message` and, when the Content Script reached a concrete phase, a safe
 `stage`. Supported DOM/target errors include
 `active_tab_not_chatgpt`, `content_script_unavailable`, `composer_not_found`,
-`composer_input_failed`, `send_button_not_found`, `send_not_ready`, and
-`send_failed`. For example, an editor whose text is visible but whose Send
-control remains disabled returns `composer_input_failed` with
-`stage: "send_button_not_enabled"`; a click that only clears the composer
+`composer_input_failed`, `composer_input_verification_failed`,
+`send_button_not_found`, `send_not_ready`, and `send_failed`. For example, an
+editor whose text is visible but whose Send control remains disabled returns
+`composer_input_failed` with `stage: "send_button_not_enabled"`; an editor
+whose structural Handoff identifiers cannot be confirmed returns
+`composer_input_verification_failed` with
+`stage: "input_identifiers_missing"`; a click that only clears the composer
 returns `send_failed` with `stage: "user_message_not_observed"`. Desktop-side
 delivery failures use `bridge_disconnected`. The payload is never echoed in a
 result or written to logs.
@@ -225,11 +228,13 @@ with a conditional editor paste route only if that operation is rejected. No
 direct `textContent` assignment is used as an input fallback.
 
 The Content Script emits safe stage diagnostics such as
-`composer_found`, `input_attempted`, `input_visible`, `send_button_found`,
-`send_button_enabled`, `send_clicked`, `composer_cleared`,
-`user_message_observed`, and `user_message_correlated`. These contain only
-request/handoff identifiers and outcome metadata, never credentials or the
-Handoff body.
+`composer_found`, `input_attempted`, `input_identifiers_found`,
+`input_visible`, `send_button_found`, `send_button_enabled`, `send_clicked`,
+`composer_cleared`, `user_message_observed`, and `user_message_correlated`.
+Input verification additionally records only boolean presence for `protocol`,
+`handoff_id`, and `boundary_id`; it does not compare or log the Handoff body.
+These contain only request/handoff identifiers and outcome metadata, never
+credentials or the Handoff body.
 
 The server accepts only `hello`, `ping`, and `handoff.result` from the
 Extension; unknown messages return an error and cannot invoke MCP, filesystem,
@@ -377,7 +382,8 @@ tests use an ephemeral loopback port so they do not collide with production.
 
 `tests/browser-extension/content-script.test.mjs` uses only Node's built-in
 test runner and a small DOM fixture to exercise textarea/contenteditable input,
-safe selection beside an attachment/plus button, matching user-message send
+safe selection beside an attachment/plus button, structural marker verification
+under DOM whitespace/newline normalization, matching user-message send
 confirmation, ID correlation, the conditional editor paste route,
 non-ChatGPT rejection, missing locator errors, disabled-send/editor-state
 handling, and the no-message/unrelated-message failure paths.

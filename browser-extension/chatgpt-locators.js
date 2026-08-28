@@ -42,6 +42,8 @@
     'article[data-testid*="conversation-turn-user"]'
   ];
 
+  const zeroWidthPattern = /[\u200b\u200c\u200d\u2060\ufeff]/g;
+
   // The composer toolbar contains several visible buttons.  A button that
   // happens to be near the composer is never a safe Send candidate unless its
   // semantics say "send/submit", or it is a submit control in the same form.
@@ -195,11 +197,40 @@
     return element.innerText ?? element.textContent ?? "";
   }
 
+  function readComposerTextCandidates(element) {
+    if (!element) return [];
+    const values = [];
+    if ("value" in element && typeof element.value === "string") values.push(element.value);
+    for (const property of ["innerText", "textContent"]) {
+      try {
+        const value = element[property];
+        if (typeof value === "string") values.push(value);
+      } catch (_) {
+        // A stale DOM node must not prevent another representation from being
+        // checked. The Content Script will report verification failure later.
+      }
+    }
+    return [...new Set(values)];
+  }
+
   function normalizeText(value) {
     return String(value ?? "")
       .replace(/\r\n/g, "\n")
       .replace(/\r/g, "\n")
-      .replace(/\u00a0/g, " ");
+      .replace(/\u00a0/g, " ")
+      .replace(zeroWidthPattern, "");
+  }
+
+  // ChatGPT's editor can expose the same input with different line, whitespace,
+  // and DOM-node serialization. This normalizer is intentionally used only for
+  // structural verification, never as a reason to declare a send successful.
+  function normalizeComposerText(value) {
+    return normalizeText(value)
+      .split("\n")
+      .map((line) => line.replace(/[ \t]+/g, " ").trim())
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
   }
 
   function composerContainsText(element, expected) {
@@ -212,6 +243,55 @@
       return actual.replace(/\n+$/, "") === target.replace(/\n+$/, "");
     }
     return false;
+  }
+
+  function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function hasStructuredFieldValue(text, fieldNames, expectedValue) {
+    if (typeof expectedValue !== "string" || expectedValue.trim().length === 0) return false;
+    const actual = normalizeComposerText(text);
+    const normalizedExpected = normalizeComposerText(expectedValue);
+    if (!actual || !normalizedExpected) return false;
+
+    const names = (Array.isArray(fieldNames) ? fieldNames : [fieldNames])
+      .filter((name) => typeof name === "string" && name.length > 0)
+      .map(escapeRegExp)
+      .join("|");
+    if (!names) return false;
+
+    const valuePattern = escapeRegExp(normalizedExpected).replace(/\s+/g, "\\s+");
+    const pattern = new RegExp(
+      `(?:^|[\\s"'([{*-])(?:${names})["']?\\s*[:=]\\s*["']?${valuePattern}(?=$|[\\s"',;)}\\]])`,
+      "i"
+    );
+    return pattern.test(actual);
+  }
+
+  function getComposerInputMarkerStatus(element, markers) {
+    const protocol = markers?.protocol;
+    const handoffId = markers?.handoffId || markers?.handoff_id;
+    const boundaryId = markers?.boundaryId || markers?.boundary_id;
+    const candidates = readComposerTextCandidates(element);
+    const status = {
+      protocol: false,
+      handoff_id: false,
+      boundary_id: false,
+      all: false
+    };
+
+    for (const text of candidates) {
+      status.protocol ||= hasStructuredFieldValue(text, "protocol", protocol);
+      status.handoff_id ||= hasStructuredFieldValue(text, ["handoff_id", "handoffId"], handoffId);
+      status.boundary_id ||= hasStructuredFieldValue(text, ["boundary_id", "boundaryId"], boundaryId);
+    }
+    status.all = status.protocol && status.handoff_id && status.boundary_id;
+    return status;
+  }
+
+  function composerContainsInputMarkers(element, markers) {
+    return getComposerInputMarkerStatus(element, markers).all;
   }
 
   function readMessageText(element) {
@@ -280,7 +360,11 @@
     findComposer,
     findSendButton,
     readComposerText,
+    readComposerTextCandidates,
+    normalizeComposerText,
     composerContainsText,
+    getComposerInputMarkerStatus,
+    composerContainsInputMarkers,
     readMessageText,
     findUserMessages,
     captureUserMessageSnapshot,

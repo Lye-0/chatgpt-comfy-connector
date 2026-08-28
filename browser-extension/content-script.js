@@ -15,8 +15,19 @@
   // Content Script.
   function diagnostic(eventName, fields = {}) {
     const safe = {};
-    for (const key of ["request_id", "handoff_id", "status", "error_code", "stage", "composer_type"]) {
+    for (const key of [
+      "request_id",
+      "handoff_id",
+      "status",
+      "error_code",
+      "stage",
+      "composer_type",
+      "protocol_found",
+      "handoff_id_found",
+      "boundary_id_found"
+    ]) {
       if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
+      if (typeof fields[key] === "boolean") safe[key] = fields[key];
     }
     try {
       console.info(`[ChatGPT Comfy Connector] ${eventName}`, safe);
@@ -36,6 +47,11 @@
     if (stage) result.stage = stage;
     diagnostic("content script result", result);
     return result;
+  }
+
+  function hasRequiredInputMarkers(markers) {
+    return [markers?.protocol, markers?.handoffId, markers?.boundaryId]
+      .every((value) => typeof value === "string" && value.trim().length > 0);
   }
 
   function createInputEvent(type, payload) {
@@ -90,7 +106,7 @@
         composed: true,
         clipboardData: transfer
       }));
-      return accepted && locators.composerContainsText(element, payload);
+      return accepted;
     } catch (_) {
       return false;
     }
@@ -111,7 +127,7 @@
       inserted = false;
     }
 
-    if (inserted && locators.composerContainsText(element, payload)) return;
+    if (inserted) return;
 
     // Some editor builds handle a paste event but reject execCommand. This is
     // a conditional fallback only after the first editing operation failed;
@@ -127,18 +143,22 @@
     return "unknown";
   }
 
-  async function waitForComposerValue(payload, preferredComposer) {
+  async function waitForComposerInput(markers, preferredComposer) {
     const deadline = Date.now() + composerStateTimeoutMs;
+    let lastStatus = null;
     while (Date.now() < deadline) {
       const current = locators.findComposer?.()
         || (preferredComposer?.isConnected === false ? null : preferredComposer);
-      if (current && locators.composerContainsText(current, payload)) return current;
+      if (current) {
+        lastStatus = locators.getComposerInputMarkerStatus(current, markers);
+        if (lastStatus.all) return { composer: current, status: lastStatus };
+      }
       await wait(25);
     }
-    return null;
+    return { composer: null, status: lastStatus };
   }
 
-  async function fillComposer(element, payload) {
+  async function fillComposer(element, payload, markers) {
     element.focus({ preventScroll: true });
     if (element instanceof HTMLTextAreaElement || element.tagName?.toLowerCase() === "textarea") {
       if (!selectAll(element)) throw new Error("Textarea selection is unavailable.");
@@ -147,32 +167,32 @@
       setContentEditableValue(element, payload);
     }
 
-    return waitForComposerValue(payload, element);
+    return waitForComposerInput(markers, element);
   }
 
   function wait(milliseconds) {
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 
-  async function waitForSendButton(composer, payload) {
+  async function waitForSendButton(composer, markers) {
     const deadline = Date.now() + composerStateTimeoutMs;
     let candidate = null;
     let currentComposer = composer;
-    let composerHadPayload = Boolean(composer && locators.composerContainsText(composer, payload));
+    let composerHadInput = Boolean(composer && locators.composerContainsInputMarkers(composer, markers));
     let composerStateWasLost = false;
     while (Date.now() < deadline) {
       const locatedComposer = locators.findComposer?.();
       currentComposer = locatedComposer
         || (currentComposer?.isConnected === false ? null : currentComposer);
-      const composerHasPayload = Boolean(currentComposer && locators.composerContainsText(currentComposer, payload));
-      if (composerHasPayload) {
-        composerHadPayload = true;
-      } else if (composerHadPayload) {
+      const composerHasInput = Boolean(currentComposer && locators.composerContainsInputMarkers(currentComposer, markers));
+      if (composerHasInput) {
+        composerHadInput = true;
+      } else if (composerHadInput) {
         composerStateWasLost = true;
       }
       candidate = locators.findSendButton(document, { includeDisabled: true, composer: currentComposer });
-      if (composerHasPayload && candidate && !locators.isDisabled(candidate)) {
-        return { button: candidate, composer: currentComposer, composerStateWasLost, composerHasPayload };
+      if (composerHasInput && candidate && !locators.isDisabled(candidate)) {
+        return { button: candidate, composer: currentComposer, composerStateWasLost, composerHasInput };
       }
       await wait(50);
     }
@@ -180,7 +200,7 @@
       button: candidate,
       composer: currentComposer,
       composerStateWasLost,
-      composerHasPayload: Boolean(currentComposer && locators.composerContainsText(currentComposer, payload))
+      composerHasInput: Boolean(currentComposer && locators.composerContainsInputMarkers(currentComposer, markers))
     };
   }
 
@@ -218,7 +238,11 @@
       // never a send-success condition.
       const currentComposer = locators.findComposer?.() || composer;
       if (!composerCleared
-        && (!currentComposer || !locators.composerContainsText(currentComposer, message.payload))) {
+        && (!currentComposer || !locators.composerContainsInputMarkers(currentComposer, {
+          protocol: message?.protocol,
+          handoffId: message?.handoffId,
+          boundaryId: message?.boundaryId
+        }))) {
         composerCleared = true;
         diagnostic("composer cleared", {
           request_id: message?.requestId,
@@ -257,6 +281,20 @@
       composer_type: composerType(composer)
     });
 
+    const inputMarkers = {
+      protocol: message?.protocol,
+      handoffId: message?.handoffId,
+      boundaryId: message?.boundaryId
+    };
+    if (!hasRequiredInputMarkers(inputMarkers)) {
+      return resultFor(
+        message,
+        "error",
+        "composer_input_verification_failed",
+        "Handoffの送信確認に必要な識別子がありません。",
+        "input_identifiers_missing");
+    }
+
     const beforeUserMessages = locators.captureUserMessageSnapshot(document);
     diagnostic("input attempted", {
       request_id: message?.requestId,
@@ -265,15 +303,43 @@
       composer_type: composerType(composer)
     });
 
-    let activeComposer;
+    let inputResult;
     try {
-      activeComposer = await fillComposer(composer, message.payload);
+      inputResult = await fillComposer(composer, message.payload, inputMarkers);
     } catch (_) {
       return resultFor(message, "error", "composer_input_failed", "ChatGPTの入力欄へHandoffを入力できませんでした。", "input_insertion_failed");
     }
-    if (!activeComposer) {
-      return resultFor(message, "error", "composer_input_failed", "Handoff本文が入力欄へ反映されませんでした。", "input_not_visible");
+    const activeComposer = inputResult?.composer;
+    const markerStatus = inputResult?.status || {
+      protocol: false,
+      handoff_id: false,
+      boundary_id: false,
+      all: false
+    };
+    if (!activeComposer || !markerStatus.all) {
+      diagnostic("input identifiers missing", {
+        request_id: message?.requestId,
+        handoff_id: message?.handoffId,
+        stage: "input_identifiers_missing",
+        protocol_found: markerStatus.protocol,
+        handoff_id_found: markerStatus.handoff_id,
+        boundary_id_found: markerStatus.boundary_id
+      });
+      return resultFor(
+        message,
+        "error",
+        "composer_input_verification_failed",
+        "Handoffの識別子が入力欄で確認できませんでした。",
+        "input_identifiers_missing");
     }
+    diagnostic("input identifiers found", {
+      request_id: message?.requestId,
+      handoff_id: message?.handoffId,
+      stage: "input_identifiers_found",
+      protocol_found: markerStatus.protocol,
+      handoff_id_found: markerStatus.handoff_id,
+      boundary_id_found: markerStatus.boundary_id
+    });
     diagnostic("input visible", {
       request_id: message?.requestId,
       handoff_id: message?.handoffId,
@@ -281,8 +347,8 @@
       composer_type: composerType(activeComposer)
     });
 
-    const sendCandidate = await waitForSendButton(activeComposer, message.payload);
-    if (sendCandidate.composerStateWasLost || !sendCandidate.composerHasPayload) {
+    const sendCandidate = await waitForSendButton(activeComposer, inputMarkers);
+    if (sendCandidate.composerStateWasLost || !sendCandidate.composerHasInput) {
       return resultFor(message, "error", "composer_input_failed", "入力欄の状態が送信前に失われました。", "composer_state_lost");
     }
     const sendButton = sendCandidate.button;

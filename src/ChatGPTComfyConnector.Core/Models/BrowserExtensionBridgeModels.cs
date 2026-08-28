@@ -50,6 +50,7 @@ public static class BrowserExtensionHandoffErrorCodes
     public const string ContentScriptUnavailable = "content_script_unavailable";
     public const string ComposerNotFound = "composer_not_found";
     public const string ComposerInputFailed = "composer_input_failed";
+    public const string ComposerInputVerificationFailed = "composer_input_verification_failed";
     public const string SendButtonNotFound = "send_button_not_found";
     public const string SendNotReady = "send_not_ready";
     public const string SendFailed = "send_failed";

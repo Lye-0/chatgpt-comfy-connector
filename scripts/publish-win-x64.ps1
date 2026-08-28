@@ -18,6 +18,10 @@ dotnet publish (Join-Path $repoRoot 'src/ChatGPTComfyConnector.Desktop/ChatGPTCo
     --configuration $Configuration --runtime win-x64 --self-contained true `
     -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false -o $stage
 
+$extensionSource = Join-Path $repoRoot 'browser-extension'
+$extensionDestination = Join-Path $stage 'browser-extension'
+Copy-Item -LiteralPath $extensionSource -Destination $extensionDestination -Recurse -Force
+
 foreach ($folder in @('config', 'data', 'data/sessions', 'logs', 'backups', 'cache')) {
     New-Item -ItemType Directory -Force -Path (Join-Path $stage $folder) | Out-Null
 }

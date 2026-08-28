@@ -10,7 +10,10 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using ChatGPTComfyConnector.Core.Models;
+using ChatGPTComfyConnector.Core.Services;
 using ChatGPTComfyConnector.Desktop.ViewModels;
+using ChatGPTComfyConnector.Infrastructure.Bridge;
+using ChatGPTComfyConnector.Infrastructure.Storage;
 
 namespace ChatGPTComfyConnector.Desktop;
 
@@ -32,9 +35,15 @@ public partial class MainWindow : Window
     private MainViewModel ViewModel => (MainViewModel)DataContext;
 
     public MainWindow()
+        : this(new BrowserExtensionBridge(
+            pairingStore: new PortableStore(new PortableLayout(AppContext.BaseDirectory))))
+    {
+    }
+
+    public MainWindow(IBrowserExtensionBridge browserExtensionBridge)
     {
         InitializeComponent();
-        DataContext = new MainViewModel(AppContext.BaseDirectory);
+        DataContext = new MainViewModel(AppContext.BaseDirectory, browserExtensionBridge: browserExtensionBridge);
         ViewModel.PropertyChanged += ViewModel_PropertyChanged;
         IdeaInputBox.AddHandler(TextCompositionManager.PreviewTextInputStartEvent,
             new TextCompositionEventHandler(IdeaInput_TextInputStart), true);
@@ -86,7 +95,7 @@ public partial class MainWindow : Window
         _disconnectingForClose = true;
         try
         {
-            await ViewModel.DisconnectAsync();
+            await ViewModel.ShutdownAsync();
             _closeAfterDisconnect = true;
             Application.Current.Shutdown();
         }

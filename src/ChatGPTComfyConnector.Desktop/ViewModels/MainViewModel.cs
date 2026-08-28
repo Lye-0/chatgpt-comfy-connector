@@ -7,6 +7,7 @@ using System.Text.Json.Nodes;
 using ChatGPTComfyConnector.Core.Models;
 using ChatGPTComfyConnector.Core.Services;
 using ChatGPTComfyConnector.Infrastructure.Contexts;
+using ChatGPTComfyConnector.Infrastructure.Bridge;
 using ChatGPTComfyConnector.Infrastructure.Mcp;
 using ChatGPTComfyConnector.Infrastructure.Storage;
 using ChatGPTComfyConnector.Infrastructure.Workflows;
@@ -20,6 +21,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly PortableLayout _layout;
     private readonly PortableStore _store;
     private readonly ComfyMcpClientProxy _mcp;
+    private readonly IBrowserExtensionBridge _browserExtensionBridge;
     private readonly IComfyUiHealthProbe _comfyUiHealthProbe;
     private readonly WorkflowCatalog _catalog;
     private readonly SemaphoreSlim _comfyUiStatusGate = new(1, 1);
@@ -73,16 +75,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // composition is committed. Keep this presentation-only flag so the
     // custom placeholder does not render over the composition text.
     private bool _isIdeaComposing;
+    private BrowserExtensionBridgeStatus _browserExtensionBridgeStatus;
+    private readonly SynchronizationContext? _notificationContext = SynchronizationContext.Current;
 
     public MainViewModel(
         string applicationDirectory,
         IProjectChatProvider? contextProvider = null,
-        IComfyUiHealthProbe? comfyUiHealthProbe = null)
+        IComfyUiHealthProbe? comfyUiHealthProbe = null,
+        IBrowserExtensionBridge? browserExtensionBridge = null)
     {
         _layout = new PortableLayout(applicationDirectory);
         _store = new PortableStore(_layout);
         _contextProvider = contextProvider ?? new LocalProjectChatProvider(_store);
         _mcp = new ComfyMcpClientProxy(_store);
+        _browserExtensionBridge = browserExtensionBridge ?? new BrowserExtensionBridge(pairingStore: _store);
+        _browserExtensionBridgeStatus = _browserExtensionBridge.Status;
+        _browserExtensionBridge.StatusChanged += BrowserExtensionBridge_StatusChanged;
         _comfyUiHealthProbe = comfyUiHealthProbe ?? new ComfyUiEndpointHealthProbe();
         _catalog = new WorkflowCatalog(_mcp, _store);
         Settings = new AppSettings
@@ -312,6 +320,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string SelectedWorkflowText => SelectedWorkflow?.RelativePath ?? "Workflow未選択";
     public string SelectedWorkflowName => SelectedWorkflow is null ? "Workflow未選択" : Path.GetFileNameWithoutExtension(SelectedWorkflow.RelativePath);
     public string ConnectionStateText => ConnectionState switch { ConnectionState.Connected => "CONNECTED", ConnectionState.Connecting => "CONNECTING", ConnectionState.Error => "ERROR", _ => "DISCONNECTED" };
+    public BrowserExtensionConnectionState BrowserExtensionConnectionState => _browserExtensionBridgeStatus.ConnectionState;
+    public string BrowserExtensionConnectionStateText => _browserExtensionBridgeStatus.ConnectionStateText;
+    public string BrowserExtensionSystemState => BrowserExtensionConnectionStateText;
+    public BrowserExtensionPairingState BrowserExtensionPairingState => _browserExtensionBridgeStatus.PairingState;
+    public string BrowserExtensionPairingStateText => _browserExtensionBridgeStatus.PairingStateText;
+    public bool IsBrowserExtensionPairingRequired => _browserExtensionBridgeStatus.IsPairingRequired;
+    public bool IsBrowserExtensionPairingCodeVisible => !string.IsNullOrWhiteSpace(_browserExtensionBridgeStatus.PairingCode);
+    public string BrowserExtensionPairingCode => _browserExtensionBridgeStatus.PairingCode ?? string.Empty;
+    public bool IsBrowserExtensionConnected => BrowserExtensionConnectionState == BrowserExtensionConnectionState.Connected;
+    public bool IsBrowserExtensionBridgeRunning => _browserExtensionBridgeStatus.IsRunning;
+    public string BrowserExtensionEndpoint => _browserExtensionBridgeStatus.HttpEndpoint;
+    public string BrowserExtensionStatusDetail => _browserExtensionBridgeStatus.LastError is { Length: > 0 } error
+        ? error
+        : _browserExtensionBridgeStatus.ClientOrigin is { Length: > 0 } origin
+            ? $"接続元 {origin}"
+            : _browserExtensionBridgeStatus.IsPairingRequired
+                ? "PopupへPairing codeを入力してください"
+            : _browserExtensionBridgeStatus.IsRunning
+                ? "Extensionの接続を待機中"
+                : "Desktop終了時に停止します";
     public bool IsSystemProcessing => IsBusy || IsJobActive;
     public string ConnectorSystemState => IsSystemProcessing ? "PROCESSING" : "ONLINE";
     public string McpSystemState => IsSystemProcessing && IsConnected ? "PROCESSING" : ConnectionStateText;
@@ -443,6 +471,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task InitializeAsync()
     {
+        try
+        {
+            await _browserExtensionBridge.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            await _store.LogAsync("bridge", "Browser Extension Bridgeの開始に失敗しました。", ex);
+        }
+
         var saved = await _store.LoadSettingsAsync();
         if (saved is not null)
         {
@@ -575,6 +612,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
         IsSlotLoading = false;
         StatusMessage = "MCPを切断しました。ComfyUIは終了していません。";
         await SaveActiveSessionAsync();
+    }
+
+    public async Task ShutdownAsync()
+    {
+        try
+        {
+            await DisconnectAsync();
+        }
+        finally
+        {
+            await _browserExtensionBridge.StopAsync();
+        }
     }
 
     public void RefreshWorkflowTree()
@@ -2029,6 +2078,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
             && string.Equals(selected.RelativePath, identity.RelativePath, StringComparison.OrdinalIgnoreCase);
 
     private void SlotChanged(object? sender, PropertyChangedEventArgs e) { if (e.PropertyName == nameof(SlotEditorItem.ValueText)) IsDirty = true; }
+
+    private void BrowserExtensionBridge_StatusChanged(object? sender, BrowserExtensionBridgeStatusChangedEventArgs e)
+    {
+        void Apply()
+        {
+            _browserExtensionBridgeStatus = e.Status;
+            OnPropertyChanged(nameof(BrowserExtensionConnectionState));
+            OnPropertyChanged(nameof(BrowserExtensionConnectionStateText));
+            OnPropertyChanged(nameof(BrowserExtensionSystemState));
+            OnPropertyChanged(nameof(BrowserExtensionPairingState));
+            OnPropertyChanged(nameof(BrowserExtensionPairingStateText));
+            OnPropertyChanged(nameof(IsBrowserExtensionPairingRequired));
+            OnPropertyChanged(nameof(IsBrowserExtensionPairingCodeVisible));
+            OnPropertyChanged(nameof(BrowserExtensionPairingCode));
+            OnPropertyChanged(nameof(IsBrowserExtensionConnected));
+            OnPropertyChanged(nameof(IsBrowserExtensionBridgeRunning));
+            OnPropertyChanged(nameof(BrowserExtensionEndpoint));
+            OnPropertyChanged(nameof(BrowserExtensionStatusDetail));
+        }
+
+        if (_notificationContext is null)
+        {
+            Apply();
+            return;
+        }
+
+        try { _notificationContext.Post(static state => ((Action)state!).Invoke(), (Action)Apply); }
+        catch (InvalidOperationException) { }
+    }
 
     private void NotifyConnectionStateChanged()
     {

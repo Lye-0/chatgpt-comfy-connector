@@ -6,7 +6,7 @@ using ChatGPTComfyConnector.Core.Services;
 
 namespace ChatGPTComfyConnector.Infrastructure.Storage;
 
-public sealed class PortableStore : IPortableStore
+public sealed class PortableStore : IPortableStore, IBrowserExtensionPairingStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -27,6 +27,14 @@ public sealed class PortableStore : IPortableStore
 
     public Task SaveSettingsAsync(AppSettings settings, CancellationToken cancellationToken = default)
         => AtomicWriteAsync(_layout.SettingsFile, settings, cancellationToken);
+
+    public Task<BrowserExtensionPairingRecord?> LoadBrowserExtensionPairingAsync(CancellationToken cancellationToken = default)
+        => ReadAsync<BrowserExtensionPairingRecord>(_layout.BrowserExtensionPairingFile, cancellationToken);
+
+    public Task SaveBrowserExtensionPairingAsync(
+        BrowserExtensionPairingRecord pairing,
+        CancellationToken cancellationToken = default)
+        => AtomicWriteAsync(_layout.BrowserExtensionPairingFile, pairing, cancellationToken);
 
     public async Task<IReadOnlyList<CreationSession>> LoadSessionsAsync(CancellationToken cancellationToken = default)
     {

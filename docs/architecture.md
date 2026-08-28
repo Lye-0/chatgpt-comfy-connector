@@ -7,10 +7,15 @@ WPF Desktop
   ├─ MainViewModel: user flow, dirty/session/job presentation
   ├─ Core: domain models, path safety, Protocol v1, context builders
   └─ Infrastructure
-       ├─ PortableStore: atomic settings/session JSON, logs, backups
+       ├─ PortableStore: atomic settings/session/pairing-verifier JSON, logs, backups
        ├─ WorkflowCatalog: filesystem tree + dynamic MCP slot/job mapping
        ├─ ComfyMcpClient: official C# SDK StdioClientTransport
-       └─ ComfyUiEndpointHealthProbe: direct ComfyUI HTTP runtime check
+       ├─ ComfyUiEndpointHealthProbe: direct ComfyUI HTTP runtime check
+       └─ BrowserExtensionBridge: loopback HTTP/WebSocket transport
+
+Chromium Browser Extension (Manifest V3)
+  ├─ Content Script: status-only page placeholder
+  └─ Background Service Worker: Bridge health, pairing/bootstrap, WebSocket, state, ping
 ```
 
 ## Project / Chat context providers
@@ -265,6 +270,39 @@ their source of truth.
 
 The app does not call ComfyUI management tools such as model download, node installation, update, or version switching.
 
+## Browser Extension Bridge
+
+v0.2 Phase 1 adds a transport-only boundary for the Chromium Extension. The
+Core `IBrowserExtensionBridge` contract and shared state/message models are
+implemented by `Infrastructure/Bridge/BrowserExtensionBridge`. The server uses
+the built-in .NET `HttpListener` WebSocket upgrade and binds only to
+`http://127.0.0.1:43127/`; it is not part of the MCP server or ComfyUI
+endpoint. `App.xaml.cs` is the manual composition root and injects one Bridge
+instance into `MainWindow` / `MainViewModel`, so the listener starts with the
+Desktop initialization and stops on the close/exit path.
+
+The protocol has metadata-only `GET /health`, one-time `POST /api/v1/pair`,
+credential-gated `POST /api/v1/bootstrap`, token-gated `POST /api/v1/ping`, and
+token-gated `GET /bridge` WebSocket endpoints. The Desktop displays a short-
+lived pairing code; the Extension stores the resulting pairing credential in
+`chrome.storage.local`. The Desktop stores only a SHA-256 verifier in
+`config/browser-extension-pairing.json`. On every Desktop start, the saved
+credential bootstraps a new short-lived process session token, which is then
+used for the WebSocket hello. The Desktop sends `hello.ack` and one
+`desktop.ready` event; the Extension sends `ping` and receives `pong`.
+Unknown messages are rejected and there is no workflow, MCP, filesystem, or
+process command surface in this phase. CORS reflects only the accepted
+an explicit `chrome-extension://`, `extension://`, or `edge-extension://`
+Origin and never emits wildcard
+CORS. The Service Worker path also uses an explicit `X-Connector-Client`
+header so it does not depend on Origin being present on extension Fetch.
+
+`BROWSER EXTENSION / Desktop Bridge` is displayed as a separate card in the
+right Handoff pane. The existing `Connector → MCP → ComfyUI → GPU` indicators
+and the Creation Pipeline connection gate remain independent. The complete
+endpoint/message/install contract is in
+`docs/browser-extension-bridge.md`.
+
 ## UI direction
 
 Creative intensity is concentrated in the production surface: session idea, workflow identity, iteration history, and output handoff. Setup, workflow safety, slot validation, restore, cancellation, and errors keep familiar productive conventions and explicit labels. No particular palette, glow, pulse interval, or animation is a protocol requirement.
@@ -280,6 +318,13 @@ Creative intensity is concentrated in the production surface: session idea, work
 - `src/ChatGPTComfyConnector.Infrastructure/Workflows/WorkflowCatalog.cs` and
   `src/ChatGPTComfyConnector.Infrastructure/Storage/PortableStore.cs` — dynamic
   slots, backup/rollback, output fetching, and atomic Portable persistence.
+- `src/ChatGPTComfyConnector.Infrastructure/Bridge/BrowserExtensionBridge.cs`,
+  `src/ChatGPTComfyConnector.Infrastructure/Storage/PortableStore.cs`, and
+  `docs/browser-extension-bridge.md` — local Extension transport,
+  pairing/bootstrap authentication, event envelope, persistence, and lifecycle.
 - `tests/ChatGPTComfyConnector.Tests/CreationPipelineStateMachineTests.cs`,
   `ProtocolTests.cs`, and `SessionAndStorageTests.cs` — state, protocol, provider,
   persistence, and compatibility behavior.
+- `tests/ChatGPTComfyConnector.Tests/BrowserExtensionBridgeTests.cs` — loopback
+  health without token disclosure, pairing/bootstrap, persistence, Origin/CORS,
+  process-token rotation, WebSocket, ping/pong, event, and disconnect behavior.

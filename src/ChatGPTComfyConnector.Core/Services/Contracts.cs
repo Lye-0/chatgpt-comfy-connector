@@ -17,6 +17,17 @@ public interface IPortableStore
     Task LogAsync(string category, string message, Exception? exception = null, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Persistence boundary for the Desktop half of Browser Extension pairing.
+/// Implementations must persist only a verifier/hash, never the raw bearer
+/// credential returned to the Extension.
+/// </summary>
+public interface IBrowserExtensionPairingStore
+{
+    Task<BrowserExtensionPairingRecord?> LoadBrowserExtensionPairingAsync(CancellationToken cancellationToken = default);
+    Task SaveBrowserExtensionPairingAsync(BrowserExtensionPairingRecord pairing, CancellationToken cancellationToken = default);
+}
+
 public interface IProjectChatProvider
 {
     string ProviderId { get; }
@@ -43,6 +54,20 @@ public interface IComfyMcpClient : IAsyncDisposable
 public interface IComfyUiHealthProbe
 {
     Task<ComfyUiHealthCheckResult> CheckAsync(string endpoint, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Local-only transport boundary for the Chromium Browser Extension. The
+/// implementation owns HTTP/WebSocket details; Core consumers only observe
+/// state and send explicitly shaped server events.
+/// </summary>
+public interface IBrowserExtensionBridge : IAsyncDisposable
+{
+    BrowserExtensionBridgeStatus Status { get; }
+    event EventHandler<BrowserExtensionBridgeStatusChangedEventArgs>? StatusChanged;
+    Task StartAsync(CancellationToken cancellationToken = default);
+    Task StopAsync(CancellationToken cancellationToken = default);
+    Task<bool> SendEventAsync(BrowserExtensionBridgeEvent bridgeEvent, CancellationToken cancellationToken = default);
 }
 
 public interface IClipboardService

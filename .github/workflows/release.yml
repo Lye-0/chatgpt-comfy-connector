@@ -73,6 +73,10 @@ jobs:
             throw 'The self-contained Desktop publish did not produce the application executable.'
           }
 
+          $extensionSource = Join-Path $env:GITHUB_WORKSPACE 'browser-extension'
+          $extensionDestination = Join-Path $publishDirectory 'browser-extension'
+          Copy-Item -LiteralPath $extensionSource -Destination $extensionDestination -Recurse -Force
+
           "publish_directory=$publishDirectory" >> $env:GITHUB_OUTPUT
 
       - name: Create ZIP and SHA-256

@@ -220,6 +220,7 @@ public sealed class PortableLayout
     public string Cache { get; }
     public string ContextsFile { get; }
     public string SettingsFile => Path.Combine(Config, "settings.json");
+    public string BrowserExtensionPairingFile => Path.Combine(Config, "browser-extension-pairing.json");
     public string LogFile => Path.Combine(Logs, "connector.log");
 
     public void EnsureDirectories()

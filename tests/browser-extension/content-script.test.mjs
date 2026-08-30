@@ -179,6 +179,7 @@ class FakeElement {
       && (this.getAttribute("type") || "").toLowerCase() === "file") {
       this.ownerDocument.onFileInputChanged(this);
     }
+    if (event.type === "input") this.ownerDocument.onComposerInput?.(this);
     this.listeners.get(event.type)?.(event);
     return true;
   }
@@ -255,7 +256,7 @@ class FakeClipboardEvent extends FakeEvent {
 }
 
 class FakeDocument {
-  constructor({ composer = "textarea", sendButton = "ready", plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", composerReadTransform = null, url = "https://chatgpt.com/c/fixture", initialAssistantMessages = [], fileInput = true, attachmentVerification = true, attachmentUploading = false } = {}) {
+  constructor({ composer = "textarea", sendButton = "ready", sendButtonReadyAfterMs = 0, plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", composerReadTransform = null, url = "https://chatgpt.com/c/fixture", initialAssistantMessages = [], fileInput = true, attachmentVerification = true, attachmentUploading = false } = {}) {
     this.activeElement = null;
     this.composers = [];
     this.sendButtons = [];
@@ -267,6 +268,9 @@ class FakeDocument {
     this.fileInputEnabled = fileInput;
     this.attachmentVerification = attachmentVerification;
     this.attachmentUploading = attachmentUploading;
+    this.sendButtonReadyAfterMs = sendButtonReadyAfterMs;
+    this.delayedSendButtonTimerStarted = false;
+    this.delayedSendButton = null;
     this.fileInput = null;
     this.attachmentIndicators = [];
     this.contentEditableInsert = contentEditableInsert;
@@ -333,6 +337,10 @@ class FakeDocument {
       this.sendButtons.push(button);
       this.buttons.push(button);
       if (sendButton === "disabled") button.disabled = true;
+      if (sendButtonReadyAfterMs > 0) {
+        button.disabled = true;
+        this.delayedSendButton = button;
+      }
       if (sendButton === "ambiguous") {
         const duplicate = new FakeButton(this, {
           "data-testid": "send-button",
@@ -393,6 +401,15 @@ class FakeDocument {
     });
     this.fileInput.parentElement?.appendChild(indicator);
     this.attachmentIndicators.push(indicator);
+  }
+
+  onComposerInput(element) {
+    if (this.delayedSendButtonTimerStarted
+      || !this.composers.includes(element)
+      || !this.delayedSendButton
+      || this.sendButtonReadyAfterMs <= 0) return;
+    this.delayedSendButtonTimerStarted = true;
+    setTimeout(() => { this.delayedSendButton.disabled = false; }, this.sendButtonReadyAfterMs);
   }
 
   appendAssistantStatusMessage(statusText) {
@@ -577,6 +594,9 @@ async function createHarness(options) {
   ).replace(
     "const composerStateTimeoutMs = 1500;",
     "const composerStateTimeoutMs = 50;"
+  ).replace(
+    "const reviewComposerStateTimeoutMs = 60000;",
+    "const reviewComposerStateTimeoutMs = 150;"
   ).replace(
     "const responseTimeoutMs = 120000;",
     "const responseTimeoutMs = 300;"
@@ -1031,6 +1051,124 @@ test("Content Script builds a File from bounded chunks and verifies the ChatGPT 
   assert.equal(harness.document.fileInput.files[0].name, mediaBegin.fileName);
   assert.equal(harness.document.fileInput.files[0].type, mediaBegin.mimeType);
   assert.equal(harness.document.fileInput.files[0].size, mediaBegin.size);
+});
+
+test("Content Script waits for the Review Send control after video processing", async () => {
+  const harness = await createHarness({ sendButton: "ready", sendButtonReadyAfterMs: 80 });
+  assert.equal((await harness.send(mediaBegin)).status, "receiving");
+  await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_CHUNK",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    offset: 0,
+    chunk: "AQID"
+  });
+  assert.equal((await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_END",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    fileName: mediaBegin.fileName,
+    mimeType: mediaBegin.mimeType,
+    size: mediaBegin.size
+  })).status, "attached");
+
+  const review = {
+    ...handoff,
+    requestId: "review-request-fixture",
+    handoffId: "review-handoff-fixture",
+    boundaryId: "review-boundary-fixture",
+    review: true,
+    expectedAttachment: {
+      mediaId: mediaBegin.mediaId,
+      fileName: mediaBegin.fileName,
+      iteration: mediaBegin.iteration
+    },
+    payload: "## Review Handoff\nProtocol: comfy-connector/1\nhandoff_id: review-handoff-fixture\nboundary_id: review-boundary-fixture\n"
+  };
+  const result = await harness.send(review);
+  assert.equal(result.status, "sent");
+  assert.equal(result.stage, "user_message_correlated");
+  assert.equal(harness.document.sendClicked, true);
+  assert.equal(harness.document.plusMenuOpened, false);
+});
+
+test("Content Script arms a Review response watcher with the Review identity and anchor", async () => {
+  const harness = await createHarness({ sendButton: "ready", fileInput: true, attachmentVerification: true });
+  assert.equal((await harness.send(handoff)).status, "sent");
+
+  assert.equal((await harness.send(mediaBegin)).status, "receiving");
+  await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_CHUNK",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    offset: 0,
+    chunk: "AQID"
+  });
+  assert.equal((await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_END",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    fileName: mediaBegin.fileName,
+    mimeType: mediaBegin.mimeType,
+    size: mediaBegin.size
+  })).status, "attached");
+
+  const review = {
+    ...handoff,
+    requestId: "review-request-watcher-fixture",
+    handoffId: "review-handoff-watcher-fixture",
+    boundaryId: "review-boundary-watcher-fixture",
+    review: true,
+    expectedAttachment: {
+      mediaId: mediaBegin.mediaId,
+      fileName: mediaBegin.fileName,
+      iteration: mediaBegin.iteration
+    },
+    payload: "## Review Handoff\nProtocol: comfy-connector/1\nhandoff_id: review-handoff-watcher-fixture\nboundary_id: review-boundary-watcher-fixture\n"
+  };
+  assert.equal((await harness.send(review)).status, "sent");
+
+  const watching = await harness.send({
+    type: "WATCH_ASSISTANT_RESPONSE",
+    requestId: review.requestId,
+    sessionId: review.sessionId,
+    handoffId: review.handoffId,
+    boundaryId: review.boundaryId,
+    protocol: review.protocol,
+    targetTabId: 42,
+    review: true
+  });
+  assert.equal(watching.status, "watching");
+
+  const command = JSON.stringify({
+    protocol: "comfy-connector/1",
+    action: "complete",
+    handoff_id: review.handoffId,
+    session_id: review.sessionId,
+    reason: "approved"
+  });
+  harness.document.appendAssistantCodeMessage({
+    codeText: command,
+    language: "connector-command",
+    classLanguage: null
+  });
+  const result = await harness.waitForRuntimeMessage((message) =>
+    message.type === "ASSISTANT_RESPONSE_RESULT" && message.status === "received");
+
+  assert.equal(result.requestId, review.requestId);
+  assert.equal(result.sessionId, review.sessionId);
+  assert.equal(result.handoffId, review.handoffId);
+  assert.equal(result.boundaryId, review.boundaryId);
+  assert.equal(result.payload.includes(review.handoffId), true);
+  assert.equal(result.payload.includes(handoff.handoffId), false);
 });
 
 test("Content Script uses only a semantic attachment control before returning a missing-input error", async () => {

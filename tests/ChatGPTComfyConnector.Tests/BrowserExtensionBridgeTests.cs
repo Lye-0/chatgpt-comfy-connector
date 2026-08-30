@@ -601,6 +601,9 @@ public sealed class BrowserExtensionBridgeTests
         Assert.Contains("type: \"handoff.result\"", background, StringComparison.Ordinal);
         Assert.Contains("background received", background, StringComparison.Ordinal);
         Assert.Contains("content script dispatched", background, StringComparison.Ordinal);
+        Assert.Contains("response watch armed", background, StringComparison.Ordinal);
+        Assert.Contains("review handoff sent", background, StringComparison.Ordinal);
+        Assert.Contains("targetTabId: tabId", background, StringComparison.Ordinal);
         Assert.Contains("result status", background, StringComparison.Ordinal);
         Assert.Contains("chrome.scripting.executeScript", background, StringComparison.Ordinal);
         Assert.Contains("CONTENT_SCRIPT_TIMEOUT_MS", background, StringComparison.Ordinal);
@@ -626,6 +629,10 @@ public sealed class BrowserExtensionBridgeTests
         Assert.Contains("user_message_observed", content, StringComparison.Ordinal);
         Assert.Contains("user_message_correlated", content, StringComparison.Ordinal);
         Assert.Contains("WATCH_ASSISTANT_RESPONSE", content, StringComparison.Ordinal);
+        Assert.Contains("response anchor found", content, StringComparison.Ordinal);
+        Assert.Contains("response_watch_armed", content, StringComparison.Ordinal);
+        Assert.Contains("assistant message complete", content, StringComparison.Ordinal);
+        Assert.Contains("assistant response emitted", content, StringComparison.Ordinal);
         Assert.Contains("assistant_response_complete", content, StringComparison.Ordinal);
         Assert.Contains("MutationObserver", content, StringComparison.Ordinal);
         Assert.Contains("assistant_response_not_found", content, StringComparison.Ordinal);

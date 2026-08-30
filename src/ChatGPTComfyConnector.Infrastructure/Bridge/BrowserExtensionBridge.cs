@@ -33,7 +33,11 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PairingCodeLifetime = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan SessionTokenLifetime = TimeSpan.FromMinutes(30);
-    private static readonly TimeSpan HandoffResponseTimeout = TimeSpan.FromSeconds(30);
+    // A Review Handoff may wait for ChatGPT to finish processing an attached
+    // video before its Send control becomes enabled. This must exceed the
+    // Extension Content Script readiness window, otherwise the Desktop would
+    // report a bridge timeout while the Extension is still waiting safely.
+    private static readonly TimeSpan HandoffResponseTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan MediaAttachResponseTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan MediaRegistrationLifetime = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(3);
@@ -289,6 +293,17 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             throw new ArgumentException("Handoff本文が空です。", nameof(request));
         }
 
+        if (request.HandoffKind is not (null or "bootstrap" or "review")
+            || request.TargetTabId is < 0
+            || request.TargetTabUrl is { Length: > 2048 }
+            || (request.TargetTabUrl is not null && !IsChatGptUrl(request.TargetTabUrl))
+            || request.ReviewMediaId is { } mediaId && !IsSafeIdentifier(mediaId)
+            || request.ReviewFileName is { } fileName && !IsSafeFileName(fileName)
+            || request.ReviewIteration is <= 0)
+        {
+            throw new ArgumentException("Review Handoffの送信メタデータが不正です。", nameof(request));
+        }
+
         if (Encoding.UTF8.GetByteCount(request.Payload) > MaxHandoffPayloadBytes)
         {
             var result = HandoffError(request.RequestId, request.HandoffId, "handoff_payload_too_large", "Handoff本文が大きすぎます。", "payload_validation");
@@ -318,10 +333,24 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             throw new ArgumentException("request_idが重複しています。", nameof(request));
         }
 
-        PublishDiagnostic("handoff.send requested", request.RequestId, request.HandoffId, "requested");
+        PublishDiagnostic(
+            "handoff.send requested",
+            request.RequestId,
+            request.HandoffId,
+            "requested",
+            sessionId: request.SessionId,
+            boundaryId: request.BoundaryId,
+            targetTabId: request.TargetTabId);
         try
         {
-            PublishDiagnostic("websocket send", request.RequestId, request.HandoffId, "sending");
+            PublishDiagnostic(
+                "websocket send",
+                request.RequestId,
+                request.HandoffId,
+                "sending",
+                sessionId: request.SessionId,
+                boundaryId: request.BoundaryId,
+                targetTabId: request.TargetTabId);
             await SendJsonAsync(socket, new
             {
                 type = "handoff.send",
@@ -330,6 +359,12 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 handoff_id = request.HandoffId,
                 boundary_id = request.BoundaryId,
                 payload = request.Payload,
+                handoff_kind = request.HandoffKind,
+                target_tab_id = request.TargetTabId,
+                target_tab_url = request.TargetTabUrl,
+                review_media_id = request.ReviewMediaId,
+                review_file_name = request.ReviewFileName,
+                review_iteration = request.ReviewIteration,
             }, cancellationToken);
 
             return await pending.Completion.Task.WaitAsync(HandoffResponseTimeout, cancellationToken);
@@ -1223,7 +1258,26 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                         continue;
                     }
 
-                    PublishDiagnostic("assistant response received", response.RequestId, response.HandoffId, response.Status, response.ErrorCode, response.Stage);
+                    PublishDiagnostic(
+                        "assistant response received",
+                        response.RequestId,
+                        response.HandoffId,
+                        response.Status,
+                        response.ErrorCode,
+                        response.Stage,
+                        sessionId: response.SessionId,
+                        boundaryId: response.BoundaryId,
+                        targetTabId: response.TargetTabId);
+                    PublishDiagnostic(
+                        "assistant response bridge received",
+                        response.RequestId,
+                        response.HandoffId,
+                        response.Status,
+                        response.ErrorCode,
+                        "assistant_response_received",
+                        sessionId: response.SessionId,
+                        boundaryId: response.BoundaryId,
+                        targetTabId: response.TargetTabId);
                     try { AssistantResponseReceived?.Invoke(this, new BrowserExtensionAssistantResponseEventArgs(response)); }
                     catch (Exception) { }
                 }
@@ -1491,9 +1545,22 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         string? stage = null,
         string? mediaId = null,
         int? iteration = null,
-        int? targetTabId = null)
+        int? targetTabId = null,
+        string? sessionId = null,
+        string? boundaryId = null)
     {
-        var diagnostic = new BrowserExtensionBridgeDiagnostic(eventName, requestId, handoffId, status, errorCode, stage, mediaId, iteration, targetTabId);
+        var diagnostic = new BrowserExtensionBridgeDiagnostic(
+            eventName,
+            requestId,
+            handoffId,
+            status,
+            errorCode,
+            stage,
+            mediaId,
+            iteration,
+            targetTabId,
+            sessionId,
+            boundaryId);
         try { Diagnostic?.Invoke(this, new BrowserExtensionBridgeDiagnosticEventArgs(diagnostic)); }
         catch (Exception) { }
     }
@@ -2030,7 +2097,29 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 return false;
             }
 
-            response = new(requestId, sessionId, handoffId, boundaryId, status, payload, errorCode, message, stage);
+            int? targetTabId = null;
+            if (root.TryGetProperty("target_tab_id", out var targetTabIdElement))
+            {
+                if (targetTabIdElement.ValueKind != JsonValueKind.Number
+                    || !targetTabIdElement.TryGetInt32(out var parsedTargetTabId)
+                    || parsedTargetTabId < 0)
+                {
+                    error = "invalid_assistant_response";
+                    return false;
+                }
+
+                targetTabId = parsedTargetTabId;
+            }
+
+            var targetTabUrl = GetString(root, "target_tab_url");
+            if (targetTabUrl is { Length: > 2048 }
+                || (targetTabUrl is not null && !IsChatGptUrl(targetTabUrl)))
+            {
+                error = "invalid_assistant_response";
+                return false;
+            }
+
+            response = new(requestId, sessionId, handoffId, boundaryId, status, payload, errorCode, message, stage, targetTabId, targetTabUrl);
             return true;
         }
         catch (JsonException)

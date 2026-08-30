@@ -115,6 +115,12 @@ public enum PendingHandoffPurpose
 {
     Unknown,
     Bootstrap,
+    /// <summary>
+    /// The immutable ComfyUI output context shown in the Timeline.  It is not
+    /// the Review request that follows it; a Review request must receive a
+    /// fresh handoff/boundary identity.
+    /// </summary>
+    GenerationResult,
     Review,
 }
 
@@ -177,6 +183,40 @@ public enum AutomaticResponseExecutionState
     Generating,
     Completed,
     Failed,
+}
+
+/// <summary>
+/// Durable transport state for the Review Handoff that follows a completed
+/// generation.  It is deliberately separate from media attachment and
+/// assistant-response state: an attachment being present does not mean that
+/// the Review Handoff was sent.
+/// </summary>
+public enum ReviewHandoffState
+{
+    None,
+    Preparing,
+    Sending,
+    Sent,
+    WaitingResponse,
+    Received,
+    Failed,
+    Stopped,
+    Completed,
+}
+
+/// <summary>
+/// State of the standard automatic iteration loop.  There is no user-facing
+/// ON/OFF switch; this snapshot exists to make cancellation, restart recovery
+/// and stale-response rejection durable and idempotent.
+/// </summary>
+public enum AutomaticIterationState
+{
+    None,
+    Running,
+    WaitingForReviewResponse,
+    Stopped,
+    Failed,
+    Completed,
 }
 
 /// <summary>
@@ -612,7 +652,7 @@ public sealed class CreationStageStatus
 
 public sealed class CreationPipelineSnapshot
 {
-    public int Version { get; set; } = 5;
+    public int Version { get; set; } = 6;
     public int IterationNumber { get; set; }
     public bool ContextBound { get; set; }
     public bool MaximumIterationSafetyStop { get; set; }
@@ -620,6 +660,8 @@ public sealed class CreationPipelineSnapshot
     public string? AcceptedCommandAction { get; set; }
     public GenerateExecutionState GenerateExecutionState { get; set; } = GenerateExecutionState.ReadyToGenerate;
     public AutomaticResponseExecutionSnapshot? AutomaticResponseExecution { get; set; }
+    public ReviewHandoffSnapshot? ReviewHandoff { get; set; }
+    public AutomaticIterationSnapshot? AutomaticIteration { get; set; }
     public ReviewMediaAttachmentSnapshot? ReviewMediaAttachment { get; set; }
     public List<CreationStageStatus> Stages { get; set; } = [];
 }
@@ -670,6 +712,44 @@ public sealed class AutomaticResponseExecutionSnapshot
     public string BoundaryId { get; set; } = string.Empty;
     public string Action { get; set; } = string.Empty;
     public AutomaticResponseExecutionState State { get; set; } = AutomaticResponseExecutionState.None;
+    public string? ErrorCode { get; set; }
+    public string? ErrorStage { get; set; }
+    public string? ErrorMessage { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// Identity and terminal state for the current Review Handoff transport.
+/// This contains identifiers only and never the rendered Handoff body.
+/// </summary>
+public sealed class ReviewHandoffSnapshot
+{
+    public ReviewHandoffState State { get; set; } = ReviewHandoffState.None;
+    public string SessionId { get; set; } = string.Empty;
+    public int Iteration { get; set; }
+    public string RequestId { get; set; } = string.Empty;
+    public string HandoffId { get; set; } = string.Empty;
+    public string BoundaryId { get; set; } = string.Empty;
+    public int? TargetTabId { get; set; }
+    public string? TargetTabUrl { get; set; }
+    public string? ErrorCode { get; set; }
+    public string? ErrorStage { get; set; }
+    public string? ErrorMessage { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// Durable loop state.  The response body remains in CHATGPT COMMAND and in
+/// the timeline; this projection only records the identity needed to prevent
+/// a duplicate response from starting APPLY/GENERATE twice.
+/// </summary>
+public sealed class AutomaticIterationSnapshot
+{
+    public AutomaticIterationState State { get; set; } = AutomaticIterationState.None;
+    public string SessionId { get; set; } = string.Empty;
+    public int Iteration { get; set; }
+    public string ReviewHandoffId { get; set; } = string.Empty;
+    public string ReviewBoundaryId { get; set; } = string.Empty;
     public string? ErrorCode { get; set; }
     public string? ErrorStage { get; set; }
     public string? ErrorMessage { get; set; }

@@ -1,4 +1,4 @@
-# Browser Extension Bridge (v0.2 Phase 1–5.1)
+# Browser Extension Bridge (v0.2 Phase 1–5.2)
 
 ## Scope
 
@@ -15,8 +15,10 @@ when the existing output/review rules allow it. Chat/project enumeration and
 an autonomous infinite iteration loop remain out of scope. Phase 5.1 adds one
 more bounded action: after a successful ComfyUI generation, the Desktop can
 register the current Primary Output and have the Extension attach it to the
-same ChatGPT tab. Review Handoff sending and the automatic Review/Iteration
-loop remain out of scope.
+same ChatGPT tab. Phase 5.2 then sends a fresh Review Handoff after the
+attachment is verified and can continue the existing APPLY → GENERATE path
+for the next iteration; complete, maximum-iteration, cancellation, and retry
+boundaries remain explicit Desktop state-machine decisions.
 
 ```text
 ChatGPT page content script (DOM only: input/send/response observation)
@@ -380,7 +382,28 @@ Bridge stops, and are revoked when the session/context/generation changes or
 after a successful attachment. The source ComfyUI output is never deleted.
 Duplicate in-flight or already terminal same-iteration attachment attempts
 are ignored by Desktop state guards; an explicit retry is available after a
-failure. No Review Handoff is generated or sent by Phase 5.1.
+failure. Phase 5.1 ends at `ATTACHED`; it does not itself create or send a
+Review Handoff.
+
+### Phase 5.2: automatic Review and next iteration
+
+Once the media result is `ATTACHED`, Desktop creates a new Review Handoff for
+the same session, target tab, and iteration. It has fresh `handoff_id` and
+`boundary_id` values, and is sent through the same authenticated
+`handoff.send` path. The Content Script first verifies that the expected
+attachment is still visible, inserts the Review body, and waits for the
+ChatGPT Send control to become enabled before clicking it. Video processing
+can leave that control disabled after the attachment chip is visible, so the
+Review path polls for up to 60 seconds; the Background and Desktop transport
+windows are 75 and 90 seconds respectively. A disabled control is never
+clicked and a timeout remains a retryable Review failure.
+
+After a confirmed Review user message, the existing assistant-response
+watcher returns the completed response to Desktop for strict validation. A
+validated `generate` response uses the existing APPLY → GENERATE path for the
+next iteration; `complete` terminates the session. The maximum-iteration
+safety stop, cancellation, stale-response rejection, and duplicate handling
+remain owned by the Desktop/Core state machine.
 
 ### `POST /api/v1/ping`
 
@@ -547,7 +570,8 @@ safe selection beside an attachment/plus button, structural marker verification
 under DOM whitespace/newline normalization, matching user-message send
 confirmation, ID correlation, the conditional editor paste route,
 non-ChatGPT rejection, missing locator errors, disabled-send/editor-state
-handling, and the no-message/unrelated-message failure paths.
+handling, delayed Review Send readiness after media processing, and the
+no-message/unrelated-message failure paths.
 
 `tests/browser-extension/background.test.mjs` uses a mock WebSocket and
 `chrome.tabs` boundary to exercise active-ChatGPT routing, non-ChatGPT rejection,

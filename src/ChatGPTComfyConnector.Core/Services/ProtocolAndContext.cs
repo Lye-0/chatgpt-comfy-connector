@@ -477,6 +477,9 @@ public static class PendingHandoffFactory
     public static PendingHandoffSnapshot CreateReview(CreationSession session, IEnumerable<WorkflowSlot> slots, params string[] allowedActions)
         => CreateCore(session, slots, PendingHandoffPurpose.Review, allowedActions);
 
+    public static PendingHandoffSnapshot CreateGenerationResult(CreationSession session, IEnumerable<WorkflowSlot> slots, params string[] allowedActions)
+        => CreateCore(session, slots, PendingHandoffPurpose.GenerationResult, allowedActions);
+
     private static PendingHandoffSnapshot CreateCore(CreationSession session, IEnumerable<WorkflowSlot> slots, PendingHandoffPurpose purpose, IEnumerable<string> allowedActions)
         => new()
         {

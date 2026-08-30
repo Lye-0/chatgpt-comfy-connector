@@ -57,6 +57,20 @@ public static class BrowserExtensionHandoffErrorCodes
     public const string SendNotReady = "send_not_ready";
     public const string SendFailed = "send_failed";
     public const string BridgeDisconnected = "bridge_disconnected";
+    public const string ReviewMediaNotAttached = "review_media_not_attached";
+    public const string ReviewHandoffBuildFailed = "review_handoff_build_failed";
+    public const string ReviewComposerNotClean = "review_composer_not_clean";
+    public const string ReviewComposerInputFailed = "review_composer_input_failed";
+    public const string ReviewSendButtonNotFound = "review_send_button_not_found";
+    public const string ReviewSendNotReady = "review_send_not_ready";
+    public const string ReviewSendFailed = "review_send_failed";
+    public const string ReviewMessageNotObserved = "review_message_not_observed";
+    public const string ReviewMessageNotCorrelated = "review_message_not_correlated";
+    public const string ReviewTargetTabNotFound = "review_target_tab_not_found";
+    public const string ReviewResponseTimeout = "review_response_timeout";
+    public const string ReviewResponseNotCorrelated = "review_response_not_correlated";
+    public const string MaximumIterationsReached = "maximum_iterations_reached";
+    public const string AutomaticIterationCancelled = "automatic_iteration_cancelled";
 }
 
 /// <summary>
@@ -156,7 +170,13 @@ public sealed record BrowserExtensionHandoffSendRequest(
     string SessionId,
     string HandoffId,
     string BoundaryId,
-    string Payload);
+    string Payload,
+    string? HandoffKind = null,
+    int? TargetTabId = null,
+    string? TargetTabUrl = null,
+    string? ReviewMediaId = null,
+    string? ReviewFileName = null,
+    int? ReviewIteration = null);
 
 /// <summary>
 /// Result correlated with <see cref="BrowserExtensionHandoffSendRequest.RequestId"/>.
@@ -241,7 +261,9 @@ public sealed record BrowserExtensionAssistantResponse(
     string? Payload = null,
     string? ErrorCode = null,
     string? Message = null,
-    string? Stage = null)
+    string? Stage = null,
+    int? TargetTabId = null,
+    string? TargetTabUrl = null)
 {
     public bool IsReceived => string.Equals(Status, "received", StringComparison.Ordinal);
 }
@@ -300,7 +322,9 @@ public sealed record BrowserExtensionBridgeDiagnostic(
     string? Stage = null,
     string? MediaId = null,
     int? Iteration = null,
-    int? TargetTabId = null);
+    int? TargetTabId = null,
+    string? SessionId = null,
+    string? BoundaryId = null);
 
 public sealed class BrowserExtensionBridgeDiagnosticEventArgs(BrowserExtensionBridgeDiagnostic diagnostic) : EventArgs
 {

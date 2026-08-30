@@ -1503,6 +1503,12 @@
                                                    TextWrapping="Wrap"
                                                    Margin="0,2,0,0"
                                                    Visibility="{Binding HasReviewMediaAttachment, Converter={StaticResource BoolToVisibility}}" />
+                                        <TextBlock Text="{Binding AutomaticIterationText}"
+                                                   Foreground="{StaticResource WarmBrush}"
+                                                   FontSize="8"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,2,0,0"
+                                                   Visibility="{Binding HasAutomaticIterationStatus, Converter={StaticResource BoolToVisibility}}" />
                                     </StackPanel>
                                 </StackPanel>
                                 <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
@@ -1520,9 +1526,9 @@
                                             Click="Generate_Click"
                                             IsEnabled="{Binding CanRunWorkflow}" />
                                     <Button Content="CANCEL"
-                                            ToolTip="実行中のJobへcancelを要求"
+                                            ToolTip="実行中のJobまたは自動Iterationを停止"
                                             Click="CancelJob_Click"
-                                            IsEnabled="{Binding IsJobActive}"
+                                            IsEnabled="{Binding CanCancelOperation}"
                                             Margin="0" />
                                 </WrapPanel>
                             </Grid>

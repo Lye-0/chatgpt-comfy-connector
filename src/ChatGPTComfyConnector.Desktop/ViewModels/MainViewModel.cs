@@ -31,6 +31,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly SemaphoreSlim _comfyUiStartGate = new(1, 1);
     private readonly SemaphoreSlim _generationGate = new(1, 1);
     private readonly SemaphoreSlim _bootstrapHandoffGate = new(1, 1);
+    private readonly SemaphoreSlim _reviewHandoffGate = new(1, 1);
     private readonly SemaphoreSlim _reviewMediaAttachmentGate = new(1, 1);
     private CreationSession? _currentSession;
     private WorkflowIdentity? _selectedWorkflow;
@@ -140,16 +141,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<ProjectContextOption> ProjectOptions { get; }
     public ObservableCollection<ChatContextOption> ChatOptions { get; }
     public ObservableCollection<HandoffTimelineItem> HandoffItems { get; }
-    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); OnPropertyChanged(nameof(CurrentGenerateExecutionState)); OnPropertyChanged(nameof(GenerateExecutionStateText)); OnPropertyChanged(nameof(AutomaticResponseExecutionText)); OnPropertyChanged(nameof(ReviewMediaAttachment)); OnPropertyChanged(nameof(HasReviewMediaAttachment)); OnPropertyChanged(nameof(ReviewMediaAttachmentStateText)); OnPropertyChanged(nameof(IsReviewMediaAttachmentFailed)); OnPropertyChanged(nameof(CanAttachReviewOutput)); NotifyPipelineStateChanged(); } }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanResendReviewHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); OnPropertyChanged(nameof(CurrentGenerateExecutionState)); OnPropertyChanged(nameof(GenerateExecutionStateText)); OnPropertyChanged(nameof(AutomaticResponseExecutionText)); OnPropertyChanged(nameof(AutomaticIterationText)); OnPropertyChanged(nameof(HasAutomaticIterationStatus)); OnPropertyChanged(nameof(ReviewHandoff)); OnPropertyChanged(nameof(ReviewMediaAttachment)); OnPropertyChanged(nameof(HasReviewMediaAttachment)); OnPropertyChanged(nameof(ReviewMediaAttachmentStateText)); OnPropertyChanged(nameof(IsReviewMediaAttachmentFailed)); OnPropertyChanged(nameof(CanAttachReviewOutput)); OnPropertyChanged(nameof(CanCancelOperation)); NotifyPipelineStateChanged(); } }
     public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); NotifyContextSelectionChanged(); } }
-    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
+    public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanCancelOperation)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
     public string StatusMessage { get => _statusMessage; set { _statusMessage = value; OnPropertyChanged(); } }
     public bool IsSetupVisible { get => _isSetupVisible; private set { _isSetupVisible = value; OnPropertyChanged(); } }
     public bool IsWorkflowEditorVisible { get => _isWorkflowEditorVisible; private set { _isWorkflowEditorVisible = value; OnPropertyChanged(); } }
     public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); } }
-    public SlotDiscoveryState SlotDiscoveryState { get => _slotDiscoveryState; private set { _slotDiscoveryState = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CanStartNewCreation)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyViewStateChanged(); } }
+    public SlotDiscoveryState SlotDiscoveryState { get => _slotDiscoveryState; private set { _slotDiscoveryState = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CanStartNewCreation)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanResendReviewHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyViewStateChanged(); } }
     public bool IsDirty { get => _isDirty; private set { _isDirty = value; OnPropertyChanged(); OnPropertyChanged(nameof(DirtyText)); NotifyPipelineStateChanged(); } }
     public bool IsWorkflowRenameVisible { get => _isWorkflowRenameVisible; private set { _isWorkflowRenameVisible = value; OnPropertyChanged(); } }
     public string WorkflowRenameText { get => _workflowRenameText; set { _workflowRenameText = value; OnPropertyChanged(); } }
@@ -353,6 +354,28 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 : "Desktop終了時に停止します";
     public ReviewMediaAttachmentSnapshot? ReviewMediaAttachment => _isCurrentSessionActivated ? CurrentSession?.Pipeline.ReviewMediaAttachment : null;
     public bool HasReviewMediaAttachment => ReviewMediaAttachment is not null;
+    public ReviewHandoffSnapshot? ReviewHandoff => _isCurrentSessionActivated ? CurrentSession?.Pipeline.ReviewHandoff : null;
+    public string AutomaticIterationText
+        => CurrentSession?.Pipeline.AutomaticIteration?.State switch
+        {
+            AutomaticIterationState.Running => "自動Iteration実行中",
+            AutomaticIterationState.WaitingForReviewResponse => "ChatGPTレビュー返答待ち",
+            AutomaticIterationState.Stopped => "自動Iteration停止 · 手動復旧可能",
+            AutomaticIterationState.Failed => "自動Iteration停止 · 再試行可能",
+            AutomaticIterationState.Completed => "自動Iteration完了",
+            _ => ReviewHandoff?.State switch
+            {
+                ReviewHandoffState.Preparing => "Review Handoff準備中",
+                ReviewHandoffState.Sending => "Review Handoff送信中",
+                ReviewHandoffState.WaitingResponse => "ChatGPTレビュー返答待ち",
+                ReviewHandoffState.Received => "Review Response受信済み",
+                ReviewHandoffState.Failed => "Review Handoff送信失敗 · 再試行可能",
+                _ => "Response受信後に自動処理",
+            }
+        };
+    public bool HasAutomaticIterationStatus
+        => _isCurrentSessionActivated
+            && CurrentSession?.Pipeline.AutomaticIteration is { State: not AutomaticIterationState.None };
     public string ReviewMediaAttachmentStateText => ReviewMediaAttachment?.State switch
     {
         ReviewMediaAttachmentState.Preparing => "生成結果をChatGPTへ添付準備中",
@@ -485,13 +508,43 @@ public sealed class MainViewModel : INotifyPropertyChanged
             && !HasPendingContextChange
             && !IsJobActive
             && PendingHandoffReuse.TryGetResendableBootstrapPayload(CurrentSession, out _);
+    public bool CanResendReviewHandoff
+    {
+        get
+        {
+            if (!_isCurrentSessionActivated || IsJobActive || CurrentSession?.PendingHandoff is not { } pending
+                || ReviewMediaAttachment?.State != ReviewMediaAttachmentState.Attached)
+            {
+                return false;
+            }
+
+            if (PendingHandoffReuse.IsReview(pending))
+            {
+                var review = FindReviewHandoff(pending, pending.Iteration);
+                return review is { State: HandoffTransportState.Failed or HandoffTransportState.Copied }
+                    || (review is null
+                        && FindGenerationResultHandoff(pending, pending.Iteration) is { State: HandoffTransportState.Attached });
+            }
+
+            // The output context is a separate immutable boundary from the
+            // Review request.  Before the first Review request is materialized,
+            // the SEND button is still the explicit recovery entry point after
+            // attachment verification.
+            return PendingHandoffReuse.IsGenerationResult(pending)
+                && FindGenerationResultHandoff(pending, pending.Iteration) is { State: HandoffTransportState.Attached }
+                && FindReviewHandoff(null, pending.Iteration) is null;
+        }
+    }
     public bool CanSendToChatGpt
         => CanResendBootstrapHandoff
+            || CanResendReviewHandoff
             || (!HasPendingContextChange
                 && CurrentSession?.PendingHandoff is null
                 && CreationWorkspacePolicy.CanSendToChatGpt(CurrentSession, _isCurrentSessionActivated, IsConnected, SlotDiscoveryState, Idea, IsJobActive));
     public string SendToChatGptButtonText
-        => !CanResendBootstrapHandoff
+        => CanResendReviewHandoff
+            ? BrowserExtensionConnectionState == BrowserExtensionConnectionState.Disconnected ? "HANDOFFを再コピー" : "CHATGPTへ再送"
+            : !CanResendBootstrapHandoff
             ? "SEND TO CHATGPT"
             : BrowserExtensionConnectionState == BrowserExtensionConnectionState.Disconnected
                 ? "HANDOFFを再コピー"
@@ -500,6 +553,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         get
         {
+            if (CanResendReviewHandoff)
+            {
+                return BrowserExtensionConnectionState switch
+                {
+                    BrowserExtensionConnectionState.Connected => "添付済み生成物を保持したまま、同じReview Handoffを保存済みChatGPTタブへ再送します。",
+                    BrowserExtensionConnectionState.Disconnected => "添付済み生成物を保持したまま、同じReview HandoffをClipboardへ再コピーします。",
+                    _ => "同じReview Handoffを再試行できます。失敗してもSessionと生成物は保持されます。",
+                };
+            }
+
             if (CanResendBootstrapHandoff)
             {
                 return BrowserExtensionConnectionState switch
@@ -549,6 +612,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasPendingContextChange => _isCurrentSessionActivated && CurrentSession?.Pipeline.ContextBound == true &&
         (SelectedWorkflow?.RelativePath != CurrentSession.BoundWorkflow?.RelativePath || SelectedProject?.ProviderId != CurrentSession.EffectiveContextProviderId || SelectedProject?.Key != CurrentSession.EffectiveProjectContextKey || SelectedChat?.ProviderId != CurrentSession.EffectiveContextProviderId || SelectedChat?.Key != CurrentSession.EffectiveChatContextKey || SessionMaximumIterations != CurrentSession.MaximumIterations);
     public bool IsJobActive => CurrentJob is { Status: JobStatus.Queued or JobStatus.Running };
+    public bool IsAutomaticIterationActive
+        => _isCurrentSessionActivated
+            && CurrentSession?.Pipeline.AutomaticIteration?.State is AutomaticIterationState.Running or AutomaticIterationState.WaitingForReviewResponse;
+    public bool CanCancelOperation => IsJobActive || IsAutomaticIterationActive;
     public string WorkflowRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "user", "default", "workflows");
     public string OutputRoot => Path.Combine(Settings.PortableRoot, "ComfyUI", "output");
     public string VideoOutputRoot => Path.Combine(OutputRoot, "video");
@@ -1050,6 +1117,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         var session = CurrentSession ?? throw new InvalidOperationException("左側から新しい制作を開始してください。");
         var workflow = SelectedWorkflow ?? throw new InvalidOperationException("Workflowを選択してください。");
+        if (session.Pipeline.AutomaticIteration?.State == AutomaticIterationState.Stopped)
+        {
+            StatusMessage = "自動Iterationは停止しています。RESUMEまたは明示的な再試行を行ってください。";
+            return;
+        }
         var changes = BuildChanges();
         if (applyFirst && (IsDirty || CreationPipelineStateMachine.Get(session, CreationStage.Apply).State != CreationStageState.Completed)) await ApplySlotsAsync();
         await EnsureComfyUiForStageAsync(session, CreationStage.Generate);
@@ -1088,6 +1160,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
+            if (session.Pipeline.AutomaticIteration?.State == AutomaticIterationState.Stopped)
+            {
+                CurrentJob = null;
+                await SaveActiveSessionAsync();
+                NotifyPipelineStateChanged();
+                return;
+            }
             MarkConnectionFailureIfTransportClosed(ex);
             iteration.Status = JobStatus.Failed;
             iteration.Error = ex.Message;
@@ -1109,7 +1188,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         finally { IsBusy = false; }
     }
 
-    public async Task ImportCommandAsync()
+    public async Task ImportCommandAsync(bool clearCommandOnComplete = true)
     {
         if (CurrentSession is null) throw new InvalidOperationException("先に新しい制作を開始してください。");
         if (CurrentSession.PendingHandoff is null)
@@ -1158,7 +1237,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // response.  Clear it only after the complete transition and
                 // persistence have succeeded; all validation/error paths keep
                 // the user's text intact.
-                ClearAppliedCommandInput();
+                if (clearCommandOnComplete) ClearAppliedCommandInput();
             }
         }
         catch (Exception ex)
@@ -1195,6 +1274,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
             await ApplySlotsAsync();
             afterApply?.Invoke();
             if (clearCommandOnApply) ClearAppliedCommandInput();
+            if (CurrentSession?.Pipeline.AutomaticIteration?.State == AutomaticIterationState.Stopped)
+            {
+                await SaveActiveSessionAsync();
+                return;
+            }
             await GenerateAsync(applyFirst: false);
         }
         else
@@ -1247,6 +1331,30 @@ public sealed class MainViewModel : INotifyPropertyChanged
         await _bootstrapHandoffGate.WaitAsync();
         try
         {
+            // Phase 5.2 reuses the initial UI action for an explicit Review
+            // retry.  The saved Review body is immutable and must be returned
+            // before Bootstrap-stage validation can reject the completed
+            // session.  No identity or payload is rebuilt for an existing
+            // Review boundary.
+            if (CurrentSession?.PendingHandoff is { } reviewPending && PendingHandoffReuse.IsReview(reviewPending))
+            {
+                var reviewMessage = FindReviewHandoff(reviewPending, reviewPending.Iteration)
+                    ?? FindGenerationResultHandoff(reviewPending, reviewPending.Iteration);
+                if (HandoffPayloadReuse.TryGetSavedPayload(reviewMessage, out var reviewPayload))
+                    return reviewPayload;
+
+                return await PrepareReviewHandoffForSendAsync();
+            }
+
+            // A completed output is not itself the Review request.  Materialize
+            // a new Review PendingHandoff from that result before the transport
+            // layer is called, so every Review boundary receives fresh IDs.
+            if (CurrentSession?.PendingHandoff is { } resultPending
+                && PendingHandoffReuse.IsGenerationResult(resultPending))
+            {
+                return await PrepareReviewHandoffForSendAsync();
+            }
+
             if (PendingHandoffReuse.TryGetResendableBootstrapPayload(CurrentSession, out var savedPayload))
             {
                 return savedPayload;
@@ -1314,24 +1422,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var iteration = selectedIteration ?? CurrentSession.Iterations.LastOrDefault() ?? throw new InvalidOperationException("ChatGPTへ渡せる生成結果がありません。");
         var existingMessage = CurrentSession.HandoffMessages.LastOrDefault(item =>
             item.Direction == HandoffDirection.ComfyToChatGpt &&
+            item.Kind == HandoffMessageKind.GenerationResult &&
             item.IterationNumber == iteration.Number);
-        var canReuseSavedResult = CurrentSession.Status == SessionStatus.Completed
-            || (CurrentSession.PendingHandoff is { } pendingReview
-                && PendingHandoffReuse.IsReview(pendingReview));
-        if (canReuseSavedResult
-            && HandoffPayloadReuse.TryGetSavedPayload(existingMessage, out var savedPayload)
-            && (CurrentSession.Status == SessionStatus.Completed
-                || PendingHandoffReuse.MatchesPayload(CurrentSession.PendingHandoff!, savedPayload)))
+        if (HandoffPayloadReuse.TryGetSavedPayload(existingMessage, out var savedPayload))
         {
             // Result Handoff payloads are immutable copy material once
-            // persisted. Re-copying must not rotate the PendingHandoff or
-            // rebuild the payload from the current editor state.
+            // persisted. Re-copying must not rotate the active Review
+            // PendingHandoff or rebuild the payload from the current editor
+            // state.
             return savedPayload;
         }
         if (iteration.Status != JobStatus.Completed || iteration.Outputs.All(output => output.IsMissing)) throw new InvalidOperationException("成功した生成結果だけをChatGPTへ渡せます。");
         EnsureSlotSchemaAvailable();
-        CurrentSession.PendingHandoff = PendingHandoffFactory.CreateReview(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
-        var payload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, CurrentSession.PendingHandoff);
+        var resultPending = CurrentSession.PendingHandoff is { } currentPending
+            && PendingHandoffReuse.IsGenerationResult(currentPending)
+            && currentPending.Iteration == iteration.Number
+            ? currentPending
+            : PendingHandoffFactory.CreateGenerationResult(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
+        if (CurrentSession.PendingHandoff is null
+            || !PendingHandoffReuse.IsReview(CurrentSession.PendingHandoff))
+        {
+            CurrentSession.PendingHandoff = resultPending;
+        }
+        var payload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, resultPending);
         // A new review boundary (for example after RESUME) is a new timeline
         // message. Never rewrite the payload of the previous result card: it
         // is the immutable handoff that was issued for that earlier boundary.
@@ -1350,6 +1463,62 @@ public sealed class MainViewModel : INotifyPropertyChanged
             IterationNumber = iteration.Number,
         });
         return payload;
+    }
+
+    /// <summary>
+    /// Materializes the Review boundary used by the explicit SEND/recovery
+    /// action. The GenerationResult card is an immutable output-context record
+    /// and is never promoted into a Review request by mutating its identity.
+    /// </summary>
+    private async Task<string> PrepareReviewHandoffForSendAsync()
+    {
+        var session = CurrentSession ?? throw new InvalidOperationException("制作セッションがありません。");
+        var currentPending = session.PendingHandoff;
+
+        if (PendingHandoffReuse.IsReview(currentPending))
+        {
+            var existingReview = FindReviewHandoff(currentPending, currentPending!.Iteration);
+            if (HandoffPayloadReuse.TryGetSavedPayload(existingReview, out var savedReviewPayload))
+                return savedReviewPayload;
+
+            var reviewIteration = session.Iterations.FirstOrDefault(item => item.Number == currentPending.Iteration)
+                ?? throw new InvalidOperationException("Review対象のIterationが見つかりません。");
+            var reviewPayload = ConnectorContextBuilder.BuildResult(session, reviewIteration, currentPending);
+            // A restored/partially-created Review boundary may have a valid
+            // PendingHandoff but no Timeline transport record yet. Materialize
+            // that record before sending so retry/recovery always has one
+            // durable ReviewRequest to update instead of silently creating an
+            // untracked transport attempt.
+            await RecordReviewHandoffTransportAsync(
+                reviewPayload,
+                HandoffTransportState.Waiting,
+                null,
+                null,
+                currentPending.Iteration);
+            return reviewPayload;
+        }
+
+        var iterationNumber = PendingHandoffReuse.IsGenerationResult(currentPending)
+            ? currentPending!.Iteration
+            : session.Iterations.LastOrDefault(item =>
+                item.Status == JobStatus.Completed
+                && item.Outputs.Any(output => !output.IsMissing))?.Number ?? session.CurrentIteration;
+        var iteration = session.Iterations.FirstOrDefault(item => item.Number == iterationNumber)
+            ?? throw new InvalidOperationException("Review対象のIterationが見つかりません。");
+        var resultMessage = FindGenerationResultHandoff(
+            PendingHandoffReuse.IsGenerationResult(currentPending) ? currentPending : null,
+            iteration.Number);
+        if (resultMessage is null || resultMessage.State != HandoffTransportState.Attached)
+            throw new InvalidOperationException("Review対象の生成物添付が完了していません。");
+
+        EnsureSlotSchemaAvailable();
+        var reviewPending = PendingHandoffFactory.CreateReview(
+            session,
+            Slots.Select(ToWorkflowSlot),
+            GetReviewAllowedActions(session));
+        session.PendingHandoff = reviewPending;
+        await SaveActiveSessionAsync();
+        return ConnectorContextBuilder.BuildResult(session, iteration, reviewPending);
     }
 
     public Task<string> PrepareTimelineHandoffAsync(HandoffTimelineItem item)
@@ -1386,6 +1555,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public async Task<BrowserExtensionHandoffSendResult> SendPreparedBootstrapHandoffAsync(string payload)
     {
+        if (CurrentSession?.PendingHandoff is { } reviewPending && PendingHandoffReuse.IsReview(reviewPending))
+            return await SendPreparedReviewHandoffAsync(payload);
+
+        if (CurrentSession?.PendingHandoff is { } resultPending
+            && PendingHandoffReuse.IsGenerationResult(resultPending)
+            && PendingHandoffReuse.MatchesPayload(resultPending, payload))
+        {
+            var reviewPayload = await PrepareReviewHandoffForSendAsync();
+            return await SendPreparedReviewHandoffAsync(reviewPayload);
+        }
+
         await _bootstrapHandoffGate.WaitAsync();
         string? sendRequestId = null;
         try
@@ -1500,7 +1680,496 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         StatusMessage = "Browser Extension経由でChatGPTへ送信中…";
-        return await SendPreparedBootstrapHandoffAsync(payload);
+        return CurrentSession?.PendingHandoff is { } pending && PendingHandoffReuse.IsReview(pending)
+            ? await SendPreparedReviewHandoffAsync(payload)
+            : await SendPreparedBootstrapHandoffAsync(payload);
+    }
+
+    public async Task<string> PrepareHandoffForSendAsync()
+    {
+        if (CurrentSession?.PendingHandoff is { } pending && PendingHandoffReuse.IsReview(pending))
+        {
+            var review = FindReviewHandoff(pending)
+                ?? FindGenerationResultHandoff(pending, pending.Iteration);
+            if (HandoffPayloadReuse.TryGetSavedPayload(review, out var payload)) return payload;
+        }
+        if (CurrentSession?.PendingHandoff is { } resultPending
+            && PendingHandoffReuse.IsGenerationResult(resultPending))
+        {
+            return await PrepareReviewHandoffForSendAsync();
+        }
+        return await PrepareBootstrapHandoffForSendAsync();
+    }
+
+    public async Task<BrowserExtensionHandoffSendResult> SendPreparedHandoffAsync(string payload)
+        => await SendPreparedBootstrapHandoffAsync(payload);
+
+    public async Task<BrowserExtensionHandoffSendResult?> TrySendPreparedHandoffAsync(string payload)
+        => await TrySendPreparedBootstrapHandoffAsync(payload);
+
+    public async Task ConfirmHandoffCopiedAsync(string payload)
+    {
+        if (CurrentSession?.PendingHandoff is { } pending && PendingHandoffReuse.IsReview(pending))
+        {
+            await _reviewHandoffGate.WaitAsync();
+            try
+            {
+                // A generation result can exist before the Review transport
+                // card is materialized (for example when the user chooses
+                // Clipboard fallback during attachment recovery). Materialize
+                // that card with the same immutable Pending Handoff before
+                // applying the copied state; never create a new identity.
+                if (FindReviewHandoff(pending, pending.Iteration, payload) is null)
+                    await RecordReviewHandoffTransportAsync(payload, HandoffTransportState.Copied, null, null, pending.Iteration);
+                EnsureReviewHandoffResendAllowed(payload);
+                CreationPipelineStateMachine.ReviewHandoffCopied(CurrentSession);
+                var message = FindReviewHandoff(CurrentSession.PendingHandoff, CurrentSession.PendingHandoff!.Iteration, payload);
+                if (message is not null) message.State = HandoffTransportState.Copied;
+                await SaveActiveSessionAsync();
+                RebuildHandoffItems();
+                NotifyPipelineStateChanged();
+            }
+            finally
+            {
+                _reviewHandoffGate.Release();
+            }
+            return;
+        }
+
+        await ConfirmBootstrapCopiedAsync(payload);
+    }
+
+    public async Task<BrowserExtensionHandoffSendResult> SendPreparedReviewHandoffAsync(string payload)
+    {
+        await _reviewHandoffGate.WaitAsync();
+        BrowserExtensionHandoffSendResult result;
+        try
+        {
+            result = await SendPreparedReviewHandoffCoreAsync(payload, automatic: false);
+        }
+        finally
+        {
+            _reviewHandoffGate.Release();
+        }
+
+        // The Extension may deliver assistant.response before the SENT state
+        // has finished persisting.  The response is queued by the normal
+        // correlation gate; drain it only after this gate is released so a
+        // Review response can safely start the next generation/review cycle.
+        if (result.IsSent) await DrainQueuedBrowserExtensionResponseAsync(result.RequestId);
+        return result;
+    }
+
+    /// <summary>
+    /// Starts the Phase 5.2 boundary after a completed output has been
+    /// verified and attached.  The result card and the Review Handoff card are
+    /// intentionally separate transport records.  This method is idempotent
+    /// for the same session/iteration/pending identity and never starts a
+    /// second Review send for an already sent boundary.
+    /// </summary>
+    private async Task SendAutomaticReviewHandoffAsync(SessionIteration iteration)
+    {
+        await _reviewHandoffGate.WaitAsync();
+        BrowserExtensionHandoffSendResult? sendResult = null;
+        try
+        {
+            var session = CurrentSession;
+            var attachment = session?.Pipeline.ReviewMediaAttachment;
+            if (!_isCurrentSessionActivated || session is null || iteration.Status != JobStatus.Completed) return;
+            if (session.Pipeline.AutomaticIteration?.State is AutomaticIterationState.Stopped or AutomaticIterationState.Failed or AutomaticIterationState.Completed)
+                return;
+            if (attachment?.State != ReviewMediaAttachmentState.Attached)
+            {
+                await StopAutomaticIterationAsync(
+                    BrowserExtensionHandoffErrorCodes.ReviewMediaNotAttached,
+                    "review_media_verification",
+                    "生成物の添付完了を確認できないためReview Handoffを送信しませんでした。");
+                return;
+            }
+
+            if (session.Pipeline.ReviewHandoff is { Iteration: var currentIteration }
+                && currentIteration == iteration.Number
+                && session.Pipeline.ReviewHandoff.State is ReviewHandoffState.Sending or ReviewHandoffState.Sent or ReviewHandoffState.WaitingResponse)
+            {
+                return;
+            }
+            // The completed output has its own GenerationResult identity. It
+            // is not a Review transport and must never be reused as the next
+            // Review boundary. Only an existing ReviewRequest is idempotent.
+            var existingReviewRequest = session.HandoffMessages.LastOrDefault(item =>
+                item.Direction == HandoffDirection.ComfyToChatGpt
+                && item.Kind == HandoffMessageKind.ReviewRequest
+                && item.IterationNumber == iteration.Number);
+            if (existingReviewRequest is not null)
+                return;
+
+            EnsureSlotSchemaAvailable();
+            // A Review Handoff is a new protocol boundary after the output
+            // context and therefore always receives fresh handoff_id and
+            // boundary_id values. Explicit user retries reuse this snapshot;
+            // this automatic first send never aliases the GenerationResult.
+            var pending = PendingHandoffFactory.CreateReview(
+                session,
+                Slots.Select(ToWorkflowSlot),
+                GetReviewAllowedActions(session));
+            session.PendingHandoff = pending;
+            CreationPipelineStateMachine.ReviewHandoffPreparing(
+                session,
+                pending,
+                iteration.Number,
+                session.BrowserExtensionTargetTabId,
+                session.BrowserExtensionTargetTabUrl);
+            var payload = ConnectorContextBuilder.BuildResult(session, iteration, pending);
+            await RecordReviewHandoffTransportAsync(payload, HandoffTransportState.Waiting, null, null, iteration.Number);
+            await SaveActiveSessionAsync();
+            NotifyPipelineStateChanged();
+
+            CreationPipelineStateMachine.AutomaticIterationStarted(session);
+            sendResult = await SendPreparedReviewHandoffCoreAsync(payload, automatic: true);
+            if (sendResult.IsSent)
+            {
+                StatusMessage = $"Iteration {iteration.Number} のReview Handoffを同じChatGPT会話へ送信しました。返答を待機しています。";
+            }
+        }
+        catch (Exception ex)
+        {
+            if (CurrentSession is not null)
+            {
+                if (CurrentSession.Pipeline.ReviewHandoff is { Iteration: var reviewIteration }
+                    && reviewIteration == iteration.Number
+                    && CurrentSession.Pipeline.ReviewHandoff.State is ReviewHandoffState.Preparing or ReviewHandoffState.Sending)
+                {
+                    CreationPipelineStateMachine.ReviewHandoffFailed(
+                        CurrentSession,
+                        BrowserExtensionHandoffErrorCodes.ReviewHandoffBuildFailed,
+                        "review_handoff_build",
+                        "Review Handoffの生成または送信準備に失敗しました。");
+                }
+                await StopAutomaticIterationAsync(
+                    BrowserExtensionHandoffErrorCodes.ReviewHandoffBuildFailed,
+                    "review_handoff_build",
+                    "Review Handoffの生成に失敗したため自動Iterationを停止しました。",
+                    ex);
+            }
+        }
+        finally
+        {
+            _reviewHandoffGate.Release();
+        }
+
+        if (sendResult?.IsSent == true)
+            await DrainQueuedBrowserExtensionResponseAsync(sendResult.RequestId);
+    }
+
+    /// <summary>
+    /// Explicitly retries the already persisted Review Handoff.  It is also
+    /// used by the automatic path after the new Review identity has been
+    /// recorded.  Preparation and transport remain separate so a failure
+    /// never rotates session/handoff/boundary or rebuilds the body.
+    /// </summary>
+    private async Task<BrowserExtensionHandoffSendResult> SendPreparedReviewHandoffCoreAsync(string payload, bool automatic)
+    {
+        var session = CurrentSession ?? throw new InvalidOperationException("制作セッションがありません。");
+        var pending = session.PendingHandoff;
+        if (pending is null || !PendingHandoffReuse.IsReview(pending) || !PendingHandoffReuse.MatchesPayload(pending, payload))
+            throw new InvalidOperationException("送信対象のReview Handoffが現在のPending Handoffと一致しません。");
+
+        var attachment = session.Pipeline.ReviewMediaAttachment;
+        if (attachment?.State != ReviewMediaAttachmentState.Attached)
+        {
+            var failure = new BrowserExtensionHandoffSendResult(
+                Guid.NewGuid().ToString("N"),
+                pending.HandoffId,
+                "error",
+                BrowserExtensionHandoffErrorCodes.ReviewMediaNotAttached,
+                "生成物の添付完了を確認できません。",
+                "attachment_verification");
+            return await FailReviewHandoffTransportAsync(payload, pending, failure, automatic);
+        }
+
+        var targetTabId = session.BrowserExtensionTargetTabId;
+        var targetTabUrl = session.BrowserExtensionTargetTabUrl;
+        if (!targetTabId.HasValue || string.IsNullOrWhiteSpace(targetTabUrl))
+        {
+            var failure = new BrowserExtensionHandoffSendResult(
+                Guid.NewGuid().ToString("N"),
+                pending.HandoffId,
+                "error",
+                BrowserExtensionHandoffErrorCodes.ReviewTargetTabNotFound,
+                "初回HandoffのChatGPT送信先が確認できません。",
+                "target_tab_check");
+            return await FailReviewHandoffTransportAsync(payload, pending, failure, automatic);
+        }
+
+        if (!automatic)
+        {
+            // Recovery can reach this method with a copied ReviewRequest whose
+            // lifecycle snapshot is intentionally None. Re-prepare the
+            // lifecycle whenever the persisted snapshot is absent, closed for
+            // the clipboard path, or belongs to another boundary. The
+            // ReviewRequest/PendingHandoff itself is still reused in place;
+            // this must never rotate the session, handoff, boundary, or body.
+            var reviewSnapshot = session.Pipeline.ReviewHandoff;
+            if (reviewSnapshot is null
+                || reviewSnapshot.State == ReviewHandoffState.None
+                || reviewSnapshot.Iteration != pending.Iteration
+                || !string.Equals(reviewSnapshot.SessionId, pending.SessionId, StringComparison.Ordinal)
+                || !string.Equals(reviewSnapshot.HandoffId, pending.HandoffId, StringComparison.Ordinal)
+                || !string.Equals(reviewSnapshot.BoundaryId, pending.BoundaryId, StringComparison.Ordinal))
+            {
+                CreationPipelineStateMachine.ReviewHandoffPreparing(
+                    session,
+                    pending,
+                    pending.Iteration,
+                    targetTabId,
+                    targetTabUrl);
+            }
+            // A copied/failed ReviewRequest remains the durable transport
+            // record. Move that same record to WAITING for the new attempt;
+            // do not create a second Timeline Handoff.
+            await RecordReviewHandoffTransportAsync(payload, HandoffTransportState.Waiting, null, null, pending.Iteration);
+            EnsureReviewHandoffResendAllowed(payload);
+            CreationPipelineStateMachine.AutomaticIterationStarted(session);
+        }
+        else if (!IsAutomaticIterationActive && session.Pipeline.AutomaticIteration?.State != AutomaticIterationState.Running)
+        {
+            return new BrowserExtensionHandoffSendResult(
+                Guid.NewGuid().ToString("N"), pending.HandoffId, "error",
+                BrowserExtensionHandoffErrorCodes.AutomaticIterationCancelled,
+                "自動Iterationは停止しています。",
+                "automatic_iteration_cancelled");
+        }
+
+        var request = new BrowserExtensionHandoffSendRequest(
+            Guid.NewGuid().ToString("N"),
+            pending.SessionId,
+            pending.HandoffId,
+            pending.BoundaryId,
+            payload,
+            "review",
+            targetTabId,
+            targetTabUrl,
+            attachment.MediaId,
+                attachment.FileName,
+                attachment.Iteration);
+        await _store.LogAsync(
+            "automation",
+            $"review handoff ready request_id={request.RequestId} session_id={request.SessionId} handoff_id={request.HandoffId} boundary_id={request.BoundaryId} target_tab_id={request.TargetTabId?.ToString() ?? "none"} stage=review_handoff_ready");
+        pending.LastBrowserExtensionRequestId = request.RequestId;
+        lock (_browserExtensionResponseGate) _browserExtensionSendRequests.Add(request.RequestId);
+        try
+        {
+            CreationPipelineStateMachine.ReviewHandoffSending(session, request.RequestId);
+            await RecordReviewHandoffTransportAsync(payload, HandoffTransportState.Waiting, null, null, pending.Iteration);
+
+            BrowserExtensionHandoffSendResult result;
+            try
+            {
+                result = await _browserExtensionBridge.SendHandoffAsync(request);
+            }
+            catch (Exception)
+            {
+                result = new(
+                    request.RequestId,
+                    request.HandoffId,
+                    "error",
+                    BrowserExtensionHandoffErrorCodes.BridgeDisconnected,
+                    "Browser Extension Bridgeとの通信に失敗しました。",
+                    "bridge_connection");
+            }
+
+            if (result.IsSent)
+            {
+                CreationPipelineStateMachine.ReviewHandoffSent(session, result);
+                await RecordReviewHandoffTransportAsync(payload, HandoffTransportState.Sent, null, null, pending.Iteration);
+                await _store.LogAsync(
+                    "automation",
+                    $"review handoff sent request_id={request.RequestId} session_id={request.SessionId} handoff_id={request.HandoffId} boundary_id={request.BoundaryId} target_tab_id={request.TargetTabId?.ToString() ?? "none"} stage=review_handoff_sent");
+            }
+            else
+            {
+                CreationPipelineStateMachine.ReviewHandoffFailed(session, result.ErrorCode ?? BrowserExtensionHandoffErrorCodes.ReviewSendFailed, result.Stage, result.Message);
+                await RecordReviewHandoffTransportAsync(payload, HandoffTransportState.Failed, result.ErrorCode, result.Stage, pending.Iteration, result.Message);
+                await SaveActiveSessionAsync();
+                await _store.LogAsync("automation", $"review handoff failed request_id={request.RequestId} handoff_id={request.HandoffId} error_code={result.ErrorCode ?? BrowserExtensionHandoffErrorCodes.ReviewSendFailed} stage={result.Stage ?? "review_send"}");
+            }
+
+            await SaveActiveSessionAsync();
+            NotifyPipelineStateChanged();
+            return result;
+        }
+        finally
+        {
+            lock (_browserExtensionResponseGate) _browserExtensionSendRequests.Remove(request.RequestId);
+        }
+    }
+
+    private async Task<BrowserExtensionHandoffSendResult> FailReviewHandoffTransportAsync(
+        string payload,
+        PendingHandoffSnapshot pending,
+        BrowserExtensionHandoffSendResult failure,
+        bool automatic)
+    {
+        var session = CurrentSession;
+        if (session is null) return failure;
+
+        if (session.Pipeline.ReviewHandoff is not null)
+        {
+            CreationPipelineStateMachine.ReviewHandoffFailed(
+                session,
+                failure.ErrorCode ?? BrowserExtensionHandoffErrorCodes.ReviewSendFailed,
+                failure.Stage,
+                failure.Message);
+        }
+        else if (automatic || session.Pipeline.AutomaticIteration is { State: AutomaticIterationState.Running or AutomaticIterationState.WaitingForReviewResponse })
+        {
+            CreationPipelineStateMachine.AutomaticIterationFailed(
+                session,
+                failure.ErrorCode ?? BrowserExtensionHandoffErrorCodes.ReviewSendFailed,
+                failure.Stage,
+                failure.Message);
+        }
+
+        await RecordReviewHandoffTransportAsync(
+            payload,
+            HandoffTransportState.Failed,
+            failure.ErrorCode,
+            failure.Stage,
+            pending.Iteration,
+            failure.Message);
+        await SaveActiveSessionAsync();
+        NotifyPipelineStateChanged();
+        return failure;
+    }
+
+    private async Task RecordReviewHandoffTransportAsync(
+        string payload,
+        HandoffTransportState state,
+        string? errorCode,
+        string? errorStage,
+        int iteration,
+        string? errorMessage = null)
+    {
+        var session = CurrentSession;
+        var pending = session?.PendingHandoff;
+        if (session is null || pending is null || !PendingHandoffReuse.IsReview(pending) || !PendingHandoffReuse.MatchesPayload(pending, payload))
+            throw new InvalidOperationException("Review Handoffの送信対象が現在のPending Handoffと一致しません。");
+
+        var message = FindReviewHandoff(pending, iteration, payload);
+        if (message is null)
+        {
+            message = new HandoffMessage
+            {
+                Direction = HandoffDirection.ComfyToChatGpt,
+                Kind = HandoffMessageKind.ReviewRequest,
+                State = HandoffTransportState.Waiting,
+                Title = $"Iteration {iteration:00} Review Handoff",
+                DisplayText = $"Iteration {iteration:00} のReview Handoffを送信",
+                Metadata = BuildResultTimelineMetadata(session.Iterations.FirstOrDefault(item => item.Number == iteration) ?? new SessionIteration { Number = iteration }),
+                Summary = "生成物を確認したChatGPTへ次のIterationまたは完了判断を依頼します。",
+                Payload = payload,
+                IterationNumber = iteration,
+            };
+            session.HandoffMessages.Add(message);
+        }
+
+        message.State = state;
+        message.TransportErrorCode = state == HandoffTransportState.Failed ? errorCode : null;
+        message.TransportErrorStage = state == HandoffTransportState.Failed ? errorStage : null;
+        if (state == HandoffTransportState.Failed && !string.IsNullOrWhiteSpace(errorMessage))
+            message.DisplayText = $"Iteration {iteration:00} Review Handoff · {errorMessage}";
+        RebuildHandoffItems();
+        await SaveActiveSessionAsync();
+    }
+
+    private async Task StopAutomaticIterationAsync(string errorCode, string stage, string message, Exception? exception = null)
+    {
+        var session = CurrentSession;
+        if (session is null) return;
+        // Review failures must also transition the durable ReviewRequest card
+        // out of WAITING; otherwise an explicit retry remains hidden even
+        // though the automatic loop has stopped. This method is only used by
+        // Phase 5.2 Review/attachment paths, but keep the non-Review fallback
+        // for defensive compatibility with restored sessions.
+        if (PendingHandoffReuse.IsReview(session.PendingHandoff))
+            MarkReviewHandoffRetryable(session, errorCode, stage, message);
+        else
+            CreationPipelineStateMachine.AutomaticIterationFailed(session, errorCode, stage, message);
+        await SaveActiveSessionAsync();
+        StatusMessage = $"自動Iterationを停止しました。({errorCode}, stage={stage})";
+        await _store.LogAsync("automation", $"automatic iteration stopped session_id={session.Id} iteration={session.CurrentIteration} error_code={errorCode} stage={stage}", exception);
+        NotifyPipelineStateChanged();
+    }
+
+    private void MarkReviewHandoffRetryable(
+        CreationSession session,
+        string errorCode,
+        string stage,
+        string message,
+        bool transitionLifecycle = true)
+    {
+        if (!PendingHandoffReuse.IsReview(session.PendingHandoff)) return;
+
+        if (transitionLifecycle && session.Pipeline.ReviewHandoff is not null)
+        {
+            CreationPipelineStateMachine.ReviewHandoffFailed(session, errorCode, stage, message);
+        }
+        else if (transitionLifecycle && session.Pipeline.AutomaticIteration is { State: AutomaticIterationState.Running or AutomaticIterationState.WaitingForReviewResponse })
+        {
+            // A restored/copied Review Pending can exist before its lifecycle
+            // snapshot is materialized. Still close the automatic loop and
+            // leave the transport retryable instead of silently leaving it in
+            // RUNNING.
+            CreationPipelineStateMachine.AutomaticIterationFailed(session, errorCode, stage, message);
+        }
+        var pending = session.PendingHandoff;
+        var review = FindReviewHandoff(pending, pending?.Iteration);
+        if (review is not null)
+        {
+            review.State = HandoffTransportState.Failed;
+            review.TransportErrorCode = errorCode;
+            review.TransportErrorStage = stage;
+            if (!string.IsNullOrWhiteSpace(message))
+                review.DisplayText = $"Iteration {pending!.Iteration:00} Review Handoff · {message}";
+        }
+        RebuildHandoffItems();
+    }
+
+    private string[] GetReviewAllowedActions(CreationSession session)
+        => session.AtIterationLimit ? ["complete"] : ["generate", "complete"];
+
+    private HandoffMessage? FindReviewHandoff(PendingHandoffSnapshot? pending, int? iteration = null, string? payload = null)
+        => CurrentSession?.HandoffMessages.LastOrDefault(item =>
+            item.Direction == HandoffDirection.ComfyToChatGpt
+            // GenerationResult is the media/result card.  It is deliberately
+            // a separate timeline record and is never the Review transport
+            // boundary that can be sent or retried.
+            && item.Kind == HandoffMessageKind.ReviewRequest
+            && (iteration is null || item.IterationNumber == iteration)
+            && (payload is null || string.Equals(item.Payload, payload, StringComparison.Ordinal))
+            && (pending is null || PendingHandoffReuse.MatchesPayload(pending, item.Payload)));
+
+    private HandoffMessage? FindGenerationResultHandoff(PendingHandoffSnapshot? pending, int? iteration = null)
+        => CurrentSession?.HandoffMessages.LastOrDefault(item =>
+            item.Direction == HandoffDirection.ComfyToChatGpt
+            && item.Kind == HandoffMessageKind.GenerationResult
+            && (iteration is null || item.IterationNumber == iteration)
+            && (pending is null || PendingHandoffReuse.MatchesPayload(pending, item.Payload)));
+
+    private void EnsureReviewHandoffResendAllowed(string payload)
+    {
+        var session = CurrentSession;
+        var pending = session?.PendingHandoff;
+        if (!_isCurrentSessionActivated || session is null || pending is null || !PendingHandoffReuse.IsReview(pending) || !PendingHandoffReuse.MatchesPayload(pending, payload))
+            throw new InvalidOperationException("再送対象のReview Handoffが見つかりません。");
+        if (session.Pipeline.ReviewMediaAttachment?.State != ReviewMediaAttachmentState.Attached)
+            throw new InvalidOperationException("Review対象の生成物添付が完了していません。");
+        if (!session.BrowserExtensionTargetTabId.HasValue || string.IsNullOrWhiteSpace(session.BrowserExtensionTargetTabUrl))
+            throw new InvalidOperationException("初回HandoffのChatGPT送信先が記録されていません。");
+        if (IsJobActive) throw new InvalidOperationException("生成中はReview Handoffを再送できません。");
+        var message = FindReviewHandoff(pending, pending.Iteration, payload);
+        if (message is null || message.State is not (HandoffTransportState.Copied or HandoffTransportState.Failed or HandoffTransportState.Waiting))
+            throw new InvalidOperationException("再送可能なReview Handoffが見つかりません。");
     }
 
     private async Task ConfirmBootstrapCopiedCoreAsync(string payload)
@@ -1641,17 +2310,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        if (item.IsConnectorToChatGpt
-            && item.Message.Kind == HandoffMessageKind.CreationRequest
+        if ((item.IsConnectorToChatGpt && item.Message.Kind == HandoffMessageKind.CreationRequest
+             || item.IsComfyToChatGpt && item.Message.Kind == HandoffMessageKind.ReviewRequest)
             && CurrentSession?.PendingHandoff is { } pending
             && PendingHandoffReuse.MatchesPayload(pending, item.Payload)
             && item.Message.State is not HandoffTransportState.Sent)
         {
-            // A persisted WAITING/FAILED Bootstrap can be deliberately
-            // recovered through the legacy Clipboard action. Confirming it
-            // advances the same boundary without issuing a replacement ID.
-            await ConfirmBootstrapCopiedAsync(item.Payload);
-            StatusMessage = "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。";
+            // A persisted WAITING/FAILED Bootstrap or Review boundary can be
+            // deliberately recovered through the legacy Clipboard action.
+            // Confirming it advances the same boundary without issuing a
+            // replacement ID.
+            await ConfirmHandoffCopiedAsync(item.Payload);
+            StatusMessage = item.Message.Kind == HandoffMessageKind.CreationRequest
+                ? "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。"
+                : "Review Handoffをコピーしました。ChatGPTへ貼り付けてください。";
             return;
         }
 
@@ -1672,6 +2344,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         if (CurrentSession is null) return;
         CreationPipelineStateMachine.Complete(CurrentSession, reason);
+        CreationPipelineStateMachine.AutomaticIterationCompleted(CurrentSession);
         RevokeReviewMediaRegistration(CurrentSession);
         RefreshHistoryFlags();
         OnPropertyChanged(nameof(SessionStatusText));
@@ -1718,6 +2391,39 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task CancelJobAsync()
     {
+        if (IsAutomaticIterationActive)
+        {
+            if (CurrentJob is { } automaticJob && IsJobActive)
+            {
+                try { await _catalog.CancelAsync(automaticJob.JobId); } catch (Exception) { }
+                automaticJob.Status = JobStatus.Cancelled;
+                var automaticIteration = CurrentSession?.Iterations.LastOrDefault(i => i.JobId == automaticJob.JobId);
+                if (automaticIteration is not null) automaticIteration.Status = JobStatus.Cancelled;
+                if (CurrentSession is not null) CreationPipelineStateMachine.JobStatusChanged(CurrentSession, JobStatus.Cancelled, "ユーザーが生成をキャンセル");
+            }
+            if (CurrentSession is not null)
+            {
+                CreationPipelineStateMachine.AutomaticIterationStopped(CurrentSession);
+                // Keep the already issued ReviewRequest explicitly retryable.
+                // AutomaticIterationStopped describes the user cancellation
+                // in the pipeline snapshot, while the Timeline transport
+                // record must remain a reusable FAILED boundary.
+                MarkReviewHandoffRetryable(
+                    CurrentSession,
+                    BrowserExtensionHandoffErrorCodes.AutomaticIterationCancelled,
+                    "automatic_iteration_cancelled",
+                    "自動Iterationをユーザーが停止しました。Review Handoffを再送できます。",
+                    transitionLifecycle: false);
+                await SaveActiveSessionAsync();
+            }
+            StatusMessage = "自動Iterationを停止しました。完了済みのOutputと履歴は保持されています。";
+            RefreshHistoryFlags();
+            NotifySelectedPreviewChanged();
+            NotifyConnectionStateChanged();
+            NotifyPipelineStateChanged();
+            return;
+        }
+
         if (CurrentJob is null || !IsJobActive) return;
         await _catalog.CancelAsync(CurrentJob.JobId);
         CurrentJob.Status = JobStatus.Cancelled;
@@ -1900,8 +2606,30 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 CurrentJob.CompletedAt = DateTimeOffset.UtcNow;
                 StatusMessage = $"Iteration {iteration.Number} が完了しました。出力 {iteration.Outputs.Count} 件。";
                 EnsureSlotSchemaAvailable();
-                CurrentSession!.PendingHandoff = PendingHandoffFactory.CreateReview(CurrentSession, Slots.Select(ToWorkflowSlot), "generate", "complete");
-                var resultPayload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, CurrentSession.PendingHandoff);
+                // GenerationResult and ReviewRequest are two distinct protocol
+                // boundaries. The result is persisted first so ATTACHED can be
+                // shown independently; SendAutomaticReviewHandoffAsync issues
+                // a fresh Review identity only after attachment verification.
+                var existingResult = CurrentSession!.HandoffMessages.LastOrDefault(item =>
+                    item.Direction == HandoffDirection.ComfyToChatGpt
+                    && item.Kind == HandoffMessageKind.GenerationResult
+                    && item.IterationNumber == iteration.Number);
+                if (existingResult is not null)
+                {
+                    var attachmentAlreadyVerified = await TryAttachPrimaryOutputAsync(iteration);
+                    if (attachmentAlreadyVerified && IsAutomaticIterationActive)
+                        await SendAutomaticReviewHandoffAsync(iteration);
+                    NotifyPipelineStateChanged();
+                    break;
+                }
+
+                var resultPending = PendingHandoffFactory.CreateGenerationResult(
+                    CurrentSession,
+                    Slots.Select(ToWorkflowSlot),
+                    "generate",
+                    "complete");
+                CurrentSession.PendingHandoff = resultPending;
+                var resultPayload = ConnectorContextBuilder.BuildResult(CurrentSession, iteration, resultPending);
                 await RecordHandoffAsync(new HandoffMessage
                 {
                     Direction = HandoffDirection.ComfyToChatGpt,
@@ -1914,7 +2642,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     Payload = resultPayload,
                     IterationNumber = iteration.Number,
                 });
-                await TryAttachPrimaryOutputAsync(iteration);
+                var attachmentVerified = await TryAttachPrimaryOutputAsync(iteration);
+                if (attachmentVerified && IsAutomaticIterationActive)
+                {
+                    await SendAutomaticReviewHandoffAsync(iteration);
+                }
                 NotifyPipelineStateChanged();
                 break;
             }
@@ -2109,8 +2841,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private async Task RecordHandoffAsync(HandoffMessage message)
     {
         if (CurrentSession is null) return;
-        var existing = CurrentSession.HandoffMessages.LastOrDefault();
-        if (existing is not null && existing.Direction == message.Direction && string.Equals(existing.Payload, message.Payload, StringComparison.Ordinal))
+        // Retry/reconnect callbacks can arrive after another Timeline record
+        // has been appended. Match the complete durable message identity, not
+        // only the last card, so duplicate GenerationCompleted/response events
+        // remain idempotent without merging different boundaries.
+        var existing = CurrentSession.HandoffMessages.LastOrDefault(item => HandoffMessageIdentity.Matches(item, message));
+        if (existing is not null)
         {
             existing.State = message.State;
             existing.Kind = message.Kind;
@@ -2118,6 +2854,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             existing.DisplayText = message.DisplayText;
             existing.Metadata = message.Metadata;
             existing.Summary = message.Summary;
+            existing.TransportErrorCode = message.TransportErrorCode;
+            existing.TransportErrorStage = message.TransportErrorStage;
             RebuildHandoffItems();
         }
         else
@@ -2462,8 +3200,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private static string BuildPersistedResultPayload(CreationSession session, SessionIteration iteration)
     {
-        session.PendingHandoff ??= PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
-        return ConnectorContextBuilder.BuildResult(session, iteration, session.PendingHandoff);
+        var pending = PendingHandoffReuse.IsGenerationResult(session.PendingHandoff)
+            && session.PendingHandoff!.Iteration == iteration.Number
+            ? session.PendingHandoff
+            : PendingHandoffFactory.CreateGenerationResult(session, [], "generate", "complete");
+        return ConnectorContextBuilder.BuildResult(session, iteration, pending);
     }
 
     private void RevokeReviewMediaRegistration(CreationSession? session)
@@ -2483,12 +3224,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// delivery is a separate transport operation and never rebuilds the
     /// Review Handoff or its PendingHandoff identity.
     /// </summary>
-    private async Task TryAttachPrimaryOutputAsync(SessionIteration iteration, bool explicitRetry = false)
+    private async Task<bool> TryAttachPrimaryOutputAsync(SessionIteration iteration, bool explicitRetry = false)
     {
         await _reviewMediaAttachmentGate.WaitAsync();
         try
         {
-            await TryAttachPrimaryOutputCoreAsync(iteration, explicitRetry);
+            return await TryAttachPrimaryOutputCoreAsync(iteration, explicitRetry);
         }
         finally
         {
@@ -2496,17 +3237,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private async Task TryAttachPrimaryOutputCoreAsync(SessionIteration iteration, bool explicitRetry)
+    private async Task<bool> TryAttachPrimaryOutputCoreAsync(SessionIteration iteration, bool explicitRetry)
     {
         var session = CurrentSession;
-        if (!_isCurrentSessionActivated || session is null || iteration.Status != JobStatus.Completed) return;
+        if (!_isCurrentSessionActivated || session is null || iteration.Status != JobStatus.Completed) return false;
 
         var output = iteration.Outputs.FirstOrDefault();
         if (output is null)
         {
             StatusMessage = $"Iteration {iteration.Number} のPrimary Outputが見つかりません。";
             NotifyPipelineStateChanged();
-            return;
+            return false;
         }
 
         string fullPath = string.Empty;
@@ -2545,9 +3286,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             && string.Equals(existing.OutputIdentity, outputIdentity, StringComparison.Ordinal);
 
         if (sameOutput && existing!.State is (ReviewMediaAttachmentState.Preparing or ReviewMediaAttachmentState.Attaching or ReviewMediaAttachmentState.Attached))
-            return;
+            return existing.State == ReviewMediaAttachmentState.Attached;
         if (sameOutput && existing is { State: ReviewMediaAttachmentState.Failed } && !explicitRetry)
-            return;
+            return false;
 
         if (existing?.MediaId is { Length: > 0 }) _browserExtensionBridge.RevokeMedia(existing.MediaId);
 
@@ -2571,7 +3312,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 BrowserExtensionReviewMediaErrorCodes.ReviewOutputNotFound,
                 "output_resolved",
                 "生成完了したPrimary Outputを安定したファイルとして確認できませんでした。");
-            return;
+            return false;
         }
 
         if (string.IsNullOrWhiteSpace(fileName) || !IsSafeReviewFileName(fileName))
@@ -2583,7 +3324,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 BrowserExtensionReviewMediaErrorCodes.ReviewOutputNotFound,
                 "output_resolved",
                 "Primary Outputのファイル名を確認できませんでした。");
-            return;
+            return false;
         }
 
         if (!BrowserExtensionMediaTypes.IsSupported(mimeType))
@@ -2595,7 +3336,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 BrowserExtensionReviewMediaErrorCodes.UnsupportedMediaType,
                 "output_resolved",
                 "Primary OutputはPhase 5.1で対応していないMIME typeです。");
-            return;
+            return false;
         }
 
         if (size <= 0 || size > MaxReviewMediaBytes)
@@ -2611,7 +3352,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 size > MaxReviewMediaBytes
                     ? "Primary Outputが許可されたサイズ上限を超えています。"
                     : "Primary Outputのサイズを確認できませんでした。");
-            return;
+            return false;
         }
 
         var targetTabId = session.BrowserExtensionTargetTabId;
@@ -2625,7 +3366,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 BrowserExtensionReviewMediaErrorCodes.ReviewTargetTabNotFound,
                 "target_tab_check",
                 "このSessionのHandoff送信先ChatGPTタブが記録されていません。");
-            return;
+            return false;
         }
 
         if (!IsBrowserExtensionConnected)
@@ -2637,7 +3378,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected,
                 "bridge_connection",
                 "Browser Extension Bridgeに接続されていません。");
-            return;
+            return false;
         }
 
         var mediaId = Guid.NewGuid().ToString("N");
@@ -2668,7 +3409,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 BrowserExtensionReviewMediaErrorCodes.MediaRegistrationFailed,
                 "media_registered",
                 "生成物を一時Mediaとして登録できませんでした。");
-            return;
+            return false;
         }
 
         CreationPipelineStateMachine.ReviewMediaAttaching(
@@ -2715,7 +3456,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             await SaveActiveSessionAsync();
             StatusMessage = "生成結果を同じChatGPT会話へ添付しました。Review Handoff送信待ちです。";
             NotifyPipelineStateChanged();
-            return;
+            return true;
         }
 
         _browserExtensionBridge.RevokeMedia(mediaId);
@@ -2726,6 +3467,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             result.ErrorCode ?? BrowserExtensionReviewMediaErrorCodes.AttachmentUploadFailed,
             result.Stage ?? "attachment_uploading",
             result.Message ?? "ChatGPTへの生成物添付に失敗しました。");
+        return false;
     }
 
     /// <summary>Explicit retry entry point. Reconnection alone never calls this.</summary>
@@ -2768,6 +3510,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         CreationPipelineStateMachine.ReviewMediaFailed(session, errorCode, stage, message);
+        if (session.Pipeline.AutomaticIteration?.State is AutomaticIterationState.Running or AutomaticIterationState.WaitingForReviewResponse)
+        {
+            CreationPipelineStateMachine.AutomaticIterationFailed(session, errorCode, stage, message);
+        }
         UpdateGenerationResultTransport(iteration, HandoffTransportState.Failed, errorCode, stage);
         await SaveActiveSessionAsync();
         StatusMessage = $"生成結果のChatGPT添付に失敗しました。({errorCode}, stage={stage})";
@@ -2892,6 +3638,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(IsReviewMediaAttachmentFailed));
             OnPropertyChanged(nameof(CanAttachReviewOutput));
             OnPropertyChanged(nameof(CanResendBootstrapHandoff));
+            OnPropertyChanged(nameof(CanResendReviewHandoff));
             OnPropertyChanged(nameof(CanSendToChatGpt));
             OnPropertyChanged(nameof(SendToChatGptButtonText));
             OnPropertyChanged(nameof(SendToChatGptHint));
@@ -2925,7 +3672,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private async Task HandleBrowserExtensionAssistantResponseAsync(BrowserExtensionAssistantResponse response)
     {
+        await _store.LogAsync(
+            "automation",
+            $"assistant response received request_id={response.RequestId} session_id={response.SessionId} handoff_id={response.HandoffId} boundary_id={response.BoundaryId} target_tab_id={response.TargetTabId?.ToString() ?? "none"} stage=assistant_response_received");
         var session = CurrentSession;
+        if (session?.Pipeline.AutomaticIteration?.State == AutomaticIterationState.Stopped
+            && session.Pipeline.ReviewHandoff is { HandoffId: var stoppedHandoff }
+            && string.Equals(stoppedHandoff, response.HandoffId, StringComparison.Ordinal))
+        {
+            await _store.LogAsync("automation", $"stale assistant.response ignored request_id={response.RequestId} handoff_id={response.HandoffId} error_code={BrowserExtensionHandoffErrorCodes.AutomaticIterationCancelled}");
+            return;
+        }
+        await _store.LogAsync(
+            "automation",
+            $"response correlation started request_id={response.RequestId} session_id={response.SessionId} handoff_id={response.HandoffId} boundary_id={response.BoundaryId} target_tab_id={response.TargetTabId?.ToString() ?? "none"} stage=response_correlation_started");
         var validation = BrowserExtensionResponseCorrelation.Validate(response, session);
         if (!validation.IsValid)
         {
@@ -2944,6 +3704,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 {
                     _queuedBrowserExtensionResponses[response.RequestId] = response;
                 }
+                await _store.LogAsync(
+                    "automation",
+                    $"response correlation deferred request_id={response.RequestId} session_id={response.SessionId} handoff_id={response.HandoffId} boundary_id={response.BoundaryId} target_tab_id={response.TargetTabId?.ToString() ?? "none"} stage=handoff_not_sent");
                 return;
             }
 
@@ -2951,22 +3714,75 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // visible workspace. Matched transport/validation failures remain
             // visible as a FAILED inbound timeline item while PendingHandoff
             // is deliberately retained for inspection/retry.
-            if (session is null || !BrowserExtensionResponseCorrelation.MatchesPending(response, session, out _))
+            string? correlationStage = null;
+            var identityMatched = false;
+            var pendingMatches = false;
+            if (session is not null)
             {
+                identityMatched = BrowserExtensionResponseCorrelation.MatchesPendingIdentity(response, session, out _);
+                pendingMatches = BrowserExtensionResponseCorrelation.MatchesPending(response, session, out correlationStage);
+            }
+            if (!pendingMatches)
+            {
+                // A response with the current Review identity can still be a
+                // real failure (for example a target-conversation mismatch).
+                // Stop the automatic loop and retain the Review transport in
+                // that case. Responses arriving after an already closed
+                // boundary, or after an explicit Clipboard fallback, are
+                // stale and must remain no-ops.
+                var staleClosedStage = string.Equals(correlationStage, "automatic_iteration_closed", StringComparison.Ordinal)
+                    || string.Equals(correlationStage, "review_boundary_closed", StringComparison.Ordinal)
+                    || string.Equals(correlationStage, "handoff_not_sent", StringComparison.Ordinal);
+                if (session is not null
+                    && identityMatched
+                    && PendingHandoffReuse.IsReview(session.PendingHandoff)
+                    && !staleClosedStage)
+                {
+                    await _store.LogAsync(
+                        "automation",
+                        $"response correlation rejected request_id={response.RequestId} session_id={response.SessionId} handoff_id={response.HandoffId} boundary_id={response.BoundaryId} target_tab_id={response.TargetTabId?.ToString() ?? "none"} error_code={validation.ErrorCode ?? BrowserExtensionHandoffErrorCodes.ReviewResponseNotCorrelated} stage={correlationStage ?? "review_response_correlation"}");
+                    CreationPipelineStateMachine.ConnectorResponseFailed(
+                        session,
+                        $"ChatGPT Response受信エラー ({validation.ErrorCode ?? "response_rejected"}, stage={correlationStage ?? "unknown"})");
+                    MarkReviewHandoffRetryable(
+                        session,
+                        validation.ErrorCode ?? BrowserExtensionHandoffErrorCodes.ReviewResponseNotCorrelated,
+                        correlationStage ?? "review_response_correlation",
+                        validation.Message);
+                    await RecordBrowserExtensionResponseFailureAsync(
+                        response,
+                        validation.ErrorCode ?? BrowserExtensionAssistantResponseErrorCodes.ResponseNotCorrelated,
+                        correlationStage ?? "review_response_correlation",
+                        validation.Message);
+                    StatusMessage = $"ChatGPTの返答を受信しましたが、Review Responseを相関できませんでした。({validation.ErrorCode ?? "response_rejected"})";
+                    NotifyPipelineStateChanged();
+                    return;
+                }
                 await _store.LogAsync(
                     "bridge.response",
-                    $"Assistant response rejected ({validation.ErrorCode ?? "response_rejected"}, stage={validation.Stage ?? "unknown"})");
+                    $"Assistant response rejected request_id={response.RequestId} session_id={response.SessionId} handoff_id={response.HandoffId} boundary_id={response.BoundaryId} target_tab_id={response.TargetTabId?.ToString() ?? "none"} error_code={validation.ErrorCode ?? "response_rejected"} stage={correlationStage ?? validation.Stage ?? "unknown"}");
                 return;
             }
 
             CreationPipelineStateMachine.ConnectorResponseFailed(
-                session,
+                session!,
                 $"ChatGPT Response受信エラー ({validation.ErrorCode ?? "response_rejected"}, stage={validation.Stage ?? "unknown"})");
+            if (PendingHandoffReuse.IsReview(session!.PendingHandoff))
+            {
+                MarkReviewHandoffRetryable(
+                    session,
+                    validation.ErrorCode ?? BrowserExtensionHandoffErrorCodes.ReviewResponseNotCorrelated,
+                    validation.Stage ?? "review_response_validation",
+                    validation.Message);
+            }
             await RecordBrowserExtensionResponseFailureAsync(
                 response,
                 validation.ErrorCode ?? BrowserExtensionAssistantResponseErrorCodes.ResponseExtractionFailed,
                 validation.Stage ?? "response_validation",
                 validation.Message);
+            await _store.LogAsync(
+                "automation",
+                $"response correlation rejected request_id={response.RequestId} session_id={response.SessionId} handoff_id={response.HandoffId} boundary_id={response.BoundaryId} target_tab_id={response.TargetTabId?.ToString() ?? "none"} error_code={validation.ErrorCode ?? BrowserExtensionAssistantResponseErrorCodes.ResponseExtractionFailed} stage={validation.Stage ?? "response_validation"}");
             StatusMessage = $"ChatGPTの返答を受信しましたが、Connector Responseを確認できませんでした。({validation.ErrorCode ?? "response_rejected"})";
             NotifyPipelineStateChanged();
             return;
@@ -2976,6 +3792,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             return;
         }
+
+        await _store.LogAsync(
+            "automation",
+            $"response correlation accepted request_id={response.RequestId} session_id={response.SessionId} handoff_id={response.HandoffId} boundary_id={response.BoundaryId} target_tab_id={response.TargetTabId?.ToString() ?? "none"} stage=response_correlation_accepted");
 
         await _automaticResponseExecutionGate.WaitAsync();
         try
@@ -2994,15 +3814,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             try
             {
+                if (PendingHandoffReuse.IsReview(session!.PendingHandoff))
+                    CreationPipelineStateMachine.ReviewHandoffResponseReceived(session);
+                else
+                    CreationPipelineStateMachine.AutomaticIterationStarted(session!);
                 SetCommandTextFromBrowserResponse(payload);
                 CreationPipelineStateMachine.ConnectorResponseReceived(session!);
                 await RecordBrowserExtensionResponseAsync(response, command, payload);
                 await _store.LogAsync(
                     "automation",
-                    $"assistant.response accepted request_id={response.RequestId} handoff_id={response.HandoffId} action={command.Action}");
+                    $"response correlated request_id={response.RequestId} session_id={response.SessionId} handoff_id={response.HandoffId} boundary_id={response.BoundaryId} target_tab_id={response.TargetTabId?.ToString() ?? "none"} stage=response_correlated action={command.Action}");
                 OnPropertyChanged(nameof(CanApplyCommand));
                 NotifyPipelineStateChanged();
 
+                await _store.LogAsync(
+                    "automation",
+                    $"response execution started request_id={response.RequestId} session_id={response.SessionId} handoff_id={response.HandoffId} boundary_id={response.BoundaryId} target_tab_id={response.TargetTabId?.ToString() ?? "none"} stage=response_execution_started action={command.Action}");
                 await ExecuteBrowserExtensionCommandAutomaticallyAsync(session!, responseKey, command);
             }
             catch (Exception ex)
@@ -3030,9 +3857,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // Run the same strict parser and CommandValidated transition used by
         // the manual "読み込んで確認" action. Browser-side validation is a
         // transport safety gate; Desktop remains the final authority.
-        await ImportCommandAsync();
+        // ImportCommandAsync normally clears the command buffer after a
+        // successful `complete` command. Automatic execution still needs the
+        // validated result after that shared import path returns; defer the
+        // clear until the automatic terminal state has been recorded.
+        await ImportCommandAsync(clearCommandOnComplete: false);
         if (_pendingValidation is not { IsValid: true, Command: not null } validation)
         {
+            await _store.LogAsync(
+                "automation",
+                $"automatic validation failed request_id={responseKey.Split('\u001f')[0]} handoff_id={session.PendingHandoff?.HandoffId} validation_state={(_pendingValidation is null ? "missing" : "invalid")} error_count={_pendingValidation?.Errors.Count ?? 0} stage=automatic_validation");
             await FailAutomaticResponseAsync(
                 session,
                 responseKey,
@@ -3073,6 +3907,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
 
             AutomaticResponseExecutionCoordinator.MarkCompleted(session, responseKey, command.Action);
+            CreationPipelineStateMachine.AutomaticIterationCompleted(session);
+            ClearAppliedCommandInput();
             await SaveActiveSessionAsync();
             await _store.LogAsync(
                 "automation",
@@ -3092,6 +3928,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 BrowserExtensionAssistantResponseErrorCodes.ConnectorResponseInvalid,
                 "automatic_validation",
                 "自動実行できないactionです。");
+            return;
+        }
+
+        if (session.AtIterationLimit)
+        {
+            // CommandValidated deliberately left REVIEW in
+            // ContinueDecisionRequired. This is a safe, user-facing stop, not
+            // an automatic execution failure: keep the valid command and the
+            // existing Review boundary available for Continue/End actions.
+            const string maximumIterationsMessage = "Maximum iterationsに達しているため次のGenerationを開始しませんでした。";
+            AutomaticResponseExecutionCoordinator.MarkCompleted(session, responseKey, command.Action);
+            CreationPipelineStateMachine.AutomaticIterationLimitReached(session, maximumIterationsMessage);
+            await SaveActiveSessionAsync();
+            StatusMessage = "Maximum iterationsに達しました。続行するか、制作を終了してください。";
+            OnPropertyChanged(nameof(CanApplyCommand));
+            NotifyPipelineStateChanged();
             return;
         }
 
@@ -3159,6 +4011,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
         string message)
     {
         AutomaticResponseExecutionCoordinator.MarkFailed(session, responseKey, action, errorCode, stage, message);
+        if (PendingHandoffReuse.IsReview(session.PendingHandoff))
+        {
+            // Keep the Review transport retryable as well as the automatic
+            // response execution failed. The same Pending Handoff/body can
+            // be sent again after the user fixes the target or UI condition.
+            MarkReviewHandoffRetryable(session, errorCode, stage, message);
+        }
+        else if (session.Pipeline.AutomaticIteration?.State is AutomaticIterationState.Running or AutomaticIterationState.WaitingForReviewResponse)
+            CreationPipelineStateMachine.AutomaticIterationFailed(session, errorCode, stage, message);
         await SaveActiveSessionAsync();
         await _store.LogAsync(
             "automation",
@@ -3269,6 +4130,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         string payload)
     {
         if (CurrentSession is null) return;
+        var isReviewResponse = PendingHandoffReuse.IsReview(CurrentSession.PendingHandoff);
+        var responseIteration = isReviewResponse ? CurrentSession.PendingHandoff?.Iteration : null;
         var existing = CurrentSession.HandoffMessages.LastOrDefault(item =>
             item.Direction == HandoffDirection.ChatGptToComfy
             && item.State == HandoffTransportState.Received
@@ -3285,11 +4148,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Direction = HandoffDirection.ChatGptToComfy,
             Kind = command.Action == "complete" ? HandoffMessageKind.Complete : HandoffMessageKind.GenerationCommand,
             State = HandoffTransportState.Received,
-            Title = command.Action == "complete" ? "制作完了の指示" : "生成指示",
+            Title = isReviewResponse
+                ? $"Iteration {responseIteration.GetValueOrDefault():00} Review Response"
+                : command.Action == "complete" ? "制作完了の指示" : "生成指示",
             DisplayText = BuildCommandTimelineDisplay(command),
             Metadata = BuildCommandTimelineMetadata(command),
             Summary = BuildCommandTimelineSummary(command),
             Payload = payload,
+            IterationNumber = responseIteration,
         });
     }
 
@@ -3300,6 +4166,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         string message)
     {
         if (CurrentSession is null) return;
+        var isReviewResponse = PendingHandoffReuse.IsReview(CurrentSession.PendingHandoff);
+        var responseIteration = isReviewResponse ? CurrentSession.PendingHandoff?.Iteration : null;
         var existing = CurrentSession.HandoffMessages.LastOrDefault(item =>
             item.Direction == HandoffDirection.ChatGptToComfy
             && item.State == HandoffTransportState.Failed
@@ -3312,13 +4180,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 Direction = HandoffDirection.ChatGptToComfy,
                 Kind = HandoffMessageKind.GenerationCommand,
                 State = HandoffTransportState.Failed,
-                Title = "ChatGPT応答の受信エラー",
+                Title = isReviewResponse
+                    ? $"Iteration {responseIteration.GetValueOrDefault():00} Review Response受信エラー"
+                    : "ChatGPT応答の受信エラー",
                 DisplayText = message,
                 Summary = "assistant応答をConnector Responseとして受信できませんでした。",
                 Metadata = $"request_id={response.RequestId}",
                 Payload = response.Payload ?? string.Empty,
                 TransportErrorCode = errorCode,
                 TransportErrorStage = stage,
+                IterationNumber = responseIteration,
             });
         }
         else
@@ -3513,6 +4384,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CurrentGenerateExecutionState));
         OnPropertyChanged(nameof(GenerateExecutionStateText));
         OnPropertyChanged(nameof(AutomaticResponseExecutionText));
+        OnPropertyChanged(nameof(AutomaticIterationText));
+        OnPropertyChanged(nameof(HasAutomaticIterationStatus));
+        OnPropertyChanged(nameof(ReviewHandoff));
         OnPropertyChanged(nameof(ReviewMediaAttachment));
         OnPropertyChanged(nameof(HasReviewMediaAttachment));
         OnPropertyChanged(nameof(ReviewMediaAttachmentStateText));
@@ -3526,11 +4400,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ShowIdeaPlaceholder));
         OnPropertyChanged(nameof(IdeaInputHint));
         OnPropertyChanged(nameof(CanResendBootstrapHandoff));
+        OnPropertyChanged(nameof(CanResendReviewHandoff));
         OnPropertyChanged(nameof(CanSendToChatGpt));
         OnPropertyChanged(nameof(SendToChatGptButtonText));
         OnPropertyChanged(nameof(SendToChatGptHint));
         OnPropertyChanged(nameof(CanApplyCommand));
         OnPropertyChanged(nameof(CanRunWorkflow));
+        OnPropertyChanged(nameof(CanCancelOperation));
     }
 
     private void RefreshPipeline()

@@ -71,10 +71,29 @@ public static class BrowserExtensionResponseCorrelation
         // outgoing message to be SENT as well, so a late/forged response can
         // never advance a copied or failed Handoff boundary.
         var pending = session.PendingHandoff;
+        if (PendingHandoffReuse.IsReview(pending)
+            && session.Pipeline.ReviewHandoff is { State: ReviewHandoffState.Failed or ReviewHandoffState.Stopped or ReviewHandoffState.Completed })
+        {
+            errorStage = "review_boundary_closed";
+            return false;
+        }
+        if (PendingHandoffReuse.IsReview(pending)
+            && session.Pipeline.AutomaticIteration is { State: AutomaticIterationState.Failed or AutomaticIterationState.Stopped or AutomaticIterationState.Completed })
+        {
+            // A timeout, validation failure, explicit CANCEL, or completed
+            // session closes the automatic continuation boundary even when a
+            // late assistant response still carries the old Review identity.
+            // Manual recovery must explicitly create/retry a new boundary.
+            errorStage = "automatic_iteration_closed";
+            return false;
+        }
+        // The two outgoing boundaries intentionally use different timeline
+        // directions: the initial CreationRequest is Connector -> ChatGPT,
+        // while a ReviewRequest is Comfy -> ChatGPT because it carries the
+        // generated media/review context.  Keep the direction check explicit
+        // so a message from the opposite side cannot authorize a response.
         var sentHandoff = pending is not null && session.HandoffMessages.Any(item =>
-            item.Direction == HandoffDirection.ConnectorToChatGpt
-            && item.Kind == HandoffMessageKind.CreationRequest
-            && item.State == HandoffTransportState.Sent
+            IsSentResponseAnchor(item)
             && PendingHandoffReuse.MatchesPayload(pending, item.Payload));
         if (!sentHandoff)
         {
@@ -82,8 +101,31 @@ public static class BrowserExtensionResponseCorrelation
             return false;
         }
 
+        // Review messages are routed to the tab captured by the initial
+        // Handoff.  The target fields are optional only for old envelopes
+        // written before target correlation was added; current Extension
+        // responses always carry them.
+        if (PendingHandoffReuse.IsReview(pending)
+            && (response.TargetTabId.HasValue || response.TargetTabUrl is not null)
+            && (session.BrowserExtensionTargetTabId is not { } targetId
+                || response.TargetTabId != targetId
+                || !string.Equals(response.TargetTabUrl, session.BrowserExtensionTargetTabUrl, StringComparison.Ordinal)))
+        {
+            errorStage = "target_conversation_mismatch";
+            return false;
+        }
+
         return true;
     }
+
+    private static bool IsSentResponseAnchor(HandoffMessage item)
+        => item.State == HandoffTransportState.Sent
+            && (item.Kind switch
+            {
+                HandoffMessageKind.CreationRequest => item.Direction == HandoffDirection.ConnectorToChatGpt,
+                HandoffMessageKind.ReviewRequest => item.Direction == HandoffDirection.ComfyToChatGpt,
+                _ => false,
+            });
 
     /// <summary>
     /// Matches only the durable transport identity.  The Desktop uses this

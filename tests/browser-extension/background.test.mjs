@@ -208,6 +208,20 @@ const request = {
   payload: "## Handoff\nhandoff_id: handoff-fixture\n"
 };
 
+const reviewHandoffRequest = {
+  ...request,
+  request_id: "review-request-fixture",
+  handoff_id: "review-handoff-fixture",
+  boundary_id: "review-boundary-fixture",
+  handoff_kind: "review",
+  target_tab_id: 42,
+  target_tab_url: "https://chatgpt.com/c/fixture",
+  review_media_id: "review-media-fixture",
+  review_file_name: "MiniMax_H3_00015_.mp4",
+  review_iteration: 2,
+  payload: "## Review Handoff\nhandoff_id: review-handoff-fixture\n"
+};
+
 const reviewMediaRequest = {
   type: "review.media.attach",
   request_id: "media-request-fixture",
@@ -267,6 +281,207 @@ test("Background relays a Handoff to the active ChatGPT tab and returns sent", a
   assert.equal(relayedMessage.type, "WATCH_ASSISTANT_RESPONSE");
   assert.equal(relayedMessage.sessionId, request.session_id);
   assert.equal(relayedMessage.boundaryId, request.boundary_id);
+});
+
+test("Background arms the response watcher before acknowledging a fast assistant response", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => {
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      // Simulate a response that arrives as soon as the watcher is armed.
+      // The Desktop may not have persisted handoff.result yet, so it relies
+      // on its existing identity queue for this ordering.
+      harness.context.handleAssistantResponseFromContent({
+        type: "ASSISTANT_RESPONSE_RESULT",
+        requestId: request.request_id,
+        sessionId: request.session_id,
+        handoffId: request.handoff_id,
+        boundaryId: request.boundary_id,
+        status: "received",
+        payload: "response payload",
+        stage: "assistant_response_complete"
+      }, { tab: { id: 17 } });
+      return {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      };
+    }
+    return {
+      request_id: request.request_id,
+      handoff_id: request.handoff_id,
+      status: "sent"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+  const responseIndex = harness.socket.sent.findIndex((message, index) =>
+    index >= previousCount && message.type === "assistant.response");
+  const handoffIndex = harness.socket.sent.findIndex((message, index) =>
+    index >= previousCount && message.type === "handoff.result");
+
+  assert.equal(result.status, "sent");
+  assert.ok(responseIndex >= 0, "The fast response should be relayed");
+  assert.ok(handoffIndex >= 0, "The handoff result should be relayed");
+  assert.ok(responseIndex < handoffIndex, "The watcher must be armed before handoff.result");
+});
+
+test("Background sends a Review Handoff only to its saved target tab and preserves its attachment metadata", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([
+    { id: 7, url: "https://example.invalid/" },
+    { id: reviewHandoffRequest.target_tab_id, url: reviewHandoffRequest.target_tab_url }
+  ]);
+  const relayedMessages = [];
+  harness.setContentHandler((message) => {
+    relayedMessages.push(message);
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      return {
+        request_id: reviewHandoffRequest.request_id,
+        session_id: reviewHandoffRequest.session_id,
+        handoff_id: reviewHandoffRequest.handoff_id,
+        boundary_id: reviewHandoffRequest.boundary_id,
+        status: "watching",
+        stage: "response_watch_started"
+      };
+    }
+    return {
+      request_id: reviewHandoffRequest.request_id,
+      handoff_id: reviewHandoffRequest.handoff_id,
+      status: "sent",
+      stage: "user_message_correlated"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(reviewHandoffRequest, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+
+  assert.equal(result.status, "sent");
+  assert.equal(result.target_tab_id, reviewHandoffRequest.target_tab_id);
+  assert.equal(result.target_tab_url, reviewHandoffRequest.target_tab_url);
+  const handoffMessage = relayedMessages.find((message) => message.type === "HANDOFF_SEND");
+  assert.equal(handoffMessage.type, "HANDOFF_SEND");
+  assert.equal(handoffMessage.requestId, reviewHandoffRequest.request_id);
+  assert.equal(handoffMessage.sessionId, reviewHandoffRequest.session_id);
+  assert.equal(handoffMessage.handoffId, reviewHandoffRequest.handoff_id);
+  assert.equal(handoffMessage.boundaryId, reviewHandoffRequest.boundary_id);
+  assert.equal(handoffMessage.protocol, "comfy-connector/1");
+  assert.equal(handoffMessage.payload, reviewHandoffRequest.payload);
+  assert.equal(handoffMessage.review, true);
+  assert.equal(handoffMessage.expectedAttachment.mediaId, reviewHandoffRequest.review_media_id);
+  assert.equal(handoffMessage.expectedAttachment.fileName, reviewHandoffRequest.review_file_name);
+  assert.equal(handoffMessage.expectedAttachment.iteration, reviewHandoffRequest.review_iteration);
+  const watchMessage = relayedMessages.find((message) => message.type === "WATCH_ASSISTANT_RESPONSE");
+  assert.equal(watchMessage.review, true);
+
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: reviewHandoffRequest.request_id,
+    sessionId: reviewHandoffRequest.session_id,
+    handoffId: reviewHandoffRequest.handoff_id,
+    boundaryId: reviewHandoffRequest.boundary_id,
+    status: "received",
+    payload: "review response",
+    stage: "assistant_response_complete"
+  }, { tab: { id: reviewHandoffRequest.target_tab_id } });
+  const response = await harness.waitForSocketMessage(previousCount + 1, (message) => message.type === "assistant.response");
+  assert.equal(response.target_tab_id, reviewHandoffRequest.target_tab_id);
+  assert.equal(response.target_tab_url, reviewHandoffRequest.target_tab_url);
+});
+
+test("Background preserves Review response correlation when it arrives during watcher arm", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: reviewHandoffRequest.target_tab_id, url: reviewHandoffRequest.target_tab_url }]);
+  harness.setContentHandler(async (message) => {
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      // A very fast/previously completed ChatGPT response can be delivered
+      // while the Background is still awaiting the Content Script's watcher
+      // acknowledgement. The Review identity must already be registered.
+      await harness.context.handleAssistantResponseFromContent({
+        type: "ASSISTANT_RESPONSE_RESULT",
+        requestId: reviewHandoffRequest.request_id,
+        sessionId: reviewHandoffRequest.session_id,
+        handoffId: reviewHandoffRequest.handoff_id,
+        boundaryId: reviewHandoffRequest.boundary_id,
+        status: "received",
+        payload: "review response",
+        stage: "assistant_response_complete"
+      }, { tab: { id: reviewHandoffRequest.target_tab_id } });
+      return {
+        request_id: reviewHandoffRequest.request_id,
+        session_id: reviewHandoffRequest.session_id,
+        handoff_id: reviewHandoffRequest.handoff_id,
+        boundary_id: reviewHandoffRequest.boundary_id,
+        status: "watching"
+      };
+    }
+    return {
+      request_id: reviewHandoffRequest.request_id,
+      handoff_id: reviewHandoffRequest.handoff_id,
+      status: "sent"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(reviewHandoffRequest, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+  const response = await harness.waitForSocketMessage(previousCount, (message) => message.type === "assistant.response");
+
+  assert.equal(result.status, "sent");
+  assert.equal(response.status, "received");
+  assert.equal(response.request_id, reviewHandoffRequest.request_id);
+  assert.equal(response.session_id, reviewHandoffRequest.session_id);
+  assert.equal(response.handoff_id, reviewHandoffRequest.handoff_id);
+  assert.equal(response.boundary_id, reviewHandoffRequest.boundary_id);
+  assert.equal(response.target_tab_id, reviewHandoffRequest.target_tab_id);
+  assert.equal(response.target_tab_url, reviewHandoffRequest.target_tab_url);
+});
+
+test("Background rejects a Review response after the saved target tab navigates away", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: reviewHandoffRequest.target_tab_id, url: reviewHandoffRequest.target_tab_url }]);
+  harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
+    ? {
+        request_id: reviewHandoffRequest.request_id,
+        session_id: reviewHandoffRequest.session_id,
+        handoff_id: reviewHandoffRequest.handoff_id,
+        boundary_id: reviewHandoffRequest.boundary_id,
+        status: "watching"
+      }
+    : {
+        request_id: reviewHandoffRequest.request_id,
+        handoff_id: reviewHandoffRequest.handoff_id,
+        status: "sent"
+      });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(reviewHandoffRequest, harness.socket);
+  await harness.waitForResult(previousCount);
+
+  // The service worker must re-check the URL at response time because the
+  // same tab can navigate between the Review send and the assistant result.
+  harness.setActiveTabs([{ id: reviewHandoffRequest.target_tab_id, url: "https://chatgpt.com/c/another-conversation" }]);
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: reviewHandoffRequest.request_id,
+    sessionId: reviewHandoffRequest.session_id,
+    handoffId: reviewHandoffRequest.handoff_id,
+    boundaryId: reviewHandoffRequest.boundary_id,
+    status: "received",
+    payload: "response from another conversation"
+  }, { tab: { id: reviewHandoffRequest.target_tab_id } });
+
+  const response = await harness.waitForSocketMessage(previousCount + 1, (message) => message.type === "assistant.response");
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "review_target_tab_not_found");
+  assert.equal(response.stage, "target_tab_check");
+  assert.equal(response.target_tab_id, reviewHandoffRequest.target_tab_id);
+  assert.equal(response.target_tab_url, reviewHandoffRequest.target_tab_url);
 });
 
 test("Background relays a correlated assistant response without parsing its payload", async () => {

@@ -38,6 +38,39 @@ public sealed class BrowserExtensionResponseCorrelationTests
     }
 
     [Fact]
+    public void ReviewResponseMatchesTheSentComfyToChatGptReviewRequest()
+    {
+        var session = CreateSession("session-review-direction");
+        var pending = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        session.PendingHandoff = pending;
+        pending.LastBrowserExtensionRequestId = "request-review-direction";
+        session.HandoffMessages.Add(new HandoffMessage
+        {
+            // ReviewRequest is recorded as ComfyToChatGpt because the review
+            // boundary includes the generated ComfyUI output context.
+            Direction = HandoffDirection.ComfyToChatGpt,
+            Kind = HandoffMessageKind.ReviewRequest,
+            State = HandoffTransportState.Sent,
+            Payload = $"handoff_id: {pending.HandoffId}\nsession_id: {pending.SessionId}\nboundary_id: {pending.BoundaryId}",
+        });
+
+        var payload = $"```connector-command\n{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"complete\",\"handoff_id\":\"{pending.HandoffId}\",\"session_id\":\"{pending.SessionId}\",\"reason\":\"approved\"}}\n```";
+        var response = new BrowserExtensionAssistantResponse(
+            pending.LastBrowserExtensionRequestId,
+            session.Id,
+            pending.HandoffId,
+            pending.BoundaryId,
+            "received",
+            payload,
+            Stage: "assistant_response_complete");
+
+        var result = BrowserExtensionResponseCorrelation.Validate(response, session);
+
+        Assert.True(result.IsValid);
+        Assert.Equal("complete", result.ProtocolResult?.Command?.Action);
+    }
+
+    [Fact]
     public void ResponseFromCopiedOrFailedHandoffCannotAdvanceTheBoundary()
     {
         var session = CreateSession("session-not-sent");
@@ -149,6 +182,77 @@ public sealed class BrowserExtensionResponseCorrelationTests
     }
 
     [Fact]
+    public void LateReviewResponseIsRejectedAfterAutomaticIterationFailure()
+    {
+        var session = CreateSession("session-review-failed");
+        session.BrowserExtensionTargetTabId = 42;
+        session.BrowserExtensionTargetTabUrl = "https://chatgpt.com/c/fixture";
+        var pending = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        session.PendingHandoff = pending;
+        pending.LastBrowserExtensionRequestId = "review-request-failed";
+        session.HandoffMessages.Add(SentMessage(pending, HandoffMessageKind.ReviewRequest));
+
+        CreationPipelineStateMachine.AutomaticIterationStarted(session);
+        CreationPipelineStateMachine.ReviewHandoffPreparing(session, pending, pending.Iteration, 42, session.BrowserExtensionTargetTabUrl);
+        CreationPipelineStateMachine.ReviewHandoffSending(session, pending.LastBrowserExtensionRequestId);
+        CreationPipelineStateMachine.ReviewHandoffSent(
+            session,
+            new BrowserExtensionHandoffSendResult(
+                pending.LastBrowserExtensionRequestId,
+                pending.HandoffId,
+                "sent",
+                TargetTabId: 42,
+                TargetTabUrl: session.BrowserExtensionTargetTabUrl));
+        CreationPipelineStateMachine.AutomaticIterationFailed(session, "response_timeout", "assistant_response", "timed out");
+
+        var response = new BrowserExtensionAssistantResponse(
+            pending.LastBrowserExtensionRequestId,
+            session.Id,
+            pending.HandoffId,
+            pending.BoundaryId,
+            "received",
+            "late response",
+            TargetTabId: 42,
+            TargetTabUrl: session.BrowserExtensionTargetTabUrl);
+
+        var result = BrowserExtensionResponseCorrelation.Validate(response, session);
+
+        Assert.False(result.IsValid);
+        Assert.Equal(BrowserExtensionAssistantResponseErrorCodes.ResponseNotCorrelated, result.ErrorCode);
+        Assert.Equal("automatic_iteration_closed", result.Stage);
+        Assert.Same(pending, session.PendingHandoff);
+    }
+
+    [Fact]
+    public void ReviewResponseFromAnotherConversationIsRejectedBySavedTarget()
+    {
+        var session = CreateSession("session-review-target");
+        session.BrowserExtensionTargetTabId = 42;
+        session.BrowserExtensionTargetTabUrl = "https://chatgpt.com/c/fixture";
+        var pending = PendingHandoffFactory.CreateReview(session, [], "complete");
+        session.PendingHandoff = pending;
+        pending.LastBrowserExtensionRequestId = "review-request-target";
+        session.HandoffMessages.Add(SentMessage(pending, HandoffMessageKind.ReviewRequest));
+
+        var response = new BrowserExtensionAssistantResponse(
+            pending.LastBrowserExtensionRequestId,
+            session.Id,
+            pending.HandoffId,
+            pending.BoundaryId,
+            "received",
+            "response payload",
+            TargetTabId: 99,
+            TargetTabUrl: "https://chatgpt.com/c/another");
+
+        var result = BrowserExtensionResponseCorrelation.Validate(response, session);
+
+        Assert.False(result.IsValid);
+        Assert.Equal(BrowserExtensionAssistantResponseErrorCodes.ResponseNotCorrelated, result.ErrorCode);
+        Assert.Equal("target_conversation_mismatch", result.Stage);
+        Assert.Same(pending, session.PendingHandoff);
+    }
+
+    [Fact]
     public void PipelineMarksCommandAsWaitingForUserWithoutApplyingOrGenerating()
     {
         var session = CreateSession("session-pipeline");
@@ -174,11 +278,15 @@ public sealed class BrowserExtensionResponseCorrelationTests
             MaximumIterations = 10,
         };
 
-    private static HandoffMessage SentMessage(PendingHandoffSnapshot pending)
+    private static HandoffMessage SentMessage(
+        PendingHandoffSnapshot pending,
+        HandoffMessageKind kind = HandoffMessageKind.CreationRequest)
         => new()
         {
-            Direction = HandoffDirection.ConnectorToChatGpt,
-            Kind = HandoffMessageKind.CreationRequest,
+            Direction = kind == HandoffMessageKind.ReviewRequest
+                ? HandoffDirection.ComfyToChatGpt
+                : HandoffDirection.ConnectorToChatGpt,
+            Kind = kind,
             State = HandoffTransportState.Sent,
             Payload = $"handoff_id: {pending.HandoffId}\nsession_id: {pending.SessionId}\nboundary_id: {pending.BoundaryId}",
         };

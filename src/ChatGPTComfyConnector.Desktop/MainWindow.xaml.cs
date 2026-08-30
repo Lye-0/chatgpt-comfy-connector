@@ -183,20 +183,26 @@ public partial class MainWindow : Window
     private async void CreateChat_Click(object sender, RoutedEventArgs e) => await Run("Chat作成", ViewModel.CreateChatAsync);
     private void CancelChatCreation_Click(object sender, RoutedEventArgs e) => ViewModel.CancelChatCreation();
     private async void Resume_Click(object sender, RoutedEventArgs e) => await Run("セッション再開", ViewModel.ResumeSessionAsync);
-    private async void ImportCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド検証", ViewModel.ImportCommandAsync);
+    private async void ImportCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド検証", () => ViewModel.ImportCommandAsync());
     private async void ApplyCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド適用", () => ViewModel.ApplyCommandAsync(false));
     private async void ApplyGenerateCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド適用 + 生成", () => ViewModel.ApplyCommandAsync(true));
     private async void CopyBootstrap_Click(object sender, RoutedEventArgs e)
     {
         await Run("ChatGPTへ送信", async () =>
         {
+            // The legacy method names are retained as the single UI entry
+            // point.  The view-model routes a saved Review Handoff through
+            // the same methods, so the Clipboard fallback remains below the
+            // transport result for both Bootstrap and Review sends.
             var payload = await ViewModel.PrepareBootstrapHandoffForSendAsync();
             var result = await ViewModel.TrySendPreparedBootstrapHandoffAsync(payload);
             if (result is not null)
             {
                 if (result.IsSent)
                 {
-                    ViewModel.StatusMessage = "制作コンテキストをChatGPTへ送信しました。ChatGPTの返答を待っています。";
+                    ViewModel.StatusMessage = ViewModel.ReviewHandoff is not null
+                        ? "Review HandoffをChatGPTへ再送しました。レビュー返答を待っています。"
+                        : "制作コンテキストをChatGPTへ送信しました。ChatGPTの返答を待っています。";
                     return;
                 }
 
@@ -211,8 +217,10 @@ public partial class MainWindow : Window
             }
 
             Clipboard.SetText(payload);
-            await ViewModel.ConfirmBootstrapCopiedAsync(payload);
-            ViewModel.StatusMessage = "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。";
+            await ViewModel.ConfirmHandoffCopiedAsync(payload);
+            ViewModel.StatusMessage = ViewModel.ReviewHandoff is not null
+                ? "Review Handoffをコピーしました。ChatGPTへ貼り付けてください。"
+                : "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。";
         });
     }
     private async void CopyHandoff_Click(object sender, RoutedEventArgs e)

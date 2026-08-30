@@ -53,8 +53,12 @@ public static class PendingHandoffReuse
     public static bool IsBootstrap(PendingHandoffSnapshot? pending)
         => pending is not null
             && !IsReview(pending)
+            && !IsGenerationResult(pending)
             && pending.AllowedActions.Count == 1
             && pending.AllowedActions.Contains("generate", StringComparer.Ordinal);
+
+    public static bool IsGenerationResult(PendingHandoffSnapshot? pending)
+        => pending?.Purpose == PendingHandoffPurpose.GenerationResult;
 
     /// <summary>
     /// Finds the exact persisted Bootstrap payload that can be retried after a

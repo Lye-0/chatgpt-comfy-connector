@@ -206,6 +206,188 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
+    public void AutomaticReviewLifecycleKeepsSessionIdentityAndCreatesFreshNextBoundary()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        var pending = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        session.PendingHandoff = pending;
+
+        CreationPipelineStateMachine.AutomaticIterationStarted(session);
+        CreationPipelineStateMachine.ReviewHandoffPreparing(
+            session,
+            pending,
+            session.CurrentIteration,
+            42,
+            "https://chatgpt.com/c/fixture");
+        CreationPipelineStateMachine.ReviewHandoffSending(session, "review-request");
+        CreationPipelineStateMachine.ReviewHandoffSent(
+            session,
+            new BrowserExtensionHandoffSendResult(
+                "review-request",
+                pending.HandoffId,
+                "sent",
+                TargetTabId: 42,
+                TargetTabUrl: "https://chatgpt.com/c/fixture"));
+
+        Assert.Equal(ReviewHandoffState.WaitingResponse, session.Pipeline.ReviewHandoff!.State);
+        Assert.Equal(AutomaticIterationState.WaitingForReviewResponse, session.Pipeline.AutomaticIteration!.State);
+        Assert.Equal(pending.HandoffId, session.Pipeline.AutomaticIteration.ReviewHandoffId);
+        Assert.Equal(pending.BoundaryId, session.Pipeline.AutomaticIteration.ReviewBoundaryId);
+
+        CreationPipelineStateMachine.ReviewHandoffResponseReceived(session);
+        Assert.Equal(ReviewHandoffState.Received, session.Pipeline.ReviewHandoff.State);
+        Assert.Equal(AutomaticIterationState.Running, session.Pipeline.AutomaticIteration.State);
+
+        var next = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        Assert.Equal(session.Id, next.SessionId);
+        Assert.NotEqual(pending.HandoffId, next.HandoffId);
+        Assert.NotEqual(pending.BoundaryId, next.BoundaryId);
+        Assert.Equal(session.CurrentIteration, next.Iteration);
+    }
+
+    [Fact]
+    public void GenerationResultAndReviewBoundariesUseDistinctIdentities()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        var result = PendingHandoffFactory.CreateGenerationResult(session, [], "generate", "complete");
+        var review = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+
+        Assert.Equal(PendingHandoffPurpose.GenerationResult, result.Purpose);
+        Assert.Equal(PendingHandoffPurpose.Review, review.Purpose);
+        Assert.Equal(session.Id, result.SessionId);
+        Assert.Equal(session.Id, review.SessionId);
+        Assert.NotEqual(result.HandoffId, review.HandoffId);
+        Assert.NotEqual(result.BoundaryId, review.BoundaryId);
+        Assert.False(PendingHandoffReuse.IsBootstrap(result));
+        Assert.False(PendingHandoffReuse.IsReview(result));
+        Assert.True(PendingHandoffReuse.IsReview(review));
+    }
+
+    [Fact]
+    public void AutomaticIterationLimitStopsAfterValidationWithoutReplacingContinueDecision()
+    {
+        var session = ReadyForReview(maximumIterations: 1);
+        var pending = PendingHandoffFactory.CreateReview(session, [], "complete", "generate");
+        session.PendingHandoff = pending;
+        CreationPipelineStateMachine.AutomaticIterationStarted(session);
+        CreationPipelineStateMachine.ReviewHandoffPreparing(session, pending, pending.Iteration, 42, "https://chatgpt.com/c/fixture");
+        CreationPipelineStateMachine.ReviewHandoffSending(session, "review-limit");
+        CreationPipelineStateMachine.ReviewHandoffSent(
+            session,
+            new BrowserExtensionHandoffSendResult(
+                "review-limit",
+                pending.HandoffId,
+                "sent",
+                TargetTabId: 42,
+                TargetTabUrl: "https://chatgpt.com/c/fixture"));
+        CreationPipelineStateMachine.ReviewHandoffResponseReceived(session);
+        CreationPipelineStateMachine.CommandValidated(session, "generate");
+
+        CreationPipelineStateMachine.AutomaticIterationLimitReached(
+            session,
+            "Maximum iterationsに達しているため次のGenerationを開始しませんでした。");
+
+        var reviewStage = CreationPipelineStateMachine.Get(session, CreationStage.Review);
+        Assert.Equal(CreationStageState.WaitingUser, reviewStage.State);
+        Assert.Equal(CreationWaitingReason.ContinueDecisionRequired, reviewStage.WaitingReason);
+        Assert.True(session.Pipeline.MaximumIterationSafetyStop);
+        Assert.Equal(ReviewHandoffState.Completed, session.Pipeline.ReviewHandoff!.State);
+        Assert.Equal(AutomaticIterationState.Completed, session.Pipeline.AutomaticIteration!.State);
+        Assert.Equal(BrowserExtensionHandoffErrorCodes.MaximumIterationsReached, session.Pipeline.AutomaticIteration.ErrorCode);
+        Assert.Equal(SessionStatus.Active, session.Status);
+        CreationPipelineStateMachine.ContinueBeyondLimit(session);
+        Assert.Equal(AutomaticIterationState.Running, session.Pipeline.AutomaticIteration!.State);
+        Assert.False(session.Pipeline.MaximumIterationSafetyStop);
+    }
+
+    [Fact]
+    public void ClipboardFallbackStopsAutomaticReviewWithoutDestroyingThePendingBoundary()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        var pending = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        session.PendingHandoff = pending;
+        CreationPipelineStateMachine.AutomaticIterationStarted(session);
+        CreationPipelineStateMachine.ReviewHandoffPreparing(session, pending, pending.Iteration, 42, "https://chatgpt.com/c/fixture");
+        CreationPipelineStateMachine.ReviewHandoffSending(session, "review-request");
+
+        CreationPipelineStateMachine.ReviewHandoffCopied(session);
+
+        Assert.Equal(AutomaticIterationState.Stopped, session.Pipeline.AutomaticIteration!.State);
+        Assert.Equal("manual_clipboard_fallback", session.Pipeline.AutomaticIteration.ErrorStage);
+        Assert.Equal(ReviewHandoffState.None, session.Pipeline.ReviewHandoff!.State);
+        Assert.Same(pending, session.PendingHandoff);
+        Assert.Single(session.Iterations);
+        Assert.Single(session.Iterations[0].Outputs);
+        Assert.Equal(SessionStatus.Active, session.Status);
+    }
+
+    [Fact]
+    public void CopiedReviewCanBePreparedAgainWithTheSamePendingIdentity()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        var pending = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        session.PendingHandoff = pending;
+        CreationPipelineStateMachine.AutomaticIterationStarted(session);
+        CreationPipelineStateMachine.ReviewHandoffPreparing(session, pending, pending.Iteration, 42, "https://chatgpt.com/c/fixture");
+        CreationPipelineStateMachine.ReviewHandoffSending(session, "review-request");
+        CreationPipelineStateMachine.ReviewHandoffCopied(session);
+
+        var handoffId = pending.HandoffId;
+        var boundaryId = pending.BoundaryId;
+        var sessionId = pending.SessionId;
+
+        // The ViewModel's explicit retry path re-enters this preparation
+        // transition after Clipboard fallback. It must reopen the same
+        // transport identity rather than generating a new Review boundary.
+        CreationPipelineStateMachine.ReviewHandoffPreparing(
+            session,
+            pending,
+            pending.Iteration,
+            42,
+            "https://chatgpt.com/c/fixture");
+
+        Assert.Equal(ReviewHandoffState.Preparing, session.Pipeline.ReviewHandoff!.State);
+        Assert.Equal(sessionId, session.Pipeline.ReviewHandoff.SessionId);
+        Assert.Equal(handoffId, session.Pipeline.ReviewHandoff.HandoffId);
+        Assert.Equal(boundaryId, session.Pipeline.ReviewHandoff.BoundaryId);
+        Assert.Same(pending, session.PendingHandoff);
+        Assert.Equal(AutomaticIterationState.Stopped, session.Pipeline.AutomaticIteration!.State);
+    }
+
+    [Fact]
+    public void AutomaticIterationFailureIsRecordedEvenBeforeReviewSnapshotExists()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        var pending = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
+        session.PendingHandoff = pending;
+        CreationPipelineStateMachine.AutomaticIterationStarted(session);
+
+        CreationPipelineStateMachine.AutomaticIterationFailed(
+            session,
+            "review_target_tab_not_found",
+            "target_tab_check",
+            "saved target missing");
+
+        Assert.Equal(AutomaticIterationState.Failed, session.Pipeline.AutomaticIteration!.State);
+        Assert.Equal("review_target_tab_not_found", session.Pipeline.AutomaticIteration.ErrorCode);
+        Assert.Equal("target_tab_check", session.Pipeline.AutomaticIteration.ErrorStage);
+        Assert.Null(session.Pipeline.ReviewHandoff);
+        Assert.Same(pending, session.PendingHandoff);
+    }
+
+    [Fact]
+    public void FinalAutomaticReviewAllowsCompleteOnlyAtTheIterationLimit()
+    {
+        var session = ReadyForReview(maximumIterations: 1);
+        var finalReview = PendingHandoffFactory.CreateReview(session, [], "complete");
+
+        Assert.True(session.AtIterationLimit);
+        Assert.Equal(["complete"], finalReview.AllowedActions);
+        Assert.DoesNotContain("generate", finalReview.AllowedActions);
+        Assert.Equal(1, session.CurrentIteration);
+    }
+
+    [Fact]
     public void PersistedHandoffPayloadCanBeReusedWithoutRebuilding()
     {
         const string saved = "  {\"handoff_id\":\"original\"}\n";

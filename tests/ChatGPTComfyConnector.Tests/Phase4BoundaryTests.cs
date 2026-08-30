@@ -29,7 +29,7 @@ public sealed class Phase4BoundaryTests
 
         Assert.Contains("BrowserExtensionResponseCorrelation.Validate", responseHandler, StringComparison.Ordinal);
         Assert.Contains("AutomaticResponseExecutionCoordinator.TryBegin", responseHandler, StringComparison.Ordinal);
-        Assert.Contains("await ImportCommandAsync()", automaticHandler, StringComparison.Ordinal);
+        Assert.Contains("await ImportCommandAsync(clearCommandOnComplete: false)", automaticHandler, StringComparison.Ordinal);
         Assert.Contains("ApplyCommandCoreAsync", automaticHandler, StringComparison.Ordinal);
         Assert.Contains("GenerateAsync(applyFirst: false)", source, StringComparison.Ordinal);
         Assert.Contains("AutomaticResponseExecutionCoordinator.MarkFailed", source, StringComparison.Ordinal);

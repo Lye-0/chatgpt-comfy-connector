@@ -16,7 +16,11 @@ const PING_TIMEOUT_MS = 5000;
 // sends traffic more frequently than that limit. Keep this below 30 seconds
 // so a connected Desktop Bridge does not silently become a stale UI state.
 const SOCKET_KEEPALIVE_INTERVAL_MS = 20000;
-const CONTENT_SCRIPT_TIMEOUT_MS = 15000;
+// Review Handoff dispatch can begin while ChatGPT is still processing a
+// video attachment. Keep this transport timeout longer than the Content
+// Script's bounded Send-readiness wait so a disabled button is not reported
+// as a bridge failure prematurely.
+const CONTENT_SCRIPT_TIMEOUT_MS = 75000;
 const PAIRING_STORAGE_KEY = "bridgePairing";
 const RESPONSE_WATCH_MESSAGE_TYPE = "WATCH_ASSISTANT_RESPONSE";
 const ASSISTANT_RESPONSE_RESULT_MESSAGE_TYPE = "ASSISTANT_RESPONSE_RESULT";
@@ -91,7 +95,7 @@ function bridgeError(message, status = 0, code = "bridge_error") {
 // include the pairing credential, session token, or Handoff payload here.
 function diagnostic(eventName, fields = {}) {
   const safe = {};
-  for (const key of ["request_id", "handoff_id", "media_id", "status", "error_code", "stage"]) {
+  for (const key of ["request_id", "session_id", "handoff_id", "boundary_id", "media_id", "status", "error_code", "stage", "target_tab_id"]) {
     if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
     if (typeof fields[key] === "number" && Number.isSafeInteger(fields[key])) safe[key] = fields[key];
   }
@@ -100,6 +104,17 @@ function diagnostic(eventName, fields = {}) {
   } catch (_) {
     // Console access must never affect the Bridge transport.
   }
+}
+
+function traceForMessage(message, fields = {}) {
+  return {
+    request_id: message?.request_id ?? message?.requestId,
+    session_id: message?.session_id ?? message?.sessionId,
+    handoff_id: message?.handoff_id ?? message?.handoffId,
+    boundary_id: message?.boundary_id ?? message?.boundaryId,
+    target_tab_id: message?.target_tab_id ?? message?.targetTabId,
+    ...fields
+  };
 }
 
 async function setState(patch) {
@@ -335,8 +350,7 @@ function sendMessageWithTimeout(tabId, message) {
 
 async function dispatchToContentScript(tabId, message, trace) {
   diagnostic("content script dispatched", {
-    request_id: trace?.request_id,
-    handoff_id: trace?.handoff_id
+    ...traceForMessage(trace, { target_tab_id: tabId })
   });
   try {
     return await sendMessageWithTimeout(tabId, message);
@@ -348,24 +362,23 @@ async function dispatchToContentScript(tabId, message, trace) {
     // does not inspect or mutate the ChatGPT DOM itself.
     if (!isMissingContentScriptError(error) || !chrome.scripting?.executeScript) throw error;
     diagnostic("content script injection requested", {
-      request_id: trace?.request_id,
-      handoff_id: trace?.handoff_id
+      ...traceForMessage(trace, { target_tab_id: tabId })
     });
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ["chatgpt-locators.js", "content-script.js"]
     });
     diagnostic("content script injected", {
-      request_id: trace?.request_id,
-      handoff_id: trace?.handoff_id
+      ...traceForMessage(trace, { target_tab_id: tabId })
     });
     return await sendMessageWithTimeout(tabId, message);
   }
 }
 
-function sendHandoffResultToBridge(result, bridgeSocket) {
+function sendHandoffResultToBridge(result, bridgeSocket, trace = null) {
   if (bridgeSocket.readyState !== WebSocket.OPEN || socket !== bridgeSocket) {
     diagnostic("handoff.result dropped", {
+      ...traceForMessage(trace),
       request_id: result.request_id,
       handoff_id: result.handoff_id,
       status: result.status,
@@ -377,6 +390,7 @@ function sendHandoffResultToBridge(result, bridgeSocket) {
   try {
     bridgeSocket.send(JSON.stringify(result));
     diagnostic("handoff.result sent", {
+      ...traceForMessage(trace),
       request_id: result.request_id,
       handoff_id: result.handoff_id,
       status: result.status,
@@ -402,11 +416,15 @@ function sendAssistantResponseToBridge(response, bridgeSocket) {
   if (response.error_code) envelope.error_code = response.error_code;
   if (response.message) envelope.message = response.message;
   if (response.stage) envelope.stage = response.stage;
+  if (Number.isSafeInteger(response.target_tab_id)) envelope.target_tab_id = response.target_tab_id;
+  if (typeof response.target_tab_url === "string" && response.target_tab_url.length <= 2048) envelope.target_tab_url = response.target_tab_url;
 
   if (bridgeSocket.readyState !== WebSocket.OPEN || socket !== bridgeSocket) {
     diagnostic("assistant response dropped", {
       request_id: response.request_id,
+      session_id: response.session_id,
       handoff_id: response.handoff_id,
+      boundary_id: response.boundary_id,
       status: response.status,
       error_code: response.error_code || "bridge_disconnected",
       stage: response.stage || "bridge_disconnected"
@@ -417,16 +435,30 @@ function sendAssistantResponseToBridge(response, bridgeSocket) {
     bridgeSocket.send(JSON.stringify(envelope));
     diagnostic("assistant response sent", {
       request_id: response.request_id,
+      session_id: response.session_id,
       handoff_id: response.handoff_id,
+      boundary_id: response.boundary_id,
       status: response.status,
       error_code: response.error_code,
       stage: response.stage
+    });
+    diagnostic("assistant response forwarded", {
+      request_id: response.request_id,
+      session_id: response.session_id,
+      handoff_id: response.handoff_id,
+      boundary_id: response.boundary_id,
+      status: response.status,
+      error_code: response.error_code,
+      stage: "assistant_response_forwarded",
+      target_tab_id: response.target_tab_id
     });
     return true;
   } catch (_) {
     diagnostic("assistant response delivery failed", {
       request_id: response.request_id,
+      session_id: response.session_id,
       handoff_id: response.handoff_id,
+      boundary_id: response.boundary_id,
       status: "error",
       error_code: "bridge_disconnected",
       stage: "response_bridge_send"
@@ -693,11 +725,19 @@ async function sendReviewMediaToTarget(message, bridgeSocket) {
 
 async function startAssistantResponseWatch(tabId, message, bridgeSocket) {
   const requestId = message.request_id;
+  diagnostic(message.handoff_kind === "review" ? "review response watch requested" : "response watch requested", traceForMessage(message, {
+    status: "requested",
+    stage: "response_watch_requested",
+    target_tab_id: tabId
+  }));
   responseWatches.set(requestId, {
     tabId,
+    targetTabId: tabId,
     sessionId: message.session_id,
     handoffId: message.handoff_id,
     boundaryId: message.boundary_id,
+    isReview: message.handoff_kind === "review",
+    targetTabUrl: message.target_tab_url || null,
     bridgeSocket
   });
 
@@ -709,15 +749,16 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket) {
       sessionId: message.session_id,
       handoffId: message.handoff_id,
       boundaryId: message.boundary_id,
-      protocol: HANDOFF_PROTOCOL
+      protocol: HANDOFF_PROTOCOL,
+      targetTabId: tabId,
+      ...(message.handoff_kind === "review" ? { review: true } : {})
     }, message);
   } catch (error) {
     responseWatches.delete(requestId);
     const errorCode = "content_script_unavailable";
     const stage = error?.stage || "response_watch_dispatch";
     diagnostic("assistant response watch failed", {
-      request_id: requestId,
-      handoff_id: message.handoff_id,
+      ...traceForMessage(message, { target_tab_id: tabId }),
       status: "error",
       error_code: errorCode,
       stage
@@ -730,9 +771,13 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket) {
       status: "error",
       error_code: errorCode,
       message: "ChatGPTのassistant応答監視を開始できませんでした。",
-      stage
+      stage,
+      ...(message.handoff_kind === "review" ? {
+        target_tab_id: message.target_tab_id,
+        target_tab_url: message.target_tab_url
+      } : {})
     }, bridgeSocket);
-    return;
+    return false;
   }
 
   if (!watchResult
@@ -745,8 +790,7 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket) {
     const errorCode = watchResult?.error_code || "content_script_unavailable";
     const stage = watchResult?.stage || "response_watch_result_invalid";
     diagnostic("assistant response watch failed", {
-      request_id: requestId,
-      handoff_id: message.handoff_id,
+      ...traceForMessage(message, { target_tab_id: tabId }),
       status: "error",
       error_code: errorCode,
       stage
@@ -759,41 +803,106 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket) {
       status: "error",
       error_code: errorCode,
       message: watchResult?.message || "ChatGPTのassistant応答監視を開始できませんでした。",
-      stage
+      stage,
+      ...(message.handoff_kind === "review" ? {
+        target_tab_id: message.target_tab_id,
+        target_tab_url: message.target_tab_url
+      } : {})
     }, bridgeSocket);
-    return;
+    return false;
   }
 
-  diagnostic("assistant response watch started", {
-    request_id: requestId,
-    handoff_id: message.handoff_id,
+  diagnostic("response watch armed", {
+    ...traceForMessage(message, { target_tab_id: tabId }),
     status: "watching",
-    stage: watchResult.stage || "response_watch_started"
+    stage: "response_watch_armed",
+    target_tab_id: tabId
   });
+  return true;
+}
+
+async function resolveHandoffTarget(message) {
+  if (message?.handoff_kind === "review") {
+    if (!Number.isSafeInteger(message.target_tab_id) || message.target_tab_id < 0
+      || typeof message.target_tab_url !== "string"
+      || chatGptConversationKey(message.target_tab_url) === null) {
+      return {
+        tab: null,
+        error: handoffResult(message, "error", "review_target_tab_not_found", "初回Handoffと同じChatGPTタブ情報がありません。", "target_tab_check")
+      };
+    }
+
+    try {
+      const targetTab = await chrome.tabs.get(message.target_tab_id);
+      if (!targetTab
+        || targetTab.id !== message.target_tab_id
+        || !isChatGptTab(targetTab)
+        || !isSameChatGptConversation(targetTab.url, message.target_tab_url)) {
+        return {
+          tab: null,
+          error: handoffResult(message, "error", "review_target_tab_not_found", "初回Handoffと同じChatGPTタブが見つかりません。", "target_tab_check")
+        };
+      }
+      diagnostic("review target tab found", {
+        request_id: message.request_id,
+        handoff_id: message.handoff_id,
+        stage: "target_tab_found",
+        target_tab_id: targetTab.id
+      });
+      return { tab: targetTab, error: null };
+    } catch (_) {
+      return {
+        tab: null,
+        error: handoffResult(message, "error", "review_target_tab_not_found", "初回Handoffと同じChatGPTタブを確認できません。", "target_tab_check")
+      };
+    }
+  }
+
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const activeTab = tabs?.[0];
+  if (!activeTab || !isChatGptTab(activeTab)) {
+    return {
+      tab: null,
+      error: handoffResult(message, "error", "active_tab_not_chatgpt", "アクティブなタブはChatGPTではありません。", "active_tab_check")
+    };
+  }
+  if (activeTab.id === undefined) {
+    return {
+      tab: null,
+      error: handoffResult(message, "error", "content_script_unavailable", "アクティブなChatGPTタブを操作できません。", "tab_id_unavailable")
+    };
+  }
+  return { tab: activeTab, error: null };
 }
 
 async function sendHandoffToActiveTab(message, bridgeSocket) {
   let result;
   let activeTabId = null;
   try {
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    const activeTab = tabs?.[0];
-    if (!activeTab || !isChatGptTab(activeTab)) {
-      result = handoffResult(message, "error", "active_tab_not_chatgpt", "アクティブなタブはChatGPTではありません。", "active_tab_check");
-    } else if (activeTab.id === undefined) {
-      result = handoffResult(message, "error", "content_script_unavailable", "アクティブなChatGPTタブを操作できません。", "tab_id_unavailable");
+    const target = await resolveHandoffTarget(message);
+    const targetTab = target.tab;
+    if (target.error) {
+      result = target.error;
     } else {
-      activeTabId = activeTab.id;
+      activeTabId = targetTab.id;
       let contentResult;
       try {
-        contentResult = await dispatchToContentScript(activeTab.id, {
+        contentResult = await dispatchToContentScript(targetTab.id, {
           type: "HANDOFF_SEND",
           requestId: message.request_id,
           sessionId: message.session_id,
           handoffId: message.handoff_id,
           boundaryId: message.boundary_id,
           protocol: HANDOFF_PROTOCOL,
-          payload: message.payload
+          payload: message.payload,
+          ...(message.handoff_kind === "review" ? {
+            review: true,
+            expectedAttachment: {
+              mediaId: message.review_media_id,
+              fileName: message.review_file_name,
+              iteration: message.review_iteration
+            }
+          } : {})
         }, message);
       } catch (error) {
         const errorCode = error?.code === "send_failed" ? "send_failed" : "content_script_unavailable";
@@ -818,7 +927,7 @@ async function sendHandoffToActiveTab(message, bridgeSocket) {
         if (!contentResult || contentResult.request_id !== message.request_id || contentResult.handoff_id !== message.handoff_id) {
           result = handoffResult(message, "error", "content_script_unavailable", "Content Scriptから有効な送信結果を受け取れませんでした。", "content_result_invalid");
         } else if (contentResult.status === "sent") {
-          result = handoffResult(message, "sent", null, null, contentResult.stage, activeTab);
+          result = handoffResult(message, "sent", null, null, contentResult.stage, targetTab);
         } else if (contentResult.status === "error") {
           result = handoffResult(
             message,
@@ -836,21 +945,35 @@ async function sendHandoffToActiveTab(message, bridgeSocket) {
   }
 
   diagnostic("result status", {
+    ...traceForMessage(message, { target_tab_id: activeTabId }),
     request_id: result.request_id,
     handoff_id: result.handoff_id,
     status: result.status,
     error_code: result.error_code,
     stage: result.stage
   });
-  const resultSent = sendHandoffResultToBridge(result, bridgeSocket);
-  if (resultSent && result.status === "sent" && activeTabId !== null) {
-    // Confirm the Phase 2 user message to Desktop first. The response watcher
-    // is started on the same tab only after that boundary is durable there.
+  if (result.status === "sent" && activeTabId !== null) {
+    // Arm the response watcher before acknowledging handoff.result. ChatGPT
+    // may begin generating immediately after the user message is accepted;
+    // arming afterwards creates a race in which a fast Review response can be
+    // emitted before the Background has a correlation entry. Desktop already
+    // queues an assistant.response that races SENT persistence, so this order
+    // preserves both transport boundaries without weakening validation.
     await startAssistantResponseWatch(activeTabId, message, bridgeSocket);
+  }
+  const resultSent = sendHandoffResultToBridge(result, bridgeSocket, message);
+  if (resultSent && result.status === "sent") {
+    diagnostic(message.handoff_kind === "review" ? "review handoff sent" : "handoff sent", {
+      ...traceForMessage(message, { target_tab_id: activeTabId }),
+      request_id: result.request_id,
+      handoff_id: result.handoff_id,
+      status: result.status,
+      stage: message.handoff_kind === "review" ? "review_handoff_sent" : "handoff_sent"
+    });
   }
 }
 
-function handleAssistantResponseFromContent(message, sender) {
+async function handleAssistantResponseFromContent(message, sender) {
   const requestId = message?.requestId || message?.request_id;
   const sessionId = message?.sessionId || message?.session_id;
   const handoffId = message?.handoffId || message?.handoff_id;
@@ -859,7 +982,9 @@ function handleAssistantResponseFromContent(message, sender) {
   if (!pending || sender?.tab?.id !== pending.tabId) {
     diagnostic("assistant response rejected", {
       request_id: requestId,
+      session_id: sessionId,
       handoff_id: handoffId,
+      boundary_id: boundaryId,
       status: "error",
       error_code: "response_not_correlated",
       stage: "response_watch_context"
@@ -869,12 +994,57 @@ function handleAssistantResponseFromContent(message, sender) {
   if (sessionId !== pending.sessionId || handoffId !== pending.handoffId || boundaryId !== pending.boundaryId) {
     diagnostic("assistant response rejected", {
       request_id: requestId,
+      session_id: sessionId,
       handoff_id: handoffId,
+      boundary_id: boundaryId,
       status: "error",
       error_code: "response_not_correlated",
       stage: "response_identity_mismatch"
     });
     return;
+  }
+
+  // Review responses are bound to the tab/conversation that accepted the
+  // Review Handoff. A content script can survive an SPA navigation, so the
+  // sender tab id alone is not sufficient. Re-check the current URL before
+  // forwarding the response; otherwise a response from a different ChatGPT
+  // conversation could be correlated as the current iteration's result.
+  if (pending.isReview) {
+    let targetTab;
+    try {
+      targetTab = await chrome.tabs.get(pending.tabId);
+    } catch (_) {
+      targetTab = null;
+    }
+    if (!targetTab
+      || targetTab.id !== pending.tabId
+      || !isChatGptTab(targetTab)
+      || !isSameChatGptConversation(targetTab.url, pending.targetTabUrl)) {
+      responseWatches.delete(requestId);
+      diagnostic("assistant response rejected", {
+        request_id: requestId,
+        session_id: sessionId,
+        handoff_id: handoffId,
+        boundary_id: boundaryId,
+        status: "error",
+        error_code: "review_target_tab_not_found",
+        stage: "target_tab_check",
+        target_tab_id: pending.tabId
+      });
+      sendAssistantResponseToBridge({
+        request_id: requestId,
+        session_id: sessionId,
+        handoff_id: handoffId,
+        boundary_id: boundaryId,
+        status: "error",
+        error_code: "review_target_tab_not_found",
+        message: "Review Handoffの対象ChatGPT会話が変わったため応答を受け付けません。",
+        stage: "target_tab_check",
+        target_tab_id: pending.tabId,
+        target_tab_url: pending.targetTabUrl
+      }, pending.bridgeSocket);
+      return;
+    }
   }
 
   responseWatches.delete(requestId);
@@ -900,10 +1070,13 @@ function handleAssistantResponseFromContent(message, sender) {
 
   diagnostic("assistant response received", {
     request_id: requestId,
+    session_id: sessionId,
     handoff_id: handoffId,
+    boundary_id: boundaryId,
     status,
     error_code: errorCode,
-    stage
+    stage: "assistant_response_received",
+    target_tab_id: pending.tabId
   });
   sendAssistantResponseToBridge({
     request_id: requestId,
@@ -914,7 +1087,11 @@ function handleAssistantResponseFromContent(message, sender) {
     payload: responsePayload,
     error_code: errorCode,
     message: responseMessage,
-    stage
+    stage,
+    ...(pending.isReview ? {
+      target_tab_id: pending.tabId,
+      target_tab_url: pending.targetTabUrl
+    } : {})
   }, pending.bridgeSocket);
 }
 
@@ -938,10 +1115,9 @@ function handleBridgeMessage(message, bridgeSocket) {
   if (message.type === "handoff.send") {
     // Background only selects the active tab and relays the request. All DOM
     // discovery and mutation remains in the ChatGPT Content Script.
-    diagnostic("background received", {
-      request_id: message.request_id,
-      handoff_id: message.handoff_id
-    });
+    diagnostic("background received", traceForMessage(message, {
+      stage: message.handoff_kind === "review" ? "review_handoff_received" : "handoff_received"
+    }));
     void sendHandoffToActiveTab(message, bridgeSocket);
     return;
   }
@@ -1202,9 +1378,14 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === ASSISTANT_RESPONSE_RESULT_MESSAGE_TYPE) {
-    handleAssistantResponseFromContent(message, _sender);
-    sendResponse({ ok: true });
-    return false;
+    // Keep the MV3 service worker event alive until the Review target check
+    // and authenticated WebSocket relay have completed. Returning before the
+    // async tab lookup can otherwise let the worker suspend and silently lose
+    // a valid assistant.response.
+    handleAssistantResponseFromContent(message, _sender)
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false, error: "assistant_response_relay_failed" }));
+    return true;
   }
 
   const operation = (async () => {

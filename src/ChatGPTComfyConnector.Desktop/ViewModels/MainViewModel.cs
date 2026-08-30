@@ -18,6 +18,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
 {
     private static readonly TimeSpan ComfyUiStartupTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan ComfyUiStartupPollInterval = TimeSpan.FromSeconds(1);
+    private const long MaxReviewMediaBytes = 512L * 1024 * 1024;
+    private static readonly TimeSpan ReviewMediaStabilityPollInterval = TimeSpan.FromMilliseconds(150);
+    private static readonly TimeSpan ReviewMediaStabilityTimeout = TimeSpan.FromSeconds(5);
     private readonly PortableLayout _layout;
     private readonly PortableStore _store;
     private readonly ComfyMcpClientProxy _mcp;
@@ -28,6 +31,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly SemaphoreSlim _comfyUiStartGate = new(1, 1);
     private readonly SemaphoreSlim _generationGate = new(1, 1);
     private readonly SemaphoreSlim _bootstrapHandoffGate = new(1, 1);
+    private readonly SemaphoreSlim _reviewMediaAttachmentGate = new(1, 1);
     private CreationSession? _currentSession;
     private WorkflowIdentity? _selectedWorkflow;
     private JobSnapshot? _currentJob;
@@ -136,7 +140,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<ProjectContextOption> ProjectOptions { get; }
     public ObservableCollection<ChatContextOption> ChatOptions { get; }
     public ObservableCollection<HandoffTimelineItem> HandoffItems { get; }
-    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); OnPropertyChanged(nameof(CurrentGenerateExecutionState)); OnPropertyChanged(nameof(GenerateExecutionStateText)); OnPropertyChanged(nameof(AutomaticResponseExecutionText)); NotifyPipelineStateChanged(); } }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); OnPropertyChanged(nameof(CurrentGenerateExecutionState)); OnPropertyChanged(nameof(GenerateExecutionStateText)); OnPropertyChanged(nameof(AutomaticResponseExecutionText)); OnPropertyChanged(nameof(ReviewMediaAttachment)); OnPropertyChanged(nameof(HasReviewMediaAttachment)); OnPropertyChanged(nameof(ReviewMediaAttachmentStateText)); OnPropertyChanged(nameof(IsReviewMediaAttachmentFailed)); OnPropertyChanged(nameof(CanAttachReviewOutput)); NotifyPipelineStateChanged(); } }
     public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); NotifyContextSelectionChanged(); } }
     public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
@@ -347,6 +351,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
             : _browserExtensionBridge.Status.IsRunning
                 ? "Extensionの接続を待機中"
                 : "Desktop終了時に停止します";
+    public ReviewMediaAttachmentSnapshot? ReviewMediaAttachment => _isCurrentSessionActivated ? CurrentSession?.Pipeline.ReviewMediaAttachment : null;
+    public bool HasReviewMediaAttachment => ReviewMediaAttachment is not null;
+    public string ReviewMediaAttachmentStateText => ReviewMediaAttachment?.State switch
+    {
+        ReviewMediaAttachmentState.Preparing => "生成結果をChatGPTへ添付準備中",
+        ReviewMediaAttachmentState.Attaching => "生成結果をChatGPTへ添付中",
+        ReviewMediaAttachmentState.Attached => "生成結果をChatGPTへ添付済み · Review Handoff送信待ち",
+        ReviewMediaAttachmentState.Failed => $"生成結果のChatGPT添付に失敗 · {ReviewMediaAttachment.ErrorCode ?? "再試行可能"}",
+        _ => "生成結果をChatGPTへ添付待ち",
+    };
+    public bool IsReviewMediaAttachmentFailed => ReviewMediaAttachment?.State == ReviewMediaAttachmentState.Failed;
+    public bool CanAttachReviewOutput
+    {
+        get
+        {
+            if (!_isCurrentSessionActivated || !IsBrowserExtensionConnected || ReviewMediaAttachment?.State != ReviewMediaAttachmentState.Failed)
+                return false;
+
+            var iteration = CurrentSession?.Iterations.FirstOrDefault(item => item.Number == ReviewMediaAttachment.Iteration);
+            return iteration is { Status: JobStatus.Completed }
+                && iteration.Outputs.FirstOrDefault() is { IsMissing: false };
+        }
+    }
     public bool IsSystemProcessing => IsBusy || IsJobActive;
     public string ConnectorSystemState => IsSystemProcessing ? "PROCESSING" : "ONLINE";
     public string McpSystemState => IsSystemProcessing && IsConnected ? "PROCESSING" : ConnectionStateText;
@@ -936,6 +963,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task StartNewCreationAsync()
     {
         ValidateNewCreationSetup();
+        RevokeReviewMediaRegistration(CurrentSession);
         var session = new CreationSession
         {
             Title = $"{SelectedProject!.DisplayName} / {SelectedChat!.DisplayName}",
@@ -962,6 +990,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         ValidateNewCreationSetup();
         if (!_isCurrentSessionActivated || CurrentSession is null) throw new InvalidOperationException("先に新しい制作を開始してください。");
+        RevokeReviewMediaRegistration(CurrentSession);
         CurrentSession.ProjectLabel = SelectedProject!.DisplayName;
         CurrentSession.ChatLabel = SelectedChat!.DisplayName;
         CurrentSession.ProjectId = SelectedProject.ExternalId;
@@ -1024,6 +1053,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var changes = BuildChanges();
         if (applyFirst && (IsDirty || CreationPipelineStateMachine.Get(session, CreationStage.Apply).State != CreationStageState.Completed)) await ApplySlotsAsync();
         await EnsureComfyUiForStageAsync(session, CreationStage.Generate);
+        // Starting a new generation invalidates any previous temporary
+        // Review media registration. The state machine clears its persisted
+        // attachment projection at the same boundary below.
+        RevokeReviewMediaRegistration(session);
         CreationPipelineStateMachine.BeginGenerate(session);
         var prompt = FindPrompt(changes) ?? Idea;
         var iteration = session.StartIteration(prompt, changes);
@@ -1421,6 +1454,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 failureStage: result.IsSent ? null : result.Stage);
             if (result.IsSent)
             {
+                // Bind later Review media to the exact tab that accepted this
+                // Session's initial Handoff. It must not depend on the tab
+                // that happens to be active when ComfyUI finishes.
+                CurrentSession.BrowserExtensionTargetTabId = result.TargetTabId;
+                CurrentSession.BrowserExtensionTargetTabUrl = result.TargetTabId.HasValue ? result.TargetTabUrl : null;
+                await SaveActiveSessionAsync();
                 await DrainQueuedBrowserExtensionResponseAsync(request.RequestId);
             }
             else
@@ -1633,6 +1672,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         if (CurrentSession is null) return;
         CreationPipelineStateMachine.Complete(CurrentSession, reason);
+        RevokeReviewMediaRegistration(CurrentSession);
         RefreshHistoryFlags();
         OnPropertyChanged(nameof(SessionStatusText));
         OnPropertyChanged(nameof(CanResumeSession));
@@ -1874,6 +1914,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     Payload = resultPayload,
                     IterationNumber = iteration.Number,
                 });
+                await TryAttachPrimaryOutputAsync(iteration);
                 NotifyPipelineStateChanged();
                 break;
             }
@@ -2425,6 +2466,396 @@ public sealed class MainViewModel : INotifyPropertyChanged
         return ConnectorContextBuilder.BuildResult(session, iteration, session.PendingHandoff);
     }
 
+    private void RevokeReviewMediaRegistration(CreationSession? session)
+    {
+        var mediaId = session?.Pipeline.ReviewMediaAttachment?.MediaId;
+        if (string.IsNullOrWhiteSpace(mediaId)) return;
+
+        // Revoke only the opaque process-local registration. The original
+        // ComfyUI output remains untouched and can still be used for a
+        // deliberate retry or manual attachment.
+        _browserExtensionBridge.RevokeMedia(mediaId);
+    }
+
+    /// <summary>
+    /// Attaches the Primary Output owned by one completed iteration to the
+    /// ChatGPT tab that accepted this session's Bootstrap Handoff. Media
+    /// delivery is a separate transport operation and never rebuilds the
+    /// Review Handoff or its PendingHandoff identity.
+    /// </summary>
+    private async Task TryAttachPrimaryOutputAsync(SessionIteration iteration, bool explicitRetry = false)
+    {
+        await _reviewMediaAttachmentGate.WaitAsync();
+        try
+        {
+            await TryAttachPrimaryOutputCoreAsync(iteration, explicitRetry);
+        }
+        finally
+        {
+            _reviewMediaAttachmentGate.Release();
+        }
+    }
+
+    private async Task TryAttachPrimaryOutputCoreAsync(SessionIteration iteration, bool explicitRetry)
+    {
+        var session = CurrentSession;
+        if (!_isCurrentSessionActivated || session is null || iteration.Status != JobStatus.Completed) return;
+
+        var output = iteration.Outputs.FirstOrDefault();
+        if (output is null)
+        {
+            StatusMessage = $"Iteration {iteration.Number} のPrimary Outputが見つかりません。";
+            NotifyPipelineStateChanged();
+            return;
+        }
+
+        string fullPath = string.Empty;
+        string outputRoot = string.Empty;
+        FileInfo? stableFile = null;
+        var pathIsSafe = false;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(output.FullPath))
+            {
+                fullPath = Path.GetFullPath(output.FullPath);
+                outputRoot = Path.GetFullPath(OutputRoot);
+                pathIsSafe = PathSafety.IsWithin(outputRoot, fullPath);
+                if (pathIsSafe && File.Exists(fullPath))
+                    stableFile = await WaitForStableReviewOutputAsync(fullPath);
+            }
+        }
+        catch (Exception)
+        {
+            // Exception text can contain a local path. Keep this failure
+            // diagnostic generic and path-free.
+            pathIsSafe = false;
+            stableFile = null;
+        }
+
+        var fileName = ResolveReviewFileName(output, fullPath);
+        var size = stableFile?.Length ?? 0;
+        var lastWriteTicks = stableFile?.LastWriteTimeUtc.Ticks ?? 0;
+        var outputIdentity = BuildReviewOutputIdentity(fileName, size, lastWriteTicks, iteration);
+        var mimeType = BrowserExtensionMediaTypes.TryResolve(output.FileName, output.Type, out var resolvedMime)
+            ? resolvedMime
+            : string.Empty;
+        var existing = session.Pipeline.ReviewMediaAttachment;
+        var sameOutput = existing is not null
+            && existing.Iteration == iteration.Number
+            && string.Equals(existing.OutputIdentity, outputIdentity, StringComparison.Ordinal);
+
+        if (sameOutput && existing!.State is (ReviewMediaAttachmentState.Preparing or ReviewMediaAttachmentState.Attaching or ReviewMediaAttachmentState.Attached))
+            return;
+        if (sameOutput && existing is { State: ReviewMediaAttachmentState.Failed } && !explicitRetry)
+            return;
+
+        if (existing?.MediaId is { Length: > 0 }) _browserExtensionBridge.RevokeMedia(existing.MediaId);
+
+        CreationPipelineStateMachine.ReviewMediaPreparing(
+            session,
+            iteration.Number,
+            session.Id,
+            outputIdentity,
+            fileName,
+            mimeType,
+            size);
+        await SaveActiveSessionAsync();
+        NotifyPipelineStateChanged();
+
+        if (!pathIsSafe || stableFile is null)
+        {
+            await FailReviewMediaAttachmentAsync(
+                session,
+                iteration,
+                outputIdentity,
+                BrowserExtensionReviewMediaErrorCodes.ReviewOutputNotFound,
+                "output_resolved",
+                "生成完了したPrimary Outputを安定したファイルとして確認できませんでした。");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(fileName) || !IsSafeReviewFileName(fileName))
+        {
+            await FailReviewMediaAttachmentAsync(
+                session,
+                iteration,
+                outputIdentity,
+                BrowserExtensionReviewMediaErrorCodes.ReviewOutputNotFound,
+                "output_resolved",
+                "Primary Outputのファイル名を確認できませんでした。");
+            return;
+        }
+
+        if (!BrowserExtensionMediaTypes.IsSupported(mimeType))
+        {
+            await FailReviewMediaAttachmentAsync(
+                session,
+                iteration,
+                outputIdentity,
+                BrowserExtensionReviewMediaErrorCodes.UnsupportedMediaType,
+                "output_resolved",
+                "Primary OutputはPhase 5.1で対応していないMIME typeです。");
+            return;
+        }
+
+        if (size <= 0 || size > MaxReviewMediaBytes)
+        {
+            await FailReviewMediaAttachmentAsync(
+                session,
+                iteration,
+                outputIdentity,
+                size > MaxReviewMediaBytes
+                    ? BrowserExtensionReviewMediaErrorCodes.MediaTooLarge
+                    : BrowserExtensionReviewMediaErrorCodes.ReviewOutputNotFound,
+                "output_resolved",
+                size > MaxReviewMediaBytes
+                    ? "Primary Outputが許可されたサイズ上限を超えています。"
+                    : "Primary Outputのサイズを確認できませんでした。");
+            return;
+        }
+
+        var targetTabId = session.BrowserExtensionTargetTabId;
+        var targetTabUrl = session.BrowserExtensionTargetTabUrl;
+        if (!targetTabId.HasValue || string.IsNullOrWhiteSpace(targetTabUrl))
+        {
+            await FailReviewMediaAttachmentAsync(
+                session,
+                iteration,
+                outputIdentity,
+                BrowserExtensionReviewMediaErrorCodes.ReviewTargetTabNotFound,
+                "target_tab_check",
+                "このSessionのHandoff送信先ChatGPTタブが記録されていません。");
+            return;
+        }
+
+        if (!IsBrowserExtensionConnected)
+        {
+            await FailReviewMediaAttachmentAsync(
+                session,
+                iteration,
+                outputIdentity,
+                BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected,
+                "bridge_connection",
+                "Browser Extension Bridgeに接続されていません。");
+            return;
+        }
+
+        var mediaId = Guid.NewGuid().ToString("N");
+        var requestId = Guid.NewGuid().ToString("N");
+        var expiresAt = DateTimeOffset.UtcNow.AddMinutes(10);
+        try
+        {
+            _browserExtensionBridge.RegisterMedia(new BrowserExtensionMediaRegistration
+            {
+                MediaId = mediaId,
+                SessionId = session.Id,
+                Iteration = iteration.Number,
+                OutputIdentity = outputIdentity,
+                FileName = fileName,
+                MimeType = mimeType,
+                Size = size,
+                ExpiresAt = expiresAt,
+                FullPath = fullPath,
+                AllowedRoot = outputRoot,
+            });
+        }
+        catch (Exception)
+        {
+            await FailReviewMediaAttachmentAsync(
+                session,
+                iteration,
+                outputIdentity,
+                BrowserExtensionReviewMediaErrorCodes.MediaRegistrationFailed,
+                "media_registered",
+                "生成物を一時Mediaとして登録できませんでした。");
+            return;
+        }
+
+        CreationPipelineStateMachine.ReviewMediaAttaching(
+            session,
+            requestId,
+            mediaId,
+            targetTabId,
+            targetTabUrl);
+        await SaveActiveSessionAsync();
+        NotifyPipelineStateChanged();
+
+        BrowserExtensionMediaAttachResult result;
+        try
+        {
+            result = await _browserExtensionBridge.SendMediaAttachAsync(new BrowserExtensionMediaAttachRequest(
+                requestId,
+                session.Id,
+                iteration.Number,
+                mediaId,
+                fileName,
+                mimeType,
+                size,
+                targetTabId.Value,
+                targetTabUrl));
+        }
+        catch (Exception)
+        {
+            result = new(
+                requestId,
+                session.Id,
+                iteration.Number,
+                mediaId,
+                "error",
+                BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected,
+                "Browser Extension Bridgeとの通信に失敗しました。",
+                "bridge_connection");
+        }
+
+        if (result.IsAttached)
+        {
+            CreationPipelineStateMachine.ReviewMediaAttached(session, result);
+            UpdateGenerationResultTransport(iteration, HandoffTransportState.Attached, null, null);
+            _browserExtensionBridge.RevokeMedia(mediaId);
+            await SaveActiveSessionAsync();
+            StatusMessage = "生成結果を同じChatGPT会話へ添付しました。Review Handoff送信待ちです。";
+            NotifyPipelineStateChanged();
+            return;
+        }
+
+        _browserExtensionBridge.RevokeMedia(mediaId);
+        await FailReviewMediaAttachmentAsync(
+            session,
+            iteration,
+            outputIdentity,
+            result.ErrorCode ?? BrowserExtensionReviewMediaErrorCodes.AttachmentUploadFailed,
+            result.Stage ?? "attachment_uploading",
+            result.Message ?? "ChatGPTへの生成物添付に失敗しました。");
+    }
+
+    /// <summary>Explicit retry entry point. Reconnection alone never calls this.</summary>
+    public async Task AttachReviewOutputAsync()
+    {
+        var session = CurrentSession;
+        if (!_isCurrentSessionActivated || session is null)
+            throw new InvalidOperationException("制作セッションがありません。");
+        if (session.Pipeline.ReviewMediaAttachment?.State != ReviewMediaAttachmentState.Failed)
+            throw new InvalidOperationException("再添付できる失敗状態の生成物がありません。");
+
+        var attachment = session.Pipeline.ReviewMediaAttachment;
+        var iteration = session.Iterations.FirstOrDefault(item => item.Number == attachment!.Iteration);
+        if (iteration is null)
+            throw new InvalidOperationException("再添付対象のIterationが見つかりません。");
+
+        await TryAttachPrimaryOutputAsync(iteration, explicitRetry: true);
+    }
+
+    private async Task FailReviewMediaAttachmentAsync(
+        CreationSession session,
+        SessionIteration iteration,
+        string outputIdentity,
+        string errorCode,
+        string stage,
+        string message)
+    {
+        if (session.Pipeline.ReviewMediaAttachment is not { Iteration: var attachmentIteration }
+            || attachmentIteration != iteration.Number
+            || !string.Equals(session.Pipeline.ReviewMediaAttachment.OutputIdentity, outputIdentity, StringComparison.Ordinal))
+        {
+            CreationPipelineStateMachine.ReviewMediaPreparing(
+                session,
+                iteration.Number,
+                session.Id,
+                outputIdentity,
+                session.Pipeline.ReviewMediaAttachment?.FileName ?? string.Empty,
+                session.Pipeline.ReviewMediaAttachment?.MimeType ?? string.Empty,
+                session.Pipeline.ReviewMediaAttachment?.Size ?? 0);
+        }
+
+        CreationPipelineStateMachine.ReviewMediaFailed(session, errorCode, stage, message);
+        UpdateGenerationResultTransport(iteration, HandoffTransportState.Failed, errorCode, stage);
+        await SaveActiveSessionAsync();
+        StatusMessage = $"生成結果のChatGPT添付に失敗しました。({errorCode}, stage={stage})";
+        NotifyPipelineStateChanged();
+    }
+
+    private void UpdateGenerationResultTransport(
+        SessionIteration iteration,
+        HandoffTransportState state,
+        string? errorCode,
+        string? stage)
+    {
+        var message = CurrentSession?.HandoffMessages.LastOrDefault(item =>
+            item.Direction == HandoffDirection.ComfyToChatGpt
+            && item.Kind == HandoffMessageKind.GenerationResult
+            && item.IterationNumber == iteration.Number);
+        if (message is null) return;
+
+        message.State = state;
+        message.TransportErrorCode = state == HandoffTransportState.Failed ? errorCode : null;
+        message.TransportErrorStage = state == HandoffTransportState.Failed ? stage : null;
+        RebuildHandoffItems();
+    }
+
+    private static async Task<FileInfo?> WaitForStableReviewOutputAsync(string fullPath)
+    {
+        var deadline = DateTimeOffset.UtcNow + ReviewMediaStabilityTimeout;
+        long? previousSize = null;
+        DateTime? previousWrite = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            try
+            {
+                if (File.Exists(fullPath))
+                {
+                    var current = new FileInfo(fullPath);
+                    if (current.Length > 0
+                        && previousSize == current.Length
+                        && previousWrite == current.LastWriteTimeUtc)
+                    {
+                        return current;
+                    }
+
+                    previousSize = current.Length;
+                    previousWrite = current.LastWriteTimeUtc;
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+
+            await Task.Delay(ReviewMediaStabilityPollInterval);
+        }
+
+        return null;
+    }
+
+    private static string ResolveReviewFileName(OutputArtifact output, string fullPath)
+    {
+        var fileName = Path.GetFileName(output.FileName ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(fileName) && !string.IsNullOrWhiteSpace(fullPath))
+            fileName = Path.GetFileName(fullPath);
+        return fileName;
+    }
+
+    private static bool IsSafeReviewFileName(string value)
+        => !string.IsNullOrWhiteSpace(value)
+            && value.Length <= 255
+            && value is not "." and not ".."
+            && !value.Contains('/')
+            && !value.Contains('\\')
+            && string.Equals(Path.GetFileName(value), value, StringComparison.Ordinal)
+            && !value.Any(static character => char.IsControl(character) || character is '"' or '\r' or '\n');
+
+    private static string BuildReviewOutputIdentity(
+        string fileName,
+        long size,
+        long lastWriteTicks,
+        SessionIteration iteration)
+    {
+        var material = string.Join('\u001f',
+            fileName,
+            size.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            lastWriteTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            iteration.Number.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            iteration.CreatedAt.UtcDateTime.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(material)));
+    }
+
     private static string NormalizeWorkflowName(string name)
     {
         var value = Path.GetFileNameWithoutExtension(name ?? string.Empty).Trim();
@@ -2456,6 +2887,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(BrowserExtensionEndpoint));
             OnPropertyChanged(nameof(BrowserExtensionStatusDetail));
             OnPropertyChanged(nameof(SystemConnectionSummary));
+            OnPropertyChanged(nameof(HasReviewMediaAttachment));
+            OnPropertyChanged(nameof(ReviewMediaAttachmentStateText));
+            OnPropertyChanged(nameof(IsReviewMediaAttachmentFailed));
+            OnPropertyChanged(nameof(CanAttachReviewOutput));
             OnPropertyChanged(nameof(CanResendBootstrapHandoff));
             OnPropertyChanged(nameof(CanSendToChatGpt));
             OnPropertyChanged(nameof(SendToChatGptButtonText));
@@ -3078,6 +3513,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CurrentGenerateExecutionState));
         OnPropertyChanged(nameof(GenerateExecutionStateText));
         OnPropertyChanged(nameof(AutomaticResponseExecutionText));
+        OnPropertyChanged(nameof(ReviewMediaAttachment));
+        OnPropertyChanged(nameof(HasReviewMediaAttachment));
+        OnPropertyChanged(nameof(ReviewMediaAttachmentStateText));
+        OnPropertyChanged(nameof(IsReviewMediaAttachmentFailed));
+        OnPropertyChanged(nameof(CanAttachReviewOutput));
         OnPropertyChanged(nameof(CurrentIterationLabel));
         OnPropertyChanged(nameof(PipelineLoopText));
         OnPropertyChanged(nameof(HasIterationSafetyStop));

@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace ChatGPTComfyConnector.Core.Models;
 
@@ -31,6 +32,7 @@ public static class BrowserExtensionBridgeProtocol
     public const string PingPath = "/api/v1/ping";
     public const string PairPath = "/api/v1/pair";
     public const string BootstrapPath = "/api/v1/bootstrap";
+    public const string MediaPathPrefix = "/api/v1/media/";
     public const string ClientHeaderName = "X-Connector-Client";
     public const string ClientHeaderValue = "browser-extension";
     public const string ExtensionClientName = "browser-extension";
@@ -76,6 +78,75 @@ public static class BrowserExtensionAssistantResponseErrorCodes
 }
 
 /// <summary>
+/// Errors reported while the Extension attaches a completed ComfyUI output
+/// to the ChatGPT tab that owns the current creation boundary.
+/// </summary>
+public static class BrowserExtensionReviewMediaErrorCodes
+{
+    public const string ReviewOutputNotFound = "review_output_not_found";
+    public const string MediaRegistrationFailed = "media_registration_failed";
+    public const string MediaExpired = "media_expired";
+    public const string MediaFetchFailed = "media_fetch_failed";
+    public const string MediaTooLarge = "media_too_large";
+    public const string UnsupportedMediaType = "unsupported_media_type";
+    public const string ReviewTargetTabNotFound = "review_target_tab_not_found";
+    public const string ContentScriptUnavailable = "content_script_unavailable";
+    public const string AttachmentControlNotFound = "attachment_control_not_found";
+    public const string AttachmentInputFailed = "attachment_input_failed";
+    public const string AttachmentUploadFailed = "attachment_upload_failed";
+    public const string AttachmentTimeout = "attachment_timeout";
+    public const string AttachmentVerificationFailed = "attachment_verification_failed";
+    public const string BridgeDisconnected = "bridge_disconnected";
+}
+
+/// <summary>
+/// The MIME allow-list for Phase 5.1.  Extension code receives the resolved
+/// MIME value, but never a local path.  Keeping this list shared prevents the
+/// Desktop registration and Bridge download endpoint from disagreeing.
+/// </summary>
+public static class BrowserExtensionMediaTypes
+{
+    public const string Mp4 = "video/mp4";
+    public const string Png = "image/png";
+    public const string Jpeg = "image/jpeg";
+    public const string Webp = "image/webp";
+
+    private static readonly IReadOnlyDictionary<string, string> ExtensionMap =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [".mp4"] = Mp4,
+            [".png"] = Png,
+            [".jpg"] = Jpeg,
+            [".jpeg"] = Jpeg,
+            [".webp"] = Webp,
+        };
+
+    public static bool IsSupported(string? mimeType)
+        => mimeType is not null
+            && mimeType.Trim().ToLowerInvariant() is Mp4 or Png or Jpeg or Webp;
+
+    public static bool TryResolve(string? fileName, string? declaredType, out string mimeType)
+    {
+        var normalizedType = (declaredType ?? string.Empty).Trim().ToLowerInvariant();
+        if (IsSupported(normalizedType))
+        {
+            mimeType = normalizedType;
+            return true;
+        }
+
+        var extension = Path.GetExtension(fileName ?? string.Empty);
+        if (ExtensionMap.TryGetValue(extension, out var mapped))
+        {
+            mimeType = mapped;
+            return true;
+        }
+
+        mimeType = string.Empty;
+        return false;
+    }
+}
+
+/// <summary>
 /// A complete, already-rendered Handoff sent over the authenticated Bridge.
 /// The payload is intentionally supplied by the existing Handoff builder;
 /// the Extension must not create a second representation of it.
@@ -97,9 +168,63 @@ public sealed record BrowserExtensionHandoffSendResult(
     string Status,
     string? ErrorCode = null,
     string? Message = null,
-    string? Stage = null)
+    string? Stage = null,
+    int? TargetTabId = null,
+    string? TargetTabUrl = null)
 {
     public bool IsSent => string.Equals(Status, "sent", StringComparison.Ordinal);
+}
+
+/// <summary>
+/// Desktop-only media registration.  FullPath and AllowedRoot are explicitly
+/// ignored by JSON serialization and are never placed on the Bridge wire.
+/// They exist only inside the Desktop/Infrastructure process boundary so the
+/// authenticated media endpoint can stream the registered output safely.
+/// </summary>
+public sealed class BrowserExtensionMediaRegistration
+{
+    public string MediaId { get; init; } = string.Empty;
+    public string SessionId { get; init; } = string.Empty;
+    public int Iteration { get; init; }
+    public string OutputIdentity { get; init; } = string.Empty;
+    public string FileName { get; init; } = string.Empty;
+    public string MimeType { get; init; } = string.Empty;
+    public long Size { get; init; }
+    public DateTimeOffset ExpiresAt { get; init; }
+
+    [JsonIgnore]
+    public string FullPath { get; init; } = string.Empty;
+
+    [JsonIgnore]
+    public string AllowedRoot { get; init; } = string.Empty;
+}
+
+/// <summary>
+/// Metadata-only command sent over the authenticated WebSocket.  The file
+/// bytes are fetched separately over the authenticated loopback media route.
+/// </summary>
+public sealed record BrowserExtensionMediaAttachRequest(
+    string RequestId,
+    string SessionId,
+    int Iteration,
+    string MediaId,
+    string FileName,
+    string MimeType,
+    long Size,
+    int TargetTabId,
+    string? TargetTabUrl = null);
+
+public sealed record BrowserExtensionMediaAttachResult(
+    string RequestId,
+    string SessionId,
+    int Iteration,
+    string MediaId,
+    string Status,
+    string? ErrorCode = null,
+    string? Message = null,
+    string? Stage = null)
+{
+    public bool IsAttached => string.Equals(Status, "attached", StringComparison.Ordinal);
 }
 
 /// <summary>
@@ -172,7 +297,10 @@ public sealed record BrowserExtensionBridgeDiagnostic(
     string? HandoffId = null,
     string? Status = null,
     string? ErrorCode = null,
-    string? Stage = null);
+    string? Stage = null,
+    string? MediaId = null,
+    int? Iteration = null,
+    int? TargetTabId = null);
 
 public sealed class BrowserExtensionBridgeDiagnosticEventArgs(BrowserExtensionBridgeDiagnostic diagnostic) : EventArgs
 {

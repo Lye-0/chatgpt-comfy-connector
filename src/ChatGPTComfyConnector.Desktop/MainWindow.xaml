@@ -1497,9 +1497,21 @@
                                                    Foreground="{StaticResource MutedTextBrush}"
                                                    FontSize="9"
                                                    Margin="0,2,0,0" />
+                                        <TextBlock Text="{Binding ReviewMediaAttachmentStateText}"
+                                                   Foreground="{StaticResource AccentBrush}"
+                                                   FontSize="8"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,2,0,0"
+                                                   Visibility="{Binding HasReviewMediaAttachment, Converter={StaticResource BoolToVisibility}}" />
                                     </StackPanel>
                                 </StackPanel>
                                 <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
+                                    <Button Content="CHATGPTへ添付"
+                                            ToolTip="失敗した生成結果を、同じSessionのChatGPTタブへ再添付"
+                                            Click="AttachReviewOutput_Click"
+                                            IsEnabled="{Binding CanAttachReviewOutput}"
+                                            Visibility="{Binding IsReviewMediaAttachmentFailed, Converter={StaticResource BoolToVisibility}}"
+                                            Margin="0,0,6,0" />
                                     <Button Content="GENERATE"
                                             ToolTip="validate後に1件のJobを生成"
                                             Background="{StaticResource WarmBrush}"

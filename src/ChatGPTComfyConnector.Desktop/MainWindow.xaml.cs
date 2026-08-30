@@ -234,6 +234,8 @@ public partial class MainWindow : Window
             ViewModel.StatusMessage = "生成結果をChatGPT用にコピーしました。必要な画像・動画を手動で添付してください。";
         });
     }
+    private async void AttachReviewOutput_Click(object sender, RoutedEventArgs e)
+        => await Run("生成結果をChatGPTへ添付", ViewModel.AttachReviewOutputAsync);
     private void OpenOutput_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { Tag: string path }) RunSync("出力を開く", () => ViewModel.OpenOutputFile(path));

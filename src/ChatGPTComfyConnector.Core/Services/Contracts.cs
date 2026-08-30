@@ -73,6 +73,11 @@ public interface IBrowserExtensionBridge : IAsyncDisposable
     Task<BrowserExtensionHandoffSendResult> SendHandoffAsync(
         BrowserExtensionHandoffSendRequest request,
         CancellationToken cancellationToken = default);
+    void RegisterMedia(BrowserExtensionMediaRegistration registration);
+    bool RevokeMedia(string mediaId);
+    Task<BrowserExtensionMediaAttachResult> SendMediaAttachAsync(
+        BrowserExtensionMediaAttachRequest request,
+        CancellationToken cancellationToken = default);
 }
 
 public interface IClipboardService

@@ -24,6 +24,7 @@ public sealed class HandoffTimelineItem : INotifyPropertyChanged
     {
         HandoffMessageKind.CreationRequest => "制作リクエストを送信",
         HandoffMessageKind.GenerationCommand => "生成指示",
+        HandoffMessageKind.GenerationResult when Message.State == HandoffTransportState.Attached => "生成結果を添付",
         HandoffMessageKind.GenerationResult => "生成結果を送信",
         HandoffMessageKind.ReviewRequest => "レビュー用情報を送信",
         HandoffMessageKind.RegenerationCommand => "再生成指示",

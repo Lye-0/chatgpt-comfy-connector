@@ -13,8 +13,11 @@ const wait = (milliseconds = 0) => new Promise((resolve) => setTimeout(resolve, 
 
 async function createHarness() {
   let activeTabs = [];
+  const tabsById = new Map();
   let contentResponse = null;
   let contentError = null;
+  let mediaResponse = null;
+  const fetchCalls = [];
   let lastSocket = null;
   let keepaliveCallback = null;
   let keepaliveDelay = null;
@@ -44,8 +47,13 @@ async function createHarness() {
     },
     tabs: {
       async query() { return activeTabs; },
+      async get(tabId) {
+        const tab = tabsById.get(tabId);
+        if (!tab) throw new Error(`No tab with id: ${tabId}`);
+        return tab;
+      },
       async sendMessage(tabId, message) {
-        assert.equal(tabId, activeTabs[0]?.id);
+        assert.ok(tabsById.has(tabId), `Message target ${tabId} should exist`);
         if (contentError) throw contentError;
         return contentResponse(message);
       }
@@ -87,6 +95,15 @@ async function createHarness() {
       keepaliveDelay = null;
     },
     queueMicrotask,
+    fetch: async (url, options = {}) => {
+      fetchCalls.push({ url, options });
+      if (mediaResponse?.error) throw mediaResponse.error;
+      return mediaResponse?.response || {
+        ok: false,
+        status: 404,
+        headers: { get() { return null; } }
+      };
+    },
     console
   });
   new Script(source).runInContext(context);
@@ -105,11 +122,19 @@ async function createHarness() {
     protocol: "chatgpt-comfy-connector.bridge/1"
   }) });
   await socketPromise;
+  // openSocket() is intentionally tested independently from the bootstrap
+  // flow. Seed the private runtime token after the authenticated fixture
+  // socket is ready so media fetch tests can exercise the same Bearer path.
+  new Script('sessionToken = "session-fixture";').runInContext(context);
 
   return {
     context,
     get socket() { return lastSocket; },
-    setActiveTabs(value) { activeTabs = value; },
+    setActiveTabs(value) {
+      activeTabs = value;
+      tabsById.clear();
+      for (const tab of value) if (tab?.id !== undefined) tabsById.set(tab.id, tab);
+    },
     setContentHandler(handler) {
       contentError = null;
       contentResponse = handler;
@@ -117,6 +142,44 @@ async function createHarness() {
     setContentError(error) {
       contentError = error;
     },
+    setMediaResponse(response) {
+      if (response?.error) {
+        mediaResponse = { error: response.error };
+        return;
+      }
+      const bytes = response?.bytes instanceof Uint8Array
+        ? response.bytes
+        : new Uint8Array(response?.bytes || []);
+      let consumed = false;
+      mediaResponse = {
+        response: {
+          ok: (response?.status ?? 200) >= 200 && (response?.status ?? 200) < 300,
+          status: response?.status ?? 200,
+          headers: {
+            get(name) {
+              return name.toLowerCase() === "content-length"
+                ? String(response?.contentLength ?? bytes.length)
+                : null;
+            }
+          },
+          body: {
+            getReader() {
+              return {
+                async read() {
+                  if (consumed) return { done: true, value: undefined };
+                  consumed = true;
+                  return { done: false, value: bytes };
+                }
+              };
+            }
+          },
+          async arrayBuffer() {
+            return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+          }
+        }
+      };
+    },
+    get fetchCalls() { return fetchCalls; },
     triggerKeepalive() {
       assert.ok(keepaliveCallback, "Background did not start a WebSocket keepalive");
       keepaliveCallback();
@@ -143,6 +206,19 @@ const request = {
   handoff_id: "handoff-fixture",
   boundary_id: "boundary-fixture",
   payload: "## Handoff\nhandoff_id: handoff-fixture\n"
+};
+
+const reviewMediaRequest = {
+  type: "review.media.attach",
+  request_id: "media-request-fixture",
+  session_id: "session-fixture",
+  iteration: 2,
+  media_id: "media-fixture",
+  filename: "MiniMax_H3_00015_.mp4",
+  mime_type: "video/mp4",
+  size: 100000,
+  target_tab_id: 42,
+  target_tab_url: "https://chatgpt.com/c/fixture"
 };
 
 test("Background keeps an MV3 WebSocket alive below the service-worker idle limit", async () => {
@@ -419,4 +495,93 @@ test("Background maps a tab disappearing during dispatch to an explicit error", 
 
   assert.equal(result.status, "error");
   assert.equal(result.error_code, "content_script_unavailable");
+});
+
+test("Background fetches media with the session token and attaches it to the original non-active ChatGPT tab", async () => {
+  const harness = await createHarness();
+  // The first tab is active and unrelated.  The target tab is deliberately
+  // second to prove Phase 5.1 does not switch to the current active tab.
+  harness.setActiveTabs([
+    { id: 7, url: "https://example.invalid/" },
+    { id: reviewMediaRequest.target_tab_id, url: reviewMediaRequest.target_tab_url }
+  ]);
+  harness.setMediaResponse({ bytes: new Uint8Array(reviewMediaRequest.size) });
+  const relayedMessages = [];
+  harness.setContentHandler((message) => {
+    relayedMessages.push(message);
+    if (message.type === "REVIEW_MEDIA_ATTACH_BEGIN") return { status: "receiving" };
+    if (message.type === "REVIEW_MEDIA_ATTACH_CHUNK") {
+      assert.ok(message.chunk.length <= 2 * 48 * 1024, "Chunk should stay within the bounded transfer budget");
+      return { status: "receiving" };
+    }
+    if (message.type === "REVIEW_MEDIA_ATTACH_END") return { status: "attached", stage: "attachment_verified" };
+    return null;
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(reviewMediaRequest, harness.socket);
+  const result = await harness.waitForSocketMessage(previousCount, (message) => message.type === "review.media.result");
+
+  assert.equal(result.request_id, reviewMediaRequest.request_id);
+  assert.equal(result.session_id, reviewMediaRequest.session_id);
+  assert.equal(result.iteration, reviewMediaRequest.iteration);
+  assert.equal(result.media_id, reviewMediaRequest.media_id);
+  assert.equal(result.status, "attached");
+  assert.ok(relayedMessages.length >= 4, "Media should be transferred in more than one bounded message");
+  assert.ok(relayedMessages.every((message) => message.targetTabId === undefined), "Content Script must not receive a local target path or tab metadata");
+  assert.equal(harness.fetchCalls.length, 1);
+  assert.match(harness.fetchCalls[0].url, /\/api\/v1\/media\/media-fixture\?/);
+  assert.equal(harness.fetchCalls[0].options.headers.Authorization, "Bearer session-fixture");
+  assert.equal(harness.fetchCalls[0].options.headers["X-Connector-Client"], "browser-extension");
+});
+
+test("Background rejects a closed or non-ChatGPT Review target without fetching or switching tabs", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 7, url: "https://chatgpt.com/c/other" }]);
+  harness.setContentHandler(() => assert.fail("Content Script must not receive media for a missing target"));
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(reviewMediaRequest, harness.socket);
+  const result = await harness.waitForSocketMessage(previousCount, (message) => message.type === "review.media.result");
+  assert.equal(result.status, "error");
+  assert.equal(result.error_code, "review_target_tab_not_found");
+  assert.equal(harness.fetchCalls.length, 0);
+});
+
+test("Background rejects a ChatGPT tab that changed to another conversation", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 42, url: "https://chatgpt.com/c/another-conversation" }]);
+  harness.setContentHandler(() => ({ status: "attached" }));
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(reviewMediaRequest, harness.socket);
+  const result = await harness.waitForSocketMessage(previousCount, (message) => message.type === "review.media.result");
+
+  assert.equal(result.status, "error");
+  assert.equal(result.error_code, "review_target_tab_not_found");
+  assert.equal(result.stage, "target_tab_check");
+  assert.equal(harness.fetchCalls.length, 0);
+});
+
+test("Background preserves explicit media expiry and Content Script upload errors", async () => {
+  const expired = await createHarness();
+  expired.setActiveTabs([{ id: reviewMediaRequest.target_tab_id, url: reviewMediaRequest.target_tab_url }]);
+  expired.setMediaResponse({ status: 410, bytes: [] });
+  expired.setContentHandler(() => assert.fail("Expired media must not be dispatched"));
+  const expiredBefore = expired.socket.sent.length;
+  expired.context.handleBridgeMessage(reviewMediaRequest, expired.socket);
+  const expiredResult = await expired.waitForSocketMessage(expiredBefore, (message) => message.type === "review.media.result");
+  assert.equal(expiredResult.error_code, "media_expired");
+
+  const failed = await createHarness();
+  failed.setActiveTabs([{ id: reviewMediaRequest.target_tab_id, url: reviewMediaRequest.target_tab_url }]);
+  failed.setMediaResponse({ bytes: new Uint8Array(reviewMediaRequest.size) });
+  failed.setContentHandler((message) => message.type === "REVIEW_MEDIA_ATTACH_BEGIN"
+    ? { status: "error", error_code: "attachment_control_not_found", stage: "attachment_control_found" }
+    : null);
+  const failedBefore = failed.socket.sent.length;
+  failed.context.handleBridgeMessage(reviewMediaRequest, failed.socket);
+  const failedResult = await failed.waitForSocketMessage(failedBefore, (message) => message.type === "review.media.result");
+  assert.equal(failedResult.error_code, "attachment_control_not_found");
+  assert.equal(failedResult.stage, "attachment_control_found");
 });

@@ -22,6 +22,7 @@ class FakeElement {
     this.isContentEditable = attributes.contenteditable === "true";
     this.readTextTransform = attributes.readTextTransform;
     this._textContent = attributes.textContent || "";
+    this.files = [];
     this.listeners = new Map();
   }
 
@@ -88,6 +89,37 @@ class FakeElement {
     };
     visit(this);
     if (selector === "*") return descendants;
+    if (selector.includes("input[type=\"file\"]") || selector.includes("input[type='file']")) {
+      return descendants.filter((element) => element.tagName === "INPUT"
+        && (element.getAttribute("type") || "").toLowerCase() === "file");
+    }
+    if (selector.includes("data-file-name")
+      || selector.includes("data-filename")
+      || selector.includes("data-testid*=\"attachment\"")
+      || selector.includes("data-testid*=\"file\"")
+      || selector.includes("data-testid*=\"upload\"")
+      || selector.includes("aria-label*=\"attachment\"")
+      || selector.includes("aria-label*=\"file\"")
+      || selector.includes("aria-label*=\"添付\"")
+      || selector.includes("aria-label*=\"ファイル\"")
+      || selector.includes("aria-label*=\"アップロード\"")
+      || selector.includes("role=\"progressbar\"")) {
+      return descendants.filter((element) => {
+        const testId = (element.getAttribute("data-testid") || "").toLowerCase();
+        const ariaLabel = (element.getAttribute("aria-label") || "").toLowerCase();
+        return element.getAttribute("data-file-name") !== null
+          || element.getAttribute("data-filename") !== null
+          || testId.includes("attachment")
+          || testId.includes("file")
+          || testId.includes("upload")
+          || ariaLabel.includes("attachment")
+          || ariaLabel.includes("file")
+          || ariaLabel.includes("添付")
+          || ariaLabel.includes("ファイル")
+          || ariaLabel.includes("アップロード")
+          || element.getAttribute("role") === "progressbar";
+      });
+    }
     if (selector === "pre") return descendants.filter((element) => element.tagName === "PRE");
     if (selector === "code") return descendants.filter((element) => element.tagName === "CODE");
     if (selector === "[data-message-content]") {
@@ -142,6 +174,11 @@ class FakeElement {
     if (event.type === "paste" && this.ownerDocument.contentEditableInsert === "paste") {
       this.textContent = event.clipboardData?.getData("text/plain") || "";
     }
+    if (event.type === "change"
+      && this.tagName === "INPUT"
+      && (this.getAttribute("type") || "").toLowerCase() === "file") {
+      this.ownerDocument.onFileInputChanged(this);
+    }
     this.listeners.get(event.type)?.(event);
     return true;
   }
@@ -185,9 +222,29 @@ class FakeEvent {
 }
 
 class FakeDataTransfer {
-  constructor() { this.values = new Map(); }
+  constructor() {
+    this.values = new Map();
+    this.files = [];
+    this.items = {
+      add: (file) => {
+        this.files.push(file);
+      }
+    };
+  }
   setData(type, value) { this.values.set(type, String(value)); }
   getData(type) { return this.values.get(type) || ""; }
+}
+
+class FakeFile {
+  constructor(parts, name, options = {}) {
+    this.name = String(name);
+    this.type = String(options.type || "");
+    this.parts = parts;
+    this.size = parts.reduce((total, part) => {
+      if (typeof part === "string") return total + part.length;
+      return total + (part?.byteLength ?? part?.length ?? 0);
+    }, 0);
+  }
 }
 
 class FakeClipboardEvent extends FakeEvent {
@@ -198,7 +255,7 @@ class FakeClipboardEvent extends FakeEvent {
 }
 
 class FakeDocument {
-  constructor({ composer = "textarea", sendButton = "ready", plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", composerReadTransform = null, url = "https://chatgpt.com/c/fixture", initialAssistantMessages = [] } = {}) {
+  constructor({ composer = "textarea", sendButton = "ready", plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", composerReadTransform = null, url = "https://chatgpt.com/c/fixture", initialAssistantMessages = [], fileInput = true, attachmentVerification = true, attachmentUploading = false } = {}) {
     this.activeElement = null;
     this.composers = [];
     this.sendButtons = [];
@@ -207,6 +264,11 @@ class FakeDocument {
     this.assistantMessages = [];
     this.plusMenuOpened = false;
     this.sendClicked = false;
+    this.fileInputEnabled = fileInput;
+    this.attachmentVerification = attachmentVerification;
+    this.attachmentUploading = attachmentUploading;
+    this.fileInput = null;
+    this.attachmentIndicators = [];
     this.contentEditableInsert = contentEditableInsert;
     this.defaultView = { getComputedStyle: () => ({ display: "block", visibility: "visible" }) };
     this.location = { href: url };
@@ -230,6 +292,15 @@ class FakeDocument {
       });
       composerForm.appendChild(contentEditable);
       this.composers.push(contentEditable);
+    }
+
+    if (fileInput) {
+      this.fileInput = new FakeElement(this, "input", {
+        type: "file",
+        accept: "image/*,video/mp4",
+        "data-testid": "file-upload"
+      });
+      composerForm.appendChild(this.fileInput);
     }
 
     const plusButton = new FakeButton(this, {
@@ -311,6 +382,19 @@ class FakeDocument {
     return message;
   }
 
+  onFileInputChanged(fileInput) {
+    if (!this.attachmentVerification || !fileInput.files?.[0]) return;
+    if (this.attachmentIndicators.some((indicator) => indicator.getAttribute("data-file-name") === fileInput.files[0].name)) return;
+    const indicator = new FakeElement(this, "div", {
+      "data-testid": "file-attachment",
+      "data-file-name": fileInput.files[0].name,
+      "aria-label": fileInput.files[0].name,
+      ...(this.attachmentUploading ? { "aria-busy": "true" } : {})
+    });
+    this.fileInput.parentElement?.appendChild(indicator);
+    this.attachmentIndicators.push(indicator);
+  }
+
   appendAssistantStatusMessage(statusText) {
     const message = new FakeElement(this, "div", {
       "data-message-author-role": "assistant"
@@ -377,6 +461,38 @@ class FakeDocument {
   }
 
   querySelectorAll(selector) {
+    const elements = this.allElements();
+    if (selector.includes("input[type=\"file\"]") || selector.includes("input[type='file']")) {
+      return elements.filter((element) => element.tagName === "INPUT"
+        && (element.getAttribute("type") || "").toLowerCase() === "file");
+    }
+    if (selector.includes("data-file-name")
+      || selector.includes("data-filename")
+      || selector.includes("data-testid*=\"attachment\"")
+      || selector.includes("data-testid*=\"file\"")
+      || selector.includes("data-testid*=\"upload\"")
+      || selector.includes("aria-label*=\"attachment\"")
+      || selector.includes("aria-label*=\"file\"")
+      || selector.includes("aria-label*=\"添付\"")
+      || selector.includes("aria-label*=\"ファイル\"")
+      || selector.includes("aria-label*=\"アップロード\"")
+      || selector.includes("role=\"progressbar\"")) {
+      return elements.filter((element) => {
+        const testId = (element.getAttribute("data-testid") || "").toLowerCase();
+        const ariaLabel = (element.getAttribute("aria-label") || "").toLowerCase();
+        return element.getAttribute("data-file-name") !== null
+          || element.getAttribute("data-filename") !== null
+          || testId.includes("attachment")
+          || testId.includes("file")
+          || testId.includes("upload")
+          || ariaLabel.includes("attachment")
+          || ariaLabel.includes("file")
+          || ariaLabel.includes("添付")
+          || ariaLabel.includes("ファイル")
+          || ariaLabel.includes("アップロード")
+          || element.getAttribute("role") === "progressbar";
+      });
+    }
     if (selector.includes("assistant")) return this.assistantMessages;
     if (selector.includes("textarea")) return this.composers.filter((element) => element.tagName === "TEXTAREA");
     if (selector.includes("contenteditable") || selector.includes("role=\"textbox\"")) {
@@ -430,6 +546,8 @@ async function createHarness(options) {
     InputEvent: FakeEvent,
     Event: FakeEvent,
     DataTransfer: FakeDataTransfer,
+    File: FakeFile,
+    Uint8Array,
     ClipboardEvent: FakeClipboardEvent,
     CustomEvent: class extends FakeEvent { constructor(type, init) { super(type); this.detail = init?.detail; } },
     HTMLTextAreaElement: FakeTextArea,
@@ -468,6 +586,12 @@ async function createHarness(options) {
   ).replace(
     "const responsePollIntervalMs = 100;",
     "const responsePollIntervalMs = 5;"
+  ).replace(
+    "const attachmentVerificationTimeoutMs = 15000;",
+    "const attachmentVerificationTimeoutMs = 50;"
+  ).replace(
+    "      await wait(100);",
+    "      await wait(5);"
   );
   new Script(fixtureContentSource).runInContext(context);
   return {
@@ -856,4 +980,134 @@ test("Content Script reports an explicit timeout when no post-anchor assistant r
   assert.equal(result.status, "error");
   assert.equal(result.errorCode, "assistant_response_not_found");
   assert.equal(result.stage, "assistant_message_not_found");
+});
+
+const mediaBegin = {
+  type: "REVIEW_MEDIA_ATTACH_BEGIN",
+  requestId: "media-request-fixture",
+  sessionId: "session-fixture",
+  iteration: 2,
+  mediaId: "media-fixture",
+  fileName: "MiniMax_H3_00015_.mp4",
+  mimeType: "video/mp4",
+  size: 3
+};
+
+test("Content Script builds a File from bounded chunks and verifies the ChatGPT attachment", async () => {
+  const harness = await createHarness({ fileInput: true, attachmentVerification: true });
+  const begin = await harness.send(mediaBegin);
+  assert.equal(begin.status, "receiving");
+
+  const chunk = await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_CHUNK",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    offset: 0,
+    chunk: "AQID"
+  });
+  assert.equal(chunk.status, "receiving");
+
+  const end = await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_END",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    fileName: mediaBegin.fileName,
+    mimeType: mediaBegin.mimeType,
+    size: mediaBegin.size
+  });
+  assert.deepEqual({ ...end }, {
+    request_id: mediaBegin.requestId,
+    session_id: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    media_id: mediaBegin.mediaId,
+    status: "attached",
+    stage: "attachment_verified"
+  });
+  assert.equal(harness.document.fileInput.files.length, 1);
+  assert.equal(harness.document.fileInput.files[0].name, mediaBegin.fileName);
+  assert.equal(harness.document.fileInput.files[0].type, mediaBegin.mimeType);
+  assert.equal(harness.document.fileInput.files[0].size, mediaBegin.size);
+});
+
+test("Content Script uses only a semantic attachment control before returning a missing-input error", async () => {
+  const harness = await createHarness({ fileInput: false });
+  const result = await harness.send(mediaBegin);
+  assert.equal(result.error_code, "attachment_control_not_found");
+  assert.equal(result.stage, "attachment_control_found");
+  // Opening a specifically identified attachment menu is only a discovery
+  // step; no file is accepted until the real file input is found and verified.
+  assert.equal(harness.document.plusMenuOpened, true);
+});
+
+test("Content Script does not report attached when ChatGPT exposes no attachment indicator", async () => {
+  const harness = await createHarness({ attachmentVerification: false });
+  assert.equal((await harness.send(mediaBegin)).status, "receiving");
+  assert.equal((await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_CHUNK",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    offset: 0,
+    chunk: "AQID"
+  })).status, "receiving");
+  const result = await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_END",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    fileName: mediaBegin.fileName,
+    mimeType: mediaBegin.mimeType,
+    size: mediaBegin.size
+  });
+  assert.equal(result.error_code, "attachment_verification_failed");
+  assert.equal(result.stage, "attachment_control_found");
+});
+
+test("Content Script keeps waiting while the attachment indicator is uploading", async () => {
+  const harness = await createHarness({ attachmentUploading: true });
+  assert.equal((await harness.send(mediaBegin)).status, "receiving");
+  await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_CHUNK",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    offset: 0,
+    chunk: "AQID"
+  });
+  const result = await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_END",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    fileName: mediaBegin.fileName,
+    mimeType: mediaBegin.mimeType,
+    size: mediaBegin.size
+  });
+  assert.equal(result.error_code, "attachment_timeout");
+  assert.equal(result.stage, "attachment_uploading");
+});
+
+test("Content Script rejects an incomplete media transfer before touching the file input", async () => {
+  const harness = await createHarness();
+  assert.equal((await harness.send(mediaBegin)).status, "receiving");
+  const result = await harness.send({
+    type: "REVIEW_MEDIA_ATTACH_END",
+    requestId: mediaBegin.requestId,
+    sessionId: mediaBegin.sessionId,
+    iteration: mediaBegin.iteration,
+    mediaId: mediaBegin.mediaId,
+    fileName: mediaBegin.fileName,
+    mimeType: mediaBegin.mimeType,
+    size: mediaBegin.size
+  });
+  assert.equal(result.error_code, "attachment_upload_failed");
+  assert.equal(harness.document.fileInput.files.length, 0);
 });

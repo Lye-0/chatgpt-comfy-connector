@@ -20,7 +20,7 @@ public static class CreationPipelineStateMachine
     public static void EnsureInitialized(CreationSession session)
     {
         session.Pipeline ??= new CreationPipelineSnapshot();
-        session.Pipeline.Version = 4;
+        session.Pipeline.Version = 5;
         foreach (var stage in OrderedStages)
         {
             if (session.Pipeline.Stages.All(item => item.Stage != stage))
@@ -208,6 +208,11 @@ public static class CreationPipelineStateMachine
     {
         EnsureInitialized(session);
         session.PendingHandoff = null;
+        // A new context cannot reuse a media registration or its Review
+        // attachment evidence. The Desktop revokes the process-local media
+        // registration before calling this boundary; the state machine also
+        // clears the persisted projection so stale media is not shown.
+        session.Pipeline.ReviewMediaAttachment = null;
         session.Pipeline.ContextBound = false;
         session.Pipeline.MaximumIterationSafetyStop = false;
         session.Pipeline.SentIdeaSnapshot = null;
@@ -232,6 +237,9 @@ public static class CreationPipelineStateMachine
         // binding must become stale instead of being accepted against the new
         // context.
         session.PendingHandoff = null;
+        // Binding a new context starts a new Review/media boundary. The
+        // Desktop revokes the old process-local registration before this call.
+        session.Pipeline.ReviewMediaAttachment = null;
         session.Pipeline.ContextBound = true;
         session.Pipeline.IterationNumber = session.CurrentIteration;
         session.Pipeline.MaximumIterationSafetyStop = false;
@@ -489,6 +497,9 @@ public static class CreationPipelineStateMachine
     {
         RequireConnection(session);
         if (session.Pipeline.MaximumIterationSafetyStop) throw new InvalidOperationException("最大反復回数に達しています。続行するか終了するか選択してください。");
+        // A new generation owns a new Primary Output. Do not carry the prior
+        // iteration's temporary attachment state into the next Review stage.
+        session.Pipeline.ReviewMediaAttachment = null;
         SetGenerateExecutionState(session, GenerateExecutionState.Generating);
         Set(session, CreationStage.Generate, CreationStageState.InProgress, "Jobを投入しています");
         ResetAfter(session, CreationStage.Generate);
@@ -531,12 +542,38 @@ public static class CreationPipelineStateMachine
         }
         Set(session, CreationStage.Output, CreationStageState.Completed, $"有効な出力 {valid.Length}件を履歴へ登録済み");
         SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
-        Set(session, CreationStage.Review, CreationStageState.Current, "生成結果を確認しChatGPTへ渡してください");
+        // A completed iteration owns a new media attachment boundary. Do not
+        // carry the previous iteration's media id into the new Review stage.
+        // When legacy resume logic replays OutputCompleted for the same
+        // iteration, only terminal attachment evidence is retained; an old
+        // Preparing/Attaching state must not leave the Review stage stuck.
+        var existingAttachment = session.Pipeline.ReviewMediaAttachment;
+        if (existingAttachment is null
+            || existingAttachment.Iteration != session.CurrentIteration
+            || existingAttachment.State is ReviewMediaAttachmentState.Preparing or ReviewMediaAttachmentState.Attaching)
+        {
+            session.Pipeline.ReviewMediaAttachment = null;
+        }
+        var reviewDetail = session.Pipeline.ReviewMediaAttachment?.State switch
+        {
+            ReviewMediaAttachmentState.Attached => "生成結果をChatGPTへ添付済み · Review Handoff送信待ち",
+            ReviewMediaAttachmentState.Failed => $"生成結果のChatGPT添付に失敗 · {session.Pipeline.ReviewMediaAttachment.ErrorCode ?? "再試行できます"} · 再試行できます",
+            _ => "生成結果を確認しChatGPTへ渡してください",
+        };
+        var reviewState = session.Pipeline.ReviewMediaAttachment?.State == ReviewMediaAttachmentState.Failed
+            ? CreationStageState.Error
+            : CreationStageState.Current;
+        Set(session, CreationStage.Review, reviewState, reviewDetail);
         session.Pipeline.IterationNumber = session.CurrentIteration;
     }
 
     public static void OutputFailed(CreationSession session, string detail)
     {
+        // Output failure belongs to the current generation boundary. Any
+        // attachment state left by a previous or partially fetched output is
+        // stale; the Desktop revokes its process-local media registration
+        // before starting the next generation.
+        session.Pipeline.ReviewMediaAttachment = null;
         SetGenerateExecutionState(session, GenerateExecutionState.GenerationFailed);
         Set(session, CreationStage.Output, CreationStageState.Error, detail);
         Set(session, CreationStage.Review, CreationStageState.NotReached, string.Empty);
@@ -544,6 +581,84 @@ public static class CreationPipelineStateMachine
 
     public static void ReviewCopied(CreationSession session)
         => Set(session, CreationStage.Review, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTの評価待ち", CreationWaitingReason.ReviewResponseRequired);
+
+    public static void ReviewMediaPreparing(
+        CreationSession session,
+        int iteration,
+        string sessionId,
+        string outputIdentity,
+        string fileName,
+        string mimeType,
+        long size)
+    {
+        EnsureInitialized(session);
+        session.Pipeline.ReviewMediaAttachment = new ReviewMediaAttachmentSnapshot
+        {
+            State = ReviewMediaAttachmentState.Preparing,
+            SessionId = sessionId,
+            Iteration = iteration,
+            OutputIdentity = outputIdentity,
+            FileName = fileName,
+            MimeType = mimeType,
+            Size = size,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        };
+        Set(session, CreationStage.Review, CreationStageState.InProgress, "生成結果をChatGPTへ添付準備中");
+    }
+
+    public static void ReviewMediaAttaching(
+        CreationSession session,
+        string requestId,
+        string mediaId,
+        int? targetTabId = null,
+        string? targetTabUrl = null)
+    {
+        EnsureInitialized(session);
+        var attachment = session.Pipeline.ReviewMediaAttachment
+            ?? throw new InvalidOperationException("Review添付対象が準備されていません。");
+        attachment.State = ReviewMediaAttachmentState.Attaching;
+        attachment.RequestId = requestId;
+        attachment.MediaId = mediaId;
+        attachment.TargetTabId = targetTabId;
+        attachment.TargetTabUrl = targetTabUrl;
+        attachment.ErrorCode = null;
+        attachment.ErrorStage = null;
+        attachment.ErrorMessage = null;
+        attachment.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(session, CreationStage.Review, CreationStageState.InProgress, "生成結果をChatGPTへ添付中");
+    }
+
+    public static void ReviewMediaAttached(CreationSession session, BrowserExtensionMediaAttachResult result)
+    {
+        EnsureInitialized(session);
+        var attachment = session.Pipeline.ReviewMediaAttachment
+            ?? throw new InvalidOperationException("Review添付対象が準備されていません。");
+        attachment.State = ReviewMediaAttachmentState.Attached;
+        attachment.RequestId = result.RequestId;
+        attachment.MediaId = result.MediaId;
+        attachment.ErrorCode = null;
+        attachment.ErrorStage = null;
+        attachment.ErrorMessage = null;
+        attachment.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(session, CreationStage.Review, CreationStageState.Current, "生成結果をChatGPTへ添付済み · Review Handoff送信待ち");
+    }
+
+    public static void ReviewMediaFailed(
+        CreationSession session,
+        string errorCode,
+        string? stage,
+        string? message)
+    {
+        EnsureInitialized(session);
+        var attachment = session.Pipeline.ReviewMediaAttachment
+            ?? throw new InvalidOperationException("Review添付対象が準備されていません。");
+        attachment.State = ReviewMediaAttachmentState.Failed;
+        attachment.ErrorCode = errorCode;
+        attachment.ErrorStage = stage;
+        attachment.ErrorMessage = message;
+        attachment.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(session, CreationStage.Review, CreationStageState.Error, $"生成結果のChatGPT添付に失敗 · {errorCode} · 再試行できます");
+    }
 
     public static void ContinueBeyondLimit(CreationSession session)
     {

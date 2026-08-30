@@ -16,10 +16,11 @@ namespace ChatGPTComfyConnector.Infrastructure.Bridge;
 ///
 /// The server deliberately has a very small command surface in this phase:
 /// public health metadata, one-time pairing, authenticated bootstrap, an
-/// authenticated HTTP ping, and an authenticated WebSocket carrying ping/pong,
-/// server-originated events, and the explicitly-shaped Handoff transport. It
-/// does not execute Connector commands and it never accepts an arbitrary URL
-/// or filesystem operation.
+/// authenticated HTTP ping/media stream, and an authenticated WebSocket
+/// carrying ping/pong, server-originated events, Handoff transport, and
+/// metadata-only Review media attachment requests. It does not execute
+/// Connector commands and it never accepts an arbitrary URL or filesystem
+/// operation.
 /// </summary>
 public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
 {
@@ -27,11 +28,14 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private const int MaxWebSocketMessageBytes = 256 * 1024;
     private const int MaxHandoffPayloadBytes = 192 * 1024;
     private const int MaxAssistantResponseBytes = 256 * 1024;
+    private const long MaxReviewMediaBytes = 512L * 1024 * 1024;
     private const int MaxPairingAttempts = 5;
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PairingCodeLifetime = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan SessionTokenLifetime = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan HandoffResponseTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan MediaAttachResponseTimeout = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan MediaRegistrationLifetime = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(3);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -46,6 +50,8 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly object _clientGate = new();
     private readonly ConcurrentDictionary<string, PendingHandoffRequest> _pendingHandoffs = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, RegisteredMedia> _registeredMedia = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PendingMediaAttachRequest> _pendingMediaAttachments = new(StringComparer.Ordinal);
     private BrowserExtensionBridgeStatus _status;
     private HttpListener? _listener;
     private CancellationTokenSource? _serverCts;
@@ -133,8 +139,12 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             _accessTokenExpiresAt = DateTimeOffset.UtcNow.Add(SessionTokenLifetime);
             _pairingId = pairing?.PairingId;
             _pairingCredentialHash = pairing?.CredentialHash;
-            _pairingCode = CreatePairingCode();
-            _pairingCodeExpiresAt = DateTimeOffset.UtcNow.Add(PairingCodeLifetime);
+            // A persisted pairing is already the Desktop/Extension trust
+            // relationship. Do not mint a second recovery code on every
+            // restart: while paired, showing or accepting a fresh code would
+            // create an unintended re-pairing surface.
+            _pairingCode = pairing is null ? CreatePairingCode() : null;
+            _pairingCodeExpiresAt = pairing is null ? DateTimeOffset.UtcNow.Add(PairingCodeLifetime) : null;
             _pairingAttempts = 0;
             PublishStatus(CreateStatus(
                 isRunning: true,
@@ -179,6 +189,8 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 _clientSocket = null;
             }
             FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeを停止しました。");
+            FailPendingMediaAttachments(BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extension Bridgeを停止しました。");
+            _registeredMedia.Clear();
 
             serverCts?.Cancel();
             try { listener?.Stop(); } catch (Exception) { }
@@ -360,6 +372,215 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         }
     }
 
+    /// <summary>
+    /// Registers one already-resolved Primary Output for a short-lived,
+    /// process-local media download.  The registration is intentionally not a
+    /// network API: only the Desktop can put a path into this map.
+    /// </summary>
+    public void RegisterMedia(BrowserExtensionMediaRegistration registration)
+    {
+        ArgumentNullException.ThrowIfNull(registration);
+        ThrowIfDisposed();
+        if (_listener?.IsListening != true)
+            throw new InvalidOperationException("Browser Extension Bridgeが起動していません。");
+        RemoveExpiredMedia();
+
+        if (!IsSafeIdentifier(registration.MediaId)
+            || !IsSafeIdentifier(registration.SessionId)
+            || registration.Iteration <= 0
+            || string.IsNullOrWhiteSpace(registration.OutputIdentity)
+            || registration.OutputIdentity.Length > 512)
+        {
+            throw new ArgumentException("Media registrationの識別情報が不正です。", nameof(registration));
+        }
+
+        if (!IsSafeFileName(registration.FileName)
+            || !BrowserExtensionMediaTypes.IsSupported(registration.MimeType)
+            || registration.Size <= 0
+            || registration.Size > MaxReviewMediaBytes)
+        {
+            throw new ArgumentException("Media registrationのファイル情報が不正です。", nameof(registration));
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (registration.ExpiresAt <= now || registration.ExpiresAt > now + MediaRegistrationLifetime + TimeSpan.FromMinutes(1))
+        {
+            throw new ArgumentException("Media registrationの有効期限が不正です。", nameof(registration));
+        }
+
+        string fullPath;
+        string allowedRoot;
+        try
+        {
+            fullPath = Path.GetFullPath(registration.FullPath);
+            allowedRoot = Path.GetFullPath(registration.AllowedRoot);
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            throw new ArgumentException("Media registrationのローカルファイルが不正です。", nameof(registration), ex);
+        }
+
+        if (!PathSafety.IsWithin(allowedRoot, fullPath)
+            || !File.Exists(fullPath)
+            || string.Equals(Path.GetFileName(fullPath), string.Empty, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Media registrationのローカルファイルが許可範囲外です。", nameof(registration));
+        }
+
+        var fileInfo = new FileInfo(fullPath);
+        if (fileInfo.Length != registration.Size)
+        {
+            throw new ArgumentException("Media registrationのファイルサイズが一致しません。", nameof(registration));
+        }
+
+        var registered = new RegisteredMedia(
+            registration.MediaId,
+            registration.SessionId,
+            registration.Iteration,
+            registration.OutputIdentity,
+            registration.FileName,
+            registration.MimeType.Trim().ToLowerInvariant(),
+            registration.Size,
+            registration.ExpiresAt,
+            fullPath,
+            allowedRoot);
+        if (!_registeredMedia.TryAdd(registered.MediaId, registered))
+        {
+            throw new ArgumentException("Media IDが重複しています。", nameof(registration));
+        }
+        PublishDiagnostic("media registered", mediaId: registered.MediaId, iteration: registered.Iteration);
+    }
+
+    public bool RevokeMedia(string mediaId)
+    {
+        if (string.IsNullOrWhiteSpace(mediaId)) return false;
+        var removed = _registeredMedia.TryRemove(mediaId, out var media);
+        if (removed) PublishDiagnostic("media revoked", mediaId: media!.MediaId, iteration: media.Iteration);
+        return removed;
+    }
+
+    public async Task<BrowserExtensionMediaAttachResult> SendMediaAttachAsync(
+        BrowserExtensionMediaAttachRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
+        RemoveExpiredMedia();
+
+        if (!IsSafeIdentifier(request.RequestId)
+            || !IsSafeIdentifier(request.SessionId)
+            || !IsSafeIdentifier(request.MediaId)
+            || request.Iteration <= 0
+            || !IsSafeFileName(request.FileName)
+            || !BrowserExtensionMediaTypes.IsSupported(request.MimeType)
+            || request.Size <= 0
+            || request.Size > MaxReviewMediaBytes
+            || request.TargetTabId < 0
+            || string.IsNullOrWhiteSpace(request.TargetTabUrl)
+            || !IsChatGptUrl(request.TargetTabUrl))
+        {
+            return MediaError(request, BrowserExtensionReviewMediaErrorCodes.MediaRegistrationFailed, "Review添付の識別情報が不正です。", "media_request_validation");
+        }
+
+        if (!_registeredMedia.TryGetValue(request.MediaId, out var media))
+        {
+            var missing = MediaError(request, BrowserExtensionReviewMediaErrorCodes.MediaRegistrationFailed, "添付対象の生成物が登録されていません。", "media_registration");
+            PublishDiagnostic("review.media.attach rejected", requestId: request.RequestId, status: missing.Status, errorCode: missing.ErrorCode, stage: missing.Stage, mediaId: request.MediaId, iteration: request.Iteration);
+            return missing;
+        }
+        if (media.ExpiresAt <= DateTimeOffset.UtcNow)
+        {
+            _registeredMedia.TryRemove(request.MediaId, out _);
+            var expired = MediaError(request, BrowserExtensionReviewMediaErrorCodes.MediaExpired, "添付対象の有効期限が切れています。", "media_expired");
+            PublishDiagnostic("review.media.attach rejected", requestId: request.RequestId, status: expired.Status, errorCode: expired.ErrorCode, stage: expired.Stage, mediaId: request.MediaId, iteration: request.Iteration);
+            return expired;
+        }
+        if (!MediaMatchesRequest(media, request))
+        {
+            var mismatch = MediaError(request, BrowserExtensionReviewMediaErrorCodes.MediaRegistrationFailed, "添付対象の生成物情報が一致しません。", "media_registration_mismatch");
+            PublishDiagnostic("review.media.attach rejected", requestId: request.RequestId, status: mismatch.Status, errorCode: mismatch.ErrorCode, stage: mismatch.Stage, mediaId: request.MediaId, iteration: request.Iteration);
+            return mismatch;
+        }
+
+        WebSocket? socket;
+        lock (_clientGate) socket = _clientSocket;
+        if (socket is null || socket.State != WebSocketState.Open)
+        {
+            var disconnected = MediaError(request, BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extension Bridgeに接続されていません。", "bridge_connection");
+            PublishDiagnostic("review.media.attach rejected", requestId: request.RequestId, status: disconnected.Status, errorCode: disconnected.ErrorCode, stage: disconnected.Stage, mediaId: request.MediaId, iteration: request.Iteration);
+            return disconnected;
+        }
+
+        var pending = new PendingMediaAttachRequest(
+            request.SessionId,
+            request.Iteration,
+            request.MediaId,
+            new TaskCompletionSource<BrowserExtensionMediaAttachResult>(TaskCreationOptions.RunContinuationsAsynchronously));
+        if (!_pendingMediaAttachments.TryAdd(request.RequestId, pending))
+        {
+            throw new ArgumentException("request_idが重複しています。", nameof(request));
+        }
+
+        PublishDiagnostic("review.media.attach requested", requestId: request.RequestId, status: "requested", mediaId: request.MediaId, iteration: request.Iteration, targetTabId: request.TargetTabId);
+        try
+        {
+            PublishDiagnostic("websocket send", requestId: request.RequestId, status: "sending", stage: "media_metadata", mediaId: request.MediaId, iteration: request.Iteration, targetTabId: request.TargetTabId);
+            await SendJsonAsync(socket, new
+            {
+                type = "review.media.attach",
+                request_id = request.RequestId,
+                session_id = request.SessionId,
+                iteration = request.Iteration,
+                media_id = request.MediaId,
+                filename = request.FileName,
+                mime_type = request.MimeType,
+                size = request.Size,
+                target_tab_id = request.TargetTabId,
+                target_tab_url = request.TargetTabUrl,
+            }, cancellationToken);
+
+            var result = await pending.Completion.Task.WaitAsync(MediaAttachResponseTimeout, cancellationToken);
+            PublishDiagnostic("result status", requestId: result.RequestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage, mediaId: result.MediaId, iteration: result.Iteration);
+            return result;
+        }
+        catch (TimeoutException)
+        {
+            var result = MediaError(request, BrowserExtensionReviewMediaErrorCodes.AttachmentTimeout, "Browser Extensionから添付結果が返りませんでした。", "media_response_timeout");
+            PublishDiagnostic("result status", requestId: result.RequestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage, mediaId: result.MediaId, iteration: result.Iteration);
+            return result;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            var result = MediaError(request, BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。", "bridge_connection");
+            PublishDiagnostic("result status", requestId: result.RequestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage, mediaId: result.MediaId, iteration: result.Iteration);
+            return result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var result = MediaError(request, BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extension Bridgeへの添付送信がキャンセルされました。", "media_send_cancelled");
+            PublishDiagnostic("result status", requestId: result.RequestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage, mediaId: result.MediaId, iteration: result.Iteration);
+            return result;
+        }
+        catch (WebSocketException)
+        {
+            RemoveClient(socket);
+            var result = MediaError(request, BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。", "bridge_connection");
+            PublishDiagnostic("result status", requestId: result.RequestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage, mediaId: result.MediaId, iteration: result.Iteration);
+            return result;
+        }
+        catch (ObjectDisposedException)
+        {
+            RemoveClient(socket);
+            var result = MediaError(request, BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。", "bridge_connection");
+            PublishDiagnostic("result status", requestId: result.RequestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage, mediaId: result.MediaId, iteration: result.Iteration);
+            return result;
+        }
+        finally
+        {
+            _pendingMediaAttachments.TryRemove(request.RequestId, out _);
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
@@ -463,6 +684,12 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             if (path == BrowserExtensionBridgeProtocol.PingPath && method == "POST")
             {
                 await HandleHttpPingAsync(context, cancellationToken);
+                return;
+            }
+
+            if (method == "GET" && TryGetMediaId(path, out var mediaId))
+            {
+                await HandleMediaDownloadAsync(context, mediaId, cancellationToken);
                 return;
             }
 
@@ -676,6 +903,98 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         }, origin, cancellationToken);
     }
 
+    private async Task HandleMediaDownloadAsync(
+        HttpListenerContext context,
+        string mediaId,
+        CancellationToken cancellationToken)
+    {
+        var origin = GetOrigin(context.Request);
+        if (!IsAllowedClientRequest(context.Request))
+        {
+            await WriteJsonAsync(context.Response, 403, new { ok = false, error = "extension_client_required" }, null, cancellationToken);
+            return;
+        }
+
+        if (!IsAccessTokenValid(GetBearerToken(context.Request)))
+        {
+            context.Response.Headers["WWW-Authenticate"] = "Bearer";
+            await WriteJsonAsync(context.Response, 401, new { ok = false, error = "invalid_session_token" }, origin, cancellationToken);
+            return;
+        }
+
+        var sessionId = context.Request.QueryString["session_id"];
+        var iterationText = context.Request.QueryString["iteration"];
+        if (!IsSafeIdentifier(sessionId ?? string.Empty)
+            || !int.TryParse(iterationText, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var iteration)
+            || iteration <= 0)
+        {
+            await WriteJsonAsync(context.Response, 400, new { ok = false, error = "invalid_media_request" }, origin, cancellationToken);
+            return;
+        }
+
+        RemoveExpiredMedia();
+        if (!_registeredMedia.TryGetValue(mediaId, out var media))
+        {
+            await WriteJsonAsync(context.Response, 404, new { ok = false, error = "media_not_found" }, origin, cancellationToken);
+            return;
+        }
+        if (media.ExpiresAt <= DateTimeOffset.UtcNow)
+        {
+            _registeredMedia.TryRemove(mediaId, out _);
+            await WriteJsonAsync(context.Response, 410, new { ok = false, error = "media_expired" }, origin, cancellationToken);
+            return;
+        }
+        if (!string.Equals(media.SessionId, sessionId, StringComparison.Ordinal)
+            || media.Iteration != iteration)
+        {
+            // Do not reveal whether a different session's media id exists.
+            await WriteJsonAsync(context.Response, 404, new { ok = false, error = "media_not_found" }, origin, cancellationToken);
+            return;
+        }
+
+        if (!PathSafety.IsWithin(media.AllowedRoot, media.FullPath) || !File.Exists(media.FullPath))
+        {
+            await WriteJsonAsync(context.Response, 404, new { ok = false, error = "media_not_found" }, origin, cancellationToken);
+            return;
+        }
+
+        var fileInfo = new FileInfo(media.FullPath);
+        if (fileInfo.Length != media.Size || fileInfo.Length <= 0 || fileInfo.Length > MaxReviewMediaBytes)
+        {
+            await WriteJsonAsync(context.Response, 409, new { ok = false, error = "media_changed" }, origin, cancellationToken);
+            return;
+        }
+
+        if (IsAllowedExtensionOrigin(origin)) AddCorsHeaders(context.Response, origin!);
+        context.Response.StatusCode = 200;
+        context.Response.ContentType = media.MimeType;
+        context.Response.ContentLength64 = media.Size;
+        context.Response.KeepAlive = false;
+        context.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{media.FileName}\"";
+        try
+        {
+            await using var stream = new FileStream(
+                media.FullPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 64 * 1024,
+                options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await stream.CopyToAsync(context.Response.OutputStream, 64 * 1024, cancellationToken);
+            PublishDiagnostic("media streamed", mediaId: media.MediaId, iteration: media.Iteration);
+        }
+        catch (FileNotFoundException)
+        {
+            // The output can be removed outside the Connector after it was
+            // registered. Keep the endpoint response generic and path-free.
+            try { context.Response.StatusCode = 404; } catch (Exception) { }
+        }
+        catch (IOException)
+        {
+            try { context.Response.StatusCode = 409; } catch (Exception) { }
+        }
+    }
+
     private async Task HandleOptionsAsync(HttpListenerContext context, string path, CancellationToken cancellationToken)
     {
         var origin = GetOrigin(context.Request);
@@ -683,7 +1002,8 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             || path is not (BrowserExtensionBridgeProtocol.HealthPath
                 or BrowserExtensionBridgeProtocol.PairPath
                 or BrowserExtensionBridgeProtocol.BootstrapPath
-                or BrowserExtensionBridgeProtocol.PingPath))
+                or BrowserExtensionBridgeProtocol.PingPath)
+                && !TryGetMediaId(path, out _))
         {
             await WriteJsonAsync(context.Response, 403, new { ok = false, error = "extension_origin_required" }, null, cancellationToken);
             return;
@@ -811,6 +1131,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         if (previous is not null && !ReferenceEquals(previous, socket))
         {
             FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extensionの接続が置き換えられました。");
+            FailPendingMediaAttachments(BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extensionの接続が置き換えられました。");
             await CloseSocketAsync(previous, WebSocketCloseStatus.PolicyViolation, "replaced by a newer extension connection", cancellationToken);
         }
 
@@ -906,13 +1227,50 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                     try { AssistantResponseReceived?.Invoke(this, new BrowserExtensionAssistantResponseEventArgs(response)); }
                     catch (Exception) { }
                 }
+                else if (type == "review.media.result")
+                {
+                    if (!TryParseMediaAttachResult(text, out var result, out var resultError))
+                    {
+                        PublishDiagnostic("media result rejected", status: "error", errorCode: resultError ?? "invalid_media_result", stage: "media_result_envelope");
+                        await SendJsonAsync(socket, new
+                        {
+                            type = "error",
+                            code = resultError ?? "invalid_media_result",
+                            message = "Review添付結果を解釈できません。",
+                        }, cancellationToken);
+                        continue;
+                    }
+
+                    if (_pendingMediaAttachments.TryRemove(result.RequestId, out var pending))
+                    {
+                        var matches = string.Equals(result.SessionId, pending.SessionId, StringComparison.Ordinal)
+                            && result.Iteration == pending.Iteration
+                            && string.Equals(result.MediaId, pending.MediaId, StringComparison.Ordinal);
+                        var completed = matches
+                            ? result
+                            : MediaError(
+                                result.RequestId,
+                                pending.SessionId,
+                                pending.Iteration,
+                                pending.MediaId,
+                                BrowserExtensionReviewMediaErrorCodes.AttachmentVerificationFailed,
+                                "Review添付結果の識別子が一致しません。",
+                                "media_result_validation");
+                        PublishDiagnostic("result status", requestId: completed.RequestId, status: completed.Status, errorCode: completed.ErrorCode, stage: completed.Stage, mediaId: completed.MediaId, iteration: completed.Iteration);
+                        pending.Completion.TrySetResult(completed);
+                    }
+                    else
+                    {
+                        PublishDiagnostic("result status", requestId: result.RequestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage, mediaId: result.MediaId, iteration: result.Iteration);
+                    }
+                }
                 else
                 {
                     await SendJsonAsync(socket, new
                     {
                         type = "error",
                         code = "unsupported_message",
-                        message = "このalpha Bridgeはhello、ping、handoff.result、assistant.responseだけを受け付けます。",
+                        message = "このalpha Bridgeはhello、ping、handoff.result、assistant.response、review.media.resultだけを受け付けます。",
                     }, cancellationToken);
                 }
             }
@@ -990,6 +1348,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         if (removed && _serverCts is { IsCancellationRequested: false })
         {
             FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。");
+            FailPendingMediaAttachments(BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。");
             PublishStatus(CreateStatus(
                 isRunning: true,
                 BrowserExtensionConnectionState.Disconnected,
@@ -1018,6 +1377,24 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 pending.Completion.TrySetResult(HandoffError(
                     pair.Key,
                     pending.HandoffId,
+                    errorCode,
+                    message,
+                    "bridge_connection"));
+            }
+        }
+    }
+
+    private void FailPendingMediaAttachments(string errorCode, string message)
+    {
+        foreach (var pair in _pendingMediaAttachments.ToArray())
+        {
+            if (_pendingMediaAttachments.TryRemove(pair.Key, out var pending))
+            {
+                pending.Completion.TrySetResult(MediaError(
+                    pair.Key,
+                    pending.SessionId,
+                    pending.Iteration,
+                    pending.MediaId,
                     errorCode,
                     message,
                     "bridge_connection"));
@@ -1111,9 +1488,12 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         string? handoffId = null,
         string? status = null,
         string? errorCode = null,
-        string? stage = null)
+        string? stage = null,
+        string? mediaId = null,
+        int? iteration = null,
+        int? targetTabId = null)
     {
-        var diagnostic = new BrowserExtensionBridgeDiagnostic(eventName, requestId, handoffId, status, errorCode, stage);
+        var diagnostic = new BrowserExtensionBridgeDiagnostic(eventName, requestId, handoffId, status, errorCode, stage, mediaId, iteration, targetTabId);
         try { Diagnostic?.Invoke(this, new BrowserExtensionBridgeDiagnosticEventArgs(diagnostic)); }
         catch (Exception) { }
     }
@@ -1377,6 +1757,138 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         string? stage = null)
         => new(requestId, handoffId, "error", errorCode, message, stage);
 
+    private static BrowserExtensionMediaAttachResult MediaError(
+        BrowserExtensionMediaAttachRequest request,
+        string errorCode,
+        string message,
+        string? stage = null)
+        => MediaError(request.RequestId, request.SessionId, request.Iteration, request.MediaId, errorCode, message, stage);
+
+    private static BrowserExtensionMediaAttachResult MediaError(
+        string requestId,
+        string sessionId,
+        int iteration,
+        string mediaId,
+        string errorCode,
+        string message,
+        string? stage = null)
+        => new(requestId, sessionId, iteration, mediaId, "error", errorCode, message, stage);
+
+    private static bool MediaMatchesRequest(
+        RegisteredMedia media,
+        BrowserExtensionMediaAttachRequest request)
+        => string.Equals(media.SessionId, request.SessionId, StringComparison.Ordinal)
+            && media.Iteration == request.Iteration
+            && string.Equals(media.MediaId, request.MediaId, StringComparison.Ordinal)
+            && string.Equals(media.FileName, request.FileName, StringComparison.Ordinal)
+            && string.Equals(media.MimeType, request.MimeType, StringComparison.OrdinalIgnoreCase)
+            && media.Size == request.Size;
+
+    private void RemoveExpiredMedia()
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var pair in _registeredMedia.ToArray())
+        {
+            if (pair.Value.ExpiresAt <= now) _registeredMedia.TryRemove(pair.Key, out _);
+        }
+    }
+
+    private static bool TryGetMediaId(string? path, out string mediaId)
+    {
+        mediaId = string.Empty;
+        if (string.IsNullOrWhiteSpace(path) || !path.StartsWith(BrowserExtensionBridgeProtocol.MediaPathPrefix, StringComparison.Ordinal)) return false;
+        var encoded = path[BrowserExtensionBridgeProtocol.MediaPathPrefix.Length..];
+        if (string.IsNullOrWhiteSpace(encoded) || encoded.Contains('/')) return false;
+        try
+        {
+            mediaId = Uri.UnescapeDataString(encoded);
+        }
+        catch (UriFormatException)
+        {
+            return false;
+        }
+
+        return mediaId is not "." and not ".." && IsSafeIdentifier(mediaId);
+    }
+
+    private static bool IsSafeFileName(string value)
+        => !string.IsNullOrWhiteSpace(value)
+            && value.Length <= 255
+            && value is not "." and not ".."
+            && !value.Contains('/')
+            && !value.Contains('\\')
+            && string.Equals(Path.GetFileName(value), value, StringComparison.Ordinal)
+            && !value.Any(static character => char.IsControl(character) || character is '"' or '\r' or '\n');
+
+    private static bool IsChatGptUrl(string? value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)) return false;
+        return uri.Scheme == Uri.UriSchemeHttps
+            && string.Equals(uri.Host, "chatgpt.com", StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrEmpty(uri.UserInfo)
+            // Uri.Port exposes the scheme's default port (443 for https), so
+            // use IsDefaultPort rather than comparing it with -1.  The latter
+            // made every normal https://chatgpt.com conversation URL fail the
+            // Phase 5.1 target validation.
+            && uri.IsDefaultPort;
+    }
+
+    private static bool TryParseMediaAttachResult(
+        string text,
+        out BrowserExtensionMediaAttachResult result,
+        out string? error)
+    {
+        result = new(string.Empty, string.Empty, 0, string.Empty, "error");
+        error = null;
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || GetString(root, "type") != "review.media.result")
+            {
+                error = "invalid_media_result";
+                return false;
+            }
+
+            var requestId = GetString(root, "request_id");
+            var sessionId = GetString(root, "session_id");
+            var mediaId = GetString(root, "media_id");
+            var status = GetString(root, "status");
+            if (requestId is null || sessionId is null || mediaId is null
+                || status is not ("attached" or "error")
+                || !IsSafeIdentifier(requestId)
+                || !IsSafeIdentifier(sessionId)
+                || !IsSafeIdentifier(mediaId)
+                || !root.TryGetProperty("iteration", out var iterationElement)
+                || iterationElement.ValueKind != JsonValueKind.Number
+                || !iterationElement.TryGetInt32(out var iteration)
+                || iteration <= 0)
+            {
+                error = "invalid_media_result";
+                return false;
+            }
+
+            var errorCode = GetString(root, "error_code");
+            var message = GetString(root, "message");
+            var stage = GetString(root, "stage");
+            if (errorCode is { Length: > 64 } || (errorCode is not null && !IsSafeIdentifier(errorCode))
+                || message is { Length: > 1024 }
+                || stage is { Length: > 64 } || (stage is not null && !IsSafeIdentifier(stage)))
+            {
+                error = "invalid_media_result";
+                return false;
+            }
+
+            result = new(requestId, sessionId, iteration, mediaId, status, errorCode, message, stage);
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "invalid_json";
+            return false;
+        }
+    }
+
     private static bool TryParseHandoffResult(
         string text,
         out BrowserExtensionHandoffSendResult result,
@@ -1417,7 +1929,28 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 return false;
             }
 
-            result = new(requestId, handoffId, status, errorCode, message, stage);
+            int? targetTabId = null;
+            if (root.TryGetProperty("target_tab_id", out var targetTabIdElement))
+            {
+                if (targetTabIdElement.ValueKind != JsonValueKind.Number
+                    || !targetTabIdElement.TryGetInt32(out var parsedTargetTabId)
+                    || parsedTargetTabId < 0)
+                {
+                    error = "invalid_handoff_result";
+                    return false;
+                }
+
+                targetTabId = parsedTargetTabId;
+            }
+
+            var targetTabUrl = GetString(root, "target_tab_url");
+            if (targetTabUrl is { Length: > 2048 } || (targetTabUrl is not null && !IsChatGptUrl(targetTabUrl)))
+            {
+                error = "invalid_handoff_result";
+                return false;
+            }
+
+            result = new(requestId, handoffId, status, errorCode, message, stage, targetTabId, targetTabUrl);
             return true;
         }
         catch (JsonException)
@@ -1510,6 +2043,24 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private sealed record PendingHandoffRequest(
         string HandoffId,
         TaskCompletionSource<BrowserExtensionHandoffSendResult> Completion);
+
+    private sealed record PendingMediaAttachRequest(
+        string SessionId,
+        int Iteration,
+        string MediaId,
+        TaskCompletionSource<BrowserExtensionMediaAttachResult> Completion);
+
+    private sealed record RegisteredMedia(
+        string MediaId,
+        string SessionId,
+        int Iteration,
+        string OutputIdentity,
+        string FileName,
+        string MimeType,
+        long Size,
+        DateTimeOffset ExpiresAt,
+        string FullPath,
+        string AllowedRoot);
 
     private static int FindAvailablePort()
     {

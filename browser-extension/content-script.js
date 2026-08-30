@@ -8,14 +8,22 @@
   const handoffMessageType = "HANDOFF_SEND";
   const responseWatchMessageType = "WATCH_ASSISTANT_RESPONSE";
   const responseResultMessageType = "ASSISTANT_RESPONSE_RESULT";
+  const reviewMediaAttachBeginMessageType = "REVIEW_MEDIA_ATTACH_BEGIN";
+  const reviewMediaAttachChunkMessageType = "REVIEW_MEDIA_ATTACH_CHUNK";
+  const reviewMediaAttachEndMessageType = "REVIEW_MEDIA_ATTACH_END";
   const sendAcceptanceTimeoutMs = 8000;
   const composerStateTimeoutMs = 1500;
+  const attachmentControlTimeoutMs = 1500;
+  const attachmentVerificationTimeoutMs = 15000;
+  const maxMediaBytes = 512 * 1024 * 1024;
+  const maxMediaChunkBase64Length = 96 * 1024;
   const responseTimeoutMs = 120000;
   const responseStabilityMs = 900;
   const responsePollIntervalMs = 100;
   const locators = globalThis.ChatGptComfyConnectorLocators;
   const responseAnchors = new Map();
   const responseWatchers = new Map();
+  const mediaTransfers = new Map();
 
   // Keep page diagnostics limited to request identity, stage, and the
   // outcome. The session token and Handoff body are never logged by the
@@ -28,6 +36,9 @@
       "status",
       "error_code",
       "stage",
+      "media_id",
+      "iteration",
+      "target_tab_id",
       "composer_type",
       "protocol_found",
       "handoff_id_found",
@@ -201,6 +212,258 @@
     }
 
     return waitForComposerInput(markers, element);
+  }
+
+  function mediaResultFor(message, status, errorCode, text, stage) {
+    const result = {
+      request_id: message?.requestId || "",
+      session_id: message?.sessionId || "",
+      iteration: message?.iteration,
+      media_id: message?.mediaId || "",
+      status
+    };
+    if (errorCode) result.error_code = errorCode;
+    if (text) result.message = text;
+    if (stage) result.stage = stage;
+    diagnostic("content script media result", result);
+    return result;
+  }
+
+  function hasValidMediaMetadata(message) {
+    return typeof message?.requestId === "string"
+      && message.requestId.length > 0
+      && typeof message?.sessionId === "string"
+      && message.sessionId.length > 0
+      && Number.isSafeInteger(message?.iteration)
+      && message.iteration > 0
+      && typeof message?.mediaId === "string"
+      && message.mediaId.length > 0
+      && typeof message?.fileName === "string"
+      && message.fileName.length > 0
+      && message.fileName.length <= 255
+      && !/[\\/\r\n"\u0000]/.test(message.fileName)
+      && typeof message?.mimeType === "string"
+      && ["video/mp4", "image/png", "image/jpeg", "image/webp"].includes(message.mimeType.toLowerCase())
+      && Number.isSafeInteger(message?.size)
+      && message.size > 0
+      && message.size <= maxMediaBytes;
+  }
+
+  function decodeBase64(value) {
+    if (typeof value !== "string" || value.length === 0 || value.length > maxMediaChunkBase64Length) return null;
+    try {
+      if (typeof globalThis.atob === "function") {
+        const binary = globalThis.atob(value);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        return bytes;
+      }
+    } catch (_) {
+      return null;
+    }
+
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const clean = value.replace(/=+$/, "");
+    if (clean.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(clean)) return null;
+    const bytes = [];
+    let buffer = 0;
+    let bits = 0;
+    for (const character of clean) {
+      buffer = (buffer << 6) | alphabet.indexOf(character);
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        bytes.push((buffer >> bits) & 255);
+      }
+    }
+    return new Uint8Array(bytes);
+  }
+
+  function mediaRequestMatchesTransfer(message, transfer) {
+    return Boolean(transfer)
+      && transfer.requestId === message?.requestId
+      && transfer.sessionId === message?.sessionId
+      && transfer.iteration === message?.iteration
+      && transfer.mediaId === message?.mediaId;
+  }
+
+  function fileInputHasExpectedFile(fileInput, transfer) {
+    const file = fileInput?.files?.[0];
+    return Boolean(file
+      && file.name === transfer.fileName
+      && file.size === transfer.size
+      && (!file.type || file.type.toLowerCase() === transfer.mimeType));
+  }
+
+  async function waitForAttachmentVerification(composer, transfer) {
+    const deadline = Date.now() + attachmentVerificationTimeoutMs;
+    let sawIndicator = false;
+    let sawUploading = false;
+    while (Date.now() < deadline) {
+      const currentComposer = locators.findComposer?.() || composer;
+      const indicator = locators.findAttachmentByFilename?.(document, transfer.fileName, currentComposer);
+      if (indicator) {
+        sawIndicator = true;
+        const uploading = Boolean(locators.isAttachmentUploading?.(indicator));
+        sawUploading ||= uploading;
+        const isNewIndicator = !transfer.baselineIndicators?.has(indicator);
+        const inputChanged = transfer.fileInput?.files?.[0]
+          && transfer.fileInput.files[0] !== transfer.previousFile;
+        const fileInputReady = fileInputHasExpectedFile(transfer.fileInput, transfer);
+        diagnostic("attachment upload state", {
+          stage: uploading ? "attachment_uploading" : "attachment_verified"
+        });
+        // A stale chip with the same filename is not sufficient. Either a
+        // newly rendered indicator or the newly injected File must be present.
+        if (!uploading && (isNewIndicator || (fileInputReady && inputChanged))) {
+          return { verified: true, stage: "attachment_verified" };
+        }
+      }
+      await wait(100);
+    }
+    return {
+      verified: false,
+      errorCode: sawUploading ? "attachment_timeout" : "attachment_verification_failed",
+      stage: sawUploading ? "attachment_uploading" : (sawIndicator ? "attachment_verification" : "attachment_control_found")
+    };
+  }
+
+  async function handleReviewMediaAttachBegin(message) {
+    diagnostic("attachment begin requested", {
+      request_id: message?.requestId,
+      media_id: message?.mediaId,
+      iteration: message?.iteration,
+      stage: "attachment_control_requested"
+    });
+    if (!locators || !locators.isChatGptPage()) {
+      return mediaResultFor(message, "error", "review_target_tab_not_found", "対象ページはChatGPTではありません。", "active_tab_check");
+    }
+    if (!hasValidMediaMetadata(message)) {
+      return mediaResultFor(message, "error", "media_registration_failed", "添付メタデータが不正です。", "media_request_validation");
+    }
+
+    const composer = locators.findComposer?.();
+    if (!composer) return mediaResultFor(message, "error", "attachment_control_not_found", "ChatGPTの入力欄が見つかりません。", "attachment_control_found");
+    let fileInput = locators.findFileInput?.(document, composer);
+    if (!fileInput) {
+      // The file input may be mounted only after ChatGPT's explicit
+      // attachment control opens its menu. Do not click a generic toolbar
+      // button: the locator helper returns only semantically attachment-like
+      // controls in the composer scope.
+      const attachmentControl = locators.findAttachmentControl?.(document, composer);
+      if (attachmentControl) {
+        try { attachmentControl.click(); } catch (_) { }
+        const deadline = Date.now() + attachmentControlTimeoutMs;
+        while (Date.now() < deadline && !fileInput) {
+          fileInput = locators.findFileInput?.(document, composer);
+          if (!fileInput) await wait(50);
+        }
+      }
+    }
+    if (!fileInput) {
+      return mediaResultFor(message, "error", "attachment_control_not_found", "ChatGPTのファイル添付入力が見つかりません。", "attachment_control_found");
+    }
+
+    mediaTransfers.set(message.requestId, {
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      iteration: message.iteration,
+      mediaId: message.mediaId,
+      fileName: message.fileName,
+      mimeType: message.mimeType.toLowerCase(),
+      size: message.size,
+      composer,
+      fileInput,
+      previousFile: fileInput.files?.[0] || null,
+      baselineIndicators: new Set(locators.findAttachmentIndicators?.(document, message.fileName, composer) || []),
+      chunks: [],
+      received: 0
+    });
+    diagnostic("attachment control found", {
+      request_id: message.requestId,
+      media_id: message.mediaId,
+      iteration: message.iteration,
+      stage: "attachment_control_found"
+    });
+    return mediaResultFor(message, "receiving", null, null, "attachment_control_found");
+  }
+
+  function handleReviewMediaAttachChunk(message) {
+    const transfer = mediaTransfers.get(message?.requestId);
+    if (!mediaRequestMatchesTransfer(message, transfer)) {
+      return mediaResultFor(message, "error", "attachment_input_failed", "添付データの受信状態が見つかりません。", "attachment_chunk_context");
+    }
+    const bytes = decodeBase64(message.chunk);
+    const expectedOffset = transfer.received;
+    if (!bytes || message.offset !== expectedOffset || transfer.received + bytes.length > transfer.size) {
+      mediaTransfers.delete(message.requestId);
+      return mediaResultFor(message, "error", "attachment_input_failed", "添付データを正しく受信できませんでした。", "attachment_chunk_validation");
+    }
+    transfer.chunks.push(bytes);
+    transfer.received += bytes.length;
+    return mediaResultFor(message, "receiving", null, null, "attachment_injected");
+  }
+
+  async function handleReviewMediaAttachEnd(message) {
+    const transfer = mediaTransfers.get(message?.requestId);
+    if (!mediaRequestMatchesTransfer(message, transfer)
+      || message.fileName !== transfer.fileName
+      || message.mimeType?.toLowerCase() !== transfer.mimeType
+      || message.size !== transfer.size) {
+      mediaTransfers.delete(message?.requestId);
+      return mediaResultFor(message, "error", "attachment_input_failed", "添付対象の識別情報が一致しません。", "attachment_metadata_validation");
+    }
+    if (transfer.received !== transfer.size) {
+      mediaTransfers.delete(message.requestId);
+      return mediaResultFor(message, "error", "attachment_upload_failed", "生成物を完全に受信できませんでした。", "attachment_uploading");
+    }
+
+    try {
+      const FileConstructor = globalThis.File;
+      const DataTransferConstructor = globalThis.DataTransfer;
+      if (typeof FileConstructor !== "function" || typeof DataTransferConstructor !== "function") throw new Error("File API is unavailable.");
+      const file = new FileConstructor(transfer.chunks, transfer.fileName, { type: transfer.mimeType });
+      const composer = locators.findComposer?.() || transfer.composer;
+      const fileInput = locators.findFileInput?.(document, composer) || transfer.fileInput;
+      if (!fileInput) {
+        mediaTransfers.delete(message.requestId);
+        return mediaResultFor(message, "error", "attachment_control_not_found", "ChatGPTのファイル添付入力が見つかりません。", "attachment_control_found");
+      }
+      const dataTransfer = new DataTransferConstructor();
+      dataTransfer.items.add(file);
+      fileInput.files = dataTransfer.files;
+      fileInput.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      fileInput.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      diagnostic("attachment injected", {
+        request_id: message.requestId,
+        media_id: message.mediaId,
+        iteration: message.iteration,
+        stage: "attachment_injected"
+      });
+      diagnostic("attachment uploading", {
+        request_id: message.requestId,
+        media_id: message.mediaId,
+        iteration: message.iteration,
+        stage: "attachment_uploading"
+      });
+      const verification = await waitForAttachmentVerification(composer, transfer);
+      if (!verification.verified) {
+        mediaTransfers.delete(message.requestId);
+        return mediaResultFor(message, "error", verification.errorCode, "ChatGPTで添付完了を確認できませんでした。", verification.stage);
+      }
+      mediaTransfers.delete(message.requestId);
+      diagnostic("attachment verified", {
+        request_id: message.requestId,
+        media_id: message.mediaId,
+        iteration: message.iteration,
+        status: "attached",
+        stage: "attachment_verified"
+      });
+      return mediaResultFor(message, "attached", null, null, "attachment_verified");
+    } catch (_) {
+      mediaTransfers.delete(message.requestId);
+      return mediaResultFor(message, "error", "attachment_input_failed", "ChatGPTのファイル添付入力へ生成物を設定できませんでした。", "attachment_input_failed");
+    }
   }
 
   function wait(milliseconds) {
@@ -705,17 +968,29 @@
       window.dispatchEvent(new CustomEvent(statusEventName, { detail: message.state }));
       return false;
     }
-    if (message?.type !== handoffMessageType && message?.type !== responseWatchMessageType) return false;
+    if (message?.type !== handoffMessageType
+      && message?.type !== responseWatchMessageType
+      && message?.type !== reviewMediaAttachBeginMessageType
+      && message?.type !== reviewMediaAttachChunkMessageType
+      && message?.type !== reviewMediaAttachEndMessageType) return false;
     if (sender?.id && sender.id !== chrome.runtime.id) return false;
 
     const operation = message?.type === responseWatchMessageType
       ? handleWatchAssistantResponse(message)
-      : handleHandoffSend(message);
+      : message?.type === handoffMessageType
+        ? handleHandoffSend(message)
+        : message?.type === reviewMediaAttachBeginMessageType
+          ? handleReviewMediaAttachBegin(message)
+          : message?.type === reviewMediaAttachChunkMessageType
+            ? Promise.resolve(handleReviewMediaAttachChunk(message))
+            : handleReviewMediaAttachEnd(message);
     void operation
       .then(sendResponse)
       .catch(() => sendResponse(message?.type === responseWatchMessageType
         ? responseResultFor(message, "error", "response_extraction_failed", "assistant応答の監視を開始できませんでした。", "unexpected_error")
-        : resultFor(message, "error", "send_failed", "ChatGPTへの送信処理に失敗しました。", "unexpected_error")));
+        : [reviewMediaAttachBeginMessageType, reviewMediaAttachChunkMessageType, reviewMediaAttachEndMessageType].includes(message?.type)
+          ? mediaResultFor(message, "error", "attachment_upload_failed", "ChatGPTへの生成物添付処理に失敗しました。", "unexpected_error")
+          : resultFor(message, "error", "send_failed", "ChatGPTへの送信処理に失敗しました。", "unexpected_error")));
     return true;
   });
 

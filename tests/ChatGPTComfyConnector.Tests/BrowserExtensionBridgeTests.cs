@@ -194,6 +194,7 @@ public sealed class BrowserExtensionBridgeTests
             await using var secondBridge = new BrowserExtensionBridge(0, secondStore);
             await secondBridge.StartAsync();
             Assert.Equal(BrowserExtensionPairingState.Paired, secondBridge.Status.PairingState);
+            Assert.Null(secondBridge.Status.PairingCode);
             var secondSession = await BootstrapAsync(client, secondBridge, credential);
             Assert.NotEqual(firstSession, secondSession);
         }
@@ -356,6 +357,193 @@ public sealed class BrowserExtensionBridgeTests
         Assert.DoesNotContain(diagnostics, item => item.EventName.Contains(payload, StringComparison.Ordinal));
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test complete", timeout.Token);
+    }
+
+    [Fact]
+    public async Task RegisteredMediaStreamsOnlyTheBoundOutputAndKeepsLocalPathOffTheWire()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"chatgpt-comfy-connector-media-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var outputPath = Path.Combine(root, "MiniMax_H3_00015_.mp4");
+        var bytes = new byte[] { 1, 2, 3, 4, 5 };
+        await File.WriteAllBytesAsync(outputPath, bytes);
+
+        try
+        {
+            var store = new InMemoryPairingStore();
+            await using var bridge = new BrowserExtensionBridge(0, store);
+            await bridge.StartAsync();
+            using var client = CreateHttpClient();
+            var credential = await PairAsync(client, bridge);
+            var sessionToken = await BootstrapAsync(client, bridge, credential);
+            using var socket = await ConnectSocketAsync(bridge, sessionToken);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var hello = await ReceiveJsonAsync(socket, timeout.Token);
+            using var ready = await ReceiveJsonAsync(socket, timeout.Token);
+
+            const string mediaId = "media-fixture-01";
+            const string sessionId = "session-media-01";
+            const string outputIdentity = "output-identity-fixture";
+            var registration = new BrowserExtensionMediaRegistration
+            {
+                MediaId = mediaId,
+                SessionId = sessionId,
+                Iteration = 2,
+                OutputIdentity = outputIdentity,
+                FileName = Path.GetFileName(outputPath),
+                MimeType = BrowserExtensionMediaTypes.Mp4,
+                Size = bytes.Length,
+                ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(2),
+                FullPath = outputPath,
+                AllowedRoot = root,
+            };
+
+            var serializedRegistration = JsonSerializer.Serialize(registration);
+            Assert.DoesNotContain(outputPath, serializedRegistration, StringComparison.Ordinal);
+            Assert.DoesNotContain(nameof(BrowserExtensionMediaRegistration.FullPath), serializedRegistration, StringComparison.Ordinal);
+            Assert.DoesNotContain(nameof(BrowserExtensionMediaRegistration.AllowedRoot), serializedRegistration, StringComparison.Ordinal);
+            bridge.RegisterMedia(registration);
+
+            using var download = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"{bridge.Status.HttpEndpoint}{BrowserExtensionBridgeProtocol.MediaPathPrefix}{mediaId}?session_id={sessionId}&iteration=2");
+            download.Headers.Authorization = new AuthenticationHeaderValue("Bearer", sessionToken);
+            download.Headers.TryAddWithoutValidation(BrowserExtensionBridgeProtocol.ClientHeaderName, BrowserExtensionBridgeProtocol.ClientHeaderValue);
+            download.Headers.TryAddWithoutValidation("Origin", ExtensionOrigin);
+            using var downloadResponse = await client.SendAsync(download);
+            Assert.Equal(HttpStatusCode.OK, downloadResponse.StatusCode);
+            Assert.Equal(BrowserExtensionMediaTypes.Mp4, downloadResponse.Content.Headers.ContentType?.MediaType);
+            Assert.Equal(bytes, await downloadResponse.Content.ReadAsByteArrayAsync());
+
+            using var wrongToken = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"{bridge.Status.HttpEndpoint}{BrowserExtensionBridgeProtocol.MediaPathPrefix}{mediaId}?session_id={sessionId}&iteration=2");
+            wrongToken.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "wrong-token");
+            wrongToken.Headers.TryAddWithoutValidation(BrowserExtensionBridgeProtocol.ClientHeaderName, BrowserExtensionBridgeProtocol.ClientHeaderValue);
+            wrongToken.Headers.TryAddWithoutValidation("Origin", ExtensionOrigin);
+            using var wrongTokenResponse = await client.SendAsync(wrongToken);
+            Assert.Equal(HttpStatusCode.Unauthorized, wrongTokenResponse.StatusCode);
+
+            using var unknownMedia = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"{bridge.Status.HttpEndpoint}{BrowserExtensionBridgeProtocol.MediaPathPrefix}unknown-media?session_id={sessionId}&iteration=2");
+            unknownMedia.Headers.Authorization = new AuthenticationHeaderValue("Bearer", sessionToken);
+            unknownMedia.Headers.TryAddWithoutValidation(BrowserExtensionBridgeProtocol.ClientHeaderName, BrowserExtensionBridgeProtocol.ClientHeaderValue);
+            unknownMedia.Headers.TryAddWithoutValidation("Origin", ExtensionOrigin);
+            using var unknownResponse = await client.SendAsync(unknownMedia);
+            Assert.Equal(HttpStatusCode.NotFound, unknownResponse.StatusCode);
+
+            var attachRequest = new BrowserExtensionMediaAttachRequest(
+                "media-request-01",
+                sessionId,
+                2,
+                mediaId,
+                registration.FileName,
+                registration.MimeType,
+                registration.Size,
+                17,
+                "https://chatgpt.com/c/fixture");
+            var attachTask = bridge.SendMediaAttachAsync(attachRequest, timeout.Token);
+            using var attachEnvelope = await ReceiveJsonAsync(socket, timeout.Token);
+            Assert.Equal("review.media.attach", attachEnvelope.RootElement.GetProperty("type").GetString());
+            Assert.Equal(mediaId, attachEnvelope.RootElement.GetProperty("media_id").GetString());
+            Assert.Equal(sessionId, attachEnvelope.RootElement.GetProperty("session_id").GetString());
+            Assert.Equal(2, attachEnvelope.RootElement.GetProperty("iteration").GetInt32());
+            Assert.Equal(17, attachEnvelope.RootElement.GetProperty("target_tab_id").GetInt32());
+            Assert.False(attachEnvelope.RootElement.TryGetProperty("full_path", out _));
+            Assert.False(attachEnvelope.RootElement.TryGetProperty("allowed_root", out _));
+
+            await SendTextAsync(socket, JsonSerializer.Serialize(new
+            {
+                type = "review.media.result",
+                request_id = attachRequest.RequestId,
+                session_id = attachRequest.SessionId,
+                iteration = attachRequest.Iteration,
+                media_id = attachRequest.MediaId,
+                status = "attached",
+                stage = "attachment_verified",
+            }), timeout.Token);
+            var attachResult = await attachTask;
+            Assert.True(attachResult.IsAttached);
+            Assert.Equal(attachRequest.RequestId, attachResult.RequestId);
+            Assert.Equal(attachRequest.MediaId, attachResult.MediaId);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task MediaRegistrationRejectsTraversalUnsupportedMimeOversizeAndExpiredMedia()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"chatgpt-comfy-connector-media-security-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var outputPath = Path.Combine(root, "safe.png");
+        await File.WriteAllBytesAsync(outputPath, [1, 2, 3]);
+
+        try
+        {
+            await using var bridge = new BrowserExtensionBridge(0, new InMemoryPairingStore());
+            await bridge.StartAsync();
+
+            BrowserExtensionMediaRegistration CreateRegistration(
+                string mediaId,
+                string fileName,
+                string mimeType,
+                long size,
+                DateTimeOffset expiresAt,
+                string fullPath = "")
+                => new()
+                {
+                    MediaId = mediaId,
+                    SessionId = "session-security",
+                    Iteration = 1,
+                    OutputIdentity = "identity-security",
+                    FileName = fileName,
+                    MimeType = mimeType,
+                    Size = size,
+                    ExpiresAt = expiresAt,
+                    FullPath = string.IsNullOrEmpty(fullPath) ? outputPath : fullPath,
+                    AllowedRoot = root,
+                };
+
+            Assert.Throws<ArgumentException>(() => bridge.RegisterMedia(CreateRegistration(
+                "media-traversal",
+                "..\\secret.txt",
+                BrowserExtensionMediaTypes.Png,
+                3,
+                DateTimeOffset.UtcNow.AddMinutes(1))));
+            Assert.Throws<ArgumentException>(() => bridge.RegisterMedia(CreateRegistration(
+                "media-unsupported",
+                "safe.png",
+                "image/gif",
+                3,
+                DateTimeOffset.UtcNow.AddMinutes(1))));
+            Assert.Throws<ArgumentException>(() => bridge.RegisterMedia(CreateRegistration(
+                "media-oversize",
+                "safe.png",
+                BrowserExtensionMediaTypes.Png,
+                512L * 1024 * 1024 + 1,
+                DateTimeOffset.UtcNow.AddMinutes(1))));
+            Assert.Throws<ArgumentException>(() => bridge.RegisterMedia(CreateRegistration(
+                "media-outside-root",
+                "safe.png",
+                BrowserExtensionMediaTypes.Png,
+                3,
+                DateTimeOffset.UtcNow.AddMinutes(1),
+                Path.Combine(root, "..", "outside.png"))));
+            Assert.Throws<ArgumentException>(() => bridge.RegisterMedia(CreateRegistration(
+                "media-expired-registration",
+                "safe.png",
+                BrowserExtensionMediaTypes.Png,
+                3,
+                DateTimeOffset.UtcNow.AddSeconds(-1))));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]

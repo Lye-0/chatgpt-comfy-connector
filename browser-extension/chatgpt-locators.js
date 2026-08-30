@@ -88,6 +88,45 @@
     '[role="button"][title*="停止"]'
   ];
 
+  const fileInputSelectors = [
+    'input[type="file"][data-testid*="file"]',
+    'input[type="file"][data-testid*="upload"]',
+    'input[type="file"][accept]',
+    'input[type="file"]'
+  ];
+
+  const attachmentControlSelectors = [
+    '[data-testid*="attachment"]',
+    '[data-testid*="attach"]',
+    '[data-testid*="upload"]',
+    '[data-testid*="file"]',
+    '[aria-label*="attachment" i]',
+    '[aria-label*="attach" i]',
+    '[aria-label*="upload" i]',
+    '[aria-label*="file" i]',
+    '[aria-label*="photo" i]',
+    '[aria-label*="image" i]',
+    '[aria-label*="添付"]',
+    '[aria-label*="ファイル"]',
+    '[aria-label*="写真"]',
+    '[aria-label*="画像"]',
+    '[aria-label*="アップロード"]'
+  ];
+
+  const attachmentIndicatorSelectors = [
+    '[data-testid*="attachment"]',
+    '[data-testid*="file"]',
+    '[data-testid*="upload"]',
+    '[data-file-name]',
+    '[data-filename]',
+    '[aria-label*="attachment" i]',
+    '[aria-label*="file" i]',
+    '[aria-label*="添付"]',
+    '[aria-label*="ファイル"]',
+    '[aria-label*="アップロード"]',
+    '[role="progressbar"]'
+  ];
+
   const zeroWidthPattern = /[\u200b\u200c\u200d\u2060\ufeff]/g;
 
   const transientRolePattern = /^(?:status|progressbar|alert|log|marquee)$/i;
@@ -99,6 +138,8 @@
   // semantics say "send/submit", or it is a submit control in the same form.
   // These exclusions intentionally cover both the English and Japanese UI.
   const excludedActionPattern = /(?:\b(?:attachment|attach|upload|add|plus|tool|tools|microphone|mic|voice|stop|file|files|photo|photos|image|images|library|browse)\b|添付|ファイル|写真|画像|追加|プラス|ツール|マイク|音声|停止)/i;
+  const excludedAttachmentControlPattern = /(?:\b(?:remove|delete|cancel|close|library|browse|search|tool|tools|microphone|mic|voice|stop)\b|削除|閉じる|キャンセル|ライブラリ|検索|ツール|マイク|音声|停止)/i;
+  const attachmentControlPattern = /(?:\b(?:attachment|attach|upload|file|files|photo|photos|image|images)\b|添付|ファイル|写真|画像|アップロード)/i;
   const sendActionPattern = /(?:\b(?:send|submit)\b|送信|メッセージを送る|メッセージを送信|送る)/i;
   const completionActionPattern = /(?:\b(?:copy|retry|regenerate|redo|edit|share|like|dislike)\b|コピー|再試行|再生成|編集|共有|いいね|よくない)/i;
 
@@ -308,6 +349,150 @@
       return null;
     }
     return best.element;
+  }
+
+  function composerScope(composer) {
+    if (!composer) return null;
+    const form = composer.closest?.("form");
+    if (form) return form;
+
+    // ChatGPT variants without a form still keep the composer controls in a
+    // small ancestor container. Stop before the document body so an unrelated
+    // file input elsewhere on the page is never selected.
+    let current = composer.parentElement;
+    for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
+      if (current.getAttribute?.("role") === "group"
+        || current.getAttribute?.("data-testid")?.toLowerCase().includes("composer")) return current;
+    }
+    return composer.parentElement || composer;
+  }
+
+  function isFileInput(element) {
+    return element?.tagName?.toLowerCase() === "input"
+      && (element.getAttribute("type") || "text").toLowerCase() === "file";
+  }
+
+  function fileInputScore(element, composer) {
+    if (!isFileInput(element)) return -10000;
+    const accept = attributeValue(element, "accept").toLowerCase();
+    const testId = attributeValue(element, "data-testid").toLowerCase();
+    const label = semanticActionText(element);
+    let score = 10;
+    if (accept.includes("image") || accept.includes("video")) score += 60;
+    if (testId.includes("file") || testId.includes("upload")) score += 30;
+    if (/(?:attachment|upload|file|添付|ファイル|アップロード)/i.test(label)) score += 20;
+    if (element.closest?.("form") && element.closest("form") === composer?.closest?.("form")) score += 100;
+    return score;
+  }
+
+  function findFileInput(root = globalThis.document, composer = findComposer(root)) {
+    if (!root?.querySelectorAll || !composer) return null;
+    const scope = composerScope(composer);
+    const scopedElements = uniqueElements(fileInputSelectors, scope || root);
+    const rootElements = scope && scope !== root ? uniqueElements(fileInputSelectors, root) : [];
+    const candidates = [...new Set([...scopedElements, ...rootElements])]
+      .filter((element) => isFileInput(element))
+      .map((element) => ({
+        element,
+        score: fileInputScore(element, composer),
+        isScoped: scopedElements.includes(element)
+      }))
+      // A file input outside the composer scope is acceptable only when its
+      // own accept/test-id metadata strongly identifies it as ChatGPT's
+      // upload control. This avoids selecting an unrelated page form.
+      .filter((candidate) => candidate.isScoped ? candidate.score > 0 : candidate.score >= 40)
+      .sort((left, right) => right.score - left.score);
+    return candidates[0]?.element || null;
+  }
+
+  function attachmentControlScore(element, composer) {
+    if (!element || isFileInput(element)) return -10000;
+    const tagName = element.tagName?.toLowerCase();
+    const role = attributeValue(element, "role").toLowerCase();
+    if (tagName !== "button" && role !== "button") return -10000;
+    const label = semanticActionText(element);
+    if (!attachmentControlPattern.test(label) || excludedAttachmentControlPattern.test(label)) return -10000;
+
+    let score = 10;
+    const testId = attributeValue(element, "data-testid").toLowerCase();
+    const ariaLabel = attributeValue(element, "aria-label").toLowerCase();
+    if (testId.includes("attachment") || testId.includes("attach")) score += 150;
+    if (testId.includes("upload") || testId.includes("file")) score += 130;
+    if (ariaLabel.includes("attachment") || ariaLabel.includes("attach")) score += 110;
+    if (ariaLabel.includes("upload") || ariaLabel.includes("file")) score += 100;
+    if (ariaLabel.includes("photo") || ariaLabel.includes("image") || /添付|ファイル|写真|画像|アップロード/.test(ariaLabel)) score += 80;
+    if (element.closest?.("form") && element.closest("form") === composer?.closest?.("form")) score += 100;
+    return score;
+  }
+
+  function findAttachmentControl(root = globalThis.document, composer = findComposer(root)) {
+    if (!root?.querySelectorAll || !composer) return null;
+    const scope = composerScope(composer);
+    const ranked = uniqueElements(attachmentControlSelectors, scope || root)
+      .filter((element) => isVisible(element))
+      .map((element) => ({ element, score: attachmentControlScore(element, composer) }))
+      .filter((candidate) => candidate.score > 0)
+      .sort((left, right) => right.score - left.score);
+    if (ranked.length === 0) return null;
+    const best = ranked[0];
+    const next = ranked[1];
+    return next && next.score === best.score ? null : best.element;
+  }
+
+  function attachmentText(element) {
+    if (!element) return "";
+    return [
+      attributeValue(element, "data-file-name"),
+      attributeValue(element, "data-filename"),
+      attributeValue(element, "aria-label"),
+      attributeValue(element, "title"),
+      rawElementText(element)
+    ].filter(Boolean).join(" ");
+  }
+
+  function attachmentNameMatches(element, fileName) {
+    const expected = String(fileName || "").trim().toLowerCase();
+    if (!expected) return false;
+    return attachmentText(element).toLowerCase().includes(expected);
+  }
+
+  function isAttachmentUploading(element) {
+    if (!element) return false;
+    let current = element;
+    for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
+      const role = attributeValue(current, "role").toLowerCase();
+      const semantic = semanticElementAttributes(current);
+      const state = `${attributeValue(current, "data-state")} ${attributeValue(current, "data-status")}`.toLowerCase();
+      const ariaBusy = attributeValue(current, "aria-busy").toLowerCase();
+      if (role === "progressbar"
+        || ariaBusy === "true"
+        || /(?:uploading|pending|loading|processing|アップロード中|読み込み中|処理中)/i.test(`${semantic} ${state} ${attachmentText(current)}`)) return true;
+    }
+    return false;
+  }
+
+  function findAttachmentIndicators(root = globalThis.document, fileName, composer = findComposer(root)) {
+    if (!composer) return [];
+    const scope = composerScope(composer) || root;
+    const candidates = uniqueElements(attachmentIndicatorSelectors, scope);
+    // Some ChatGPT builds render a plain filename chip without a stable
+    // data-testid. Search only the composer scope, never the whole document.
+    try {
+      for (const element of Array.from(scope.querySelectorAll?.("*") || [])) {
+        if (attachmentNameMatches(element, fileName) && !candidates.includes(element)) candidates.push(element);
+      }
+    } catch (_) { }
+    return candidates.filter((element) => attachmentNameMatches(element, fileName));
+  }
+
+  function findAttachmentByFilename(root = globalThis.document, fileName, composer = findComposer(root)) {
+    const indicators = findAttachmentIndicators(root, fileName, composer);
+    return indicators.find((element) => isVisible(element) || isAttachmentUploading(element)) || null;
+  }
+
+  function isAttachmentUploadComplete(root = globalThis.document, fileName, composer = findComposer(root)) {
+    const indicator = findAttachmentByFilename(root, fileName, composer);
+    return Boolean(indicator && !isAttachmentUploading(indicator));
   }
 
   function readComposerText(element) {
@@ -903,6 +1088,16 @@
     isDisabled,
     findComposer,
     findSendButton,
+    fileInputSelectors: Object.freeze([...fileInputSelectors]),
+    attachmentIndicatorSelectors: Object.freeze([...attachmentIndicatorSelectors]),
+    attachmentControlSelectors: Object.freeze([...attachmentControlSelectors]),
+    composerScope,
+    findFileInput,
+    findAttachmentControl,
+    findAttachmentIndicators,
+    findAttachmentByFilename,
+    isAttachmentUploading,
+    isAttachmentUploadComplete,
     readComposerText,
     readComposerTextCandidates,
     normalizeComposerText,

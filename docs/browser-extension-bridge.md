@@ -1,4 +1,4 @@
-# Browser Extension Bridge (v0.2 Phase 1–4)
+# Browser Extension Bridge (v0.2 Phase 1–5.1)
 
 ## Scope
 
@@ -12,7 +12,11 @@ validated `generate` Response to the existing Desktop APPLY → ComfyUI READY
 → GENERATE → OUTPUT path, while retaining the manual controls as a safe
 fallback. A strictly validated `complete` Response completes the session only
 when the existing output/review rules allow it. Chat/project enumeration and
-an autonomous infinite iteration loop remain out of scope.
+an autonomous infinite iteration loop remain out of scope. Phase 5.1 adds one
+more bounded action: after a successful ComfyUI generation, the Desktop can
+register the current Primary Output and have the Extension attach it to the
+same ChatGPT tab. Review Handoff sending and the automatic Review/Iteration
+loop remain out of scope.
 
 ```text
 ChatGPT page content script (DOM only: input/send/response observation)
@@ -299,9 +303,84 @@ of the command-shaped block as a narrow fallback discriminator. Raw
 the Desktop strict parser remains the authority and no JSON-plus-Payload
 grammar is accepted by the Extension.
 
-The server accepts only `hello`, `ping`, `handoff.result`, and
-`assistant.response` from the Extension; unknown messages return an error and
-cannot invoke MCP, filesystem, workflow, or process operations.
+The server accepts only `hello`, `ping`, `handoff.result`,
+`assistant.response`, and `review.media.result` from the Extension; unknown
+messages return an error and cannot invoke MCP, filesystem, workflow, or
+process operations.
+
+### Phase 5.1: generated media attachment
+
+After a successful ComfyUI generation, the Desktop registers only the current
+iteration's confirmed Primary Output in a process-local media registry. The
+registry record contains an opaque `media_id`, session/iteration and output
+identity, safe basename, allow-listed MIME type, exact byte size, an expiry,
+and the Desktop-side allowed output root. `FullPath` and the root are never
+serialized into a Bridge message.
+
+The authenticated WebSocket carries metadata only:
+
+```json
+{
+  "type": "review.media.attach",
+  "request_id": "<attempt-id>",
+  "session_id": "<creation-session-id>",
+  "iteration": 1,
+  "media_id": "<opaque-process-local-id>",
+  "filename": "output.mp4",
+  "mime_type": "video/mp4",
+  "size": 123456,
+  "target_tab_id": 123,
+  "target_tab_url": "https://chatgpt.com/g/g-example/c/example"
+}
+```
+
+The Background validates the exact target tab recorded by the successful
+Bootstrap Handoff, then downloads the registered bytes through the
+authenticated loopback endpoint:
+
+```text
+GET /api/v1/media/{media_id}?session_id=<id>&iteration=<number>
+Authorization: Bearer <current process session token>
+X-Connector-Client: browser-extension
+```
+
+The response is streamed in bounded chunks to the Content Script. It contains
+only the registered file bytes, safe filename, and allow-listed MIME type; it
+does not expose an absolute path. The Content Script creates a browser `File`,
+sets ChatGPT's real file input through `DataTransfer`, dispatches `input` and
+`change`, and waits for a new filename/chip/preview indicator with upload
+activity finished before returning:
+
+```json
+{
+  "type": "review.media.result",
+  "request_id": "<attempt-id>",
+  "session_id": "<creation-session-id>",
+  "iteration": 1,
+  "media_id": "<opaque-process-local-id>",
+  "status": "attached",
+  "stage": "attachment_verified"
+}
+```
+
+The failure response uses `status: "error"`, `error_code`, `stage`, and a
+short message. Supported failures include `review_output_not_found`,
+`media_registration_failed`, `media_expired`, `media_fetch_failed`,
+`media_too_large`, `unsupported_media_type`, `review_target_tab_not_found`,
+`content_script_unavailable`, `attachment_control_not_found`,
+`attachment_input_failed`, `attachment_upload_failed`,
+`attachment_timeout`, `attachment_verification_failed`, and
+`bridge_disconnected`. A missing tab, changed ChatGPT conversation, expired
+registration, size/MIME mismatch, or incomplete upload never advances Review
+to attached.
+
+Only `video/mp4`, `image/png`, `image/jpeg`, and `image/webp` are registered
+for this phase. Registrations expire after ten minutes, are cleared when the
+Bridge stops, and are revoked when the session/context/generation changes or
+after a successful attachment. The source ComfyUI output is never deleted.
+Duplicate in-flight or already terminal same-iteration attachment attempts
+are ignored by Desktop state guards; an explicit retry is available after a
+failure. No Review Handoff is generated or sent by Phase 5.1.
 
 ### `POST /api/v1/ping`
 

@@ -100,6 +100,7 @@ public enum HandoffTransportState
     Received,
     Copied,
     Sent,
+    Attached,
     Failed,
     Completed,
 }
@@ -611,7 +612,7 @@ public sealed class CreationStageStatus
 
 public sealed class CreationPipelineSnapshot
 {
-    public int Version { get; set; } = 4;
+    public int Version { get; set; } = 5;
     public int IterationNumber { get; set; }
     public bool ContextBound { get; set; }
     public bool MaximumIterationSafetyStop { get; set; }
@@ -619,7 +620,40 @@ public sealed class CreationPipelineSnapshot
     public string? AcceptedCommandAction { get; set; }
     public GenerateExecutionState GenerateExecutionState { get; set; } = GenerateExecutionState.ReadyToGenerate;
     public AutomaticResponseExecutionSnapshot? AutomaticResponseExecution { get; set; }
+    public ReviewMediaAttachmentSnapshot? ReviewMediaAttachment { get; set; }
     public List<CreationStageStatus> Stages { get; set; } = [];
+}
+
+public enum ReviewMediaAttachmentState
+{
+    None,
+    Preparing,
+    Attaching,
+    Attached,
+    Failed,
+}
+
+/// <summary>
+/// Durable UI/operation state for the temporary Primary Output attachment.
+/// It deliberately contains no local filesystem path or media bytes.
+/// </summary>
+public sealed class ReviewMediaAttachmentSnapshot
+{
+    public ReviewMediaAttachmentState State { get; set; } = ReviewMediaAttachmentState.None;
+    public string SessionId { get; set; } = string.Empty;
+    public int Iteration { get; set; }
+    public string RequestId { get; set; } = string.Empty;
+    public string MediaId { get; set; } = string.Empty;
+    public string OutputIdentity { get; set; } = string.Empty;
+    public string FileName { get; set; } = string.Empty;
+    public string MimeType { get; set; } = string.Empty;
+    public long Size { get; set; }
+    public int? TargetTabId { get; set; }
+    public string? TargetTabUrl { get; set; }
+    public string? ErrorCode { get; set; }
+    public string? ErrorStage { get; set; }
+    public string? ErrorMessage { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 /// <summary>
@@ -704,6 +738,12 @@ public sealed class CreationSession
     public string? LocalChatContextId { get; set; }
     public string? ProjectId { get; set; }
     public string? ConversationId { get; set; }
+    /// <summary>
+    /// Browser tab identity returned by the successful initial Handoff.  It
+    /// is used only to bind Phase 5.1 media attachment to that same tab.
+    /// </summary>
+    public int? BrowserExtensionTargetTabId { get; set; }
+    public string? BrowserExtensionTargetTabUrl { get; set; }
     public WorkflowIdentity? BoundWorkflow { get; set; }
     public int CurrentIteration { get; set; }
     public int MaximumIterations { get; set; } = 10;

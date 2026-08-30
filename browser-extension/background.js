@@ -2,6 +2,7 @@ const BRIDGE_HTTP_ORIGIN = "http://127.0.0.1:43127";
 const BRIDGE_HEALTH_URL = `${BRIDGE_HTTP_ORIGIN}/health`;
 const BRIDGE_PAIR_URL = `${BRIDGE_HTTP_ORIGIN}/api/v1/pair`;
 const BRIDGE_BOOTSTRAP_URL = `${BRIDGE_HTTP_ORIGIN}/api/v1/bootstrap`;
+const BRIDGE_MEDIA_URL_PREFIX = `${BRIDGE_HTTP_ORIGIN}/api/v1/media/`;
 const BRIDGE_WS_URL = "ws://127.0.0.1:43127/bridge";
 const BRIDGE_PROTOCOL = "chatgpt-comfy-connector.bridge/1";
 const HANDOFF_PROTOCOL = "comfy-connector/1";
@@ -19,6 +20,11 @@ const CONTENT_SCRIPT_TIMEOUT_MS = 15000;
 const PAIRING_STORAGE_KEY = "bridgePairing";
 const RESPONSE_WATCH_MESSAGE_TYPE = "WATCH_ASSISTANT_RESPONSE";
 const ASSISTANT_RESPONSE_RESULT_MESSAGE_TYPE = "ASSISTANT_RESPONSE_RESULT";
+const REVIEW_MEDIA_ATTACH_BEGIN_MESSAGE_TYPE = "REVIEW_MEDIA_ATTACH_BEGIN";
+const REVIEW_MEDIA_ATTACH_CHUNK_MESSAGE_TYPE = "REVIEW_MEDIA_ATTACH_CHUNK";
+const REVIEW_MEDIA_ATTACH_END_MESSAGE_TYPE = "REVIEW_MEDIA_ATTACH_END";
+const REVIEW_MEDIA_CHUNK_BYTES = 48 * 1024;
+const MAX_REVIEW_MEDIA_BYTES = 512 * 1024 * 1024;
 
 const defaultState = {
   status: "DISCONNECTED",
@@ -85,8 +91,9 @@ function bridgeError(message, status = 0, code = "bridge_error") {
 // include the pairing credential, session token, or Handoff payload here.
 function diagnostic(eventName, fields = {}) {
   const safe = {};
-  for (const key of ["request_id", "handoff_id", "status", "error_code", "stage"]) {
+  for (const key of ["request_id", "handoff_id", "media_id", "status", "error_code", "stage"]) {
     if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
+    if (typeof fields[key] === "number" && Number.isSafeInteger(fields[key])) safe[key] = fields[key];
   }
   try {
     console.info(`[ChatGPT Comfy Connector] ${eventName}`, safe);
@@ -255,13 +262,30 @@ function clearResponseWatchesForSocket(bridgeSocket) {
 function isChatGptTab(tab) {
   try {
     const url = new URL(tab?.url || "");
-    return url.protocol === "https:" && url.hostname === "chatgpt.com";
+    return url.protocol === "https:" && url.hostname === "chatgpt.com" && url.port === "";
   } catch (_) {
     return false;
   }
 }
 
-function handoffResult(message, status, errorCode, text, stage) {
+function chatGptConversationKey(value) {
+  try {
+    const url = new URL(value || "");
+    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com" || url.port !== "") return null;
+    const pathname = url.pathname.replace(/\/+$/, "") || "/";
+    return `${url.origin}${pathname}`;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isSameChatGptConversation(actualUrl, expectedUrl) {
+  const actual = chatGptConversationKey(actualUrl);
+  const expected = chatGptConversationKey(expectedUrl);
+  return actual !== null && expected !== null && actual === expected;
+}
+
+function handoffResult(message, status, errorCode, text, stage, targetTab = null) {
   const result = {
     type: "handoff.result",
     request_id: message?.request_id || "",
@@ -271,6 +295,10 @@ function handoffResult(message, status, errorCode, text, stage) {
   if (errorCode) result.error_code = errorCode;
   if (text) result.message = text;
   if (stage) result.stage = stage;
+  if (status === "sent" && Number.isSafeInteger(targetTab?.id)) {
+    result.target_tab_id = targetTab.id;
+    if (typeof targetTab.url === "string" && targetTab.url.length <= 2048) result.target_tab_url = targetTab.url;
+  }
   return result;
 }
 
@@ -407,6 +435,262 @@ function sendAssistantResponseToBridge(response, bridgeSocket) {
   }
 }
 
+function reviewMediaResult(message, status, errorCode, text, stage) {
+  const result = {
+    type: "review.media.result",
+    request_id: message?.request_id || "",
+    session_id: message?.session_id || "",
+    iteration: message?.iteration,
+    media_id: message?.media_id || "",
+    status
+  };
+  if (errorCode) result.error_code = errorCode;
+  if (text) result.message = text;
+  if (stage) result.stage = stage;
+  return result;
+}
+
+function sendReviewMediaResultToBridge(result, bridgeSocket) {
+  if (bridgeSocket.readyState !== WebSocket.OPEN || socket !== bridgeSocket) {
+    diagnostic("review.media.result dropped", {
+      request_id: result.request_id,
+      media_id: result.media_id,
+      status: result.status,
+      error_code: result.error_code || "bridge_disconnected",
+      stage: result.stage || "bridge_disconnected"
+    });
+    return false;
+  }
+  try {
+    bridgeSocket.send(JSON.stringify(result));
+    diagnostic("review.media.result sent", {
+      request_id: result.request_id,
+      media_id: result.media_id,
+      status: result.status,
+      error_code: result.error_code,
+      stage: result.stage
+    });
+    return true;
+  } catch (_) {
+    diagnostic("review.media.result delivery failed", {
+      request_id: result.request_id,
+      media_id: result.media_id,
+      status: "error",
+      error_code: "bridge_disconnected",
+      stage: "media_bridge_send"
+    });
+    return false;
+  }
+}
+
+function isValidReviewMediaMessage(message) {
+  return typeof message?.request_id === "string"
+    && message.request_id.length > 0
+    && typeof message?.session_id === "string"
+    && message.session_id.length > 0
+    && typeof message?.media_id === "string"
+    && message.media_id.length > 0
+    && Number.isSafeInteger(message?.iteration)
+    && message.iteration > 0
+    && typeof message?.filename === "string"
+    && message.filename.length > 0
+    && message.filename.length <= 255
+    && !/[\\/\r\n"\u0000]/.test(message.filename)
+    && typeof message?.mime_type === "string"
+    && ["video/mp4", "image/png", "image/jpeg", "image/webp"].includes(message.mime_type.toLowerCase())
+    && Number.isSafeInteger(message?.size)
+    && message.size > 0
+    && message.size <= MAX_REVIEW_MEDIA_BYTES
+    && Number.isSafeInteger(message?.target_tab_id)
+    && message.target_tab_id >= 0
+    && typeof message?.target_tab_url === "string"
+    && message.target_tab_url.length > 0
+    && message.target_tab_url.length <= 2048
+    && chatGptConversationKey(message.target_tab_url) !== null;
+}
+
+function base64FromBytes(bytes) {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index]);
+  if (typeof globalThis.btoa === "function") return globalThis.btoa(binary);
+
+  // Test/runtime fallback for environments without Window.btoa. This is
+  // deliberately per-chunk; the full media file is never base64-embedded in
+  // a WebSocket or one JSON message.
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let encoded = "";
+  for (let index = 0; index < binary.length; index += 3) {
+    const first = binary.charCodeAt(index);
+    const second = index + 1 < binary.length ? binary.charCodeAt(index + 1) : 0;
+    const third = index + 2 < binary.length ? binary.charCodeAt(index + 2) : 0;
+    const combined = (first << 16) | (second << 8) | third;
+    encoded += alphabet[(combined >> 18) & 63];
+    encoded += alphabet[(combined >> 12) & 63];
+    encoded += index + 1 < binary.length ? alphabet[(combined >> 6) & 63] : "=";
+    encoded += index + 2 < binary.length ? alphabet[combined & 63] : "=";
+  }
+  return encoded;
+}
+
+function contentResultError(result, fallbackCode, fallbackStage) {
+  if (!result || typeof result !== "object") {
+    return { code: fallbackCode, stage: fallbackStage, message: "ChatGPT Content Scriptから有効な添付結果を受け取れませんでした。" };
+  }
+  return {
+    code: result.error_code || fallbackCode,
+    stage: result.stage || fallbackStage,
+    message: result.message || "ChatGPTへの生成物添付に失敗しました。"
+  };
+}
+
+async function sendReviewMediaToTarget(message, bridgeSocket) {
+  let result;
+  const trace = {
+    request_id: message?.request_id,
+    media_id: message?.media_id,
+    iteration: message?.iteration
+  };
+  diagnostic("review.media.attach received", trace);
+  if (!isValidReviewMediaMessage(message)) {
+    result = reviewMediaResult(message, "error", "media_registration_failed", "Review添付メタデータが不正です。", "media_request_validation");
+  } else if (!sessionToken || bridgeSocket !== socket || bridgeSocket.readyState !== WebSocket.OPEN) {
+    result = reviewMediaResult(message, "error", "bridge_disconnected", "Desktop Bridgeに接続されていません。", "bridge_connection");
+  } else {
+    let targetTab;
+    try {
+      targetTab = await chrome.tabs.get(message.target_tab_id);
+    } catch (_) {
+      targetTab = null;
+    }
+
+    if (!targetTab
+      || targetTab.id !== message.target_tab_id
+      || !isChatGptTab(targetTab)
+      || !isSameChatGptConversation(targetTab.url, message.target_tab_url)) {
+      result = reviewMediaResult(message, "error", "review_target_tab_not_found", "初回Handoffと同じChatGPTタブが見つかりません。", "target_tab_check");
+    } else {
+      diagnostic("review target tab found", { ...trace, target_tab_id: targetTab.id, stage: "target_tab_found" });
+      try {
+        const mediaUrl = `${BRIDGE_MEDIA_URL_PREFIX}${encodeURIComponent(message.media_id)}?session_id=${encodeURIComponent(message.session_id)}&iteration=${encodeURIComponent(String(message.iteration))}`;
+        diagnostic("media fetching", { ...trace, stage: "media_fetching" });
+        const response = await fetchBridge(mediaUrl, {
+          method: "GET",
+          credentials: "omit",
+          cache: "no-store",
+          headers: {
+            Authorization: `Bearer ${sessionToken}`,
+            [BRIDGE_CLIENT_HEADER]: BRIDGE_CLIENT_VALUE
+          }
+        });
+        if (!response.ok) {
+          const code = response.status === 410 ? "media_expired" : response.status === 413 ? "media_too_large" : "media_fetch_failed";
+          result = reviewMediaResult(message, "error", code, "Desktop Bridgeから生成物を取得できませんでした。", "media_fetch_failed");
+        } else {
+          const contentLength = Number(response.headers?.get?.("content-length") || 0);
+          if (contentLength > MAX_REVIEW_MEDIA_BYTES || (contentLength > 0 && contentLength !== message.size)) {
+            result = reviewMediaResult(message, "error", contentLength > MAX_REVIEW_MEDIA_BYTES ? "media_too_large" : "media_fetch_failed", "生成物のサイズ確認に失敗しました。", "media_size_validation");
+          } else {
+            const begin = await dispatchToContentScript(targetTab.id, {
+              type: REVIEW_MEDIA_ATTACH_BEGIN_MESSAGE_TYPE,
+              requestId: message.request_id,
+              sessionId: message.session_id,
+              iteration: message.iteration,
+              mediaId: message.media_id,
+              fileName: message.filename,
+              mimeType: message.mime_type,
+              size: message.size
+            }, trace);
+            if (!begin || begin.status !== "receiving") {
+              const failure = contentResultError(begin, "attachment_control_not_found", "attachment_control_found");
+              result = reviewMediaResult(message, "error", failure.code, failure.message, failure.stage);
+            } else {
+              let transferred = 0;
+              const reader = response.body?.getReader?.();
+              const sendChunk = async (bytes) => {
+                if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
+                if (bytes.length === 0) return;
+                // ReadableStream implementations are free to return a much
+                // larger chunk than the MV3 message budget. Split every
+                // reader chunk before base64 encoding so a video never turns
+                // into one oversized tabs.sendMessage payload.
+                for (let offset = 0; offset < bytes.length; offset += REVIEW_MEDIA_CHUNK_BYTES) {
+                  const part = bytes.slice(offset, Math.min(offset + REVIEW_MEDIA_CHUNK_BYTES, bytes.length));
+                  if (part.length === 0) continue;
+                  const nextTransferred = transferred + part.length;
+                  if (nextTransferred > message.size || nextTransferred > MAX_REVIEW_MEDIA_BYTES) {
+                    throw bridgeError("Review media is too large.", 0, nextTransferred > MAX_REVIEW_MEDIA_BYTES ? "media_too_large" : "media_fetch_failed");
+                  }
+                  const chunkResult = await dispatchToContentScript(targetTab.id, {
+                    type: REVIEW_MEDIA_ATTACH_CHUNK_MESSAGE_TYPE,
+                    requestId: message.request_id,
+                    sessionId: message.session_id,
+                    iteration: message.iteration,
+                    mediaId: message.media_id,
+                    offset: transferred,
+                    chunk: base64FromBytes(part)
+                  }, trace);
+                  if (!chunkResult || chunkResult.status !== "receiving") {
+                    const failure = contentResultError(chunkResult, "attachment_input_failed", "attachment_injected");
+                    throw bridgeError(failure.message, 0, failure.code);
+                  }
+                  transferred = nextTransferred;
+                }
+              };
+
+              if (reader) {
+                while (true) {
+                  const part = await reader.read();
+                  if (part.done) break;
+                  await sendChunk(part.value);
+                }
+              } else {
+                const bytes = new Uint8Array(await response.arrayBuffer());
+                for (let offset = 0; offset < bytes.length; offset += REVIEW_MEDIA_CHUNK_BYTES) {
+                  await sendChunk(bytes.slice(offset, offset + REVIEW_MEDIA_CHUNK_BYTES));
+                }
+              }
+
+              if (transferred !== message.size) {
+                result = reviewMediaResult(message, "error", "media_fetch_failed", "生成物の受信サイズが一致しません。", "media_size_validation");
+              } else {
+                diagnostic("media ready", { ...trace, stage: "media_ready" });
+                const end = await dispatchToContentScript(targetTab.id, {
+                  type: REVIEW_MEDIA_ATTACH_END_MESSAGE_TYPE,
+                  requestId: message.request_id,
+                  sessionId: message.session_id,
+                  iteration: message.iteration,
+                  mediaId: message.media_id,
+                  fileName: message.filename,
+                  mimeType: message.mime_type,
+                  size: message.size
+                }, trace);
+                if (end?.status === "attached") {
+                  result = reviewMediaResult(message, "attached", null, null, end.stage || "attachment_verified");
+                } else {
+                  const failure = contentResultError(end, "attachment_verification_failed", "attachment_verified");
+                  result = reviewMediaResult(message, "error", failure.code, failure.message, failure.stage);
+                }
+              }
+            }
+          }
+        }
+      } catch (error) {
+        const code = error?.code || (isMissingContentScriptError(error) ? "content_script_unavailable" : "media_fetch_failed");
+        const stage = error?.stage || (code === "content_script_unavailable" ? "content_script_dispatch" : "media_fetching");
+        result = reviewMediaResult(message, "error", code, error?.message || "生成物の添付に失敗しました。", stage);
+      }
+    }
+  }
+
+  diagnostic("review media result", {
+    ...trace,
+    status: result.status,
+    error_code: result.error_code,
+    stage: result.stage
+  });
+  sendReviewMediaResultToBridge(result, bridgeSocket);
+}
+
 async function startAssistantResponseWatch(tabId, message, bridgeSocket) {
   const requestId = message.request_id;
   responseWatches.set(requestId, {
@@ -534,7 +818,7 @@ async function sendHandoffToActiveTab(message, bridgeSocket) {
         if (!contentResult || contentResult.request_id !== message.request_id || contentResult.handoff_id !== message.handoff_id) {
           result = handoffResult(message, "error", "content_script_unavailable", "Content Scriptから有効な送信結果を受け取れませんでした。", "content_result_invalid");
         } else if (contentResult.status === "sent") {
-          result = handoffResult(message, "sent", null, null, contentResult.stage);
+          result = handoffResult(message, "sent", null, null, contentResult.stage, activeTab);
         } else if (contentResult.status === "error") {
           result = handoffResult(
             message,
@@ -659,6 +943,14 @@ function handleBridgeMessage(message, bridgeSocket) {
       handoff_id: message.handoff_id
     });
     void sendHandoffToActiveTab(message, bridgeSocket);
+    return;
+  }
+
+  if (message.type === "review.media.attach") {
+    // The Background owns authenticated media retrieval and tab routing. The
+    // Content Script receives only bounded file chunks and never contacts the
+    // localhost Bridge itself.
+    void sendReviewMediaToTarget(message, bridgeSocket);
   }
 }
 

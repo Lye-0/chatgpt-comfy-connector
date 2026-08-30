@@ -127,6 +127,85 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
+    public void ReviewMediaLifecycleKeepsOutputEvidenceAndSeparatesAttachedFromSent()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        var iteration = session.Iterations.Single();
+        var output = iteration.Outputs.Single();
+
+        CreationPipelineStateMachine.ReviewMediaPreparing(
+            session,
+            iteration.Number,
+            session.Id,
+            "output-identity-01",
+            output.FileName,
+            BrowserExtensionMediaTypes.Mp4,
+            5);
+        Assert.Equal(ReviewMediaAttachmentState.Preparing, session.Pipeline.ReviewMediaAttachment!.State);
+        Assert.Equal(CreationStageState.InProgress, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+
+        CreationPipelineStateMachine.ReviewMediaAttaching(
+            session,
+            "request-media-01",
+            "media-01",
+            42,
+            "https://chatgpt.com/c/original");
+        var attachedResult = new BrowserExtensionMediaAttachResult(
+            "request-media-01",
+            session.Id,
+            iteration.Number,
+            "media-01",
+            "attached",
+            Stage: "attachment_verified");
+        CreationPipelineStateMachine.ReviewMediaAttached(session, attachedResult);
+
+        Assert.Equal(ReviewMediaAttachmentState.Attached, session.Pipeline.ReviewMediaAttachment.State);
+        Assert.Equal(CreationStageState.Current, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+        Assert.Contains("Review Handoff送信待ち", CreationPipelineStateMachine.Get(session, CreationStage.Review).Detail, StringComparison.Ordinal);
+        Assert.Equal(output.FileName, session.Iterations.Single().Outputs.Single().FileName);
+        Assert.NotEqual(HandoffTransportState.Sent, HandoffTransportState.Attached);
+    }
+
+    [Fact]
+    public void ReviewMediaFailureIsRetryableAndStaleAttachmentIsClearedForNextIteration()
+    {
+        var session = ReadyForReview(maximumIterations: 3);
+        var firstIteration = session.Iterations.Single();
+        var firstOutput = firstIteration.Outputs.Single();
+
+        CreationPipelineStateMachine.ReviewMediaPreparing(
+            session,
+            firstIteration.Number,
+            session.Id,
+            "output-identity-failed",
+            firstOutput.FileName,
+            BrowserExtensionMediaTypes.Mp4,
+            5);
+        CreationPipelineStateMachine.ReviewMediaFailed(
+            session,
+            "attachment_verification_failed",
+            "attachment_verified",
+            "fixture failure");
+
+        Assert.Equal(ReviewMediaAttachmentState.Failed, session.Pipeline.ReviewMediaAttachment!.State);
+        Assert.Equal("attachment_verification_failed", session.Pipeline.ReviewMediaAttachment.ErrorCode);
+        Assert.Equal(CreationStageState.Error, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+        Assert.Contains("再試行できます", CreationPipelineStateMachine.Get(session, CreationStage.Review).Detail, StringComparison.Ordinal);
+
+        session.CurrentIteration = 2;
+        var nextOutputPath = Path.Combine(_temp, "next-output.mp4");
+        File.WriteAllText(nextOutputPath, "next-media");
+        var nextOutputs = new[]
+        {
+            new OutputArtifact { FileName = "next-output.mp4", FullPath = nextOutputPath, Type = "mp4" }
+        };
+        CreationPipelineStateMachine.OutputCompleted(session, nextOutputs);
+
+        Assert.Null(session.Pipeline.ReviewMediaAttachment);
+        Assert.Equal(CreationStageState.Current, CreationPipelineStateMachine.Get(session, CreationStage.Review).State);
+    }
+
+    [Fact]
     public void PersistedHandoffPayloadCanBeReusedWithoutRebuilding()
     {
         const string saved = "  {\"handoff_id\":\"original\"}\n";

@@ -32,6 +32,8 @@ public partial class MainWindow : Window
     private string? _lastCurrentOutputVideoPath;
     private string? _requestedHistoryPlaybackPath;
     private readonly Dictionary<string, BitmapSource> _videoThumbnailCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _videoThumbnailCaptureInProgress = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _videoThumbnailCaptureRetryRequested = new(StringComparer.OrdinalIgnoreCase);
     private MainViewModel ViewModel => (MainViewModel)DataContext;
 
     public MainWindow()
@@ -515,9 +517,15 @@ public partial class MainWindow : Window
         ViewModel.StatusMessage = "動画プレビューに対応していません。OPENでOSの既定アプリを使用できます。";
     }
 
-    private async void HistoryVideoMediaOpened(object sender, RoutedEventArgs e)
+    private void HistoryVideoMediaLoaded(object sender, RoutedEventArgs e)
+        => RequestHistoryVideoThumbnailCapture(sender as MediaElement);
+
+    private void HistoryVideoMediaOpened(object sender, RoutedEventArgs e)
+        => RequestHistoryVideoThumbnailCapture(sender as MediaElement);
+
+    private void RequestHistoryVideoThumbnailCapture(MediaElement? media)
     {
-        if (sender is not MediaElement media) return;
+        if (media is null) return;
         if (media.DataContext is not GenerationHistoryItem item
             || item.PrimaryOutput is not { IsVideo: true } output
             || output.IsMissing)
@@ -525,35 +533,82 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_videoThumbnailCache.TryGetValue(output.FullPath, out var cachedThumbnail))
+        var outputPath = output.FullPath;
+        if (_videoThumbnailCache.TryGetValue(outputPath, out var cachedThumbnail))
         {
             item.SetThumbnail(cachedThumbnail);
             return;
         }
 
+        if (media.Source is null) return;
+        if (!_videoThumbnailCaptureInProgress.Add(outputPath))
+        {
+            // Loaded and MediaOpened can be raised close together. Keep the
+            // later signal so a premature Loaded capture gets another chance
+            // after the decoder has published its natural video dimensions.
+            _videoThumbnailCaptureRetryRequested.Add(outputPath);
+            return;
+        }
+
+        _ = CaptureHistoryVideoThumbnailAsync(media, item, outputPath);
+    }
+
+    private async Task CaptureHistoryVideoThumbnailAsync(
+        MediaElement media,
+        GenerationHistoryItem item,
+        string outputPath)
+    {
+        var source = media.Source;
         try
         {
-            var source = media.Source;
             // ScrubbingEnabled lets a paused MediaElement render a seeked
             // frame. This keeps HISTORY cards static instead of using them as
             // miniature players.
             media.ScrubbingEnabled = true;
             var position = GetThumbnailPosition(media);
+            if (!media.IsLoaded) return;
             media.Position = position;
             media.Pause();
             var thumbnail = await CaptureMediaFrameWhenReadyAsync(media, position, allowPlaybackFallback: true);
-            if (thumbnail is null || !media.IsLoaded || !Equals(media.Source, source)) return;
-            StoreVideoThumbnail(output.FullPath, thumbnail);
+            if (thumbnail is not null && media.IsLoaded && Equals(media.Source, source))
+            {
+                StoreVideoThumbnail(outputPath, thumbnail);
+                return;
+            }
+
+            // Do not leave a failed MediaElement as a permanent black card.
+            // A later Loaded/MediaOpened signal can still clear this state when
+            // virtualization or decoder startup was the transient cause.
+            if (media.IsLoaded && Equals(media.Source, source) && !item.HasThumbnail)
+                item.MarkThumbnailUnavailable();
         }
         catch (InvalidOperationException)
         {
             // The card may have been virtualized/unloaded while the media was
             // opening; the history item itself remains usable.
+            if (media.IsLoaded && Equals(media.Source, source) && !item.HasThumbnail)
+                item.MarkThumbnailUnavailable();
+        }
+        finally
+        {
+            _videoThumbnailCaptureInProgress.Remove(outputPath);
+            if (_videoThumbnailCaptureRetryRequested.Remove(outputPath)
+                && !_videoThumbnailCache.ContainsKey(outputPath)
+                && !Dispatcher.HasShutdownStarted)
+            {
+                _ = Dispatcher.BeginInvoke(
+                    DispatcherPriority.ContextIdle,
+                    new Action(() => RequestHistoryVideoThumbnailCapture(media)));
+            }
         }
     }
 
     private void HistoryVideoMediaFailed(object sender, ExceptionRoutedEventArgs e)
-        => ViewModel.StatusMessage = "履歴の動画サムネイルを読み込めません。OUTPUT VIEWERまたはOPENで確認できます。";
+    {
+        if (sender is MediaElement { DataContext: GenerationHistoryItem item })
+            item.MarkThumbnailUnavailable();
+        ViewModel.StatusMessage = "履歴の動画サムネイルを読み込めません。OUTPUT VIEWERまたはOPENで確認できます。";
+    }
 
     private void QueueCurrentOutputThumbnailCapture()
     {
@@ -598,15 +653,20 @@ public partial class MainWindow : Window
         bool allowPlaybackFallback,
         Func<bool>? shouldAbort = null)
     {
-        for (var attempt = 0; attempt < 6; attempt++)
+        for (var attempt = 0; attempt < 10; attempt++)
         {
             if (shouldAbort?.Invoke() == true) return null;
             if (!media.IsLoaded) return null;
+            if (!IsMediaReadyForThumbnail(media))
+            {
+                await Task.Delay(100);
+                continue;
+            }
             await media.Dispatcher.InvokeAsync(media.UpdateLayout, DispatcherPriority.Render);
             var frame = CaptureVisualFrame(media);
             if (frame is not null && !IsLikelyBlankFrame(frame)) return frame;
 
-            await Task.Delay(120);
+            await Task.Delay(100);
             if (shouldAbort?.Invoke() == true) return null;
             try { media.Position = position; }
             catch (InvalidOperationException) { return null; }
@@ -617,19 +677,44 @@ public partial class MainWindow : Window
         try
         {
             // Some Windows decoders do not paint a seeked paused frame until
-            // playback has advanced. Decode briefly, then freeze the captured
-            // bitmap; the MediaElement itself is never used for interaction.
+            // playback has advanced. Decode briefly, polling rendered frames
+            // until one is non-blank; the MediaElement itself is never used
+            // for interaction.
+            if (shouldAbort?.Invoke() == true || !media.IsLoaded) return null;
+            media.Position = position;
             media.Play();
-            await Task.Delay(700);
+            for (var attempt = 0; attempt < 10; attempt++)
+            {
+                await Task.Delay(100);
+                if (shouldAbort?.Invoke() == true || !media.IsLoaded) return null;
+                await media.Dispatcher.InvokeAsync(media.UpdateLayout, DispatcherPriority.Render);
+                var frame = CaptureVisualFrame(media);
+                if (frame is not null && !IsLikelyBlankFrame(frame))
+                {
+                    media.Pause();
+                    return frame;
+                }
+
+                if (media.NaturalDuration.HasTimeSpan
+                    && media.Position >= media.NaturalDuration.TimeSpan - TimeSpan.FromMilliseconds(40))
+                {
+                    media.Position = position;
+                    media.Play();
+                }
+            }
             media.Pause();
-            await media.Dispatcher.InvokeAsync(media.UpdateLayout, DispatcherPriority.Render);
-            return CaptureVisualFrame(media);
+            return null;
         }
         catch (InvalidOperationException)
         {
             return null;
         }
     }
+
+    private static bool IsMediaReadyForThumbnail(MediaElement media)
+        => media.NaturalVideoWidth > 0
+            && media.NaturalVideoHeight > 0
+            && (!media.NaturalDuration.HasTimeSpan || media.NaturalDuration.TimeSpan > TimeSpan.Zero);
 
     private void StoreVideoThumbnail(string outputPath, BitmapSource thumbnail)
     {

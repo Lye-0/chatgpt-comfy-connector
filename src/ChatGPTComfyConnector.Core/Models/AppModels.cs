@@ -54,6 +54,13 @@ public enum SessionStatus
     Stopped,
     Paused,
     Error,
+    /// <summary>
+    /// The current automatic Run reached its per-run iteration budget while
+    /// ChatGPT still returned a valid generate decision.  This is distinct
+    /// from Completed: the user can explicitly resume the deferred command.
+    /// Appended at the end to preserve the numeric values of persisted states.
+    /// </summary>
+    LimitReached,
 }
 
 public enum JobStatus
@@ -122,6 +129,12 @@ public enum PendingHandoffPurpose
     /// </summary>
     GenerationResult,
     Review,
+    /// <summary>
+    /// A user-directed Handoff issued after a completed Session was resumed.
+    /// It deliberately permits only the first generate decision of the new
+    /// Run; later iteration Reviews use <see cref="Review"/>.
+    /// </summary>
+    Resume,
 }
 
 public enum CreationStage
@@ -217,6 +230,8 @@ public enum AutomaticIterationState
     Stopped,
     Failed,
     Completed,
+    // Appended to preserve the numeric values of the v0.2 snapshots.
+    LimitReached,
 }
 
 /// <summary>
@@ -652,7 +667,7 @@ public sealed class CreationStageStatus
 
 public sealed class CreationPipelineSnapshot
 {
-    public int Version { get; set; } = 6;
+    public int Version { get; set; } = 7;
     public int IterationNumber { get; set; }
     public bool ContextBound { get; set; }
     public bool MaximumIterationSafetyStop { get; set; }
@@ -663,7 +678,55 @@ public sealed class CreationPipelineSnapshot
     public ReviewHandoffSnapshot? ReviewHandoff { get; set; }
     public AutomaticIterationSnapshot? AutomaticIteration { get; set; }
     public ReviewMediaAttachmentSnapshot? ReviewMediaAttachment { get; set; }
+    /// <summary>
+    /// The automatic-generation budget is scoped to this Run.  Iteration
+    /// history remains session-wide and is never renumbered by Resume.
+    /// </summary>
+    public CreationRunSnapshot? CurrentRun { get; set; }
+    /// <summary>
+    /// A validated generate command that was intentionally deferred because
+    /// the current Run reached its limit.  The raw command is retained so a
+    /// later Resume can APPLY/GENERATE it without re-sending a Handoff.
+    /// </summary>
+    public DeferredGenerateSnapshot? DeferredGenerate { get; set; }
     public List<CreationStageStatus> Stages { get; set; } = [];
+}
+
+/// <summary>
+/// Durable per-Run accounting.  Run numbers are user-visible history
+/// context, while RunId is used for idempotency and stale-response guards.
+/// </summary>
+public sealed class CreationRunSnapshot
+{
+    public string RunId { get; set; } = Guid.NewGuid().ToString("N");
+    public int Number { get; set; } = 1;
+    public int StartIteration { get; set; }
+    public int IterationCount { get; set; }
+    public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
+    public string StartedReason { get; set; } = "initial";
+}
+
+/// <summary>
+/// Persisted, already validated generate Response waiting for an explicit
+/// user Resume after LIMIT_REACHED.  CommandText is intentionally not logged;
+/// it is stored only to make recovery deterministic across restarts.
+/// </summary>
+public sealed class DeferredGenerateSnapshot
+{
+    public string RunId { get; set; } = string.Empty;
+    /// <summary>
+    /// The recovery Run created by the first Resume.  Keeping this value makes
+    /// repeated Resume clicks/restarts reuse one Run instead of creating a
+    /// chain of empty Runs.
+    /// </summary>
+    public string? RecoveryRunId { get; set; }
+    public string SessionId { get; set; } = string.Empty;
+    public string RequestId { get; set; } = string.Empty;
+    public string HandoffId { get; set; } = string.Empty;
+    public string BoundaryId { get; set; } = string.Empty;
+    public string CommandText { get; set; } = string.Empty;
+    public int Iteration { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public enum ReviewMediaAttachmentState
@@ -857,7 +920,19 @@ public sealed class CreationSession
     };
 
     public bool CanGenerate => Status is SessionStatus.New or SessionStatus.Active or SessionStatus.Paused or SessionStatus.Error;
-    public bool AtIterationLimit => CurrentIteration >= MaximumIterations;
+
+    /// <summary>
+    /// Compatibility name retained for existing callers.  The value now means
+    /// the current Run has consumed its per-Run budget, not that the Session's
+    /// lifetime history has reached a permanent ceiling.
+    /// </summary>
+    [JsonIgnore]
+    public bool AtIterationLimit => AtRunIterationLimit;
+
+    [JsonIgnore]
+    public bool AtRunIterationLimit
+        => MaximumIterations > 0
+            && (Pipeline.CurrentRun?.IterationCount ?? CurrentIteration) >= MaximumIterations;
 
     public void Resume()
     {
@@ -868,11 +943,37 @@ public sealed class CreationSession
         UpdatedAt = DateTimeOffset.UtcNow;
     }
 
+    /// <summary>
+    /// Starts a new automatic Run without touching the Session identity or
+    /// historical iteration numbers.  Callers are responsible for clearing or
+    /// re-arming the pipeline stages for the specific Resume path.
+    /// </summary>
+    public CreationRunSnapshot StartNewRun(string reason)
+    {
+        var previous = Pipeline.CurrentRun;
+        var run = new CreationRunSnapshot
+        {
+            RunId = Guid.NewGuid().ToString("N"),
+            Number = (previous?.Number ?? 0) + 1,
+            StartIteration = CurrentIteration,
+            IterationCount = 0,
+            StartedAt = DateTimeOffset.UtcNow,
+            StartedReason = string.IsNullOrWhiteSpace(reason) ? "resume" : reason,
+        };
+        Pipeline.CurrentRun = run;
+        Status = SessionStatus.Active;
+        PauseReason = null;
+        LastError = null;
+        CompletionReason = null;
+        UpdatedAt = run.StartedAt;
+        return run;
+    }
+
     public SessionIteration StartIteration(string prompt, IDictionary<string, JsonNode?> parameters)
     {
-        if (AtIterationLimit)
+        if (AtRunIterationLimit)
         {
-            throw new InvalidOperationException("最大反復回数に達しています。続行する場合は上限を明示的に変更してください。");
+            throw new InvalidOperationException("このRunの最大反復回数に達しています。RESUMEで次のRunを開始してください。");
         }
 
         Status = SessionStatus.Active;
@@ -884,6 +985,14 @@ public sealed class CreationSession
             Parameters = new Dictionary<string, JsonNode?>(parameters, StringComparer.OrdinalIgnoreCase),
         };
         Iterations.Add(iteration);
+        var run = Pipeline.CurrentRun ??= new CreationRunSnapshot
+        {
+            RunId = Guid.NewGuid().ToString("N"),
+            Number = 1,
+            StartIteration = 0,
+            StartedReason = "initial",
+        };
+        run.IterationCount = Math.Max(0, CurrentIteration - run.StartIteration);
         UpdatedAt = DateTimeOffset.UtcNow;
         return iteration;
     }
@@ -891,6 +1000,8 @@ public sealed class CreationSession
     public void Complete(string reason)
     {
         Status = SessionStatus.Completed;
+        Pipeline.DeferredGenerate = null;
+        Pipeline.MaximumIterationSafetyStop = false;
         CompletionReason = reason;
         UpdatedAt = DateTimeOffset.UtcNow;
     }

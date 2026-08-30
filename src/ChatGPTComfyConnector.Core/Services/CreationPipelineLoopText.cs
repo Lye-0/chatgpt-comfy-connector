@@ -32,6 +32,13 @@ public static class CreationPipelineLoopText
 
         CreationPipelineStateMachine.EnsureInitialized(session);
 
+        if (session.Status == SessionStatus.LimitReached)
+        {
+            return session.Pipeline.DeferredGenerate is null
+                ? "LIMIT REACHED → RESUMEまたは終了を選択"
+                : "LIMIT REACHED → 保留generateをRESUMEで実行";
+        }
+
         if (session.Status == SessionStatus.Completed)
         {
             return "SESSION COMPLETE";

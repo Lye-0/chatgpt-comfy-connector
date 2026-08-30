@@ -291,13 +291,19 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         Assert.Equal(CreationStageState.WaitingUser, reviewStage.State);
         Assert.Equal(CreationWaitingReason.ContinueDecisionRequired, reviewStage.WaitingReason);
         Assert.True(session.Pipeline.MaximumIterationSafetyStop);
-        Assert.Equal(ReviewHandoffState.Completed, session.Pipeline.ReviewHandoff!.State);
-        Assert.Equal(AutomaticIterationState.Completed, session.Pipeline.AutomaticIteration!.State);
-        Assert.Equal(BrowserExtensionHandoffErrorCodes.MaximumIterationsReached, session.Pipeline.AutomaticIteration.ErrorCode);
-        Assert.Equal(SessionStatus.Active, session.Status);
+        Assert.Equal(ReviewHandoffState.Received, session.Pipeline.ReviewHandoff!.State);
+        Assert.Equal(AutomaticIterationState.LimitReached, session.Pipeline.AutomaticIteration!.State);
+        Assert.Null(session.Pipeline.AutomaticIteration.ErrorCode);
+        Assert.Equal(SessionStatus.LimitReached, session.Status);
+        Assert.Null(session.Pipeline.DeferredGenerate);
+        var runId = session.Pipeline.CurrentRun!.RunId;
         CreationPipelineStateMachine.ContinueBeyondLimit(session);
         Assert.Equal(AutomaticIterationState.Running, session.Pipeline.AutomaticIteration!.State);
         Assert.False(session.Pipeline.MaximumIterationSafetyStop);
+        Assert.Equal(SessionStatus.Active, session.Status);
+        Assert.Equal(2, session.Pipeline.CurrentRun!.Number);
+        Assert.NotEqual(runId, session.Pipeline.CurrentRun.RunId);
+        Assert.Equal(1, session.MaximumIterations);
     }
 
     [Fact]
@@ -376,14 +382,15 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     }
 
     [Fact]
-    public void FinalAutomaticReviewAllowsCompleteOnlyAtTheIterationLimit()
+    public void FinalAutomaticReviewKeepsBothGenerateAndCompleteActionsAtTheIterationLimit()
     {
         var session = ReadyForReview(maximumIterations: 1);
-        var finalReview = PendingHandoffFactory.CreateReview(session, [], "complete");
+        var finalReview = PendingHandoffFactory.CreateReview(session, [], "generate", "complete");
 
         Assert.True(session.AtIterationLimit);
-        Assert.Equal(["complete"], finalReview.AllowedActions);
-        Assert.DoesNotContain("generate", finalReview.AllowedActions);
+        Assert.Equal(["generate", "complete"], finalReview.AllowedActions);
+        Assert.Contains("generate", finalReview.AllowedActions);
+        Assert.Contains("complete", finalReview.AllowedActions);
         Assert.Equal(1, session.CurrentIteration);
     }
 
@@ -947,7 +954,9 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
 
         CreationPipelineStateMachine.ContinueBeyondLimit(session);
         Assert.False(session.Pipeline.MaximumIterationSafetyStop);
-        Assert.Equal(2, session.MaximumIterations);
+        Assert.Equal(1, session.MaximumIterations);
+        Assert.Equal(2, session.Pipeline.CurrentRun!.Number);
+        Assert.Equal(SessionStatus.Active, session.Status);
         AssertStage(session, CreationStage.Apply, CreationStageState.Current);
     }
 

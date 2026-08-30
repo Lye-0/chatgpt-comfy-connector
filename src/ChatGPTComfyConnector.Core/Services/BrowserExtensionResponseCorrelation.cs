@@ -78,7 +78,7 @@ public static class BrowserExtensionResponseCorrelation
             return false;
         }
         if (PendingHandoffReuse.IsReview(pending)
-            && session.Pipeline.AutomaticIteration is { State: AutomaticIterationState.Failed or AutomaticIterationState.Stopped or AutomaticIterationState.Completed })
+            && session.Pipeline.AutomaticIteration is { State: AutomaticIterationState.LimitReached or AutomaticIterationState.Failed or AutomaticIterationState.Stopped or AutomaticIterationState.Completed })
         {
             // A timeout, validation failure, explicit CANCEL, or completed
             // session closes the automatic continuation boundary even when a

@@ -315,14 +315,22 @@
                                        Visibility="{Binding HasThumbnail, Converter={StaticResource BoolToVisibility}}"
                                        Stretch="UniformToFill"
                                        Opacity="0.94" />
+                                <TextBlock Text="サムネイルを表示できません。▶で確認"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="9"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           TextAlignment="Center"
+                                           Visibility="{Binding ShowThumbnailUnavailable, Converter={StaticResource BoolToVisibility}}" />
                                 <MediaElement Source="{Binding PrimaryOutput.FullPath}"
                                               LoadedBehavior="Manual"
                                               UnloadedBehavior="Stop"
                                               Volume="0"
                                               Stretch="UniformToFill"
                                               ScrubbingEnabled="True"
-                                              Visibility="{Binding HasThumbnail, Converter={StaticResource InverseBoolToVisibility}}"
+                                              Visibility="{Binding ShowThumbnailMedia, Converter={StaticResource BoolToVisibility}}"
                                               IsHitTestVisible="False"
+                                              Loaded="HistoryVideoMediaLoaded"
                                               MediaOpened="HistoryVideoMediaOpened"
                                               MediaFailed="HistoryVideoMediaFailed" />
                                 <Button Style="{StaticResource VideoPlayButtonStyle}"
@@ -1537,10 +1545,15 @@
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                     <StackPanel>
                                         <TextBlock Text="最大反復回数に達しました" Foreground="{StaticResource WarningBrush}" FontSize="11" FontWeight="SemiBold" />
-                                        <TextBlock Text="自動では次Iterationへ進みません。続行または制作終了を選択してください。" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
+                                        <TextBlock Text="自動では次Iterationへ進みません。RESUMEまたは制作終了を選択してください。" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
+                                        <TextBlock Text="{Binding DeferredGenerateText}"
+                                                   Foreground="{StaticResource WarmBrush}"
+                                                   FontSize="9"
+                                                   TextWrapping="Wrap"
+                                                   Visibility="{Binding HasDeferredGenerate, Converter={StaticResource BoolToVisibility}}" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                        <Button Content="続行" Click="ContinueIteration_Click" Padding="10,5" />
+                                        <Button Content="RESUME" Click="ContinueIteration_Click" Padding="10,5" ToolTip="保留中のgenerateまたは完了済み制作を新しいRunとして再開します。" />
                                         <Button Content="この制作を終了" Click="EndIteration_Click" Padding="10,5" Margin="0" />
                                     </StackPanel>
                                 </Grid>

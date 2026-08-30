@@ -20,7 +20,8 @@ public static class CreationPipelineStateMachine
     public static void EnsureInitialized(CreationSession session)
     {
         session.Pipeline ??= new CreationPipelineSnapshot();
-        session.Pipeline.Version = 6;
+        session.Pipeline.Version = 7;
+        EnsureRunInitialized(session);
         foreach (var stage in OrderedStages)
         {
             if (session.Pipeline.Stages.All(item => item.Stage != stage))
@@ -220,6 +221,8 @@ public static class CreationPipelineStateMachine
         session.Pipeline.AutomaticResponseExecution = null;
         session.Pipeline.ReviewHandoff = null;
         session.Pipeline.AutomaticIteration = null;
+        session.Pipeline.CurrentRun = null;
+        session.Pipeline.DeferredGenerate = null;
         SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         SetAllFrom(session, CreationStage.Connect, CreationStageState.NotReached);
         Set(session, CreationStage.Connect, CreationStageState.Current, detail);
@@ -250,6 +253,18 @@ public static class CreationPipelineStateMachine
         session.Pipeline.AutomaticResponseExecution = null;
         session.Pipeline.ReviewHandoff = null;
         session.Pipeline.AutomaticIteration = null;
+        session.Pipeline.DeferredGenerate = null;
+        if (session.Pipeline.CurrentRun is null)
+        {
+            session.Pipeline.CurrentRun = new CreationRunSnapshot
+            {
+                RunId = Guid.NewGuid().ToString("N"),
+                Number = 1,
+                StartIteration = 0,
+                IterationCount = session.CurrentIteration,
+                StartedReason = "initial",
+            };
+        }
         SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         SetAllFrom(session, CreationStage.Context, CreationStageState.NotReached);
         Set(session, CreationStage.Context, CreationStageState.Completed, "制作セッションへContextをBinding済み");
@@ -465,7 +480,7 @@ public static class CreationPipelineStateMachine
         SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         if (isReviewResponse) Set(session, CreationStage.Review, CreationStageState.Completed, "次のIterationへ進みます");
 
-        if (isReviewResponse && session.AtIterationLimit)
+        if (isReviewResponse && session.AtRunIterationLimit)
         {
             session.Pipeline.MaximumIterationSafetyStop = true;
             ResetFrom(session, CreationStage.Apply);
@@ -504,7 +519,8 @@ public static class CreationPipelineStateMachine
     public static void BeginGenerate(CreationSession session)
     {
         RequireConnection(session);
-        if (session.Pipeline.MaximumIterationSafetyStop) throw new InvalidOperationException("最大反復回数に達しています。続行するか終了するか選択してください。");
+        if (session.Pipeline.MaximumIterationSafetyStop || session.Status == SessionStatus.LimitReached || session.AtRunIterationLimit)
+            throw new InvalidOperationException("このRunの最大反復回数に達しています。RESUMEで次のRunを開始してください。");
         // A new generation owns a new Primary Output. Do not carry the prior
         // iteration's temporary attachment state into the next Review stage.
         session.Pipeline.ReviewMediaAttachment = null;
@@ -859,21 +875,34 @@ public static class CreationPipelineStateMachine
     }
 
     /// <summary>
-    /// Records the deliberate safety stop after a valid <c>generate</c>
-    /// response at the configured iteration limit.  CommandValidated has
-    /// already moved REVIEW to ContinueDecisionRequired; this transition must
-    /// close only the automation execution snapshot and must not turn that
-    /// user decision into a transport/error failure.
+    /// Records the deliberate stop after a valid <c>generate</c> response at
+    /// the current Run's limit.  The response has already been received and
+    /// validated; it is therefore not a transport or protocol failure.  The
+    /// original Review identity remains visible while the validated command
+    /// is retained in <see cref="CreationPipelineSnapshot.DeferredGenerate"/>.
     /// </summary>
-    public static void AutomaticIterationLimitReached(CreationSession session, string message)
+    public static void AutomaticIterationLimitReached(
+        CreationSession session,
+        string message,
+        DeferredGenerateSnapshot? deferredGenerate = null)
     {
         EnsureInitialized(session);
+        session.Status = SessionStatus.LimitReached;
+        session.PauseReason = message;
+        session.LastError = null;
+        session.CompletionReason = null;
+        session.Pipeline.MaximumIterationSafetyStop = true;
+        if (deferredGenerate is not null) session.Pipeline.DeferredGenerate = deferredGenerate;
+
+        // The Review Response itself is valid and received.  Do not turn the
+        // Review transport into COMPLETED/FAILED merely because execution was
+        // deferred to a later Run.
         if (session.Pipeline.ReviewHandoff is { } review)
         {
-            review.State = ReviewHandoffState.Completed;
-            review.ErrorCode = BrowserExtensionHandoffErrorCodes.MaximumIterationsReached;
-            review.ErrorStage = "maximum_iterations";
-            review.ErrorMessage = message;
+            review.State = ReviewHandoffState.Received;
+            review.ErrorCode = null;
+            review.ErrorStage = null;
+            review.ErrorMessage = null;
             review.UpdatedAt = DateTimeOffset.UtcNow;
         }
 
@@ -882,34 +911,92 @@ public static class CreationPipelineStateMachine
             SessionId = session.Id,
             Iteration = session.CurrentIteration,
         };
-        session.Pipeline.AutomaticIteration.State = AutomaticIterationState.Completed;
-        session.Pipeline.AutomaticIteration.ErrorCode = BrowserExtensionHandoffErrorCodes.MaximumIterationsReached;
+        session.Pipeline.AutomaticIteration.State = AutomaticIterationState.LimitReached;
+        session.Pipeline.AutomaticIteration.ErrorCode = null;
         session.Pipeline.AutomaticIteration.ErrorStage = "maximum_iterations";
         session.Pipeline.AutomaticIteration.ErrorMessage = message;
         session.Pipeline.AutomaticIteration.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(
+            session,
+            CreationStage.Review,
+            CreationStageState.WaitingUser,
+            deferredGenerate is null
+                ? "このRunの最大反復回数に達しました · RESUMEまたは終了を選択"
+                : "このRunの最大反復回数に達しました · 次のgenerateを保留中 · RESUMEで続行",
+            CreationWaitingReason.ContinueDecisionRequired);
         session.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
-    public static void ContinueBeyondLimit(CreationSession session)
+    /// <summary>
+    /// Arms the existing validated command for an explicit Resume after a
+    /// limit stop.  The first call creates exactly one recovery Run; later
+    /// calls reuse <see cref="DeferredGenerateSnapshot.RecoveryRunId"/> and
+    /// never create another Run or Handoff.
+    /// </summary>
+    public static DeferredGenerateSnapshot? ResumeFromLimit(CreationSession session)
     {
-        if (!session.Pipeline.MaximumIterationSafetyStop) return;
-        session.MaximumIterations = Math.Max(session.MaximumIterations + 1, session.CurrentIteration + 1);
-        session.Pipeline.MaximumIterationSafetyStop = false;
-        if (session.Pipeline.AutomaticIteration is { } automaticIteration)
+        EnsureInitialized(session);
+        var deferred = session.Pipeline.DeferredGenerate;
+        if (session.Status != SessionStatus.LimitReached
+            && !session.Pipeline.MaximumIterationSafetyStop
+            && deferred is null)
         {
-            // Continue is an explicit user decision after the automatic
-            // safety stop. Re-arm the existing automatic loop without
-            // changing the current session or any Handoff identity.
-            automaticIteration.State = AutomaticIterationState.Running;
-            automaticIteration.ErrorCode = null;
-            automaticIteration.ErrorStage = null;
-            automaticIteration.ErrorMessage = null;
-            automaticIteration.UpdatedAt = DateTimeOffset.UtcNow;
+            return null;
         }
-        Set(session, CreationStage.Review, CreationStageState.Completed, "ユーザーが次Iterationへの続行を承認");
-        Set(session, CreationStage.Apply, CreationStageState.Current, "検証済みCommandをWorkflowへ反映できます");
+
+        if (deferred is not null && string.IsNullOrWhiteSpace(deferred.RecoveryRunId))
+        {
+            var run = session.StartNewRun("resume_deferred_generate");
+            deferred.RecoveryRunId = run.RunId;
+            deferred.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        else if (deferred is null
+                 && (session.Pipeline.CurrentRun is null || session.Pipeline.CurrentRun.IterationCount > 0))
+        {
+            session.StartNewRun("resume_limit");
+        }
+
+        session.Resume();
+        session.Pipeline.MaximumIterationSafetyStop = false;
+        // The old Review is already received. Keep its Pending Handoff and
+        // response identity for strict parsing/replay protection, but do not
+        // leave the UI waiting for another response on that old boundary.
+        if (session.Pipeline.ReviewHandoff is { } review)
+        {
+            review.State = ReviewHandoffState.Received;
+            review.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        if (session.Pipeline.AutomaticIteration is not { } automatic)
+        {
+            automatic = new AutomaticIterationSnapshot
+            {
+                SessionId = session.Id,
+                Iteration = session.CurrentIteration,
+                ReviewHandoffId = session.PendingHandoff?.HandoffId ?? string.Empty,
+                ReviewBoundaryId = session.PendingHandoff?.BoundaryId ?? string.Empty,
+            };
+            session.Pipeline.AutomaticIteration = automatic;
+        }
+        automatic.State = AutomaticIterationState.Running;
+        automatic.ErrorCode = null;
+        automatic.ErrorStage = null;
+        automatic.ErrorMessage = null;
+        automatic.UpdatedAt = DateTimeOffset.UtcNow;
+        session.Pipeline.IterationNumber = session.CurrentIteration + 1;
+        Set(session, CreationStage.Review, CreationStageState.Completed, "ユーザーがRESUMEを選択 · 保留中のgenerateを実行します");
+        Set(session, CreationStage.Apply, CreationStageState.Current, "保留中のgenerateをWorkflowへ反映できます");
         ResetAfter(session, CreationStage.Apply);
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+        return deferred;
     }
+
+    /// <summary>
+    /// Compatibility entry point for the existing safety-stop button. It no
+    /// longer increases MaximumIterations; the limit is per Run and the
+    /// ViewModel performs the actual deferred APPLY/GENERATE operation.
+    /// </summary>
+    public static void ContinueBeyondLimit(CreationSession session)
+        => ResumeFromLimit(session);
 
     public static void Complete(CreationSession session, string reason)
     {
@@ -923,8 +1010,32 @@ public static class CreationPipelineStateMachine
 
     public static void Resume(CreationSession session)
     {
-        var invalidatesConsumedReviewHandoff = session.Status == SessionStatus.Completed
+        EnsureInitialized(session);
+        var wasCompleted = session.Status == SessionStatus.Completed;
+        var resumeBoundaryIsActive = !wasCompleted
+            && PendingHandoffReuse.IsResume(session.PendingHandoff)
+            && session.Pipeline.ReviewHandoff is
+                { State: ReviewHandoffState.Preparing or ReviewHandoffState.Sending or ReviewHandoffState.WaitingResponse or ReviewHandoffState.Received }
+            && session.Pipeline.AutomaticIteration is
+                { State: AutomaticIterationState.Running or AutomaticIterationState.WaitingForReviewResponse };
+        if (resumeBoundaryIsActive)
+        {
+            // RESUME is idempotent while its fresh Handoff is in flight or its
+            // response is being processed. Do not clear the active boundary or
+            // create a second Run when a UI command is delivered twice.
+            session.Resume();
+            return;
+        }
+
+        var invalidatesConsumedReviewHandoff = wasCompleted
             && PendingHandoffReuse.IsReview(session.PendingHandoff);
+        if (wasCompleted)
+        {
+            // COMPLETED is a run terminal state, not a permanent Session
+            // terminal state. Preserve history/current output and move to a
+            // fresh Run before preparing the new Resume Handoff.
+            session.StartNewRun("user_resume_completed");
+        }
         session.Resume();
         session.Pipeline.MaximumIterationSafetyStop = false;
         // A completed response has already crossed its protocol boundary.
@@ -942,6 +1053,8 @@ public static class CreationPipelineStateMachine
         session.Pipeline.AutomaticResponseExecution = null;
         session.Pipeline.ReviewHandoff = null;
         session.Pipeline.AutomaticIteration = null;
+        session.Pipeline.DeferredGenerate = null;
+        session.Pipeline.IterationNumber = session.CurrentIteration;
         session.Pipeline.AcceptedCommandAction = null;
         SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         Set(session, CreationStage.Review, CreationStageState.Current, "制作を再開しました · 次の指示をChatGPTと検討してください");
@@ -1026,6 +1139,32 @@ public static class CreationPipelineStateMachine
     {
         var index = Array.IndexOf(OrderedStages, stage);
         for (var i = index; i < OrderedStages.Length; i++) Set(session, OrderedStages[i], state, string.Empty);
+    }
+
+    private static void EnsureRunInitialized(CreationSession session)
+    {
+        if (session.Pipeline.CurrentRun is null)
+        {
+            // Snapshots written before Run existed are migrated into one
+            // legacy Run. Its consumed count is the existing history count,
+            // so an old session cannot silently exceed its configured budget
+            // on the first post-upgrade generation.
+            session.Pipeline.CurrentRun = new CreationRunSnapshot
+            {
+                RunId = Guid.NewGuid().ToString("N"),
+                Number = 1,
+                StartIteration = 0,
+                IterationCount = Math.Max(session.CurrentIteration, session.Iterations.Count),
+                StartedReason = "legacy-migration",
+            };
+            return;
+        }
+
+        var run = session.Pipeline.CurrentRun;
+        run.StartIteration = Math.Clamp(run.StartIteration, 0, Math.Max(0, session.CurrentIteration));
+        run.Number = Math.Max(1, run.Number);
+        run.IterationCount = Math.Max(run.IterationCount, Math.Max(0, session.CurrentIteration - run.StartIteration));
+        if (string.IsNullOrWhiteSpace(run.RunId)) run.RunId = Guid.NewGuid().ToString("N");
     }
 
     private static void SetGenerateExecutionState(CreationSession session, GenerateExecutionState state)

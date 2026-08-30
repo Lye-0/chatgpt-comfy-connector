@@ -477,6 +477,9 @@ public static class PendingHandoffFactory
     public static PendingHandoffSnapshot CreateReview(CreationSession session, IEnumerable<WorkflowSlot> slots, params string[] allowedActions)
         => CreateCore(session, slots, PendingHandoffPurpose.Review, allowedActions);
 
+    public static PendingHandoffSnapshot CreateResume(CreationSession session, IEnumerable<WorkflowSlot> slots)
+        => CreateCore(session, slots, PendingHandoffPurpose.Resume, ["generate"]);
+
     public static PendingHandoffSnapshot CreateGenerationResult(CreationSession session, IEnumerable<WorkflowSlot> slots, params string[] allowedActions)
         => CreateCore(session, slots, PendingHandoffPurpose.GenerationResult, allowedActions);
 
@@ -562,6 +565,11 @@ public static class ConnectorContextBuilder
         sb.AppendLine("If a Kickoff instruction is provided below, treat it as an additional instruction and prioritize it when it clarifies the requested direction.");
         sb.AppendLine("If the Kickoff instruction is blank, begin from the existing conversation context.");
         sb.AppendLine("If this is a new Chat with no earlier messages, use the Workflow, slot schema, and other context below as the production basis.");
+        if (handoff.Purpose == PendingHandoffPurpose.Resume)
+        {
+            sb.AppendLine("The user explicitly resumed a previously completed creation. Treat the latest attached result as the baseline and propose one improved next generation.");
+            sb.AppendLine("This Resume Handoff permits generate only; do not return complete for this first resumed iteration.");
+        }
         sb.AppendLine();
         sb.AppendLine("## Response contract (strict)");
         sb.AppendLine($"Protocol: {ConnectorProtocol.Version}");

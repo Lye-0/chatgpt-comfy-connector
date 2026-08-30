@@ -10,6 +10,7 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
     private bool _isLatest;
     private bool _isFinal;
     private BitmapSource? _thumbnailImage;
+    private bool _thumbnailUnavailable;
 
     public GenerationHistoryItem(SessionIteration iteration)
     {
@@ -37,6 +38,9 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
     public OutputArtifact? PrimaryOutput => Iteration.Outputs.FirstOrDefault();
     public BitmapSource? ThumbnailImage => _thumbnailImage;
     public bool HasThumbnail => _thumbnailImage is not null;
+    public bool IsThumbnailUnavailable => _thumbnailUnavailable && !HasThumbnail;
+    public bool ShowThumbnailMedia => HasVideo && !HasThumbnail && !IsThumbnailUnavailable;
+    public bool ShowThumbnailUnavailable => HasVideo && IsThumbnailUnavailable;
     public bool HasOutput => PrimaryOutput is not null;
     public bool HasImage => !IsGenerating && PrimaryOutput?.IsImage == true;
     public bool HasVideo => !IsGenerating && PrimaryOutput?.IsVideo == true;
@@ -51,8 +55,21 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
     {
         if (thumbnail.CanFreeze && !thumbnail.IsFrozen) thumbnail.Freeze();
         _thumbnailImage = thumbnail;
+        _thumbnailUnavailable = false;
         OnPropertyChanged(nameof(ThumbnailImage));
         OnPropertyChanged(nameof(HasThumbnail));
+        OnPropertyChanged(nameof(IsThumbnailUnavailable));
+        OnPropertyChanged(nameof(ShowThumbnailMedia));
+        OnPropertyChanged(nameof(ShowThumbnailUnavailable));
+    }
+
+    public void MarkThumbnailUnavailable()
+    {
+        if (_thumbnailImage is not null || _thumbnailUnavailable) return;
+        _thumbnailUnavailable = true;
+        OnPropertyChanged(nameof(IsThumbnailUnavailable));
+        OnPropertyChanged(nameof(ShowThumbnailMedia));
+        OnPropertyChanged(nameof(ShowThumbnailUnavailable));
     }
 
     public void UpdateFlags(bool isLatest, bool isFinal)
@@ -78,6 +95,8 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
             OnPropertyChanged(nameof(HasImage));
             OnPropertyChanged(nameof(HasVideo));
             OnPropertyChanged(nameof(ShowNoOutput));
+            OnPropertyChanged(nameof(ShowThumbnailMedia));
+            OnPropertyChanged(nameof(ShowThumbnailUnavailable));
         }
 
         if (e.PropertyName is nameof(SessionIteration.Outputs) or nameof(SessionIteration.HasOutputs))
@@ -87,6 +106,8 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
             OnPropertyChanged(nameof(HasImage));
             OnPropertyChanged(nameof(HasVideo));
             OnPropertyChanged(nameof(ShowNoOutput));
+            OnPropertyChanged(nameof(ShowThumbnailMedia));
+            OnPropertyChanged(nameof(ShowThumbnailUnavailable));
         }
     }
 

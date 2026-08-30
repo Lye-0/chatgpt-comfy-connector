@@ -212,6 +212,13 @@ metadata, and the full payload. The three semantic directions are
 bootstrap is Connector → ChatGPT, not a Comfy result. Timeline cards may shorten only
 the visible display text, while copy actions continue to use the full payload.
 
+Incoming Connector Response timeline identity is based on the persisted direction,
+message kind, and full payload. This includes the protocol/session/handoff/boundary
+identity carried by the payload, so the same parsed response remains one card when
+the automatic command-import projection omits its optional iteration number. Outgoing
+generation and result messages continue to include the iteration projection in their
+identity.
+
 The older `Summary` field remains a compatibility fallback for sessions written
 before the content-first card model. Existing messages are normalized when loaded so
 legacy direction, kind, display text, and metadata do not break the timeline.
@@ -228,6 +235,12 @@ iteration. The Windows standard SaveFileDialog supplies the initial basename,
 extension, and overwrite confirmation; the source Output is never moved or
 deleted. The copy operation rejects missing sources and silent overwrites so
 filesystem errors are surfaced to the user.
+
+HISTORY video cards capture a still frame only after the WPF media decoder reports
+usable natural dimensions. Seek and playback capture use bounded retries and reject
+blank frames before caching them. If a usable thumbnail cannot be captured, the card
+shows an explicit unavailable state while the existing OUTPUT viewer and `OPEN`
+fallback remain available.
 
 ## Production UI information architecture
 

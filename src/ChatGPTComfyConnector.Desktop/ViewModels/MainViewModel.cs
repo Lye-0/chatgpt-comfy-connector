@@ -33,6 +33,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly SemaphoreSlim _bootstrapHandoffGate = new(1, 1);
     private readonly SemaphoreSlim _reviewHandoffGate = new(1, 1);
     private readonly SemaphoreSlim _reviewMediaAttachmentGate = new(1, 1);
+    private readonly SemaphoreSlim _resumeGate = new(1, 1);
     private CreationSession? _currentSession;
     private WorkflowIdentity? _selectedWorkflow;
     private JobSnapshot? _currentJob;
@@ -83,6 +84,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly SynchronizationContext? _notificationContext = SynchronizationContext.Current;
     private readonly object _browserExtensionResponseGate = new();
     private readonly SemaphoreSlim _automaticResponseExecutionGate = new(1, 1);
+    private bool _isResumeInProgress;
     private readonly HashSet<string> _browserExtensionSendRequests = new(StringComparer.Ordinal);
     private readonly Dictionary<string, BrowserExtensionAssistantResponse> _queuedBrowserExtensionResponses = new(StringComparer.Ordinal);
 
@@ -141,7 +143,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<ProjectContextOption> ProjectOptions { get; }
     public ObservableCollection<ChatContextOption> ChatOptions { get; }
     public ObservableCollection<HandoffTimelineItem> HandoffItems { get; }
-    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanResendReviewHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); OnPropertyChanged(nameof(CurrentGenerateExecutionState)); OnPropertyChanged(nameof(GenerateExecutionStateText)); OnPropertyChanged(nameof(AutomaticResponseExecutionText)); OnPropertyChanged(nameof(AutomaticIterationText)); OnPropertyChanged(nameof(HasAutomaticIterationStatus)); OnPropertyChanged(nameof(ReviewHandoff)); OnPropertyChanged(nameof(ReviewMediaAttachment)); OnPropertyChanged(nameof(HasReviewMediaAttachment)); OnPropertyChanged(nameof(ReviewMediaAttachmentStateText)); OnPropertyChanged(nameof(IsReviewMediaAttachmentFailed)); OnPropertyChanged(nameof(CanAttachReviewOutput)); OnPropertyChanged(nameof(CanCancelOperation)); NotifyPipelineStateChanged(); } }
+    public CreationSession? CurrentSession { get => _currentSession; private set { _currentSession = value; if (value is not null) CreationPipelineStateMachine.EnsureInitialized(value); OnPropertyChanged(); OnPropertyChanged(nameof(SessionTitle)); OnPropertyChanged(nameof(SessionStatusText)); OnPropertyChanged(nameof(SessionProgressText)); OnPropertyChanged(nameof(ProjectLabel)); OnPropertyChanged(nameof(ChatLabel)); OnPropertyChanged(nameof(CurrentSessionContextText)); OnPropertyChanged(nameof(CanResumeSession)); OnPropertyChanged(nameof(HasPendingContextChange)); OnPropertyChanged(nameof(IsIdeaInputEnabled)); OnPropertyChanged(nameof(HasIdeaInput)); OnPropertyChanged(nameof(ShowIdeaPlaceholder)); OnPropertyChanged(nameof(IdeaInputHint)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanResendReviewHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); OnPropertyChanged(nameof(CurrentGenerateExecutionState)); OnPropertyChanged(nameof(GenerateExecutionStateText)); OnPropertyChanged(nameof(AutomaticResponseExecutionText)); OnPropertyChanged(nameof(AutomaticIterationText)); OnPropertyChanged(nameof(HasAutomaticIterationStatus)); OnPropertyChanged(nameof(ReviewHandoff)); OnPropertyChanged(nameof(ReviewMediaAttachment)); OnPropertyChanged(nameof(HasReviewMediaAttachment)); OnPropertyChanged(nameof(ReviewMediaAttachmentStateText)); OnPropertyChanged(nameof(IsReviewMediaAttachmentFailed)); OnPropertyChanged(nameof(CanAttachReviewOutput)); OnPropertyChanged(nameof(CanCancelOperation)); OnPropertyChanged(nameof(HasDeferredGenerate)); OnPropertyChanged(nameof(DeferredGenerateText)); NotifyPipelineStateChanged(); } }
     public WorkflowIdentity? SelectedWorkflow { get => _selectedWorkflow; private set { _selectedWorkflow = value; OnPropertyChanged(); OnPropertyChanged(nameof(SelectedWorkflowText)); OnPropertyChanged(nameof(SelectedWorkflowName)); OnPropertyChanged(nameof(HasSelectedWorkflow)); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CurrentOutputFolderPath)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyViewStateChanged(); NotifyContextSelectionChanged(); } }
     public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanCancelOperation)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
@@ -360,6 +362,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             AutomaticIterationState.Running => "自動Iteration実行中",
             AutomaticIterationState.WaitingForReviewResponse => "ChatGPTレビュー返答待ち",
+            AutomaticIterationState.LimitReached => "LIMIT REACHED · 保留generateをRESUME可能",
             AutomaticIterationState.Stopped => "自動Iteration停止 · 手動復旧可能",
             AutomaticIterationState.Failed => "自動Iteration停止 · 再試行可能",
             AutomaticIterationState.Completed => "自動Iteration完了",
@@ -459,11 +462,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
     public string CurrentIterationLabel => !_isCurrentSessionActivated || CurrentSession is null || CurrentSession.Pipeline.IterationNumber == 0 ? "ITERATION —" : CurrentSession.Pipeline.IterationNumber > CurrentSession.CurrentIteration ? $"ITERATION {CurrentSession.Pipeline.IterationNumber:00} · PREP" : $"ITERATION {CurrentSession.CurrentIteration:00}";
     public string PipelineLoopText => CreationPipelineLoopText.Resolve(CurrentSession, _isCurrentSessionActivated, ConnectionState, Idea);
-    public string SessionStatusText => CurrentSession?.Status.ToString().ToUpperInvariant() ?? "NEW";
+    public string SessionStatusText => CurrentSession?.Status switch
+    {
+        SessionStatus.LimitReached => "LIMIT REACHED",
+        SessionStatus.Completed => "COMPLETED",
+        { } status => status.ToString().ToUpperInvariant(),
+        null => "NEW",
+    };
     public string JobStatusText => CurrentJob is null ? "IDLE" : CurrentJob.Status.ToString().ToUpperInvariant();
     public string JobStatusDetailText => IsGenerationInProgress ? CurrentOutputGenerationDetail : CurrentJob is null ? "生成待機中" : CurrentJob.Status switch { JobStatus.Completed => "生成が完了しました", JobStatus.Failed => "生成に失敗しました", JobStatus.Cancelled => "生成をキャンセルしました", _ => "Jobを確認してください" };
     public string DirtyText => IsDirty ? "UNSAVED CHANGES" : "SAVED";
-    public string SessionProgressText => CurrentSession is null ? "0 / 10 ITERATIONS" : $"{CurrentSession.CurrentIteration} / {CurrentSession.MaximumIterations} ITERATIONS";
+    public string SessionProgressText => CurrentSession is null
+        ? "RUN 01 · 0 / 10 ITERATIONS"
+        : $"RUN {(CurrentSession.Pipeline.CurrentRun?.Number ?? 1):00} · {CurrentSession.Pipeline.CurrentRun?.IterationCount ?? CurrentSession.CurrentIteration} / {CurrentSession.MaximumIterations} · TOTAL {CurrentSession.CurrentIteration}";
+    public bool HasDeferredGenerate => _isCurrentSessionActivated && CurrentSession?.Pipeline.DeferredGenerate is not null;
+    public string DeferredGenerateText => CurrentSession?.Pipeline.DeferredGenerate is null
+        ? string.Empty
+        : "保留中のgenerateがあります。RESUMEで同じCommandを一度だけAPPLY・GENERATEします。";
     public string CurrentSessionContextText => CurrentSession is null ? "制作セッションなし" : $"{BlankFallback(CurrentSession.ProjectLabel, "Project未設定")}  ·  {BlankFallback(CurrentSession.ChatLabel, "Chat未設定")}";
     public string ProjectPlaceholderText => HasSelectedProject || IsProjectCreateVisible ? string.Empty : "Projectを選択…";
     public string ChatPlaceholderText => !HasSelectedProject ? "先にProjectを選択してください" : HasSelectedChat || IsChatCreateVisible ? string.Empty : "Chatを選択…";
@@ -494,7 +509,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasProjectValidationMessage => !string.IsNullOrWhiteSpace(ProjectValidationMessage);
     public bool HasChatValidationMessage => !string.IsNullOrWhiteSpace(ChatValidationMessage);
     public bool CanStartNewCreation => IsCreationConnectionReady && SlotDiscoveryState == SlotDiscoveryState.Loaded && HasSelectedWorkflow && HasSelectedProject && HasSelectedChat && SessionMaximumIterations is >= 1 and <= 1000 && !IsJobActive;
-    public bool CanResumeSession => _isCurrentSessionActivated && IsCreationConnectionReady && CurrentSession?.Status is SessionStatus.Completed or SessionStatus.Paused or SessionStatus.Stopped or SessionStatus.Error;
+    public bool CanResumeSession => !_isResumeInProgress
+        && _isCurrentSessionActivated
+        && IsCreationConnectionReady
+        && CurrentSession?.Status is SessionStatus.Completed or SessionStatus.LimitReached or SessionStatus.Paused or SessionStatus.Stopped or SessionStatus.Error;
     public bool IsIdeaInputEnabled => _isCurrentSessionActivated && CurrentSession?.Pipeline.ContextBound == true && !IsJobActive;
     public bool HasIdeaInput => !string.IsNullOrWhiteSpace(Idea);
     public bool IsIdeaComposing => _isIdeaComposing;
@@ -608,7 +626,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool ShowNoSlotState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && !HasSlots;
     public bool ShowReadyState => HasSelectedWorkflow && IsConnected && !IsSlotLoading && !HasSlotLoadError && HasSlots;
     public bool CanRunWorkflow => IsCreationConnectionReady && _isCurrentSessionActivated && HasSelectedWorkflow && !IsSlotLoading && !HasSlotLoadError && CurrentSession is not null && CreationPipelineStateMachine.Get(CurrentSession, CreationStage.Generate).State is CreationStageState.Current or CreationStageState.WaitingUser or CreationStageState.Error or CreationStageState.Cancelled;
-    public bool HasIterationSafetyStop => _isCurrentSessionActivated && CurrentSession?.Pipeline.MaximumIterationSafetyStop == true;
+    public bool HasIterationSafetyStop => _isCurrentSessionActivated
+        && (CurrentSession?.Pipeline.MaximumIterationSafetyStop == true || CurrentSession?.Status == SessionStatus.LimitReached);
     public bool HasPendingContextChange => _isCurrentSessionActivated && CurrentSession?.Pipeline.ContextBound == true &&
         (SelectedWorkflow?.RelativePath != CurrentSession.BoundWorkflow?.RelativePath || SelectedProject?.ProviderId != CurrentSession.EffectiveContextProviderId || SelectedProject?.Key != CurrentSession.EffectiveProjectContextKey || SelectedChat?.ProviderId != CurrentSession.EffectiveContextProviderId || SelectedChat?.Key != CurrentSession.EffectiveChatContextKey || SessionMaximumIterations != CurrentSession.MaximumIterations);
     public bool IsJobActive => CurrentJob is { Status: JobStatus.Queued or JobStatus.Running };
@@ -1862,6 +1881,102 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// Sends the first Handoff of a new Run after a previously completed
+    /// Session is explicitly resumed. It can also retry a persisted Resume
+    /// boundary after a transport failure, without rotating its identity. The
+    /// latest output is attached by the caller, and the saved ChatGPT
+    /// tab/conversation is reused.
+    /// </summary>
+    private async Task<BrowserExtensionHandoffSendResult> SendResumeHandoffAsync(
+        SessionIteration iteration,
+        bool reuseExisting = false)
+    {
+        await _reviewHandoffGate.WaitAsync();
+        try
+        {
+            var session = CurrentSession ?? throw new InvalidOperationException("制作セッションがありません。");
+            EnsureSlotSchemaAvailable();
+
+            PendingHandoffSnapshot pending;
+            string payload;
+            if (reuseExisting)
+            {
+                if (session.PendingHandoff is not { } existingPending
+                    || !PendingHandoffReuse.IsResume(existingPending)
+                    || existingPending.Iteration != iteration.Number)
+                {
+                    throw new InvalidOperationException("再試行するResume Handoffが見つかりません。Sessionの履歴は保持されています。");
+                }
+
+                var existingMessage = FindReviewHandoff(existingPending, iteration.Number);
+                if (!HandoffPayloadReuse.TryGetSavedPayload(existingMessage, out payload))
+                {
+                    throw new InvalidOperationException("保存済みResume Handoff本文を確認できません。Sessionの履歴は保持されています。");
+                }
+
+                pending = existingPending;
+                var review = session.Pipeline.ReviewHandoff;
+                if (review is null
+                    || review.Iteration != pending.Iteration
+                    || !string.Equals(review.SessionId, pending.SessionId, StringComparison.Ordinal)
+                    || !string.Equals(review.HandoffId, pending.HandoffId, StringComparison.Ordinal)
+                    || !string.Equals(review.BoundaryId, pending.BoundaryId, StringComparison.Ordinal)
+                    || review.State is ReviewHandoffState.None or ReviewHandoffState.Failed or ReviewHandoffState.Stopped or ReviewHandoffState.Completed)
+                {
+                    // Re-arm the same persisted boundary. This changes only
+                    // transient lifecycle state; it never regenerates the
+                    // session, Handoff, boundary, or payload.
+                    CreationPipelineStateMachine.ReviewHandoffPreparing(
+                        session,
+                        pending,
+                        iteration.Number,
+                        session.BrowserExtensionTargetTabId,
+                        session.BrowserExtensionTargetTabUrl);
+                }
+            }
+            else
+            {
+                pending = PendingHandoffFactory.CreateResume(
+                    session,
+                    Slots.Select(ToWorkflowSlot));
+                session.PendingHandoff = pending;
+                CreationPipelineStateMachine.ReviewHandoffPreparing(
+                    session,
+                    pending,
+                    iteration.Number,
+                    session.BrowserExtensionTargetTabId,
+                    session.BrowserExtensionTargetTabUrl);
+                payload = ConnectorContextBuilder.BuildResult(session, iteration, pending);
+            }
+
+            await RecordReviewHandoffTransportAsync(
+                payload,
+                HandoffTransportState.Waiting,
+                null,
+                null,
+                iteration.Number);
+            await SaveActiveSessionAsync();
+            NotifyPipelineStateChanged();
+
+            // Resume is an explicit user action, but the resulting Handoff is
+            // still an automatic loop boundary.  The shared Review send path
+            // will persist SENT/FAILED and correlate assistant.response using
+            // this fresh PendingHandoff identity.
+            CreationPipelineStateMachine.AutomaticIterationStarted(session);
+            var result = await SendPreparedReviewHandoffCoreAsync(payload, automatic: true);
+            if (result.IsSent)
+            {
+                StatusMessage = "RESUME Handoffを同じChatGPT会話へ送信しました。返答を待機しています。";
+            }
+            return result;
+        }
+        finally
+        {
+            _reviewHandoffGate.Release();
+        }
+    }
+
+    /// <summary>
     /// Explicitly retries the already persisted Review Handoff.  It is also
     /// used by the automatic path after the new Review identity has been
     /// recorded.  Preparation and transport remain separate so a failure
@@ -2058,15 +2173,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var message = FindReviewHandoff(pending, iteration, payload);
         if (message is null)
         {
+            var isResume = pending.Purpose == PendingHandoffPurpose.Resume;
             message = new HandoffMessage
             {
                 Direction = HandoffDirection.ComfyToChatGpt,
                 Kind = HandoffMessageKind.ReviewRequest,
                 State = HandoffTransportState.Waiting,
-                Title = $"Iteration {iteration:00} Review Handoff",
-                DisplayText = $"Iteration {iteration:00} のReview Handoffを送信",
+                Title = isResume
+                    ? $"Iteration {iteration:00} Resume Handoff"
+                    : $"Iteration {iteration:00} Review Handoff",
+                DisplayText = isResume
+                    ? $"Iteration {iteration:00} のResume Handoffを送信"
+                    : $"Iteration {iteration:00} のReview Handoffを送信",
                 Metadata = BuildResultTimelineMetadata(session.Iterations.FirstOrDefault(item => item.Number == iteration) ?? new SessionIteration { Number = iteration }),
-                Summary = "生成物を確認したChatGPTへ次のIterationまたは完了判断を依頼します。",
+                Summary = isResume
+                    ? "完成済みの生成結果を基準に、新しいRunの最初のgenerate判断を依頼します。"
+                    : "生成物を確認したChatGPTへ次のIterationまたは完了判断を依頼します。",
                 Payload = payload,
                 IterationNumber = iteration,
             };
@@ -2136,7 +2258,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     private string[] GetReviewAllowedActions(CreationSession session)
-        => session.AtIterationLimit ? ["complete"] : ["generate", "complete"];
+        // MaximumIterations limits Connector execution for the current Run;
+        // it must never change ChatGPT's Review decision contract. The final
+        // iteration is still allowed to return either generate or complete.
+        => ["generate", "complete"];
 
     private HandoffMessage? FindReviewHandoff(PendingHandoffSnapshot? pending, int? iteration = null, string? payload = null)
         => CurrentSession?.HandoffMessages.LastOrDefault(item =>
@@ -2360,34 +2485,241 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             throw new InvalidOperationException("再開する制作Sessionを明示的に選択してください。");
         }
-        SynchronizePipelineConnectionGate(CurrentSession);
-        CreationPipelineStateMachine.RequireConnection(CurrentSession);
-        _isCurrentSessionActivated = true;
-        CreationPipelineStateMachine.Resume(CurrentSession);
-        RefreshHistoryFlags();
-        await SaveActiveSessionAsync();
-        OnPropertyChanged(nameof(SessionStatusText));
+
+        if (!await _resumeGate.WaitAsync(0))
+            throw new InvalidOperationException("セッションの再開処理を実行中です。完了するまでお待ちください。");
+
+        _isResumeInProgress = true;
         OnPropertyChanged(nameof(CanResumeSession));
-        NotifyPipelineStateChanged();
-        StatusMessage = "セッションを再開しました。";
+        try
+        {
+            var session = CurrentSession;
+            SynchronizePipelineConnectionGate(session);
+            CreationPipelineStateMachine.RequireConnection(session);
+            _isCurrentSessionActivated = true;
+
+            if (session.Status == SessionStatus.LimitReached
+                || session.Pipeline.MaximumIterationSafetyStop
+                || session.Pipeline.DeferredGenerate is not null)
+            {
+                await ResumeDeferredGenerateAsync(session);
+            }
+            else if (IsCompletedResumeAwaitingResponse(session))
+            {
+                // A second invocation after the first Resume has already
+                // crossed the Bridge is a no-op. The active watcher owns the
+                // existing boundary; restarting it would duplicate a Handoff
+                // and could cause a second automatic generation.
+                StatusMessage = "Resume Handoffは送信済みです。ChatGPTの返答を待機しています。";
+            }
+            else if (session.Status == SessionStatus.Completed)
+            {
+                await ResumeCompletedSessionAsync(session);
+            }
+            else if (IsCompletedResumeRetryable(session))
+            {
+                // If the first Resume send failed after persisting its
+                // boundary, retry that exact Handoff instead of creating a
+                // fresh Run or rotating its identity.
+                await ResumeCompletedSessionAsync(session);
+            }
+            else
+            {
+                // Preserve the legacy pause/error recovery behavior for a
+                // session that was stopped for a non-iteration reason.
+                CreationPipelineStateMachine.Resume(session);
+                RefreshHistoryFlags();
+                await SaveActiveSessionAsync();
+                StatusMessage = "セッションを再開しました。";
+            }
+
+            OnPropertyChanged(nameof(SessionStatusText));
+            OnPropertyChanged(nameof(CanResumeSession));
+            NotifyPipelineStateChanged();
+        }
+        catch (Exception ex)
+        {
+            // A Resume can fail during media/Bridge recovery after the new
+            // Run was created. Keep it explicitly retryable instead of
+            // leaving an Active session that has no actionable button.
+            if (CurrentSession is { } failed
+                && failed.Status == SessionStatus.Active
+                && !IsJobActive)
+            {
+                failed.Status = SessionStatus.Error;
+                failed.LastError = ex.Message;
+                failed.PauseReason = "Resumeに失敗しました。再試行してください。";
+                await SaveActiveSessionAsync();
+                OnPropertyChanged(nameof(SessionStatusText));
+                OnPropertyChanged(nameof(CanResumeSession));
+                NotifyPipelineStateChanged();
+            }
+            throw;
+        }
+        finally
+        {
+            _isResumeInProgress = false;
+            _resumeGate.Release();
+            OnPropertyChanged(nameof(CanResumeSession));
+        }
     }
 
     public async Task ContinueBeyondIterationLimitAsync()
     {
         if (CurrentSession is null) return;
-        CreationPipelineStateMachine.ContinueBeyondLimit(CurrentSession);
-        SessionMaximumIterations = CurrentSession.MaximumIterations;
-        await SaveActiveSessionAsync();
-        OnPropertyChanged(nameof(SessionProgressText));
-        NotifyPipelineStateChanged();
-        StatusMessage = $"Maximum Iterationsを{CurrentSession.MaximumIterations}へ拡張しました。次のIterationへ進めます。";
+        await ResumeSessionAsync();
     }
 
     public async Task EndAtIterationLimitAsync()
     {
-        if (CurrentSession is null || !CurrentSession.Pipeline.MaximumIterationSafetyStop) return;
+        if (CurrentSession is null
+            || (CurrentSession.Status != SessionStatus.LimitReached
+                && !CurrentSession.Pipeline.MaximumIterationSafetyStop
+                && CurrentSession.Pipeline.DeferredGenerate is null)) return;
         await CompleteSessionAsync("最大反復回数でユーザーが制作終了を選択しました。");
     }
+
+    private async Task ResumeDeferredGenerateAsync(CreationSession session)
+    {
+        // Validate the durable recovery record before changing the Run.  A
+        // corrupt/stale snapshot must remain retryable and must never create an
+        // empty recovery Run merely because the user pressed RESUME.
+        var deferred = session.Pipeline.DeferredGenerate;
+        if (deferred is null)
+        {
+            CreationPipelineStateMachine.ResumeFromLimit(session);
+            await SaveActiveSessionAsync();
+            StatusMessage = "LIMIT REACHEDを解除しました。次の生成を準備できます。";
+            return;
+        }
+
+        if (!string.Equals(deferred.SessionId, session.Id, StringComparison.Ordinal)
+            || !string.Equals(
+                deferred.RecoveryRunId ?? deferred.RunId,
+                session.Pipeline.CurrentRun?.RunId,
+                StringComparison.Ordinal)
+            || session.PendingHandoff is not { } pending
+            || !string.Equals(deferred.HandoffId, pending.HandoffId, StringComparison.Ordinal)
+            || !string.Equals(deferred.BoundaryId, pending.BoundaryId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("保留中のgenerateの相関情報を確認できません。Sessionを破壊せず再試行できます。");
+        }
+
+        var restoredText = deferred.CommandText;
+        var restoredValidation = ConnectorProtocol.Parse(restoredText, pending);
+        if (!restoredValidation.IsValid
+            || restoredValidation.Command is not { Action: "generate" })
+        {
+            throw new InvalidOperationException("保留中のgenerate Commandをstrict validationできません。保留内容は保持されています。");
+        }
+
+        // This is the first mutating step.  All identity and strict-command
+        // checks above are intentionally complete before the recovery Run is
+        // created or the old Review boundary is re-armed.
+        deferred = CreationPipelineStateMachine.ResumeFromLimit(session)
+            ?? throw new InvalidOperationException("LIMIT REACHEDの再開状態を確認できません。保留内容は保持されています。");
+
+        RestoreAutomaticCommandInput(restoredText, restoredValidation);
+        await SaveActiveSessionAsync();
+        NotifyPipelineStateChanged();
+
+        var iterationBefore = session.CurrentIteration;
+        var commandBefore = CommandText;
+        var validationBefore = _pendingValidation;
+        try
+        {
+            await ApplyCommandCoreAsync(
+                generate: true,
+                clearCommandOnApply: false,
+                afterApply: ClearAppliedCommandInput);
+        }
+        catch
+        {
+            RestoreAutomaticCommandInput(commandBefore, validationBefore);
+            throw;
+        }
+
+        var generated = session.Iterations.LastOrDefault();
+        var generationSucceeded = generated is not null
+            && generated.Number > iterationBefore
+            && generated.Status == JobStatus.Completed
+            && generated.Outputs.Any(output => !output.IsMissing)
+            && CreationPipelineStateMachine.Get(session, CreationStage.Output).State == CreationStageState.Completed;
+        if (!generationSucceeded)
+        {
+            RestoreAutomaticCommandInput(commandBefore, validationBefore);
+            await SaveActiveSessionAsync();
+            throw new InvalidOperationException("保留中のgenerateを実行できませんでした。Commandと生成履歴は保持されています。");
+        }
+
+        // The deferred command was consumed only after APPLY/GENERATE and
+        // OUTPUT completed. The response/Handoff identity itself remains in
+        // the Timeline for auditability, while a new normal Review boundary
+        // will be issued by the existing output monitor.
+        session.Pipeline.DeferredGenerate = null;
+        session.Pipeline.MaximumIterationSafetyStop = false;
+        await SaveActiveSessionAsync();
+        OnPropertyChanged(nameof(SessionProgressText));
+        OnPropertyChanged(nameof(HasDeferredGenerate));
+        OnPropertyChanged(nameof(DeferredGenerateText));
+        var generatedNumber = generated?.Number ?? session.CurrentIteration;
+        StatusMessage = $"保留中のgenerateでIteration {generatedNumber:00}を開始しました。生成結果をReviewします。";
+    }
+
+    private async Task ResumeCompletedSessionAsync(CreationSession session)
+    {
+        var latest = session.Iterations
+            .Where(item => item.Status == JobStatus.Completed && item.Outputs.Any(output => !output.IsMissing))
+            .OrderByDescending(item => item.Number)
+            .FirstOrDefault()
+            ?? throw new InvalidOperationException("RESUME対象の完成済みOutputが見つかりません。");
+
+        var hasExistingResumeBoundary = IsCompletedResumeRetryable(session);
+        if (!hasExistingResumeBoundary)
+        {
+            CreationPipelineStateMachine.Resume(session);
+            // CompleteSessionAsync revokes the process-local media registration.
+            // Force a fresh registration for the same latest artifact without
+            // creating a new output or changing its history identity.
+            RevokeReviewMediaRegistration(session);
+            session.Pipeline.ReviewMediaAttachment = null;
+            await SaveActiveSessionAsync();
+        }
+        else
+        {
+            // Preserve the recovery Run and its persisted Resume boundary when
+            // retrying after a failed send. Only clear a transient error.
+            session.Resume();
+        }
+
+        if (session.Pipeline.ReviewMediaAttachment?.State != ReviewMediaAttachmentState.Attached
+            && !await TryAttachPrimaryOutputAsync(latest, explicitRetry: true))
+            throw new InvalidOperationException("RESUME用に最新生成物をChatGPTへ再添付できませんでした。");
+
+        var result = await SendResumeHandoffAsync(latest, reuseExisting: hasExistingResumeBoundary);
+        if (!result.IsSent)
+            throw new InvalidOperationException(result.Message ?? "RESUME Handoffの送信に失敗しました。");
+
+        await DrainQueuedBrowserExtensionResponseAsync(result.RequestId);
+        RefreshHistoryFlags();
+        await SaveActiveSessionAsync();
+        StatusMessage = "制作を再開し、最新成果物を基準にResume Handoffを送信しました。返答を待っています。";
+    }
+
+    private bool IsCompletedResumeRetryable(CreationSession session)
+        => PendingHandoffReuse.IsResume(session.PendingHandoff)
+            && session.Pipeline.CurrentRun?.StartedReason == "user_resume_completed"
+            && session.PendingHandoff?.Iteration == session.CurrentIteration
+            && FindReviewHandoff(session.PendingHandoff, session.CurrentIteration) is
+                { State: HandoffTransportState.Failed or HandoffTransportState.Copied or HandoffTransportState.Waiting };
+
+    private bool IsCompletedResumeAwaitingResponse(CreationSession session)
+        => PendingHandoffReuse.IsResume(session.PendingHandoff)
+            && session.Pipeline.CurrentRun?.StartedReason == "user_resume_completed"
+            && session.Pipeline.ReviewHandoff is
+                { State: ReviewHandoffState.Preparing or ReviewHandoffState.Sending or ReviewHandoffState.WaitingResponse or ReviewHandoffState.Received }
+            && session.Pipeline.AutomaticIteration is
+                { State: AutomaticIterationState.Running or AutomaticIterationState.WaitingForReviewResponse };
 
     public async Task CancelJobAsync()
     {
@@ -3830,7 +4162,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 await _store.LogAsync(
                     "automation",
                     $"response execution started request_id={response.RequestId} session_id={response.SessionId} handoff_id={response.HandoffId} boundary_id={response.BoundaryId} target_tab_id={response.TargetTabId?.ToString() ?? "none"} stage=response_execution_started action={command.Action}");
-                await ExecuteBrowserExtensionCommandAutomaticallyAsync(session!, responseKey, command);
+                await ExecuteBrowserExtensionCommandAutomaticallyAsync(session!, responseKey, response, command);
             }
             catch (Exception ex)
             {
@@ -3852,6 +4184,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private async Task ExecuteBrowserExtensionCommandAutomaticallyAsync(
         CreationSession session,
         string responseKey,
+        BrowserExtensionAssistantResponse response,
         ConnectorCommand responseCommand)
     {
         // Run the same strict parser and CommandValidated transition used by
@@ -3931,18 +4264,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        if (session.AtIterationLimit)
+        if (session.AtRunIterationLimit)
         {
             // CommandValidated deliberately left REVIEW in
             // ContinueDecisionRequired. This is a safe, user-facing stop, not
             // an automatic execution failure: keep the valid command and the
-            // existing Review boundary available for Continue/End actions.
+            // existing Review boundary available for Resume/End actions.
             const string maximumIterationsMessage = "Maximum iterationsに達しているため次のGenerationを開始しませんでした。";
+            var deferred = new DeferredGenerateSnapshot
+            {
+                RunId = session.Pipeline.CurrentRun?.RunId ?? string.Empty,
+                SessionId = response.SessionId,
+                RequestId = response.RequestId,
+                HandoffId = response.HandoffId,
+                BoundaryId = response.BoundaryId,
+                CommandText = CommandText,
+                Iteration = session.CurrentIteration,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            };
             AutomaticResponseExecutionCoordinator.MarkCompleted(session, responseKey, command.Action);
-            CreationPipelineStateMachine.AutomaticIterationLimitReached(session, maximumIterationsMessage);
+            CreationPipelineStateMachine.AutomaticIterationLimitReached(session, maximumIterationsMessage, deferred);
             await SaveActiveSessionAsync();
             StatusMessage = "Maximum iterationsに達しました。続行するか、制作を終了してください。";
             OnPropertyChanged(nameof(CanApplyCommand));
+            OnPropertyChanged(nameof(HasDeferredGenerate));
+            OnPropertyChanged(nameof(DeferredGenerateText));
             NotifyPipelineStateChanged();
             return;
         }
@@ -4243,6 +4589,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ShowIdeaPlaceholder));
         OnPropertyChanged(nameof(IdeaInputHint));
         OnPropertyChanged(nameof(CanResendBootstrapHandoff));
+        OnPropertyChanged(nameof(CanResendReviewHandoff));
         OnPropertyChanged(nameof(CanSendToChatGpt));
         OnPropertyChanged(nameof(SendToChatGptButtonText));
         OnPropertyChanged(nameof(SendToChatGptHint));
@@ -4381,6 +4728,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CurrentCreationStageText));
         OnPropertyChanged(nameof(CurrentCreationStageDescription));
         OnPropertyChanged(nameof(CurrentCreationStageState));
+        OnPropertyChanged(nameof(SessionStatusText));
+        OnPropertyChanged(nameof(SessionProgressText));
+        OnPropertyChanged(nameof(CanResumeSession));
         OnPropertyChanged(nameof(CurrentGenerateExecutionState));
         OnPropertyChanged(nameof(GenerateExecutionStateText));
         OnPropertyChanged(nameof(AutomaticResponseExecutionText));
@@ -4407,6 +4757,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CanApplyCommand));
         OnPropertyChanged(nameof(CanRunWorkflow));
         OnPropertyChanged(nameof(CanCancelOperation));
+        OnPropertyChanged(nameof(HasDeferredGenerate));
+        OnPropertyChanged(nameof(DeferredGenerateText));
     }
 
     private void RefreshPipeline()

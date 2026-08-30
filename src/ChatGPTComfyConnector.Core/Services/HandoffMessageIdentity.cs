@@ -4,7 +4,7 @@ namespace ChatGPTComfyConnector.Core.Services;
 
 /// <summary>
 /// Defines the durable identity used when a timeline record is updated by a
-/// later phase of the same transport. Incoming complete Responses are
+/// later phase of the same transport. Incoming Connector Responses are
 /// identified by their exact payload (which carries the protocol identity), so
 /// an optional iteration projection must not create a second card.
 /// </summary>
@@ -19,11 +19,11 @@ public static class HandoffMessageIdentity
             return false;
         }
 
-        return IsIncomingComplete(existing)
+        return IsIncomingConnectorResponse(existing)
             || existing.IterationNumber == candidate.IterationNumber;
     }
 
-    private static bool IsIncomingComplete(HandoffMessage message)
+    private static bool IsIncomingConnectorResponse(HandoffMessage message)
         => message.Direction == HandoffDirection.ChatGptToComfy
-            && message.Kind == HandoffMessageKind.Complete;
+            && message.Kind is HandoffMessageKind.GenerationCommand or HandoffMessageKind.Complete;
 }

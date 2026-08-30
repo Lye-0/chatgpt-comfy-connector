@@ -60,6 +60,9 @@ public static class PendingHandoffReuse
     public static bool IsGenerationResult(PendingHandoffSnapshot? pending)
         => pending?.Purpose == PendingHandoffPurpose.GenerationResult;
 
+    public static bool IsResume(PendingHandoffSnapshot? pending)
+        => pending?.Purpose == PendingHandoffPurpose.Resume;
+
     /// <summary>
     /// Finds the exact persisted Bootstrap payload that can be retried after a
     /// Clipboard or Browser Extension delivery attempt. The pending snapshot
@@ -99,7 +102,7 @@ public static class PendingHandoffReuse
     /// </summary>
     public static bool IsReview(PendingHandoffSnapshot? pending)
         => pending is not null
-            && (pending.Purpose == PendingHandoffPurpose.Review
+            && (pending.Purpose is PendingHandoffPurpose.Review or PendingHandoffPurpose.Resume
                 || (pending.Purpose == PendingHandoffPurpose.Unknown
                     && pending.AllowedActions.Contains("complete", StringComparer.Ordinal)));
 

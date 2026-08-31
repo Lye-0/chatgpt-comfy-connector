@@ -72,6 +72,25 @@ public enum JobStatus
     Cancelled,
 }
 
+/// <summary>
+/// Durable user-facing outcome of an iteration. This is intentionally
+/// independent from <see cref="JobStatus"/>: a completed ComfyUI job can
+/// later be stopped at a Run limit or be the iteration ChatGPT marked as
+/// complete.
+/// </summary>
+public enum IterationOutcome
+{
+    /// <summary>
+    /// No terminal history outcome has been recorded yet. This value also
+    /// allows older session snapshots to be migrated without guessing while
+    /// an iteration is still in progress.
+    /// </summary>
+    Unknown,
+    Generated,
+    LimitReached,
+    ChatGptComplete,
+}
+
 public enum ContextBindingMode
 {
     Local,
@@ -81,6 +100,16 @@ public enum ContextBindingMode
 public static class ContextProviderIds
 {
     public const string LocalJson = "local-json";
+    public const string ChatGptExtension = "chatgpt-extension";
+}
+
+public enum ProjectChatCatalogLoadState
+{
+    Loading,
+    Loaded,
+    Empty,
+    Disconnected,
+    Error,
 }
 
 public enum HandoffDirection
@@ -570,6 +599,8 @@ public sealed class ProjectChatBindingSnapshot
     public string? ChatKey { get; init; }
     public string? ProjectExternalId { get; init; }
     public string? ChatExternalId { get; init; }
+    public string? ProjectExternalUrl { get; init; }
+    public string? ChatExternalUrl { get; init; }
     public string ProjectLabel { get; init; } = string.Empty;
     public string ChatLabel { get; init; } = string.Empty;
 }
@@ -581,10 +612,13 @@ public sealed class ChatContextOption
     public string Key { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public string? ExternalId { get; set; }
+    public string? Url { get; set; }
     public ContextBindingMode Mode { get; set; } = ContextBindingMode.Local;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     [JsonIgnore]
     public bool IsCreateAction { get; set; }
+    [JsonIgnore]
+    public bool IsNewConversation { get; set; }
 }
 
 public sealed class ProjectContextOption
@@ -593,16 +627,30 @@ public sealed class ProjectContextOption
     public string Key { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public string? ExternalId { get; set; }
+    public string? Url { get; set; }
     public ContextBindingMode Mode { get; set; } = ContextBindingMode.Local;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<ChatContextOption> Chats { get; set; } = [];
     [JsonIgnore]
     public bool IsCreateAction { get; set; }
+    [JsonIgnore]
+    public bool IsNoProject { get; set; }
+    [JsonIgnore]
+    public bool IsTargetResolvable
+        => Mode == ContextBindingMode.Local || IsNoProject || ExternalId is not null || Url is not null;
+    [JsonIgnore]
+    public bool IsNewConversationTargetResolvable
+        => Mode == ContextBindingMode.Local
+            || IsNoProject
+            || ExternalId is not null && Url is not null && !string.Equals(Url, "https://chatgpt.com/", StringComparison.OrdinalIgnoreCase);
 }
 
 public sealed class ProjectChatCatalog
 {
     public string ProviderId { get; set; } = string.Empty;
+    public ProjectChatCatalogLoadState LoadState { get; set; } = ProjectChatCatalogLoadState.Loaded;
+    public string? ErrorCode { get; set; }
+    public string? ErrorMessage { get; set; }
     public List<ProjectContextOption> Projects { get; set; } = [];
 }
 
@@ -824,6 +872,8 @@ public sealed class SessionIteration : INotifyPropertyChanged
     private List<OutputArtifact> _outputs = [];
     private JobStatus _status = JobStatus.Queued;
     private string? _error;
+    private IterationOutcome _outcome = IterationOutcome.Unknown;
+    private bool _isFinal;
     public int Number { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public string Prompt { get; set; } = string.Empty;
@@ -847,6 +897,26 @@ public sealed class SessionIteration : INotifyPropertyChanged
             if (string.Equals(_error, value, StringComparison.Ordinal)) return;
             _error = value;
             PropertyChanged?.Invoke(this, new(nameof(Error)));
+        }
+    }
+    public IterationOutcome Outcome
+    {
+        get => _outcome;
+        set
+        {
+            if (_outcome == value) return;
+            _outcome = value;
+            PropertyChanged?.Invoke(this, new(nameof(Outcome)));
+        }
+    }
+    public bool IsFinal
+    {
+        get => _isFinal;
+        set
+        {
+            if (_isFinal == value) return;
+            _isFinal = value;
+            PropertyChanged?.Invoke(this, new(nameof(IsFinal)));
         }
     }
     public List<OutputArtifact> Outputs
@@ -882,6 +952,12 @@ public sealed class CreationSession
     public string? ProjectId { get; set; }
     public string? ConversationId { get; set; }
     /// <summary>
+    /// Stable external metadata retained for ChatGPT context recovery. The
+    /// URL is only used as a validated same-conversation recovery hint.
+    /// </summary>
+    public string? ProjectUrl { get; set; }
+    public string? ConversationUrl { get; set; }
+    /// <summary>
     /// Browser tab identity returned by the successful initial Handoff.  It
     /// is used only to bind Phase 5.1 media attachment to that same tab.
     /// </summary>
@@ -915,6 +991,8 @@ public sealed class CreationSession
         ChatKey = EffectiveChatContextKey,
         ProjectExternalId = ProjectId,
         ChatExternalId = ConversationId,
+        ProjectExternalUrl = ProjectUrl,
+        ChatExternalUrl = ConversationUrl,
         ProjectLabel = ProjectLabel,
         ChatLabel = ChatLabel,
     };

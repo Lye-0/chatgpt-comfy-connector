@@ -8,7 +8,6 @@ namespace ChatGPTComfyConnector.Desktop.ViewModels;
 public sealed class GenerationHistoryItem : INotifyPropertyChanged
 {
     private bool _isLatest;
-    private bool _isFinal;
     private BitmapSource? _thumbnailImage;
     private bool _thumbnailUnavailable;
 
@@ -22,6 +21,14 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
     public int Number => Iteration.Number;
     public string Prompt => Iteration.Prompt;
     public string StatusText => Iteration.Status.ToString().ToUpperInvariant();
+    public string OutcomeText => Iteration.Outcome switch
+    {
+        IterationOutcome.Generated => "GENERATED",
+        IterationOutcome.LimitReached => "LIMIT REACHED",
+        IterationOutcome.ChatGptComplete => "CHATGPT COMPLETE",
+        _ when Iteration.Status == JobStatus.Completed => "GENERATED",
+        _ => StatusText,
+    };
     public bool IsGenerating => Iteration.Status is JobStatus.Queued or JobStatus.Running;
     public string ActivityText => IsGenerating ? "GENERATING" : StatusText;
     public string StatusDetailText => Iteration.Status switch
@@ -47,7 +54,7 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
     public bool ShowNoOutput => !HasOutput && !IsGenerating;
     public bool IsFailed => Iteration.Status == JobStatus.Failed;
     public bool IsLatest => _isLatest;
-    public bool IsFinal => _isFinal;
+    public bool IsFinal => Iteration.IsFinal;
     public bool HasBadge => IsLatest || IsFinal;
     public string BadgeText => IsFinal ? "FINAL" : IsLatest ? "LATEST" : string.Empty;
 
@@ -72,13 +79,11 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
         OnPropertyChanged(nameof(ShowThumbnailUnavailable));
     }
 
-    public void UpdateFlags(bool isLatest, bool isFinal)
+    public void UpdateFlags(bool isLatest)
     {
-        if (_isLatest == isLatest && _isFinal == isFinal) return;
+        if (_isLatest == isLatest) return;
         _isLatest = isLatest;
-        _isFinal = isFinal;
         OnPropertyChanged(nameof(IsLatest));
-        OnPropertyChanged(nameof(IsFinal));
         OnPropertyChanged(nameof(HasBadge));
         OnPropertyChanged(nameof(BadgeText));
     }
@@ -88,6 +93,7 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
         if (e.PropertyName == nameof(SessionIteration.Status))
         {
             OnPropertyChanged(nameof(StatusText));
+            OnPropertyChanged(nameof(OutcomeText));
             OnPropertyChanged(nameof(IsGenerating));
             OnPropertyChanged(nameof(ActivityText));
             OnPropertyChanged(nameof(StatusDetailText));
@@ -97,6 +103,14 @@ public sealed class GenerationHistoryItem : INotifyPropertyChanged
             OnPropertyChanged(nameof(ShowNoOutput));
             OnPropertyChanged(nameof(ShowThumbnailMedia));
             OnPropertyChanged(nameof(ShowThumbnailUnavailable));
+        }
+
+        if (e.PropertyName is nameof(SessionIteration.Outcome) or nameof(SessionIteration.IsFinal))
+        {
+            OnPropertyChanged(nameof(OutcomeText));
+            OnPropertyChanged(nameof(IsFinal));
+            OnPropertyChanged(nameof(HasBadge));
+            OnPropertyChanged(nameof(BadgeText));
         }
 
         if (e.PropertyName is nameof(SessionIteration.Outputs) or nameof(SessionIteration.HasOutputs))

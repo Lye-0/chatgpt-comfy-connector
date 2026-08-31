@@ -649,12 +649,16 @@ const handoff = {
 test("Content Script fills a textarea with React-visible input and confirms send", async () => {
   const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
   const result = await harness.send(handoff);
-  assert.deepEqual({ ...result }, {
+  assert.deepEqual({ ...result, current_context: undefined }, {
     request_id: handoff.requestId,
     handoff_id: handoff.handoffId,
     status: "sent",
-    stage: "user_message_correlated"
+    stage: "user_message_correlated",
+    current_context: undefined
   });
+  assert.equal(result.current_context?.conversation_id, "fixture");
+  assert.equal(result.current_context?.title, "fixture");
+  assert.equal(result.current_context?.url, "https://chatgpt.com/c/fixture");
   assert.equal(harness.document.composers[0].value, "");
   assert.equal(harness.document.plusMenuOpened, false, "the attachment/plus button must never be clicked");
   assert.equal(harness.document.sendClicked, true);

@@ -311,6 +311,94 @@ public sealed class BrowserExtensionBridgeTests
     }
 
     [Fact]
+    public async Task WebSocketReturnsMetadataOnlyChatGptProjectAndConversationContext()
+    {
+        var store = new InMemoryPairingStore();
+        await using var bridge = new BrowserExtensionBridge(0, store);
+        await bridge.StartAsync();
+        using var client = CreateHttpClient();
+        var credential = await PairAsync(client, bridge);
+        var sessionToken = await BootstrapAsync(client, bridge, credential);
+        using var socket = await ConnectSocketAsync(bridge, sessionToken);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var hello = await ReceiveJsonAsync(socket, timeout.Token);
+        using var ready = await ReceiveJsonAsync(socket, timeout.Token);
+
+        var contextTask = bridge.GetChatGptContextAsync(cancellationToken: timeout.Token);
+        using var request = await ReceiveJsonAsync(socket, timeout.Token);
+        Assert.Equal("chatgpt.context.list.request", request.RootElement.GetProperty("type").GetString());
+        Assert.True(request.RootElement.TryGetProperty("request_id", out var requestId));
+        Assert.False(request.RootElement.TryGetProperty("payload", out _));
+        Assert.False(request.RootElement.TryGetProperty("session_token", out _));
+
+        await SendTextAsync(socket, JsonSerializer.Serialize(new
+        {
+            type = "chatgpt.context.list.response",
+            request_id = requestId.GetString(),
+            status = "ok",
+            projects = new[]
+            {
+                new
+                {
+                    project_id = (string?)"g-p-project-a",
+                    title = "Project A",
+                    url = (string?)"https://chatgpt.com/g/g-p-project-a/project",
+                    discovery_key = (string?)null,
+                },
+                new
+                {
+                    project_id = (string?)null,
+                    title = "Visible Project",
+                    url = (string?)null,
+                    discovery_key = (string?)"project-visible-01",
+                }
+            },
+            conversations = new[]
+            {
+                new
+                {
+                    conversation_id = "conversation-a",
+                    title = "Chat A",
+                    url = "https://chatgpt.com/g/g-p-project-a/c/conversation-a",
+                    project_id = (string?)"g-p-project-a",
+                    project_title = (string?)"Project A",
+                },
+                new
+                {
+                    conversation_id = "conversation-free",
+                    title = "Free Chat",
+                    url = "https://chatgpt.com/c/conversation-free",
+                    project_id = (string?)null,
+                    project_title = (string?)null,
+                }
+            },
+            current = new
+            {
+                conversation_id = "conversation-a",
+                title = "Chat A",
+                url = "https://chatgpt.com/g/g-p-project-a/c/conversation-a",
+                project_id = "g-p-project-a",
+                project_title = "Project A",
+            }
+        }), timeout.Token);
+
+        var snapshot = await contextTask;
+        Assert.True(snapshot.IsSuccess);
+        Assert.Equal(2, snapshot.Projects.Count);
+        Assert.Equal("g-p-project-a", snapshot.Projects[0].ProjectId);
+        Assert.Equal("https://chatgpt.com/g/g-p-project-a/project", snapshot.Projects[0].Url);
+        Assert.Null(snapshot.Projects[1].ProjectId);
+        Assert.Equal("project-visible-01", snapshot.Projects[1].DiscoveryKey);
+        Assert.Equal(2, snapshot.Conversations.Count);
+        Assert.Equal("conversation-a", snapshot.Conversations[0].ConversationId);
+        Assert.Equal("g-p-project-a", snapshot.Conversations[0].ProjectId);
+        Assert.Null(snapshot.Conversations[1].ProjectId);
+        Assert.Equal("conversation-a", snapshot.Current?.ConversationId);
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test complete", timeout.Token);
+    }
+
+    [Fact]
     public async Task WebSocketPublishesAuthenticatedAssistantResponseWithoutParsingPayload()
     {
         var store = new InMemoryPairingStore();

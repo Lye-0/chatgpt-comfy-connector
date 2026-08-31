@@ -22,6 +22,7 @@ async function createHarness() {
   let keepaliveCallback = null;
   let keepaliveDelay = null;
   const runtimeListeners = [];
+  const createdTabs = [];
 
   class FakeWebSocket {
     static OPEN = 1;
@@ -50,6 +51,13 @@ async function createHarness() {
       async get(tabId) {
         const tab = tabsById.get(tabId);
         if (!tab) throw new Error(`No tab with id: ${tabId}`);
+        return tab;
+      },
+      async create({ url }) {
+        const tab = { id: 100 + createdTabs.length, url, active: true };
+        createdTabs.push(tab);
+        tabsById.set(tab.id, tab);
+        activeTabs = [tab, ...activeTabs.map((item) => ({ ...item, active: false }))];
         return tab;
       },
       async sendMessage(tabId, message) {
@@ -142,6 +150,7 @@ async function createHarness() {
     setContentError(error) {
       contentError = error;
     },
+    get createdTabs() { return createdTabs; },
     setMediaResponse(response) {
       if (response?.error) {
         mediaResponse = { error: response.error };
@@ -328,6 +337,49 @@ test("Background arms the response watcher before acknowledging a fast assistant
   assert.ok(responseIndex >= 0, "The fast response should be relayed");
   assert.ok(handoffIndex >= 0, "The handoff result should be relayed");
   assert.ok(responseIndex < handoffIndex, "The watcher must be armed before handoff.result");
+});
+
+test("Background reopens the exact bound conversation when its original tab is closed", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 7, url: "https://chatgpt.com/c/unrelated" }]);
+  const boundRequest = {
+    ...request,
+    request_id: "bound-request-fixture",
+    target_conversation_id: "conversation-saved",
+    target_conversation_url: "https://chatgpt.com/c/conversation-saved"
+  };
+  const relayedMessages = [];
+  harness.setContentHandler((message) => {
+    relayedMessages.push(message);
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      return {
+        request_id: boundRequest.request_id,
+        session_id: boundRequest.session_id,
+        handoff_id: boundRequest.handoff_id,
+        boundary_id: boundRequest.boundary_id,
+        status: "watching",
+        stage: "response_watch_started"
+      };
+    }
+    return {
+      request_id: boundRequest.request_id,
+      handoff_id: boundRequest.handoff_id,
+      status: "sent"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(boundRequest, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+
+  assert.equal(result.status, "sent");
+  assert.equal(result.target_conversation_id, "conversation-saved");
+  assert.equal(result.target_conversation_url, boundRequest.target_conversation_url);
+  assert.deepEqual(harness.createdTabs.map((tab) => tab.url), [boundRequest.target_conversation_url]);
+  assert.equal(relayedMessages[0].type, "HANDOFF_SEND");
+  assert.equal(relayedMessages[0].requestId, boundRequest.request_id);
+  assert.equal(relayedMessages[1].type, "WATCH_ASSISTANT_RESPONSE");
+  assert.equal(relayedMessages[1].targetTabId, 100);
 });
 
 test("Background sends a Review Handoff only to its saved target tab and preserves its attachment metadata", async () => {
@@ -647,6 +699,76 @@ test("Background preserves the original Handoff relay shape before response watc
     protocol: "comfy-connector/1",
     payload: request.payload
   });
+});
+
+test("Background forwards normalized metadata-only ChatGPT context", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/g/g-p-project-a/c/conversation-a" }]);
+  let requestedMessage;
+  harness.setContentHandler((message) => {
+    requestedMessage = message;
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [
+        {
+          project_id: "g-p-project-a",
+          title: "Project A",
+          url: "https://chatgpt.com/g/g-p-project-a/project"
+        },
+        {
+          project_id: null,
+          title: "Visible Project",
+          discovery_key: "project-visible-01"
+        }
+      ],
+      conversations: [
+        {
+          conversation_id: "conversation-a",
+          title: "Visible Chat",
+          url: "https://chatgpt.com/g/g-p-project-a/c/conversation-a",
+          project_id: "g-p-project-a",
+          project_title: "Project A"
+        }
+      ],
+      current: {
+        conversation_id: "conversation-a",
+        title: "Visible Chat",
+        url: "https://chatgpt.com/g/g-p-project-a/c/conversation-a",
+        project_id: "g-p-project-a",
+        project_title: "Project A"
+      }
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "context-request-fixture"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(requestedMessage.type, "GET_CHATGPT_CONTEXT");
+  assert.equal(requestedMessage.mode, "list");
+  assert.equal(response.request_id, "context-request-fixture");
+  assert.equal(response.status, "ok");
+  assert.deepEqual(response.projects, [
+    {
+      project_id: "g-p-project-a",
+      title: "Project A",
+      url: "https://chatgpt.com/g/g-p-project-a/project"
+    },
+    {
+      title: "Visible Project",
+      discovery_key: "project-visible-01"
+    }
+  ]);
+  assert.equal(response.conversations[0].title, "Visible Chat");
+  assert.equal(response.current.project_id, "g-p-project-a");
 });
 
 test("Background propagates a Content Script send failure instead of upgrading it to sent", async () => {

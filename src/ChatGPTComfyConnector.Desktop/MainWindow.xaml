@@ -381,8 +381,8 @@
                         </Grid>
                     </Border>
                     <Grid Grid.Row="2">
-                        <TextBlock Text="{Binding StatusText}"
-                                   Foreground="{StaticResource MutedTextBrush}"
+                        <TextBlock Text="{Binding OutcomeText}"
+                                   Foreground="{Binding OutcomeText, Converter={StaticResource StateToBrush}}"
                                    FontSize="9"
                                    FontWeight="SemiBold" />
                         <TextBlock Text="{Binding CreatedAtText}"
@@ -1011,11 +1011,21 @@
                             BorderBrush="{StaticResource LineBrush}"
                             BorderThickness="1">
                         <StackPanel>
-                            <TextBlock Text="CHATGPT CONTEXT" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="SemiBold" />
+                            <DockPanel LastChildFill="False">
+                                <TextBlock Text="CHATGPT CONTEXT" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                <Button DockPanel.Dock="Right"
+                                        Content="↻"
+                                        Click="RefreshChatGptContext_Click"
+                                        IsEnabled="{Binding CanRefreshChatGptContext}"
+                                        Padding="5,1"
+                                        Margin="6,0,0,0"
+                                        ToolTip="ChatGPTのProject / Chat履歴を再取得" />
+                            </DockPanel>
                             <TextBlock Text="制作開始前の設定" FontSize="14" FontWeight="SemiBold" Margin="0,3,0,8" />
+                            <TextBlock Text="{Binding ChatGptContextLoadStateText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" Margin="0,0,0,6" />
                             <TextBlock Text="Project" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
                             <Grid Margin="0,3,0,5">
-                                <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" DisplayMemberPath="DisplayName" ToolTip="ローカルProjectを選択、または新規作成" />
+                                <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" DisplayMemberPath="DisplayName" ToolTip="ChatGPTのProjectを選択" />
                                 <TextBlock Text="{Binding ProjectPlaceholderText}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="10,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False" />
                             </Grid>
                             <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsProjectCreateVisible, Converter={StaticResource BoolToVisibility}}">
@@ -1030,7 +1040,7 @@
                             </Border>
                             <TextBlock Text="Chat" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
                             <Grid Margin="0,3,0,5">
-                                <ComboBox ItemsSource="{Binding ChatOptions}" SelectedItem="{Binding SelectedChat}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanCreateChat}" ToolTip="選択したProject内のChat" />
+                                <ComboBox ItemsSource="{Binding ChatOptions}" SelectedItem="{Binding SelectedChat}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanSelectChat}" ToolTip="選択したProject内のChat" />
                                 <TextBlock Text="{Binding ChatPlaceholderText}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="10,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False" />
                             </Grid>
                             <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsChatCreateVisible, Converter={StaticResource BoolToVisibility}}">

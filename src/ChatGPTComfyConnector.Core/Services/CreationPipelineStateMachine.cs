@@ -75,6 +75,8 @@ public static class CreationPipelineStateMachine
                 }
             }
         }
+
+        EnsureIterationHistoryMetadata(session);
     }
 
     public static CreationStageStatus Get(CreationSession session, CreationStage stage)
@@ -482,6 +484,7 @@ public static class CreationPipelineStateMachine
 
         if (isReviewResponse && session.AtRunIterationLimit)
         {
+            MarkIterationLimitReached(session);
             session.Pipeline.MaximumIterationSafetyStop = true;
             ResetFrom(session, CreationStage.Apply);
             Set(session, CreationStage.Review, CreationStageState.WaitingUser, "最大反復回数に達しました · 続行するか判断してください", CreationWaitingReason.ContinueDecisionRequired);
@@ -564,6 +567,7 @@ public static class CreationPipelineStateMachine
             OutputFailed(session, outputs.Count == 0 ? "出力が0件です" : "取得した出力ファイルが見つかりません");
             return;
         }
+        MarkIterationGenerated(session);
         Set(session, CreationStage.Output, CreationStageState.Completed, $"有効な出力 {valid.Length}件を履歴へ登録済み");
         SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         // A completed iteration owns a new media attachment boundary. Do not
@@ -887,6 +891,7 @@ public static class CreationPipelineStateMachine
         DeferredGenerateSnapshot? deferredGenerate = null)
     {
         EnsureInitialized(session);
+        MarkIterationLimitReached(session);
         session.Status = SessionStatus.LimitReached;
         session.PauseReason = message;
         session.LastError = null;
@@ -998,12 +1003,19 @@ public static class CreationPipelineStateMachine
     public static void ContinueBeyondLimit(CreationSession session)
         => ResumeFromLimit(session);
 
-    public static void Complete(CreationSession session, string reason)
+    public static void Complete(CreationSession session, string reason, bool chatGptComplete = false)
     {
         if (!HasSuccessfulOutput(session) || Get(session, CreationStage.Review).State is not (CreationStageState.Current or CreationStageState.WaitingUser or CreationStageState.Completed))
         {
             throw new InvalidOperationException("Output成功後のREVIEW工程でのみ制作を完了できます。");
         }
+        var finalIteration = FindLatestSuccessfulIteration(session);
+        if (finalIteration is null)
+        {
+            throw new InvalidOperationException("FINALにできる成功済みIterationがありません。");
+        }
+        if (chatGptComplete) finalIteration.Outcome = IterationOutcome.ChatGptComplete;
+        SetFinalIteration(session, finalIteration);
         Set(session, CreationStage.Review, CreationStageState.Completed, reason);
         session.Complete(reason);
     }
@@ -1034,6 +1046,7 @@ public static class CreationPipelineStateMachine
             // COMPLETED is a run terminal state, not a permanent Session
             // terminal state. Preserve history/current output and move to a
             // fresh Run before preparing the new Resume Handoff.
+            ClearFinalIterationFlags(session);
             session.StartNewRun("user_resume_completed");
         }
         session.Resume();
@@ -1106,6 +1119,100 @@ public static class CreationPipelineStateMachine
 
     private static bool HasSuccessfulOutput(CreationSession session)
         => session.Iterations.Any(iteration => iteration.Status == JobStatus.Completed && iteration.Outputs.Any(output => !output.IsMissing));
+
+    /// <summary>
+    /// Records the normal terminal outcome for a successful Output. The
+    /// operation is deliberately idempotent and never overwrites a stronger
+    /// terminal history fact such as a Run limit or ChatGPT completion.
+    /// </summary>
+    public static void MarkIterationGenerated(CreationSession session, int? iterationNumber = null)
+    {
+        var iteration = FindIteration(session, iterationNumber);
+        if (iteration is null || !HasSuccessfulOutput(iteration)) return;
+        if (iteration.Outcome == IterationOutcome.Unknown) iteration.Outcome = IterationOutcome.Generated;
+    }
+
+    /// <summary>
+    /// Records that the current Run stopped at its limit after this iteration.
+    /// A repeated limit notification must not change the history again.
+    /// </summary>
+    public static void MarkIterationLimitReached(CreationSession session, int? iterationNumber = null)
+    {
+        var iteration = FindIteration(session, iterationNumber);
+        if (iteration is null || !HasSuccessfulOutput(iteration)) return;
+        if (iteration.Outcome is IterationOutcome.Unknown or IterationOutcome.Generated)
+            iteration.Outcome = IterationOutcome.LimitReached;
+    }
+
+    private static SessionIteration? FindIteration(CreationSession session, int? iterationNumber)
+        => iterationNumber is { } number
+            ? session.Iterations.FirstOrDefault(iteration => iteration.Number == number)
+            : session.Iterations.FirstOrDefault(iteration => iteration.Number == session.CurrentIteration)
+                ?? session.Iterations.OrderByDescending(iteration => iteration.Number).FirstOrDefault();
+
+    private static SessionIteration? FindLatestSuccessfulIteration(CreationSession session)
+        => session.Iterations
+            .Where(iteration => HasSuccessfulOutput(iteration))
+            .OrderByDescending(iteration => iteration.Number)
+            .FirstOrDefault();
+
+    private static bool HasSuccessfulOutput(SessionIteration iteration)
+        => iteration.Status == JobStatus.Completed && iteration.Outputs.Any(output => !output.IsMissing);
+
+    private static void SetFinalIteration(CreationSession session, SessionIteration finalIteration)
+    {
+        foreach (var iteration in session.Iterations)
+            iteration.IsFinal = ReferenceEquals(iteration, finalIteration);
+    }
+
+    private static void ClearFinalIterationFlags(CreationSession session)
+    {
+        foreach (var iteration in session.Iterations) iteration.IsFinal = false;
+    }
+
+    private static void EnsureIterationHistoryMetadata(CreationSession session)
+    {
+        foreach (var iteration in session.Iterations)
+        {
+            if (iteration.Outcome == IterationOutcome.Unknown && HasSuccessfulOutput(iteration))
+                iteration.Outcome = IterationOutcome.Generated;
+        }
+
+        var finalIterations = session.Iterations
+            .Where(iteration => iteration.IsFinal)
+            .OrderByDescending(iteration => iteration.Number)
+            .ToArray();
+        if (finalIterations.Length > 1)
+        {
+            foreach (var stale in finalIterations.Skip(1)) stale.IsFinal = false;
+        }
+
+        if (session.Status == SessionStatus.Completed)
+        {
+            var final = finalIterations.FirstOrDefault(HasSuccessfulOutput) ?? FindLatestSuccessfulIteration(session);
+            if (final is not null)
+            {
+                foreach (var stale in session.Iterations.Where(iteration => iteration.IsFinal && !ReferenceEquals(iteration, final)))
+                    stale.IsFinal = false;
+                final.IsFinal = true;
+                if (final.Outcome == IterationOutcome.Unknown)
+                    final.Outcome = IterationOutcome.Generated;
+                if (final.Outcome is IterationOutcome.Unknown or IterationOutcome.Generated
+                    && LooksLikeLegacyChatGptCompletion(session.CompletionReason))
+                    final.Outcome = IterationOutcome.ChatGptComplete;
+            }
+        }
+        else
+        {
+            // FINAL describes the current completed Session, not an old
+            // transient flag left on an active/paused snapshot.
+            ClearFinalIterationFlags(session);
+        }
+    }
+
+    private static bool LooksLikeLegacyChatGptCompletion(string? reason)
+        => !string.IsNullOrWhiteSpace(reason)
+            && reason.Contains("ChatGPT", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsReviewResponse(CreationSession session)
     {

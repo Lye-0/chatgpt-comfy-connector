@@ -96,6 +96,15 @@ next Review Handoff receives fresh `handoff_id` / `boundary_id` values while
 retaining the same `session_id`. Reaching the iteration limit creates an
 explicit user decision stop rather than silently starting another iteration.
 
+Each persisted `SessionIteration` also records its history `Outcome` separately
+from the ComfyUI `JobStatus`: a successful normal iteration is `Generated`, a
+Run stopped at its budget is `LimitReached`, and a ChatGPT `complete` response
+is `ChatGptComplete`. `IsFinal` is an independent Session-level projection and
+is true for exactly one current final output while the Session is completed.
+Resuming preserves the old outcome labels but clears the old `IsFinal` marker;
+the next completed iteration can then become the new final item without
+rewriting prior history.
+
 The initial `SEND TO CHATGPT` action is governed by the Core
 `CreationWorkspacePolicy` and is exposed by the ViewModel as
 `CanSendToChatGpt`. It requires an explicitly activated, Context-bound session,
@@ -333,6 +342,53 @@ not a new permanent pipeline stage. The manual Command controls remain
 available for recovery and explicit user operation. The complete
 endpoint/message/install contract is in
 `docs/browser-extension-bridge.md`.
+
+### ChatGPT Context Sync
+
+The Desktop `CHATGPT CONTEXT` selectors use the authenticated Browser
+Extension as a metadata-only discovery provider when the default provider is
+used. The Content Script reads visible ChatGPT sidebar metadata and the
+current SPA URL; it does not copy conversation bodies and does not call an
+undocumented ChatGPT API. In the observed ChatGPT DOM, Projects are
+`role="button"[data-sidebar-item="true"]` rows rather than links, and their
+visible title is nested under `data-marquee-text`. Conversations remain
+navigation links, but their `aria-label` can contain Project/Pinned
+descriptions, so title extraction prefers the visible title child and only
+uses a bounded text fallback. Project routes are identified from the stable
+`/g/g-p-.../project` and `/g/g-p-.../c/...` URL shapes, while conversations
+are keyed by their `/c/{conversationId}` identity. A conversation outside a
+Project is grouped under `Projectなし`, and `＋ 新しいChat` represents a
+new-chat target whose conversation ID is not known until the first Handoff is
+accepted.
+
+The list request uses a locator-owned sidebar discovery helper. It expands a
+bounded number of `さらに表示`/`もっと見る` controls, scans the sidebar
+scroll container incrementally for lazy/virtualized rows, merges duplicate
+Project/Conversation metadata, and restores the original scroll position.
+Project rows without a public ID are returned with a deterministic
+`discovery_key` for display/deduplication only; Desktop does not treat that
+key as a Project identity and does not offer an unsafe new-chat target for the
+unresolved row. A later scan can merge that row into a real Project ID when a
+conversation or Project URL exposes one.
+
+`chatgpt.context.list.request` and
+`chatgpt.context.current.request` travel over the existing authenticated
+WebSocket and return only bounded Project/Conversation metadata. The
+Content Script also emits a deduplicated `chatgpt.context.changed` event for
+SPA navigation and visible link changes. Desktop keeps Loading, Loaded,
+Empty, Disconnected, and Error states distinct; refresh preserves stable
+selection keys when they still exist. The selected external Project and
+Conversation URLs/IDs are copied into the `CreationSession` binding at start.
+
+After a Session starts, selector changes affect only the next draft and never
+retarget its Handoff, media attachment, Review, or Resume. The Background
+routes an existing bound conversation by conversation ID/URL, searches open
+ChatGPT tabs first, and opens only the exact saved conversation URL when a
+tab must be recovered. A new-chat target continues to use the active ChatGPT
+tab until ChatGPT creates its conversation URL, which is then returned in the
+sent result and persisted by Desktop. The Bridge validates all returned IDs
+and ChatGPT URLs; no credentials, tokens, body text, or arbitrary navigation
+commands are included in the context protocol.
 
 ## UI direction
 

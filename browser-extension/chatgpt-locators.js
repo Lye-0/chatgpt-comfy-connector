@@ -143,12 +143,612 @@
   const sendActionPattern = /(?:\b(?:send|submit)\b|送信|メッセージを送る|メッセージを送信|送る)/i;
   const completionActionPattern = /(?:\b(?:copy|retry|regenerate|redo|edit|share|like|dislike)\b|コピー|再試行|再生成|編集|共有|いいね|よくない)/i;
 
+  // Context discovery is metadata-only.  Keep the limits here as well as in
+  // the authenticated Desktop Bridge so a malformed or unexpectedly large
+  // ChatGPT page never becomes a large message from the Content Script.
+  const metadataIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+  const metadataTitleMaxLength = 512;
+  const metadataUrlMaxLength = 2048;
+
+  // ChatGPT's sidebar has changed from link-based project entries to an
+  // unfurl button followed by conversation links. Keep these selectors in
+  // the metadata locator layer; the Content Script must not know either DOM
+  // shape or the sidebar's scroll implementation.
+  const sidebarRootSelectors = [
+    'nav[aria-label="チャット履歴"]',
+    'nav[aria-label="Chat history"]',
+    'nav[data-sidebar]'
+  ];
+  const sidebarScrollContainerSelectors = [
+    '[data-sidebar-scroll-container="true"]',
+    '[data-radix-scroll-area-viewport]',
+    '[class*="scrollport"]',
+    '[class*="overflow-y-auto"]'
+  ];
+  const projectRowSelectors = [
+    '[role="button"][data-sidebar-item="true"]',
+    '[data-sidebar-item="true"][role="button"]'
+  ];
+  const visibleTitleSelectors = [
+    '[data-marquee-text="true"]',
+    '[data-marquee-text]',
+    '[data-sidebar-item-title]',
+    '[data-conversation-title]',
+    '[data-project-title]'
+  ];
+  const moreButtonSelectors = [
+    'button',
+    '[role="button"]'
+  ];
+  const moreButtonTextPattern = /(?:さらに表示|もっと見る|\b(?:show|see|load)\s+more\b|\bmore\s+(?:chats?|projects?|conversations?)\b)/i;
+  const projectFallbackTitlePattern = /^Project\s*\([^)]*\)$/i;
+  const projectFallbackIdPattern = /^Project\s*\(\s*([A-Za-z0-9][A-Za-z0-9._-]{0,127})\s*\)$/i;
+
   function isChatGptPage(url = globalThis.location?.href) {
     try {
       const parsed = new URL(url);
       return parsed.protocol === "https:" && parsed.hostname === "chatgpt.com";
     } catch (_) {
       return false;
+    }
+  }
+
+  function metadataIdentifier(value) {
+    const text = String(value ?? "").trim();
+    return metadataIdentifierPattern.test(text) ? text : null;
+  }
+
+  function metadataTitle(value, fallback = "") {
+    const text = String(value ?? "")
+      .replace(/[\u200b\u200c\u200d\u2060\ufeff]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    return (text || fallback).slice(0, metadataTitleMaxLength);
+  }
+
+  function chatGptMetadataUrl(value, baseUrl = globalThis.location?.href) {
+    if (typeof value !== "string" || value.trim().length === 0) return null;
+    try {
+      const parsed = new URL(value, baseUrl);
+      if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com" || parsed.port !== "") return null;
+      const pathname = parsed.pathname.replace(/\/{2,}/g, "/").replace(/\/$/, "") || "/";
+      const canonical = `${parsed.origin}${pathname}`;
+      return canonical.length <= metadataUrlMaxLength ? canonical : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function decodedPathSegments(value, baseUrl = globalThis.location?.href) {
+    if (typeof value !== "string" || value.trim().length === 0) return [];
+    try {
+      const parsed = new URL(value, baseUrl);
+      if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com" || parsed.port !== "") return [];
+      return parsed.pathname.split("/").filter(Boolean).map((segment) => {
+        try { return decodeURIComponent(segment); } catch (_) { return segment; }
+      });
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function conversationIdFromUrl(value = globalThis.location?.href) {
+    const segments = decodedPathSegments(value);
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      if (segments[index].toLowerCase() !== "c") continue;
+      return metadataIdentifier(segments[index + 1]);
+    }
+    return null;
+  }
+
+  function projectIdFromUrl(value = globalThis.location?.href) {
+    try {
+      const parsed = new URL(value || "", globalThis.location?.href);
+      if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com" || parsed.port !== "") return null;
+      for (const name of ["project_id", "projectId"]) {
+        const fromQuery = metadataIdentifier(parsed.searchParams.get(name));
+        if (fromQuery) return fromQuery;
+      }
+    } catch (_) { }
+
+    const segments = decodedPathSegments(value);
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      if (segments[index].toLowerCase() !== "g") continue;
+      const projectId = metadataIdentifier(segments[index + 1]);
+      // /g/g-... is also used by custom GPTs.  Project routes observed in
+      // ChatGPT use the g-p-* identity; do not misclassify a GPT as a
+      // Project merely because it contains a conversation link.
+      if (projectId?.toLowerCase().startsWith("g-p-")) return projectId;
+    }
+    return null;
+  }
+
+  function isProjectHomeUrl(value) {
+    const segments = decodedPathSegments(value);
+    return segments.at(-1)?.toLowerCase() === "project" && projectIdFromUrl(value) !== null;
+  }
+
+  function projectUrlFromConversationUrl(value, projectId) {
+    const canonical = chatGptMetadataUrl(value);
+    if (!canonical || !projectId) return null;
+    try {
+      const parsed = new URL(canonical);
+      const segments = decodedPathSegments(canonical);
+      const projectSegmentIndex = segments.findIndex((segment) => segment === projectId);
+      if (projectSegmentIndex >= 1 && segments[projectSegmentIndex - 1].toLowerCase() === "g") {
+        const prefix = segments.slice(0, projectSegmentIndex + 1).map((segment) => encodeURIComponent(segment)).join("/");
+        return `${parsed.origin}/${prefix}/project`;
+      }
+    } catch (_) { }
+    return null;
+  }
+
+  function stableMetadataKey(prefix, value) {
+    const text = String(value ?? "");
+    // FNV-1a keeps the key deterministic without putting a title into the
+    // bridge identity. It is only a discovery key for a visible project row
+    // that has no public project id in the current ChatGPT DOM.
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `${prefix}-${(hash >>> 0).toString(16)}`;
+  }
+
+  function metadataTextKey(value) {
+    return normalizeText(value).replace(/\s+/g, " ").trim().toLocaleLowerCase();
+  }
+
+  function stripMetadataDescriptionSuffix(value) {
+    return String(value ?? "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/(?:、|,\s*)?(?:プロジェクト\s+.+?\s+内のチャット|project\s+.+?\s+(?:inside|under)\s+(?:the\s+)?project|ピン留めされた(?:会話|チャット)|pinned\s+(?:conversation|chat))$/i, "")
+      .trim();
+  }
+
+  function fallbackProjectIdFromTitle(value) {
+    const match = String(value ?? "").trim().match(projectFallbackIdPattern);
+    return match ? metadataIdentifier(match[1]) : null;
+  }
+
+  function visibleElementText(element) {
+    if (!element || !isVisible(element)) return "";
+    for (const property of ["innerText", "textContent"]) {
+      try {
+        const value = element[property];
+        if (typeof value === "string" && value.trim().length > 0) return value;
+      } catch (_) {
+        // A stale virtualized node may expose only one representation.
+      }
+    }
+    return "";
+  }
+
+  function visibleTitleFromElement(element, fallback = "") {
+    if (!element) return metadataTitle(fallback);
+    const titleElements = uniqueElements(visibleTitleSelectors, element)
+      .filter((candidate) => isVisible(candidate));
+    for (const titleElement of titleElements) {
+      const title = metadataTitle(visibleElementText(titleElement));
+      if (title) return title;
+    }
+
+    const direct = stripMetadataDescriptionSuffix(visibleElementText(element));
+    return metadataTitle(direct, fallback);
+  }
+
+  function conversationTitleFromAnchor(anchor, conversationId) {
+    const visible = visibleTitleFromElement(anchor);
+    if (visible) return visible;
+
+    const explicit = [
+      attributeValue(anchor, "data-title"),
+      attributeValue(anchor, "data-conversation-title"),
+      attributeValue(anchor, "title")
+    ].find((value) => value.trim().length > 0);
+    if (explicit) return metadataTitle(stripMetadataDescriptionSuffix(explicit), conversationId);
+
+    // Do not use aria-label as the title. It is an accessible description on
+    // ChatGPT and commonly contains Project/Pinned suffixes.
+    return metadataTitle(stripMetadataDescriptionSuffix(visibleElementText(anchor)), conversationId);
+  }
+
+  function projectTitleFromAnchor(anchor, projectId) {
+    const visible = visibleTitleFromElement(anchor, "");
+    if (visible) return visible;
+
+    const explicit = [
+      attributeValue(anchor, "data-project-title"),
+      attributeValue(anchor, "data-project-name")
+    ].find((value) => value.trim().length > 0);
+    if (explicit) return metadataTitle(stripMetadataDescriptionSuffix(explicit));
+
+    return metadataTitle(stripMetadataDescriptionSuffix(visibleElementText(anchor))) || null;
+  }
+
+  function projectIdFromElement(element, baseUrl) {
+    const explicit = [
+      attributeValue(element, "data-project-id"),
+      attributeValue(element, "data-project-id-value")
+    ].map((value) => metadataIdentifier(value)).find(Boolean);
+    if (explicit) return explicit;
+    const href = chatGptMetadataUrl(attributeValue(element, "href"), baseUrl);
+    return projectIdFromUrl(href);
+  }
+
+  function projectUrlFromElement(element, baseUrl) {
+    const explicit = chatGptMetadataUrl(
+      attributeValue(element, "data-project-url") || attributeValue(element, "href"),
+      baseUrl);
+    return explicit && isProjectHomeUrl(explicit) ? explicit : null;
+  }
+
+  function projectTitleFromRelatedAnchor(anchor, projectId, projectAnchors = [], projectRows = []) {
+    const direct = [
+      attributeValue(anchor, "data-project-title"),
+      attributeValue(anchor, "data-project-name")
+    ].map((value) => stripMetadataDescriptionSuffix(value)).find((value) => value.length > 0);
+    if (direct) return direct;
+
+    let ancestor = anchor?.parentElement;
+    for (let depth = 0; ancestor && depth < 8; depth += 1, ancestor = ancestor.parentElement) {
+      const ancestorProjectId = projectIdFromElement(ancestor);
+      if (ancestorProjectId === projectId && isProjectHomeUrl(attributeValue(ancestor, "href"))) {
+        const title = visibleTitleFromElement(ancestor);
+        if (title) return title;
+      }
+      if (projectRows.includes(ancestor)) {
+        const title = visibleTitleFromElement(ancestor);
+        if (title) return title;
+      }
+      for (const attribute of ["data-project-title", "data-project-name"]) {
+        const value = attributeValue(ancestor, attribute);
+        if (value) return metadataTitle(stripMetadataDescriptionSuffix(value));
+      }
+    }
+
+    const explicit = projectAnchors.find((candidate) => projectIdFromElement(candidate) === projectId);
+    if (explicit) return projectTitleFromAnchor(explicit, projectId);
+
+    const projectRow = projectRows.find((candidate) => projectIdFromElement(candidate) === projectId);
+    return projectRow ? visibleTitleFromElement(projectRow) : null;
+  }
+
+  function findSidebarRoot(root = globalThis.document) {
+    const matches = uniqueElements(sidebarRootSelectors, root);
+    return matches[0] || root;
+  }
+
+  function findProjectRows(root = globalThis.document) {
+    return sortInDocumentOrder(uniqueElements(projectRowSelectors, findSidebarRoot(root))
+      .filter((element) => isVisible(element)));
+  }
+
+  function findSidebarScrollContainer(root = globalThis.document) {
+    const sidebar = findSidebarRoot(root);
+    const rows = findProjectRows(sidebar);
+    const candidates = [sidebar, ...uniqueElements(sidebarScrollContainerSelectors, sidebar)];
+    const containsProjectRow = (candidate) => candidate === sidebar
+      || rows.some((row) => candidate === row || candidate.contains?.(row));
+    const hasScrollMetrics = (candidate) => candidate
+      && typeof candidate.scrollTop === "number"
+      && typeof candidate.scrollHeight === "number"
+      && typeof candidate.clientHeight === "number";
+    const scrollable = candidates.find((candidate) =>
+      containsProjectRow(candidate)
+      && hasScrollMetrics(candidate)
+      && candidate.scrollHeight > candidate.clientHeight);
+    if (scrollable) return scrollable;
+    return candidates.find((candidate) => containsProjectRow(candidate) && hasScrollMetrics(candidate)) || sidebar;
+  }
+
+  function isMoreButton(element) {
+    if (!element || !isVisible(element)) return false;
+    if (attributeValue(element, "data-sidebar-more") === "true") return true;
+    const visible = visibleElementText(element);
+    const label = `${visible} ${attributeValue(element, "aria-label")}`.trim();
+    return (element.tagName === "BUTTON" || attributeValue(element, "role") === "button")
+      && moreButtonTextPattern.test(label);
+  }
+
+  function findMoreButtons(root = globalThis.document) {
+    return sortInDocumentOrder(uniqueElements(moreButtonSelectors, findSidebarRoot(root))
+      .filter((element) => isMoreButton(element)));
+  }
+
+  function waitForSidebarMutation(root, timeoutMs = 150) {
+    const MutationObserverCtor = root?.ownerDocument?.defaultView?.MutationObserver
+      || globalThis.MutationObserver;
+    if (typeof MutationObserverCtor !== "function" || typeof globalThis.setTimeout !== "function") {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      let observer = null;
+      let timer = null;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (observer) observer.disconnect();
+        if (timer !== null) globalThis.clearTimeout?.(timer);
+        resolve();
+      };
+      try {
+        observer = new MutationObserverCtor(finish);
+        observer.observe(root, { childList: true, subtree: true, characterData: true });
+      } catch (_) {
+        observer = null;
+      }
+      timer = globalThis.setTimeout(finish, Math.max(20, Number(timeoutMs) || 150));
+    });
+  }
+
+  async function expandSidebarMoreButtons(root, options = {}) {
+    const maxClicks = Math.max(0, Math.min(12, Number(options.maxMoreClicks) || 8));
+    const clicked = new Set();
+    let clicks = 0;
+    while (clicks < maxClicks) {
+      const button = findMoreButtons(root).find((candidate) => !clicked.has(candidate));
+      if (!button) break;
+      clicked.add(button);
+      try { button.click?.(); } catch (_) { break; }
+      clicks += 1;
+      await waitForSidebarMutation(root, options.settleMs);
+    }
+    return clicks;
+  }
+
+  function upsertContextProject(projects, item) {
+    if (!item || typeof item !== "object") return null;
+    const projectId = metadataIdentifier(item.project_id || item.projectId);
+    const title = metadataTitle(item.title);
+    const url = chatGptMetadataUrl(item.url);
+    const discoveryKey = metadataIdentifier(item.discovery_key || item.discoveryKey);
+    const titleKey = metadataTextKey(title);
+    let existing = projectId
+      ? projects.find((candidate) => candidate.project_id === projectId)
+      : null;
+    if (!existing && projectId && titleKey) {
+      existing = projects.find((candidate) => !candidate.project_id
+        && metadataTextKey(candidate.title) === titleKey);
+    }
+    if (!existing && projectId) {
+      existing = projects.find((candidate) => !candidate.project_id
+        && fallbackProjectIdFromTitle(candidate.title) === projectId);
+    }
+    if (!existing && discoveryKey) {
+      existing = projects.find((candidate) => candidate.discovery_key === discoveryKey);
+    }
+    if (!existing && !projectId && titleKey) {
+      existing = projects.find((candidate) => !candidate.project_id
+        && metadataTextKey(candidate.title) === titleKey);
+    }
+
+    if (existing) {
+      if (projectId) existing.project_id = projectId;
+      if (title && (!existing.title || projectFallbackTitlePattern.test(existing.title))) existing.title = title;
+      if (url && !existing.url) existing.url = url;
+      if (discoveryKey && !existing.discovery_key) existing.discovery_key = discoveryKey;
+      return existing;
+    }
+    if (!title || (!projectId && !discoveryKey)) return null;
+    const entry = {
+      ...(projectId ? { project_id: projectId } : {}),
+      title,
+      ...(url ? { url } : {}),
+      ...(discoveryKey ? { discovery_key: discoveryKey } : {})
+    };
+    projects.push(entry);
+    return entry;
+  }
+
+  function mergeContextProjectCatalog(destination, source) {
+    for (const project of source?.projects || []) upsertContextProject(destination.projects, project);
+  }
+
+  function mergeContextConversationCatalog(destination, source) {
+    for (const item of source?.conversations || []) {
+      if (!item?.conversation_id) continue;
+      const existing = destination.conversations.find((candidate) =>
+        candidate.conversation_id === item.conversation_id);
+      if (!existing) {
+        destination.conversations.push({ ...item });
+        continue;
+      }
+      if (item.title && (!existing.title || existing.title === existing.conversation_id)) existing.title = item.title;
+      if (item.url && !existing.url) existing.url = item.url;
+      if (item.project_id && !existing.project_id) existing.project_id = item.project_id;
+      if (item.project_title && !existing.project_title) existing.project_title = item.project_title;
+    }
+  }
+
+  function collectContextEntries(root = globalThis.document, url = globalThis.location?.href) {
+    const projects = [];
+    const conversations = [];
+    const projectById = new Map();
+    const conversationById = new Map();
+    const sidebarRoot = findSidebarRoot(root);
+    let anchors = [];
+    try { anchors = Array.from(sidebarRoot?.querySelectorAll?.("a[href]") || []); } catch (_) { anchors = []; }
+    const projectAnchors = anchors.filter((anchor) => isProjectHomeUrl(attributeValue(anchor, "href")));
+    const projectRows = findProjectRows(sidebarRoot);
+    const currentProjectId = projectIdFromUrl(url);
+
+    const upsertProject = (projectId, title, projectUrl, discoveryKey) => {
+      const entry = upsertContextProject(projects, {
+        ...(projectId ? { project_id: projectId } : {}),
+        title,
+        ...(projectUrl ? { url: projectUrl } : {}),
+        ...(discoveryKey ? { discovery_key: discoveryKey } : {})
+      });
+      if (entry?.project_id) projectById.set(entry.project_id, entry);
+      return entry;
+    };
+
+    // Project rows are the source of ordering and visible titles. In the
+    // current DOM they have no public href/id, so keep a stable display-only
+    // discovery key instead of inventing a g-p-* identity.
+    for (const row of projectRows) {
+      const title = visibleTitleFromElement(row);
+      if (!title) continue;
+      const projectId = projectIdFromElement(row, url);
+      const projectUrl = projectUrlFromElement(row, url);
+      upsertProject(projectId, title, projectUrl, projectId ? null : stableMetadataKey("project", title));
+    }
+
+    // Current ChatGPT Project rows are rendered as expandable buttons and do
+    // not expose the Project ID in their DOM attributes. The current route is
+    // the only safe ID source in that case. Associate it only with the
+    // visibly expanded row; never infer an ID from a title or from row order.
+    if (currentProjectId) {
+      const expandedProjectRow = projectRows.find((row) =>
+        attributeValue(row, "aria-expanded").toLowerCase() === "true");
+      const currentProjectTitle = visibleTitleFromElement(expandedProjectRow, "");
+      if (currentProjectTitle) {
+        const currentProjectUrl = isProjectHomeUrl(url)
+          ? chatGptMetadataUrl(url, url)
+          : projectUrlFromConversationUrl(url, currentProjectId);
+        upsertProject(currentProjectId, currentProjectTitle, currentProjectUrl);
+      }
+    }
+
+    for (const anchor of projectAnchors) {
+      const projectUrl = chatGptMetadataUrl(attributeValue(anchor, "href"), url);
+      const projectId = projectIdFromUrl(projectUrl);
+      if (!projectId) continue;
+      upsertProject(projectId, projectTitleFromAnchor(anchor, projectId), projectUrl);
+    }
+
+    for (const anchor of anchors) {
+      const href = chatGptMetadataUrl(attributeValue(anchor, "href"), url);
+      const conversationId = conversationIdFromUrl(href);
+      if (!href || !conversationId) continue;
+      const projectId = projectIdFromUrl(href);
+      const projectTitle = projectId
+        ? projectTitleFromRelatedAnchor(anchor, projectId, projectAnchors, projectRows)
+          || projectById.get(projectId)?.title
+        : null;
+      if (projectId) {
+        const projectUrl = projectUrlFromConversationUrl(href, projectId);
+        const existingProject = projectById.get(projectId);
+        const project = upsertProject(projectId, projectTitle, projectUrl);
+        if (project) projectById.set(projectId, project);
+        else if (existingProject) projectById.set(projectId, existingProject);
+      }
+      const entry = {
+        conversation_id: conversationId,
+        title: conversationTitleFromAnchor(anchor, conversationId),
+        url: href,
+        ...(projectId ? { project_id: projectId } : {}),
+        ...(projectTitle ? { project_title: projectTitle } : {})
+      };
+      const existing = conversationById.get(conversationId);
+      if (!existing) {
+        conversationById.set(conversationId, entry);
+        conversations.push(entry);
+      } else {
+        if (entry.title && (!existing.title || existing.title === conversationId)) existing.title = entry.title;
+        if (entry.project_id && !existing.project_id) existing.project_id = entry.project_id;
+        if (entry.project_title && !existing.project_title) existing.project_title = entry.project_title;
+        if (entry.url && !existing.url) existing.url = entry.url;
+      }
+    }
+
+    return { projects, conversations };
+  }
+
+  function documentTitleFallback(root, conversationId) {
+    let title = "";
+    try { title = root?.title || ""; } catch (_) { title = ""; }
+    title = title.replace(/\s*[|·-]\s*ChatGPT\s*$/i, "").trim();
+    return metadataTitle(title, conversationId || "ChatGPT");
+  }
+
+  function getCurrentChatGptContextFromEntries(entries, root = globalThis.document, url = globalThis.location?.href) {
+    const currentUrl = chatGptMetadataUrl(url, url);
+    const conversationId = conversationIdFromUrl(currentUrl || url);
+    const projectId = projectIdFromUrl(currentUrl || url);
+    const matching = conversationId
+      ? entries.conversations.find((conversation) => conversation.conversation_id === conversationId)
+      : null;
+    const title = matching?.title || documentTitleFallback(root, conversationId);
+    const projectTitle = matching?.project_title
+      || (projectId
+        ? entries.projects.find((project) => project.project_id === projectId)?.title || null
+        : null);
+    return {
+      ...(conversationId ? { conversation_id: conversationId } : {}),
+      title,
+      ...(currentUrl ? { url: currentUrl } : {}),
+      ...(projectId ? { project_id: projectId } : {}),
+      ...(projectTitle ? { project_title: projectTitle } : {})
+    };
+  }
+
+  function getCurrentChatGptContext(root = globalThis.document, url = globalThis.location?.href) {
+    return getCurrentChatGptContextFromEntries(collectContextEntries(root, url), root, url);
+  }
+
+  function collectChatGptContext(root = globalThis.document, url = globalThis.location?.href) {
+    const entries = collectContextEntries(root, url);
+    return {
+      projects: entries.projects,
+      conversations: entries.conversations,
+      current: getCurrentChatGptContext(root, url)
+    };
+  }
+
+  async function collectChatGptContextAsync(
+    root = globalThis.document,
+    url = globalThis.location?.href,
+    options = {}) {
+    const merged = { projects: [], conversations: [] };
+    const scrollContainer = findSidebarScrollContainer(root);
+    const canScroll = scrollContainer && typeof scrollContainer.scrollTop === "number"
+      && typeof scrollContainer.scrollHeight === "number"
+      && typeof scrollContainer.clientHeight === "number";
+    const originalScrollTop = canScroll ? scrollContainer.scrollTop : null;
+    const maxScrolls = Math.max(1, Math.min(64, Number(options.maxScrolls) || 32));
+    try {
+      const initial = collectContextEntries(root, url);
+      mergeContextProjectCatalog(merged, initial);
+      mergeContextConversationCatalog(merged, initial);
+      await expandSidebarMoreButtons(root, options);
+      let stagnantPasses = 0;
+      for (let pass = 0; pass < maxScrolls; pass += 1) {
+        const beforeCount = merged.projects.length + merged.conversations.length;
+        const beforeTop = canScroll ? Number(scrollContainer.scrollTop) || 0 : 0;
+        const beforeHeight = canScroll ? Number(scrollContainer.scrollHeight) || 0 : 0;
+        const snapshot = collectContextEntries(root, url);
+        mergeContextProjectCatalog(merged, snapshot);
+        mergeContextConversationCatalog(merged, snapshot);
+        const added = merged.projects.length + merged.conversations.length - beforeCount;
+        if (!canScroll) break;
+
+        const maxTop = Math.max(0, beforeHeight - (Number(scrollContainer.clientHeight) || 0));
+        if (beforeTop >= maxTop) break;
+        const step = Math.max(1, Math.floor((Number(scrollContainer.clientHeight) || 1) * 0.8));
+        const nextTop = Math.min(maxTop, beforeTop + step);
+        if (nextTop <= beforeTop) break;
+        try { scrollContainer.scrollTop = nextTop; } catch (_) { break; }
+        await waitForSidebarMutation(root, options.settleMs);
+        const afterTop = Number(scrollContainer.scrollTop) || 0;
+        const afterHeight = Number(scrollContainer.scrollHeight) || 0;
+        if (afterTop === beforeTop && afterHeight === beforeHeight && added === 0) stagnantPasses += 1;
+        else stagnantPasses = 0;
+        if (stagnantPasses >= 2) break;
+      }
+      return {
+        projects: merged.projects,
+        conversations: merged.conversations,
+        current: getCurrentChatGptContextFromEntries(merged, root, url)
+      };
+    } finally {
+      if (canScroll && originalScrollTop !== null) {
+        try { scrollContainer.scrollTop = originalScrollTop; } catch (_) { }
+      }
     }
   }
 
@@ -1084,6 +1684,22 @@
     assistantMessageSelectors: Object.freeze([...assistantMessageSelectors]),
     stopButtonSelectors: Object.freeze([...stopButtonSelectors]),
     isChatGptPage,
+    conversationIdFromUrl,
+    projectIdFromUrl,
+    collectChatGptContext,
+    collectChatGptContextAsync,
+    getCurrentChatGptContext,
+    findSidebarRoot,
+    findSidebarScrollContainer,
+    findProjectRows,
+    findMoreButtons,
+    visibleTitleFromElement,
+    stripMetadataDescriptionSuffix,
+    fallbackProjectIdFromTitle,
+    sidebarRootSelectors: Object.freeze([...sidebarRootSelectors]),
+    sidebarScrollContainerSelectors: Object.freeze([...sidebarScrollContainerSelectors]),
+    projectRowSelectors: Object.freeze([...projectRowSelectors]),
+    visibleTitleSelectors: Object.freeze([...visibleTitleSelectors]),
     isVisible,
     isDisabled,
     findComposer,

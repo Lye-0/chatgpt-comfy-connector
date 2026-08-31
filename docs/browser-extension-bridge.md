@@ -11,8 +11,9 @@ Response, and places it into `CHATGPT COMMAND`. Phase 4 connects a strictly
 validated `generate` Response to the existing Desktop APPLY → ComfyUI READY
 → GENERATE → OUTPUT path, while retaining the manual controls as a safe
 fallback. A strictly validated `complete` Response completes the session only
-when the existing output/review rules allow it. Chat/project enumeration and
-an autonomous infinite iteration loop remain out of scope. Phase 5.1 adds one
+when the existing output/review rules allow it. Project/conversation metadata
+discovery is available through the authenticated Extension bridge; message-body
+history sync and autonomous infinite iteration remain out of scope. Phase 5.1 adds one
 more bounded action: after a successful ComfyUI generation, the Desktop can
 register the current Primary Output and have the Extension attach it to the
 same ChatGPT tab. Phase 5.2 then sends a fresh Review Handoff after the
@@ -63,6 +64,78 @@ only while pairing is required and is hidden after pairing/connection; it is
 never included in health responses or logs. The Timeline and `CHATGPT COMMAND`
 area remain the natural detailed surfaces for Handoff/Response and manual
 recovery actions.
+
+## ChatGPT Project / Conversation metadata
+
+The Desktop context selectors use the authenticated Extension as a
+metadata-only provider. The Extension reads the visible ChatGPT sidebar and
+the current SPA URL; it does not read conversation message bodies, call a
+private ChatGPT API, or expose arbitrary browser automation. In the current
+ChatGPT DOM, Project entries are `role="button"` rows with a nested visible
+`data-marquee-text` title, while conversations are `a[href]` entries with the
+same kind of visible title child. The locator layer therefore never uses an
+accessible name as a Project/Conversation title. The request types are
+`chatgpt.context.list.request` and
+`chatgpt.context.current.request`; responses are
+`chatgpt.context.list.response` and `chatgpt.context.current.response`.
+
+The list response contains bounded entries of the following shape:
+
+```json
+{
+  "type": "chatgpt.context.list.response",
+  "request_id": "<request-id>",
+  "status": "ok",
+  "projects": [
+    { "project_id": "g-p-example", "title": "制作", "url": "https://chatgpt.com/g/g-p-example/project" },
+    { "title": "表示されたProject", "discovery_key": "project-a1b2c3" }
+  ],
+  "conversations": [
+    { "conversation_id": "<conversation-id>", "title": "新しい制作", "url": "https://chatgpt.com/g/g-p-example/c/<conversation-id>", "project_id": "g-p-example", "project_title": "制作" },
+    { "conversation_id": "<conversation-id-2>", "title": "個人メモ", "url": "https://chatgpt.com/c/<conversation-id-2>" }
+  ],
+  "current": {
+    "conversation_id": "<conversation-id>",
+    "title": "新しい制作",
+    "url": "https://chatgpt.com/g/g-p-example/c/<conversation-id>",
+    "project_id": "g-p-example",
+    "project_title": "制作"
+  }
+}
+```
+
+Projectless conversations have no `project_id` and are shown under
+`Projectなし`. A Project row that is visible in the sidebar but does not
+expose a public Project ID is represented by `title` plus a deterministic
+`discovery_key`; the key is only for deduplication/display selection and is
+never sent as a ChatGPT Project ID. Such a row is not offered as a new-chat
+send target until a real ID or URL is discovered. The Desktop always provides
+an explicit `＋ 新しいChat` choice for a resolvable Project; selecting it does
+not fabricate a conversation ID. A catalog is
+reported as `Loading`, `Loaded`, `Empty`, `Disconnected`, or `Error`, and the
+context panel has an explicit refresh action. Push/pop-state and relevant
+sidebar changes can emit a current-context event, but that event never
+changes the active Desktop session or starts a Handoff by itself.
+
+List discovery first expands bounded `さらに表示`/`もっと見る` controls, then
+scans the sidebar scroll container in small steps. It merges Project entries by
+`project_id` when available, otherwise by `discovery_key`, and merges
+conversations by `conversation_id`. The original sidebar `scrollTop` is
+restored in a `finally` path. This handles the observed lazy/virtualized DOM
+without selecting a Chat, navigating to a Project, changing the composer, or
+sending a Handoff. A title-only row can be displayed safely, but the current
+ChatGPT DOM does not provide enough public metadata to invent its Project URL
+or ID.
+
+When a session is bound to an existing Chat, Desktop persists its conversation
+ID and canonical URL in the session binding. Handoff, media attachment, and
+Review routing use that identity to find the exact open tab or reopen the
+exact saved conversation URL. A new Chat is routed only to a project-matched
+new-conversation page (or the ChatGPT root for `Projectなし`); an unrelated
+conversation is never navigated or used as a target. After a successful
+first Handoff, the current context returned by the Content Script can bind a
+new conversation if ChatGPT has assigned its ID. If it has not yet assigned
+one, Desktop keeps the operation safe and does not invent an identifier.
 
 ## Endpoints
 
@@ -496,7 +569,7 @@ operations are not exposed to the Extension.
 browser-extension/
 ├─ manifest.json          # Chromium Manifest V3
 ├─ background.js          # health, pairing, bootstrap, WebSocket, reconnect, routing
-├─ chatgpt-locators.js    # replaceable composer/send locator candidates
+├─ chatgpt-locators.js    # replaceable DOM locators and context metadata extraction
 ├─ content-script.js      # ChatGPT input/send and assistant response watcher
 ├─ popup.html             # connection and first-pairing UI
 ├─ popup.css
@@ -563,6 +636,11 @@ ComfyUI startup/wait/generation substates, and complete/resume boundaries. The
 automatic-response coordinator tests cover response identity idempotency and
 safe persisted diagnostics. The bridge tests use an ephemeral loopback port so
 they do not collide with production.
+
+`tests/browser-extension/chatgpt-context.test.mjs` covers project/conversation
+URL parsing, projectless chats, duplicate sidebar entries, current SPA context,
+and metadata-only fallback behavior. The Bridge test also covers the
+authenticated context request/response envelope.
 
 `tests/browser-extension/content-script.test.mjs` uses only Node's built-in
 test runner and a small DOM fixture to exercise textarea/contenteditable input,

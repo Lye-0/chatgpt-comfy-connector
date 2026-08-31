@@ -115,6 +115,8 @@ public partial class MainWindow : Window
     private async void Connect_Click(object sender, RoutedEventArgs e) => await Run("MCP接続", ViewModel.ConnectAsync);
     private async void StartComfy_Click(object sender, RoutedEventArgs e) => await Run("ComfyUI起動", ViewModel.StartComfyUiAsync);
     private void Refresh_Click(object sender, RoutedEventArgs e) => ViewModel.RefreshWorkflowTree();
+    private async void RefreshChatGptContext_Click(object sender, RoutedEventArgs e)
+        => await Run("ChatGPT履歴更新", () => ViewModel.RefreshChatGptContextAsync());
     private void OpenWorkflowFolder_Click(object sender, RoutedEventArgs e) => OpenFolder(ViewModel.WorkflowRoot);
     private async void RetryWorkflow_Click(object sender, RoutedEventArgs e)
     {

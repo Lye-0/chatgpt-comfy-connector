@@ -67,6 +67,7 @@ public interface IBrowserExtensionBridge : IAsyncDisposable
     event EventHandler<BrowserExtensionBridgeStatusChangedEventArgs>? StatusChanged;
     event EventHandler<BrowserExtensionBridgeDiagnosticEventArgs>? Diagnostic;
     event EventHandler<BrowserExtensionAssistantResponseEventArgs>? AssistantResponseReceived;
+    event EventHandler<BrowserExtensionChatGptContextChangedEventArgs>? ChatGptContextChanged;
     Task StartAsync(CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
     Task<bool> SendEventAsync(BrowserExtensionBridgeEvent bridgeEvent, CancellationToken cancellationToken = default);
@@ -77,6 +78,9 @@ public interface IBrowserExtensionBridge : IAsyncDisposable
     bool RevokeMedia(string mediaId);
     Task<BrowserExtensionMediaAttachResult> SendMediaAttachAsync(
         BrowserExtensionMediaAttachRequest request,
+        CancellationToken cancellationToken = default);
+    Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextAsync(
+        bool currentOnly = false,
         CancellationToken cancellationToken = default);
 }
 

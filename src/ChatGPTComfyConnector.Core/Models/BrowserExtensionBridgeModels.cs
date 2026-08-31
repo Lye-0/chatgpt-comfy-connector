@@ -42,6 +42,50 @@ public static class BrowserExtensionBridgeProtocol
 }
 
 /// <summary>
+/// Metadata-only ChatGPT context entries discovered by the Content Script.
+/// Message bodies, attachments, credentials, and tokens are deliberately not
+/// represented by these records.
+/// </summary>
+public sealed record BrowserExtensionChatGptProjectEntry(
+    string? ProjectId,
+    string Title,
+    string? Url = null,
+    string? DiscoveryKey = null);
+
+public sealed record BrowserExtensionChatGptConversationEntry(
+    string ConversationId,
+    string Title,
+    string Url,
+    string? ProjectId = null,
+    string? ProjectTitle = null);
+
+public sealed record BrowserExtensionChatGptCurrentContext(
+    string? ConversationId = null,
+    string? Title = null,
+    string? Url = null,
+    string? ProjectId = null,
+    string? ProjectTitle = null);
+
+public sealed record BrowserExtensionChatGptContextSnapshot(
+    string RequestId,
+    string Status,
+    IReadOnlyList<BrowserExtensionChatGptProjectEntry> Projects,
+    IReadOnlyList<BrowserExtensionChatGptConversationEntry> Conversations,
+    BrowserExtensionChatGptCurrentContext? Current = null,
+    string? ErrorCode = null,
+    string? Message = null,
+    string? Stage = null)
+{
+    public bool IsSuccess => string.Equals(Status, "ok", StringComparison.Ordinal);
+}
+
+public sealed class BrowserExtensionChatGptContextChangedEventArgs(
+    BrowserExtensionChatGptCurrentContext context) : EventArgs
+{
+    public BrowserExtensionChatGptCurrentContext Context { get; } = context;
+}
+
+/// <summary>
 /// Error codes returned by the Extension when the active ChatGPT tab cannot
 /// accept a Handoff. Keeping these values in the shared protocol model makes
 /// the Desktop result handling independent from the Extension implementation.
@@ -176,7 +220,12 @@ public sealed record BrowserExtensionHandoffSendRequest(
     string? TargetTabUrl = null,
     string? ReviewMediaId = null,
     string? ReviewFileName = null,
-    int? ReviewIteration = null);
+    int? ReviewIteration = null,
+    string? TargetConversationId = null,
+    string? TargetConversationUrl = null,
+    string? TargetProjectId = null,
+    bool NewConversation = false,
+    string? TargetProjectUrl = null);
 
 /// <summary>
 /// Result correlated with <see cref="BrowserExtensionHandoffSendRequest.RequestId"/>.
@@ -190,7 +239,10 @@ public sealed record BrowserExtensionHandoffSendResult(
     string? Message = null,
     string? Stage = null,
     int? TargetTabId = null,
-    string? TargetTabUrl = null)
+    string? TargetTabUrl = null,
+    string? TargetConversationId = null,
+    string? TargetConversationUrl = null,
+    string? TargetProjectId = null)
 {
     public bool IsSent => string.Equals(Status, "sent", StringComparison.Ordinal);
 }
@@ -232,7 +284,10 @@ public sealed record BrowserExtensionMediaAttachRequest(
     string MimeType,
     long Size,
     int TargetTabId,
-    string? TargetTabUrl = null);
+    string? TargetTabUrl = null,
+    string? TargetConversationId = null,
+    string? TargetConversationUrl = null,
+    string? TargetProjectId = null);
 
 public sealed record BrowserExtensionMediaAttachResult(
     string RequestId,

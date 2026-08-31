@@ -6,12 +6,15 @@
 
   const statusEventName = "chatgpt-comfy-connector:bridge-status";
   const handoffMessageType = "HANDOFF_SEND";
+  const contextRequestMessageType = "GET_CHATGPT_CONTEXT";
+  const contextChangedMessageType = "CHATGPT_CONTEXT_CHANGED";
   const responseWatchMessageType = "WATCH_ASSISTANT_RESPONSE";
   const responseResultMessageType = "ASSISTANT_RESPONSE_RESULT";
   const reviewMediaAttachBeginMessageType = "REVIEW_MEDIA_ATTACH_BEGIN";
   const reviewMediaAttachChunkMessageType = "REVIEW_MEDIA_ATTACH_CHUNK";
   const reviewMediaAttachEndMessageType = "REVIEW_MEDIA_ATTACH_END";
   const sendAcceptanceTimeoutMs = 8000;
+  const newConversationBindingTimeoutMs = 5000;
   const composerStateTimeoutMs = 1500;
   // ChatGPT can keep the composer Send control disabled while a Review video
   // is being processed even after the attachment chip is visible.  Review
@@ -29,6 +32,8 @@
   const responseAnchors = new Map();
   const responseWatchers = new Map();
   const mediaTransfers = new Map();
+  let contextMonitorTimer = null;
+  let lastContextFingerprint = null;
   // The browser page is the source of truth for the visible attachment. This
   // short-lived map only remembers which authenticated media request was
   // verified during the current content-script lifetime; the DOM check below
@@ -103,6 +108,121 @@
     if (text) result.message = text;
     if (stage) result.stage = stage;
     return result;
+  }
+
+  function contextResultFor(message, status, errorCode, text, stage, data = {}) {
+    const result = {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message?.requestId || message?.request_id || "",
+      mode: message?.mode === "current" ? "current" : "list",
+      status,
+      projects: Array.isArray(data.projects) ? data.projects : [],
+      conversations: Array.isArray(data.conversations) ? data.conversations : [],
+      current: data.current || null
+    };
+    if (errorCode) result.errorCode = errorCode;
+    if (text) result.message = text;
+    if (stage) result.stage = stage;
+    return result;
+  }
+
+  async function handleGetChatGptContext(message) {
+    if (!locators || !locators.isChatGptPage()) {
+      return contextResultFor(
+        message,
+        "error",
+        "active_tab_not_chatgpt",
+        "アクティブなタブはChatGPTではありません。",
+        "active_tab_check");
+    }
+
+    try {
+      const currentOnly = message?.mode === "current";
+      let value;
+      if (currentOnly) {
+        value = locators.getCurrentChatGptContext?.(document, globalThis.location?.href);
+      } else if (typeof locators.collectChatGptContextAsync === "function") {
+        value = await locators.collectChatGptContextAsync(document, globalThis.location?.href);
+      } else {
+        value = locators.collectChatGptContext?.(document, globalThis.location?.href);
+      }
+      if (!value) {
+        return contextResultFor(message, "error", "context_extraction_failed", "ChatGPTのContextを取得できませんでした。", "context_extraction");
+      }
+      return contextResultFor(message, "ok", null, null, "context_extracted", currentOnly
+        ? { current: value }
+        : value);
+    } catch (_) {
+      // Metadata discovery must not expose page text or DOM errors to the
+      // authenticated Bridge. The Desktop receives only a stable error code.
+      return contextResultFor(message, "error", "context_extraction_failed", "ChatGPTのContext取得に失敗しました。", "context_extraction");
+    }
+  }
+
+  function contextFingerprint(context) {
+    if (!context || typeof context !== "object") return "";
+    return [
+      context.conversation_id || context.conversationId || "",
+      context.project_id || context.projectId || "",
+      context.url || "",
+      context.title || ""
+    ].join("\u001f");
+  }
+
+  function emitCurrentContext() {
+    if (!locators?.getCurrentChatGptContext || !locators.isChatGptPage()) return;
+    let context;
+    try { context = locators.getCurrentChatGptContext(document, globalThis.location?.href); } catch (_) { return; }
+    const fingerprint = contextFingerprint(context);
+    if (fingerprint === lastContextFingerprint) return;
+    lastContextFingerprint = fingerprint;
+    Promise.resolve(chrome.runtime.sendMessage({
+      type: contextChangedMessageType,
+      context
+    })).catch(() => {});
+  }
+
+  function scheduleCurrentContextNotification() {
+    if (contextMonitorTimer !== null) clearTimeout(contextMonitorTimer);
+    contextMonitorTimer = setTimeout(() => {
+      contextMonitorTimer = null;
+      emitCurrentContext();
+    }, 350);
+  }
+
+  function installContextMonitor() {
+    if (!locators?.isChatGptPage?.() || globalThis.__chatgptComfyContextMonitorInstalled) return;
+    globalThis.__chatgptComfyContextMonitorInstalled = true;
+
+    const historyObject = globalThis.history;
+    if (historyObject) {
+      for (const methodName of ["pushState", "replaceState"]) {
+        const original = historyObject[methodName];
+        if (typeof original !== "function") continue;
+        historyObject[methodName] = function (...args) {
+          const result = original.apply(this, args);
+          scheduleCurrentContextNotification();
+          return result;
+        };
+      }
+    }
+    globalThis.addEventListener?.("popstate", scheduleCurrentContextNotification);
+    globalThis.addEventListener?.("hashchange", scheduleCurrentContextNotification);
+
+    const MutationObserverConstructor = globalThis.MutationObserver;
+    if (typeof MutationObserverConstructor === "function") {
+      const observationTarget = document.documentElement || document.body || document;
+      try {
+        const observer = new MutationObserverConstructor(scheduleCurrentContextNotification);
+        observer.observe(observationTarget, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["href", "aria-current", "data-active", "data-state"]
+        });
+      } catch (_) { }
+    }
+    emitCurrentContext();
   }
 
   function responseCorrelationKey(message) {
@@ -494,6 +614,28 @@
 
   function wait(milliseconds) {
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+
+  async function readCurrentContextAfterHandoff(message) {
+    let current = null;
+    try {
+      current = locators.getCurrentChatGptContext?.(document, globalThis.location?.href) || null;
+    } catch (_) { current = null; }
+    if (message?.newConversation !== true
+      || (current?.conversation_id && current?.url)) return current;
+
+    // ChatGPT creates the conversation route asynchronously after accepting a
+    // message on the new-chat page.  Bind only after the page exposes both
+    // stable identity fields; never invent an ID from the visible title.
+    const deadline = Date.now() + newConversationBindingTimeoutMs;
+    while (Date.now() < deadline) {
+      await wait(100);
+      try {
+        current = locators.getCurrentChatGptContext?.(document, globalThis.location?.href) || current;
+      } catch (_) { }
+      if (current?.conversation_id && current?.url) return current;
+    }
+    return current;
   }
 
   function reviewAttachmentKey(message) {
@@ -1125,13 +1267,30 @@
       status: "sent",
       stage: acceptance.stage
     });
-    return resultFor(message, "sent", null, null, acceptance.stage);
+    const result = resultFor(message, "sent", null, null, acceptance.stage);
+    // For a new Chat, ChatGPT may create the conversation URL only after the
+    // user message is accepted. Return metadata discovered from the page so
+    // Desktop can bind the created conversation without syncing message text.
+    result.current_context = await readCurrentContextAfterHandoff(message);
+    return result;
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "BRIDGE_STATE_CHANGED") {
       window.dispatchEvent(new CustomEvent(statusEventName, { detail: message.state }));
       return false;
+    }
+    if (message?.type === contextRequestMessageType) {
+      if (sender?.id && sender.id !== chrome.runtime.id) return false;
+      handleGetChatGptContext(message)
+        .then(sendResponse)
+        .catch(() => sendResponse(contextResultFor(
+          message,
+          "error",
+          "context_extraction_failed",
+          "ChatGPTのContext取得に失敗しました。",
+          "context_extraction")));
+      return true;
     }
     if (message?.type !== handoffMessageType
       && message?.type !== responseWatchMessageType
@@ -1160,4 +1319,5 @@
   });
 
   chrome.runtime.sendMessage({ type: "CONTENT_SCRIPT_READY" }).catch(() => {});
+  installContextMonitor();
 })();

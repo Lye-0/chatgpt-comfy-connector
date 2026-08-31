@@ -28,6 +28,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private const int MaxWebSocketMessageBytes = 256 * 1024;
     private const int MaxHandoffPayloadBytes = 192 * 1024;
     private const int MaxAssistantResponseBytes = 256 * 1024;
+    private const int MaxChatGptContextEntries = 5000;
     private const long MaxReviewMediaBytes = 512L * 1024 * 1024;
     private const int MaxPairingAttempts = 5;
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
@@ -39,6 +40,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     // report a bridge timeout while the Extension is still waiting safely.
     private static readonly TimeSpan HandoffResponseTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan MediaAttachResponseTimeout = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan ChatGptContextResponseTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan MediaRegistrationLifetime = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(3);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -56,6 +58,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private readonly ConcurrentDictionary<string, PendingHandoffRequest> _pendingHandoffs = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, RegisteredMedia> _registeredMedia = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, PendingMediaAttachRequest> _pendingMediaAttachments = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PendingChatGptContextRequest> _pendingChatGptContextRequests = new(StringComparer.Ordinal);
     private BrowserExtensionBridgeStatus _status;
     private HttpListener? _listener;
     private CancellationTokenSource? _serverCts;
@@ -95,6 +98,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     public event EventHandler<BrowserExtensionBridgeStatusChangedEventArgs>? StatusChanged;
     public event EventHandler<BrowserExtensionBridgeDiagnosticEventArgs>? Diagnostic;
     public event EventHandler<BrowserExtensionAssistantResponseEventArgs>? AssistantResponseReceived;
+    public event EventHandler<BrowserExtensionChatGptContextChangedEventArgs>? ChatGptContextChanged;
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -194,6 +198,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             }
             FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeを停止しました。");
             FailPendingMediaAttachments(BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extension Bridgeを停止しました。");
+            FailPendingChatGptContextRequests("Browser Extension Bridgeを停止しました。");
             _registeredMedia.Clear();
 
             serverCts?.Cancel();
@@ -273,6 +278,90 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         }
     }
 
+    public async Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextAsync(
+        bool currentOnly = false,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        var requestId = Guid.NewGuid().ToString("N");
+        WebSocket? socket;
+        lock (_clientGate) socket = _clientSocket;
+        if (socket is null || socket.State != WebSocketState.Open)
+        {
+            var disconnected = ContextError(
+                requestId,
+                "bridge_disconnected",
+                "Browser Extension Bridgeに接続されていません。",
+                "bridge_connection");
+            PublishDiagnostic("chatgpt.context rejected", requestId: requestId, status: disconnected.Status, errorCode: disconnected.ErrorCode, stage: disconnected.Stage);
+            return disconnected;
+        }
+
+        var pending = new PendingChatGptContextRequest(
+            currentOnly,
+            new TaskCompletionSource<BrowserExtensionChatGptContextSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously));
+        if (!_pendingChatGptContextRequests.TryAdd(requestId, pending))
+        {
+            return ContextError(requestId, "context_request_id_collision", "ChatGPT Context request IDが重複しました。", "context_request");
+        }
+
+        PublishDiagnostic(
+            currentOnly ? "chatgpt.context.current requested" : "chatgpt.context.list requested",
+            requestId: requestId,
+            status: "requested",
+            stage: "context_request");
+        try
+        {
+            await SendJsonAsync(socket, new
+            {
+                type = currentOnly ? "chatgpt.context.current.request" : "chatgpt.context.list.request",
+                request_id = requestId,
+            }, cancellationToken);
+            PublishDiagnostic(
+                "websocket send",
+                requestId: requestId,
+                status: "sending",
+                stage: currentOnly ? "chatgpt_context_current" : "chatgpt_context_list");
+            return await pending.Completion.Task.WaitAsync(ChatGptContextResponseTimeout, cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            var result = ContextError(requestId, "context_response_timeout", "Browser ExtensionからChatGPT Contextが返りませんでした。", "context_response_timeout");
+            PublishDiagnostic("chatgpt.context result", requestId: requestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage);
+            return result;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            var result = ContextError(requestId, "bridge_disconnected", "Browser Extension Bridgeとの接続が終了しました。", "bridge_connection");
+            PublishDiagnostic("chatgpt.context result", requestId: requestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage);
+            return result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var result = ContextError(requestId, "context_request_cancelled", "ChatGPT Context取得がキャンセルされました。", "context_request_cancelled");
+            PublishDiagnostic("chatgpt.context result", requestId: requestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage);
+            return result;
+        }
+        catch (WebSocketException)
+        {
+            RemoveClient(socket);
+            var result = ContextError(requestId, "bridge_disconnected", "Browser Extension Bridgeとの接続が終了しました。", "bridge_connection");
+            PublishDiagnostic("chatgpt.context result", requestId: requestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage);
+            return result;
+        }
+        catch (ObjectDisposedException)
+        {
+            RemoveClient(socket);
+            var result = ContextError(requestId, "bridge_disconnected", "Browser Extension Bridgeとの接続が終了しました。", "bridge_connection");
+            PublishDiagnostic("chatgpt.context result", requestId: requestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage);
+            return result;
+        }
+        finally
+        {
+            _pendingChatGptContextRequests.TryRemove(requestId, out _);
+        }
+    }
+
     public async Task<BrowserExtensionHandoffSendResult> SendHandoffAsync(
         BrowserExtensionHandoffSendRequest request,
         CancellationToken cancellationToken = default)
@@ -297,8 +386,16 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             || request.TargetTabId is < 0
             || request.TargetTabUrl is { Length: > 2048 }
             || (request.TargetTabUrl is not null && !IsChatGptUrl(request.TargetTabUrl))
-            || request.ReviewMediaId is { } mediaId && !IsSafeIdentifier(mediaId)
-            || request.ReviewFileName is { } fileName && !IsSafeFileName(fileName)
+            || (request.TargetConversationId is { } conversationId && !IsSafeIdentifier(conversationId))
+            || request.TargetConversationUrl is { Length: > 2048 }
+            || (request.TargetConversationUrl is not null && !IsChatGptUrl(request.TargetConversationUrl))
+            || (request.TargetProjectId is { } projectId && !IsSafeIdentifier(projectId))
+            || (request.TargetProjectUrl is { Length: > 2048 })
+            || (request.TargetProjectUrl is not null && !IsChatGptUrl(request.TargetProjectUrl))
+            || (request.NewConversation && (request.TargetConversationId is not null || request.TargetConversationUrl is not null))
+            || (request.HandoffKind == "review" && request.NewConversation)
+            || (request.ReviewMediaId is { } mediaId && !IsSafeIdentifier(mediaId))
+            || (request.ReviewFileName is { } fileName && !IsSafeFileName(fileName))
             || request.ReviewIteration is <= 0)
         {
             throw new ArgumentException("Review Handoffの送信メタデータが不正です。", nameof(request));
@@ -365,6 +462,11 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 review_media_id = request.ReviewMediaId,
                 review_file_name = request.ReviewFileName,
                 review_iteration = request.ReviewIteration,
+                target_conversation_id = request.TargetConversationId,
+                target_conversation_url = request.TargetConversationUrl,
+                target_project_id = request.TargetProjectId,
+                new_conversation = request.NewConversation,
+                target_project_url = request.TargetProjectUrl,
             }, cancellationToken);
 
             return await pending.Completion.Task.WaitAsync(HandoffResponseTimeout, cancellationToken);
@@ -512,7 +614,11 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             || request.Size > MaxReviewMediaBytes
             || request.TargetTabId < 0
             || string.IsNullOrWhiteSpace(request.TargetTabUrl)
-            || !IsChatGptUrl(request.TargetTabUrl))
+            || !IsChatGptUrl(request.TargetTabUrl)
+            || request.TargetConversationId is { } conversationId && !IsSafeIdentifier(conversationId)
+            || request.TargetConversationUrl is { Length: > 2048 }
+            || (request.TargetConversationUrl is not null && !IsChatGptUrl(request.TargetConversationUrl))
+            || request.TargetProjectId is { } projectId && !IsSafeIdentifier(projectId))
         {
             return MediaError(request, BrowserExtensionReviewMediaErrorCodes.MediaRegistrationFailed, "Review添付の識別情報が不正です。", "media_request_validation");
         }
@@ -572,6 +678,9 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 size = request.Size,
                 target_tab_id = request.TargetTabId,
                 target_tab_url = request.TargetTabUrl,
+                target_conversation_id = request.TargetConversationId,
+                target_conversation_url = request.TargetConversationUrl,
+                target_project_id = request.TargetProjectId,
             }, cancellationToken);
 
             var result = await pending.Completion.Task.WaitAsync(MediaAttachResponseTimeout, cancellationToken);
@@ -1167,6 +1276,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         {
             FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extensionの接続が置き換えられました。");
             FailPendingMediaAttachments(BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extensionの接続が置き換えられました。");
+            FailPendingChatGptContextRequests("Browser Extensionの接続が置き換えられました。");
             await CloseSocketAsync(previous, WebSocketCloseStatus.PolicyViolation, "replaced by a newer extension connection", cancellationToken);
         }
 
@@ -1237,6 +1347,57 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                     {
                         PublishDiagnostic("result status", result.RequestId, result.HandoffId, result.Status, result.ErrorCode, result.Stage);
                     }
+                }
+                else if (type is "chatgpt.context.list.response" or "chatgpt.context.current.response")
+                {
+                    if (!TryParseChatGptContextSnapshot(text, out var context, out var contextError, out var currentOnly))
+                    {
+                        PublishDiagnostic("chatgpt.context rejected", requestId: GetString(root, "request_id"), status: "error", errorCode: contextError ?? "invalid_context_response", stage: "context_response_envelope");
+                        await SendJsonAsync(socket, new
+                        {
+                            type = "error",
+                            code = contextError ?? "invalid_context_response",
+                            message = "ChatGPT Context responseを解釈できません。",
+                        }, cancellationToken);
+                        continue;
+                    }
+
+                    if (!IsCurrentClient(socket))
+                    {
+                        PublishDiagnostic("chatgpt.context rejected", requestId: context.RequestId, status: "error", errorCode: "stale_bridge_connection", stage: "context_response_connection");
+                        continue;
+                    }
+
+                    if (_pendingChatGptContextRequests.TryRemove(context.RequestId, out var pending))
+                    {
+                        var completed = pending.CurrentOnly == currentOnly
+                            ? context
+                            : ContextError(context.RequestId, "context_response_mode_mismatch", "ChatGPT Context responseの種別が一致しません。", "context_response_validation");
+                        PublishDiagnostic("chatgpt.context result", requestId: completed.RequestId, status: completed.Status, errorCode: completed.ErrorCode, stage: completed.Stage);
+                        pending.Completion.TrySetResult(completed);
+                    }
+                    else
+                    {
+                        PublishDiagnostic("chatgpt.context result", requestId: context.RequestId, status: context.Status, errorCode: context.ErrorCode, stage: context.Stage);
+                    }
+                }
+                else if (type is "chatgpt.context.current" or "chatgpt.context.changed")
+                {
+                    if (!TryParseChatGptCurrentContext(text, out var current, out var currentError))
+                    {
+                        PublishDiagnostic("chatgpt.context current rejected", status: "error", errorCode: currentError ?? "invalid_current_context", stage: "context_current_envelope");
+                        continue;
+                    }
+
+                    if (!IsCurrentClient(socket))
+                    {
+                        PublishDiagnostic("chatgpt.context current rejected", status: "error", errorCode: "stale_bridge_connection", stage: "context_current_connection");
+                        continue;
+                    }
+
+                    PublishDiagnostic("chatgpt.context current received", status: "ok", stage: "context_current_received");
+                    try { ChatGptContextChanged?.Invoke(this, new BrowserExtensionChatGptContextChangedEventArgs(current)); }
+                    catch (Exception) { }
                 }
                 else if (type == "assistant.response")
                 {
@@ -1324,7 +1485,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                     {
                         type = "error",
                         code = "unsupported_message",
-                        message = "このalpha Bridgeはhello、ping、handoff.result、assistant.response、review.media.resultだけを受け付けます。",
+                        message = "このalpha Bridgeはhello、ping、handoff.result、chatgpt.context、assistant.response、review.media.resultだけを受け付けます。",
                     }, cancellationToken);
                 }
             }
@@ -1403,6 +1564,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         {
             FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。");
             FailPendingMediaAttachments(BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。");
+            FailPendingChatGptContextRequests("Browser Extension Bridgeとの接続が終了しました。");
             PublishStatus(CreateStatus(
                 isRunning: true,
                 BrowserExtensionConnectionState.Disconnected,
@@ -1450,6 +1612,21 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                     pending.Iteration,
                     pending.MediaId,
                     errorCode,
+                    message,
+                    "bridge_connection"));
+            }
+        }
+    }
+
+    private void FailPendingChatGptContextRequests(string message)
+    {
+        foreach (var pair in _pendingChatGptContextRequests.ToArray())
+        {
+            if (_pendingChatGptContextRequests.TryRemove(pair.Key, out var pending))
+            {
+                pending.Completion.TrySetResult(ContextError(
+                    pair.Key,
+                    "bridge_disconnected",
                     message,
                     "bridge_connection"));
             }
@@ -1824,6 +2001,13 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         string? stage = null)
         => new(requestId, handoffId, "error", errorCode, message, stage);
 
+    private static BrowserExtensionChatGptContextSnapshot ContextError(
+        string requestId,
+        string errorCode,
+        string message,
+        string? stage = null)
+        => new(requestId, "error", [], [], null, errorCode, message, stage);
+
     private static BrowserExtensionMediaAttachResult MediaError(
         BrowserExtensionMediaAttachRequest request,
         string errorCode,
@@ -2017,7 +2201,29 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 return false;
             }
 
-            result = new(requestId, handoffId, status, errorCode, message, stage, targetTabId, targetTabUrl);
+            var targetConversationId = GetString(root, "target_conversation_id");
+            if (targetConversationId is { } conversationId && !IsSafeIdentifier(conversationId))
+            {
+                error = "invalid_handoff_result";
+                return false;
+            }
+
+            var targetConversationUrl = GetString(root, "target_conversation_url");
+            if (targetConversationUrl is { Length: > 2048 }
+                || (targetConversationUrl is not null && !IsChatGptUrl(targetConversationUrl)))
+            {
+                error = "invalid_handoff_result";
+                return false;
+            }
+
+            var targetProjectId = GetString(root, "target_project_id");
+            if (targetProjectId is { } projectId && !IsSafeIdentifier(projectId))
+            {
+                error = "invalid_handoff_result";
+                return false;
+            }
+
+            result = new(requestId, handoffId, status, errorCode, message, stage, targetTabId, targetTabUrl, targetConversationId, targetConversationUrl, targetProjectId);
             return true;
         }
         catch (JsonException)
@@ -2025,6 +2231,218 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             error = "invalid_json";
             return false;
         }
+    }
+
+    private static bool TryParseChatGptContextSnapshot(
+        string text,
+        out BrowserExtensionChatGptContextSnapshot snapshot,
+        out string? error,
+        out bool currentOnly)
+    {
+        snapshot = new(string.Empty, "error", [], []);
+        error = null;
+        currentOnly = false;
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+            var type = root.ValueKind == JsonValueKind.Object ? GetString(root, "type") : null;
+            currentOnly = type == "chatgpt.context.current.response";
+            if (root.ValueKind != JsonValueKind.Object
+                || type is not ("chatgpt.context.list.response" or "chatgpt.context.current.response"))
+            {
+                error = "invalid_context_response";
+                return false;
+            }
+
+            var requestId = GetString(root, "request_id");
+            var status = GetString(root, "status");
+            if (requestId is null
+                || !IsSafeIdentifier(requestId)
+                || status is not ("ok" or "error"))
+            {
+                error = "invalid_context_response";
+                return false;
+            }
+
+            var projects = new List<BrowserExtensionChatGptProjectEntry>();
+            if (root.TryGetProperty("projects", out var projectsElement))
+            {
+                if (!TryParseContextProjects(projectsElement, projects, out error)) return false;
+            }
+
+            var conversations = new List<BrowserExtensionChatGptConversationEntry>();
+            if (root.TryGetProperty("conversations", out var conversationsElement))
+            {
+                if (!TryParseContextConversations(conversationsElement, conversations, out error)) return false;
+            }
+
+            BrowserExtensionChatGptCurrentContext? current = null;
+            if (root.TryGetProperty("current", out var currentElement)
+                && currentElement.ValueKind is not JsonValueKind.Null)
+            {
+                if (!TryParseCurrentContextElement(currentElement, out current, out error)) return false;
+            }
+
+            var errorCode = GetString(root, "error_code");
+            var message = GetString(root, "message");
+            var stage = GetString(root, "stage");
+            if (errorCode is { Length: > 64 } || (errorCode is not null && !IsSafeIdentifier(errorCode))
+                || message is { Length: > 1024 }
+                || stage is { Length: > 64 } || (stage is not null && !IsSafeIdentifier(stage)))
+            {
+                error = "invalid_context_response";
+                return false;
+            }
+
+            snapshot = new(requestId, status, projects, conversations, current, errorCode, message, stage);
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "invalid_json";
+            return false;
+        }
+    }
+
+    private static bool TryParseChatGptCurrentContext(
+        string text,
+        out BrowserExtensionChatGptCurrentContext context,
+        out string? error)
+    {
+        context = new();
+        error = null;
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+            var type = GetString(root, "type");
+            if (root.ValueKind != JsonValueKind.Object
+                || type is not ("chatgpt.context.current" or "chatgpt.context.changed"))
+            {
+                error = "invalid_current_context";
+                return false;
+            }
+
+            var element = root.TryGetProperty("context", out var nested)
+                ? nested
+                : root;
+            return TryParseCurrentContextElement(element, out context, out error);
+        }
+        catch (JsonException)
+        {
+            error = "invalid_json";
+            return false;
+        }
+    }
+
+    private static bool TryParseContextProjects(
+        JsonElement element,
+        List<BrowserExtensionChatGptProjectEntry> destination,
+        out string? error)
+    {
+        error = null;
+        if (element.ValueKind != JsonValueKind.Array || element.GetArrayLength() > MaxChatGptContextEntries)
+        {
+            error = "invalid_context_projects";
+            return false;
+        }
+
+        foreach (var item in element.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) { error = "invalid_context_projects"; return false; }
+            var id = GetString(item, "project_id");
+            var title = GetString(item, "title");
+            var url = GetString(item, "url");
+            var discoveryKey = GetString(item, "discovery_key");
+            var hasId = item.TryGetProperty("project_id", out var idElement)
+                && idElement.ValueKind is not JsonValueKind.Null;
+            var hasDiscoveryKey = item.TryGetProperty("discovery_key", out var discoveryElement)
+                && discoveryElement.ValueKind is not JsonValueKind.Null;
+            if (title is null || title.Length is 0 or > 512
+                || hasId && (id is null || !IsSafeIdentifier(id))
+                || hasDiscoveryKey && (discoveryKey is null || !IsSafeIdentifier(discoveryKey))
+                || id is null && discoveryKey is null
+                || url is { Length: > 2048 } || (url is not null && !IsChatGptUrl(url)))
+            {
+                error = "invalid_context_projects";
+                return false;
+            }
+
+            destination.Add(new BrowserExtensionChatGptProjectEntry(id, title, url, discoveryKey));
+        }
+
+        return true;
+    }
+
+    private static bool TryParseContextConversations(
+        JsonElement element,
+        List<BrowserExtensionChatGptConversationEntry> destination,
+        out string? error)
+    {
+        error = null;
+        if (element.ValueKind != JsonValueKind.Array || element.GetArrayLength() > MaxChatGptContextEntries)
+        {
+            error = "invalid_context_conversations";
+            return false;
+        }
+
+        foreach (var item in element.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) { error = "invalid_context_conversations"; return false; }
+            var id = GetString(item, "conversation_id");
+            var title = GetString(item, "title");
+            var url = GetString(item, "url");
+            var projectId = GetString(item, "project_id");
+            var projectTitle = GetString(item, "project_title");
+            if (id is null || title is null || url is null
+                || !IsSafeIdentifier(id)
+                || title.Length is 0 or > 512
+                || url.Length > 2048
+                || !IsChatGptUrl(url)
+                || projectId is { } nonNullProjectId && !IsSafeIdentifier(nonNullProjectId)
+                || projectTitle is { Length: > 512 })
+            {
+                error = "invalid_context_conversations";
+                return false;
+            }
+
+            destination.Add(new BrowserExtensionChatGptConversationEntry(id, title, url, projectId, projectTitle));
+        }
+
+        return true;
+    }
+
+    private static bool TryParseCurrentContextElement(
+        JsonElement element,
+        out BrowserExtensionChatGptCurrentContext context,
+        out string? error)
+    {
+        context = new();
+        error = null;
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            error = "invalid_current_context";
+            return false;
+        }
+
+        var conversationId = GetString(element, "conversation_id") ?? GetString(element, "current_conversation_id");
+        var title = GetString(element, "title") ?? GetString(element, "current_title");
+        var url = GetString(element, "url") ?? GetString(element, "conversation_url") ?? GetString(element, "current_conversation_url");
+        var projectId = GetString(element, "project_id") ?? GetString(element, "current_project_id");
+        var projectTitle = GetString(element, "project_title") ?? GetString(element, "current_project_title");
+        if (conversationId is { } nonNullConversationId && !IsSafeIdentifier(nonNullConversationId)
+            || title is { Length: > 512 }
+            || url is { Length: > 2048 } || (url is not null && !IsChatGptUrl(url))
+            || projectId is { } nonNullProjectId && !IsSafeIdentifier(nonNullProjectId)
+            || projectTitle is { Length: > 512 })
+        {
+            error = "invalid_current_context";
+            return false;
+        }
+
+        context = new(conversationId, title, url, projectId, projectTitle);
+        return true;
     }
 
     private static bool TryParseAssistantResponse(
@@ -2138,6 +2556,10 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         int Iteration,
         string MediaId,
         TaskCompletionSource<BrowserExtensionMediaAttachResult> Completion);
+
+    private sealed record PendingChatGptContextRequest(
+        bool CurrentOnly,
+        TaskCompletionSource<BrowserExtensionChatGptContextSnapshot> Completion);
 
     private sealed record RegisteredMedia(
         string MediaId,

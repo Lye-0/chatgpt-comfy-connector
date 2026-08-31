@@ -21,6 +21,11 @@ const SOCKET_KEEPALIVE_INTERVAL_MS = 20000;
 // Script's bounded Send-readiness wait so a disabled button is not reported
 // as a bridge failure prematurely.
 const CONTENT_SCRIPT_TIMEOUT_MS = 75000;
+// A newly opened ChatGPT Conversation returns from tabs.create before the
+// page reaches document_idle.  Do not interpret the temporary absence of the
+// manifest Content Script as a permanent dispatch failure.
+const CONTENT_SCRIPT_READY_TIMEOUT_MS = 20000;
+const CONTENT_SCRIPT_READY_POLL_INTERVAL_MS = 100;
 const PAIRING_STORAGE_KEY = "bridgePairing";
 const RESPONSE_WATCH_MESSAGE_TYPE = "WATCH_ASSISTANT_RESPONSE";
 const ASSISTANT_RESPONSE_RESULT_MESSAGE_TYPE = "ASSISTANT_RESPONSE_RESULT";
@@ -430,6 +435,63 @@ function sendMessageWithTimeout(tabId, message) {
   });
 }
 
+function waitForTabReady(tabId, timeoutMs = CONTENT_SCRIPT_READY_TIMEOUT_MS) {
+  if (!chrome.tabs?.get) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let pollTimer = null;
+    let timeoutTimer = null;
+
+    const cleanup = () => {
+      if (pollTimer !== null) clearTimeout(pollTimer);
+      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+      chrome.tabs.onUpdated?.removeListener?.(handleUpdated);
+    };
+    const finish = (ready) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(ready);
+    };
+    const inspect = async () => {
+      if (settled) return;
+      let tab;
+      try {
+        tab = await chrome.tabs.get(tabId);
+      } catch (_) {
+        finish(false);
+        return;
+      }
+      if (!tab) {
+        finish(false);
+        return;
+      }
+      // Test doubles and some Chromium implementations omit status.  In
+      // that case the tab is already usable for the dispatch retry.  When
+      // status is present, wait until the navigation is complete.
+      if (typeof tab.status !== "string" || tab.status === "complete") {
+        finish(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        finish(false);
+        return;
+      }
+      pollTimer = setTimeout(inspect, CONTENT_SCRIPT_READY_POLL_INTERVAL_MS);
+    };
+    const handleUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId !== tabId || changeInfo?.status !== "complete") return;
+      void inspect();
+    };
+    const deadline = Date.now() + timeoutMs;
+
+    chrome.tabs.onUpdated?.addListener?.(handleUpdated);
+    timeoutTimer = setTimeout(() => finish(false), timeoutMs);
+    void inspect();
+  });
+}
+
 async function dispatchToContentScript(tabId, message, trace) {
   diagnostic("content script dispatched", {
     ...traceForMessage(trace, { target_tab_id: tabId })
@@ -442,7 +504,24 @@ async function dispatchToContentScript(tabId, message, trace) {
     // locator/DOM modules through the MV3 scripting API, then retry the
     // message. The injected code is still content-script.js; the background
     // does not inspect or mutate the ChatGPT DOM itself.
-    if (!isMissingContentScriptError(error) || !chrome.scripting?.executeScript) throw error;
+    if (!isMissingContentScriptError(error)) throw error;
+
+    const ready = await waitForTabReady(tabId);
+    if (!ready) {
+      const timeoutError = bridgeError("ChatGPT tab did not finish loading before Content Script dispatch.", 0, "content_script_unavailable");
+      timeoutError.stage = "content_script_ready_timeout";
+      throw timeoutError;
+    }
+
+    // The manifest Content Script may have become available while the tab
+    // was loading.  Retry it before using executeScript so a normal page load
+    // does not create a duplicate watcher/context monitor.
+    try {
+      return await sendMessageWithTimeout(tabId, message);
+    } catch (retryError) {
+      if (!isMissingContentScriptError(retryError) || !chrome.scripting?.executeScript) throw retryError;
+    }
+
     diagnostic("content script injection requested", {
       ...traceForMessage(trace, { target_tab_id: tabId })
     });

@@ -256,7 +256,7 @@ class FakeClipboardEvent extends FakeEvent {
 }
 
 class FakeDocument {
-  constructor({ composer = "textarea", sendButton = "ready", sendButtonReadyAfterMs = 0, plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", composerReadTransform = null, url = "https://chatgpt.com/c/fixture", initialAssistantMessages = [], fileInput = true, attachmentVerification = true, attachmentUploading = false } = {}) {
+  constructor({ composer = "textarea", composerMountDelayMs = 0, sendButton = "ready", sendButtonReadyAfterMs = 0, plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", composerReadTransform = null, url = "https://chatgpt.com/c/fixture", initialAssistantMessages = [], fileInput = true, attachmentVerification = true, attachmentUploading = false } = {}) {
     this.activeElement = null;
     this.composers = [];
     this.sendButtons = [];
@@ -280,23 +280,28 @@ class FakeDocument {
     const composerForm = new FakeElement(this, "form");
     this.body.appendChild(composerForm);
 
-    if (composer === "textarea") {
-      const textarea = new FakeTextArea(this, {
-        "data-testid": "prompt-textarea",
-        placeholder: "メッセージを入力"
-      });
-      composerForm.appendChild(textarea);
-      this.composers.push(textarea);
-    } else if (composer === "contenteditable") {
-      const contentEditable = new FakeElement(this, "div", {
-        contenteditable: "true",
-        role: "textbox",
-        "aria-label": "メッセージを入力",
-        readTextTransform: composerReadTransform
-      });
-      composerForm.appendChild(contentEditable);
-      this.composers.push(contentEditable);
-    }
+    const mountComposer = () => {
+      if (this.composers.length > 0 || composer === "missing") return;
+      if (composer === "textarea") {
+        const textarea = new FakeTextArea(this, {
+          "data-testid": "prompt-textarea",
+          placeholder: "メッセージを入力"
+        });
+        composerForm.appendChild(textarea);
+        this.composers.push(textarea);
+      } else if (composer === "contenteditable") {
+        const contentEditable = new FakeElement(this, "div", {
+          contenteditable: "true",
+          role: "textbox",
+          "aria-label": "メッセージを入力",
+          readTextTransform: composerReadTransform
+        });
+        composerForm.appendChild(contentEditable);
+        this.composers.push(contentEditable);
+      }
+    };
+    if (composerMountDelayMs > 0) setTimeout(mountComposer, composerMountDelayMs);
+    else mountComposer();
 
     if (fileInput) {
       this.fileInput = new FakeElement(this, "input", {
@@ -578,10 +583,12 @@ async function createHarness(options) {
       runtime: {
         id: "fixture-extension",
         onMessage: { addListener: (listener) => runtimeListeners.push(listener) },
-        sendMessage: async (message) => {
-          runtimeMessages.push(message);
-          return { ok: true };
-        }
+        sendMessage: options?.runtimeContextInvalidated
+          ? () => { throw new Error("Extension context invalidated."); }
+          : async (message) => {
+            runtimeMessages.push(message);
+            return { ok: true };
+          }
       }
     }
   });
@@ -594,6 +601,12 @@ async function createHarness(options) {
   ).replace(
     "const composerStateTimeoutMs = 1500;",
     "const composerStateTimeoutMs = 50;"
+  ).replace(
+    "const composerMountTimeoutMs = 20000;",
+    "const composerMountTimeoutMs = 100;"
+  ).replace(
+    "const composerPollIntervalMs = 100;",
+    "const composerPollIntervalMs = 5;"
   ).replace(
     "const reviewComposerStateTimeoutMs = 60000;",
     "const reviewComposerStateTimeoutMs = 150;"
@@ -664,6 +677,28 @@ test("Content Script fills a textarea with React-visible input and confirms send
   assert.equal(harness.document.sendClicked, true);
   assert.equal(harness.document.userMessages.length, 1);
   assert.equal(harness.document.userMessages[0].textContent, handoff.payload);
+});
+
+test("Content Script waits for a newly loaded ChatGPT composer before sending", async () => {
+  const harness = await createHarness({
+    composer: "textarea",
+    composerMountDelayMs: 20,
+    sendButton: "ready"
+  });
+  const result = await harness.send(handoff);
+  assert.equal(result.status, "sent");
+  assert.equal(harness.document.sendClicked, true);
+  assert.equal(harness.document.userMessages[0].textContent, handoff.payload);
+});
+
+test("Content Script tolerates an invalidated Extension context during best-effort notifications", async () => {
+  const harness = await createHarness({
+    composer: "textarea",
+    sendButton: "ready",
+    runtimeContextInvalidated: true
+  });
+  const result = await harness.send(handoff);
+  assert.equal(result.status, "sent");
 });
 
 test("Content Script also supports a contenteditable composer", async () => {

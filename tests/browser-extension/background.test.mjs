@@ -23,6 +23,8 @@ async function createHarness() {
   let keepaliveDelay = null;
   const runtimeListeners = [];
   const createdTabs = [];
+  const tabUpdatedListeners = new Set();
+  let nextCreatedTabStatus;
 
   class FakeWebSocket {
     static OPEN = 1;
@@ -54,7 +56,7 @@ async function createHarness() {
         return tab;
       },
       async create({ url }) {
-        const tab = { id: 100 + createdTabs.length, url, active: true };
+        const tab = { id: 100 + createdTabs.length, url, active: true, status: nextCreatedTabStatus };
         createdTabs.push(tab);
         tabsById.set(tab.id, tab);
         activeTabs = [tab, ...activeTabs.map((item) => ({ ...item, active: false }))];
@@ -64,6 +66,10 @@ async function createHarness() {
         assert.ok(tabsById.has(tabId), `Message target ${tabId} should exist`);
         if (contentError) throw contentError;
         return contentResponse(message);
+      },
+      onUpdated: {
+        addListener(listener) { tabUpdatedListeners.add(listener); },
+        removeListener(listener) { tabUpdatedListeners.delete(listener); }
       }
     },
     runtime: {
@@ -149,6 +155,15 @@ async function createHarness() {
     },
     setContentError(error) {
       contentError = error;
+    },
+    setNextCreatedTabStatus(status) {
+      nextCreatedTabStatus = status;
+    },
+    setTabStatus(tabId, status) {
+      const tab = tabsById.get(tabId);
+      assert.ok(tab, `Tab ${tabId} should exist before updating its status`);
+      tab.status = status;
+      for (const listener of tabUpdatedListeners) listener(tabId, { status }, tab);
     },
     get createdTabs() { return createdTabs; },
     setMediaResponse(response) {
@@ -378,6 +393,55 @@ test("Background reopens the exact bound conversation when its original tab is c
   assert.deepEqual(harness.createdTabs.map((tab) => tab.url), [boundRequest.target_conversation_url]);
   assert.equal(relayedMessages[0].type, "HANDOFF_SEND");
   assert.equal(relayedMessages[0].requestId, boundRequest.request_id);
+  assert.equal(relayedMessages[1].type, "WATCH_ASSISTANT_RESPONSE");
+  assert.equal(relayedMessages[1].targetTabId, 100);
+});
+
+test("Background waits for a newly opened Conversation before dispatching the Handoff", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 7, url: "https://chatgpt.com/c/unrelated" }]);
+  harness.setNextCreatedTabStatus("loading");
+  const boundRequest = {
+    ...request,
+    request_id: "loading-bound-request-fixture",
+    handoff_id: "loading-bound-handoff-fixture",
+    boundary_id: "loading-boundary-fixture",
+    target_conversation_id: "conversation-loading",
+    target_conversation_url: "https://chatgpt.com/c/conversation-loading"
+  };
+  const relayedMessages = [];
+  harness.setContentHandler((message) => {
+    relayedMessages.push(message);
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      return {
+        request_id: boundRequest.request_id,
+        session_id: boundRequest.session_id,
+        handoff_id: boundRequest.handoff_id,
+        boundary_id: boundRequest.boundary_id,
+        status: "watching"
+      };
+    }
+    return {
+      request_id: boundRequest.request_id,
+      handoff_id: boundRequest.handoff_id,
+      status: "sent"
+    };
+  });
+  // tabs.create resolves while the new document is still loading.  The
+  // first dispatch therefore has no receiving Content Script; completing the
+  // navigation must make the same request succeed without user retry.
+  harness.setContentError(new Error("Could not establish connection."));
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(boundRequest, harness.socket);
+  setTimeout(() => {
+    harness.setContentError(null);
+    harness.setTabStatus(100, "complete");
+  }, 10);
+
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+  assert.deepEqual(harness.createdTabs.map((tab) => tab.url), [boundRequest.target_conversation_url]);
+  assert.equal(relayedMessages[0].type, "HANDOFF_SEND");
   assert.equal(relayedMessages[1].type, "WATCH_ASSISTANT_RESPONSE");
   assert.equal(relayedMessages[1].targetTabId, 100);
 });

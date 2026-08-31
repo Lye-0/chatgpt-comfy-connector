@@ -273,7 +273,12 @@ the user to another tab and contains no DOM locator code. If a ChatGPT tab was
 already open when the unpacked Extension was reloaded, the Background uses the
 MV3 `scripting` permission to inject `chatgpt-locators.js` and
 `content-script.js` into that exact ChatGPT tab, then retries the message. The
-Content Script returns a result, which the Background forwards to the Desktop:
+same readiness path is used when the Background opens a saved Conversation in
+a new tab: `tabs.create` can resolve while the document is still loading, so a
+missing Content Script is retried after the tab reaches `complete`, before the
+MV3 injection fallback is attempted. The target Conversation identity is not
+changed during this wait. The Content Script returns a result, which the
+Background forwards to the Desktop:
 
 ```json
 {
@@ -284,6 +289,12 @@ Content Script returns a result, which the Background forwards to the Desktop:
   "stage": "user_message_correlated"
 }
 ```
+
+After a newly loaded ChatGPT page receives the relay, the Content Script waits
+for the concrete Composer to mount before attempting input. This bounded wait
+does not relax the Composer or Send-button selectors; `composer_not_found` is
+returned with `stage: "composer_mount_timeout"` only after that mount window
+expires.
 
 On failure, `status` is `error` and the response contains `error_code` and a
 short `message` and, when the Content Script reached a concrete phase, a safe

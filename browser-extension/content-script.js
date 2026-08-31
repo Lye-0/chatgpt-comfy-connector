@@ -16,6 +16,11 @@
   const sendAcceptanceTimeoutMs = 8000;
   const newConversationBindingTimeoutMs = 5000;
   const composerStateTimeoutMs = 1500;
+  // A newly opened Conversation can reach document.readyState=complete before
+  // ChatGPT mounts its React composer. Wait for that concrete composer rather
+  // than treating the transient DOM as a permanent selector failure.
+  const composerMountTimeoutMs = 20000;
+  const composerPollIntervalMs = 100;
   // ChatGPT can keep the composer Send control disabled while a Review video
   // is being processed even after the attachment chip is visible.  Review
   // sends therefore get a bounded readiness window of their own; normal
@@ -69,6 +74,24 @@
     } catch (_) {
       // Console access must never affect DOM automation.
     }
+  }
+
+  // chrome.runtime.sendMessage can throw synchronously when an older content
+  // script survives an Extension reload. Keep that lifecycle event from
+  // becoming an uncaught page error; message delivery is best effort and the
+  // authenticated Background remains the transport owner.
+  function sendRuntimeMessage(message, onFailure = null) {
+    let pending;
+    try {
+      pending = chrome.runtime.sendMessage(message);
+    } catch (_) {
+      try { onFailure?.(); } catch (_) { }
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve(pending).catch(() => {
+      try { onFailure?.(); } catch (_) { }
+      return undefined;
+    });
   }
 
   function traceForMessage(message, fields = {}) {
@@ -176,10 +199,10 @@
     const fingerprint = contextFingerprint(context);
     if (fingerprint === lastContextFingerprint) return;
     lastContextFingerprint = fingerprint;
-    Promise.resolve(chrome.runtime.sendMessage({
+    void sendRuntimeMessage({
       type: contextChangedMessageType,
       context
-    })).catch(() => {});
+    });
   }
 
   function scheduleCurrentContextNotification() {
@@ -616,6 +639,23 @@
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 
+  async function waitForComposer(message) {
+    const deadline = Date.now() + composerMountTimeoutMs;
+    let waitingDiagnosticSent = false;
+    while (Date.now() < deadline) {
+      const composer = locators.findComposer?.();
+      if (composer) return composer;
+      if (!waitingDiagnosticSent) {
+        waitingDiagnosticSent = true;
+        diagnostic("composer waiting", traceForMessage(message, {
+          stage: "composer_waiting"
+        }));
+      }
+      await wait(composerPollIntervalMs);
+    }
+    return locators.findComposer?.() || null;
+  }
+
   async function readCurrentContextAfterHandoff(message) {
     let current = null;
     try {
@@ -813,7 +853,7 @@
       target_tab_id: watcher.targetTabId
     });
 
-    chrome.runtime.sendMessage(message).catch(() => {
+    void sendRuntimeMessage(message, () => {
       diagnostic("assistant response delivery failed", {
         request_id: watcher.requestId,
         session_id: watcher.sessionId,
@@ -1114,9 +1154,9 @@
       return resultFor(message, "error", "composer_input_failed", "Handoff本文が空です。", "payload_validation");
     }
 
-    const composer = locators.findComposer();
+    const composer = await waitForComposer(message);
     if (!composer) {
-      return resultFor(message, "error", "composer_not_found", "ChatGPTの入力欄が見つかりません。", "composer_not_found");
+      return resultFor(message, "error", "composer_not_found", "ChatGPTの入力欄が見つかりません。", "composer_mount_timeout");
     }
     diagnostic("composer found", {
       request_id: message?.requestId,
@@ -1318,6 +1358,6 @@
     return true;
   });
 
-  chrome.runtime.sendMessage({ type: "CONTENT_SCRIPT_READY" }).catch(() => {});
+  void sendRuntimeMessage({ type: "CONTENT_SCRIPT_READY" });
   installContextMonitor();
 })();

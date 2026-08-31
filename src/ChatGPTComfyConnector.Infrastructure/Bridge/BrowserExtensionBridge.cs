@@ -39,6 +39,10 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     // Extension Content Script readiness window, otherwise the Desktop would
     // report a bridge timeout while the Extension is still waiting safely.
     private static readonly TimeSpan HandoffResponseTimeout = TimeSpan.FromSeconds(90);
+    // Keep an in-flight Handoff alive while the MV3 service worker reconnects.
+    // A normal socket close is not proof that the ChatGPT post failed; the
+    // accepted result may arrive on the next authenticated socket.
+    private static readonly TimeSpan BridgeReconnectGrace = TimeSpan.FromSeconds(7);
     private static readonly TimeSpan MediaAttachResponseTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan ChatGptContextResponseTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan MediaRegistrationLifetime = TimeSpan.FromMinutes(10);
@@ -64,6 +68,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private CancellationTokenSource? _serverCts;
     private Task? _acceptTask;
     private WebSocket? _clientSocket;
+    private long _clientGeneration;
     private string? _accessToken;
     private DateTimeOffset? _accessTokenExpiresAt;
     private string? _pairingId;
@@ -469,7 +474,18 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 target_project_url = request.TargetProjectUrl,
             }, cancellationToken);
 
-            return await pending.Completion.Task.WaitAsync(HandoffResponseTimeout, cancellationToken);
+            var result = await pending.Completion.Task.WaitAsync(HandoffResponseTimeout, cancellationToken);
+            PublishDiagnostic(
+                "handoff.send completed",
+                result.RequestId,
+                result.HandoffId,
+                result.Status,
+                result.ErrorCode,
+                "handoff_send_completed",
+                sessionId: request.SessionId,
+                boundaryId: request.BoundaryId,
+                targetTabId: result.TargetTabId ?? request.TargetTabId);
+            return result;
         }
         catch (TimeoutException)
         {
@@ -612,12 +628,15 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             || !BrowserExtensionMediaTypes.IsSupported(request.MimeType)
             || request.Size <= 0
             || request.Size > MaxReviewMediaBytes
-            || request.TargetTabId < 0
-            || string.IsNullOrWhiteSpace(request.TargetTabUrl)
-            || !IsChatGptUrl(request.TargetTabUrl)
+            || request.TargetTabId is < 0
+            || request.TargetTabUrl is { Length: > 2048 }
+            || (request.TargetTabUrl is not null && !IsChatGptUrl(request.TargetTabUrl))
             || request.TargetConversationId is { } conversationId && !IsSafeIdentifier(conversationId)
             || request.TargetConversationUrl is { Length: > 2048 }
             || (request.TargetConversationUrl is not null && !IsChatGptUrl(request.TargetConversationUrl))
+            || request.TargetConversationId is { } conversationIdForUrl
+                && request.TargetConversationUrl is { } conversationUrl
+                && !string.Equals(ConversationIdFromUrl(conversationUrl), conversationIdForUrl, StringComparison.Ordinal)
             || request.TargetProjectId is { } projectId && !IsSafeIdentifier(projectId))
         {
             return MediaError(request, BrowserExtensionReviewMediaErrorCodes.MediaRegistrationFailed, "Review添付の識別情報が不正です。", "media_request_validation");
@@ -1270,13 +1289,14 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         {
             previous = _clientSocket;
             _clientSocket = socket;
+            _clientGeneration++;
         }
 
         if (previous is not null && !ReferenceEquals(previous, socket))
         {
-            FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extensionの接続が置き換えられました。");
-            FailPendingMediaAttachments(BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extensionの接続が置き換えられました。");
-            FailPendingChatGptContextRequests("Browser Extensionの接続が置き換えられました。");
+            // Keep request correlation alive across the replacement. The new
+            // authenticated Extension connection can still return the result
+            // for a Handoff already posted by the previous connection.
             await CloseSocketAsync(previous, WebSocketCloseStatus.PolicyViolation, "replaced by a newer extension connection", cancellationToken);
         }
 
@@ -1330,6 +1350,27 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                         continue;
                     }
 
+                    if (!IsCurrentClient(socket))
+                    {
+                        PublishDiagnostic(
+                            "result rejected",
+                            result.RequestId,
+                            result.HandoffId,
+                            result.Status,
+                            "stale_bridge_connection",
+                            "handoff_result_connection",
+                            targetTabId: result.TargetTabId);
+                        continue;
+                    }
+
+                    PublishDiagnostic(
+                        "handoff.result received",
+                        result.RequestId,
+                        result.HandoffId,
+                        result.Status,
+                        result.ErrorCode,
+                        "handoff_result_received",
+                        targetTabId: result.TargetTabId);
                     if (_pendingHandoffs.TryRemove(result.RequestId, out var pending))
                     {
                         var completed = string.Equals(result.HandoffId, pending.HandoffId, StringComparison.Ordinal)
@@ -1347,6 +1388,18 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                     {
                         PublishDiagnostic("result status", result.RequestId, result.HandoffId, result.Status, result.ErrorCode, result.Stage);
                     }
+
+                    // `WebSocket.SendAsync` on the Extension side can
+                    // succeed while this server is replacing the old client
+                    // connection. An explicit receipt lets the Extension
+                    // retain/retry the envelope until this current Bridge
+                    // instance has actually accepted it.
+                    await SendDeliveryAckAsync(
+                        socket,
+                        "handoff.result",
+                        result.RequestId,
+                        result.HandoffId,
+                        cancellationToken);
                 }
                 else if (type is "chatgpt.context.list.response" or "chatgpt.context.current.response")
                 {
@@ -1441,6 +1494,12 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                         targetTabId: response.TargetTabId);
                     try { AssistantResponseReceived?.Invoke(this, new BrowserExtensionAssistantResponseEventArgs(response)); }
                     catch (Exception) { }
+                    await SendDeliveryAckAsync(
+                        socket,
+                        "assistant.response",
+                        response.RequestId,
+                        response.HandoffId,
+                        cancellationToken);
                 }
                 else if (type == "review.media.result")
                 {
@@ -1528,6 +1587,31 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         }
     }
 
+    private async Task SendDeliveryAckAsync(
+        WebSocket socket,
+        string deliveryType,
+        string requestId,
+        string handoffId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await SendJsonAsync(socket, new
+            {
+                type = "bridge.delivery.ack",
+                delivery_type = deliveryType,
+                request_id = requestId,
+                handoff_id = handoffId,
+                status = "received",
+            }, cancellationToken);
+        }
+        catch (Exception)
+        {
+            // The Extension keeps the envelope when this acknowledgement is
+            // lost and retries it on the next authenticated socket.
+        }
+    }
+
     private static async Task CloseSocketAsync(
         WebSocket socket,
         WebSocketCloseStatus closeStatus,
@@ -1551,18 +1635,20 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private void RemoveClient(WebSocket socket)
     {
         var removed = false;
+        long disconnectedGeneration = 0;
         lock (_clientGate)
         {
             if (ReferenceEquals(_clientSocket, socket))
             {
                 _clientSocket = null;
+                disconnectedGeneration = ++_clientGeneration;
                 removed = true;
             }
         }
 
         if (removed && _serverCts is { IsCancellationRequested: false })
         {
-            FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。");
+            SchedulePendingHandoffFailure(disconnectedGeneration);
             FailPendingMediaAttachments(BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。");
             FailPendingChatGptContextRequests("Browser Extension Bridgeとの接続が終了しました。");
             PublishStatus(CreateStatus(
@@ -1577,6 +1663,31 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 pairingCodeExpiresAt: _pairingCodeExpiresAt));
             PublishDiagnostic("bridge disconnected", status: Status.ConnectionStateText);
         }
+    }
+
+    private void SchedulePendingHandoffFailure(long disconnectedGeneration)
+    {
+        _ = FailPendingHandoffsAfterReconnectGraceAsync(disconnectedGeneration);
+    }
+
+    private async Task FailPendingHandoffsAfterReconnectGraceAsync(long disconnectedGeneration)
+    {
+        var serverToken = _serverCts?.Token ?? CancellationToken.None;
+        try
+        {
+            await Task.Delay(BridgeReconnectGrace, serverToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        lock (_clientGate)
+        {
+            if (_clientSocket is not null || _clientGeneration != disconnectedGeneration) return;
+        }
+
+        FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, "Browser Extension Bridgeとの接続が終了しました。");
     }
 
     private bool IsCurrentClient(WebSocket socket)
@@ -2084,6 +2195,23 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             && uri.IsDefaultPort;
     }
 
+    private static string? ConversationIdFromUrl(string value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || !IsChatGptUrl(value)) return null;
+
+        var segments = uri.AbsolutePath
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var index = 0; index < segments.Length - 1; index++)
+        {
+            if (!string.Equals(segments[index], "c", StringComparison.OrdinalIgnoreCase)) continue;
+            var conversationId = Uri.UnescapeDataString(segments[index + 1]);
+            return IsSafeIdentifier(conversationId) ? conversationId : null;
+        }
+
+        return null;
+    }
+
     private static bool TryParseMediaAttachResult(
         string text,
         out BrowserExtensionMediaAttachResult result,
@@ -2537,7 +2665,35 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 return false;
             }
 
-            response = new(requestId, sessionId, handoffId, boundaryId, status, payload, errorCode, message, stage, targetTabId, targetTabUrl);
+            var targetConversationId = GetString(root, "target_conversation_id");
+            if (targetConversationId is { } conversationId && !IsSafeIdentifier(conversationId))
+            {
+                error = "invalid_assistant_response";
+                return false;
+            }
+
+            var targetConversationUrl = GetString(root, "target_conversation_url");
+            if (targetConversationUrl is { Length: > 2048 }
+                || (targetConversationUrl is not null && !IsChatGptUrl(targetConversationUrl)))
+            {
+                error = "invalid_assistant_response";
+                return false;
+            }
+
+            response = new(
+                requestId,
+                sessionId,
+                handoffId,
+                boundaryId,
+                status,
+                payload,
+                errorCode,
+                message,
+                stage,
+                targetTabId,
+                targetTabUrl,
+                targetConversationId,
+                targetConversationUrl);
             return true;
         }
         catch (JsonException)

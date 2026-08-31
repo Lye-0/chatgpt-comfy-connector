@@ -283,7 +283,7 @@ public sealed record BrowserExtensionMediaAttachRequest(
     string FileName,
     string MimeType,
     long Size,
-    int TargetTabId,
+    int? TargetTabId = null,
     string? TargetTabUrl = null,
     string? TargetConversationId = null,
     string? TargetConversationUrl = null,
@@ -318,7 +318,9 @@ public sealed record BrowserExtensionAssistantResponse(
     string? Message = null,
     string? Stage = null,
     int? TargetTabId = null,
-    string? TargetTabUrl = null)
+    string? TargetTabUrl = null,
+    string? TargetConversationId = null,
+    string? TargetConversationUrl = null)
 {
     public bool IsReceived => string.Equals(Status, "received", StringComparison.Ordinal);
 }

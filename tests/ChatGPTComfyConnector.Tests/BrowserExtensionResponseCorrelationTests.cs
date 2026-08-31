@@ -224,9 +224,11 @@ public sealed class BrowserExtensionResponseCorrelationTests
     }
 
     [Fact]
-    public void ReviewResponseFromAnotherConversationIsRejectedBySavedTarget()
+    public void ReviewResponseFromTheSameConversationSurvivesManagedTabReplacement()
     {
         var session = CreateSession("session-review-target");
+        session.ConversationId = "fixture";
+        session.ConversationUrl = "https://chatgpt.com/c/fixture";
         session.BrowserExtensionTargetTabId = 42;
         session.BrowserExtensionTargetTabUrl = "https://chatgpt.com/c/fixture";
         var pending = PendingHandoffFactory.CreateReview(session, [], "complete");
@@ -240,9 +242,38 @@ public sealed class BrowserExtensionResponseCorrelationTests
             pending.HandoffId,
             pending.BoundaryId,
             "received",
-            "response payload",
+            $"```connector-command\n{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"complete\",\"handoff_id\":\"{pending.HandoffId}\",\"session_id\":\"{pending.SessionId}\",\"reason\":\"approved\"}}\n```",
             TargetTabId: 99,
-            TargetTabUrl: "https://chatgpt.com/c/another");
+            TargetTabUrl: "https://chatgpt.com/c/fixture",
+            TargetConversationId: "fixture",
+            TargetConversationUrl: "https://chatgpt.com/c/fixture");
+
+        var result = BrowserExtensionResponseCorrelation.Validate(response, session);
+
+        Assert.True(result.IsValid);
+        Assert.Equal("complete", result.ProtocolResult?.Command?.Action);
+    }
+
+    [Fact]
+    public void ReviewResponseFromAnotherConversationIsRejectedByConversationIdentity()
+    {
+        var session = CreateSession("session-review-target-mismatch");
+        session.ConversationId = "fixture";
+        session.ConversationUrl = "https://chatgpt.com/c/fixture";
+        var pending = PendingHandoffFactory.CreateReview(session, [], "complete");
+        session.PendingHandoff = pending;
+        pending.LastBrowserExtensionRequestId = "review-request-target-mismatch";
+        session.HandoffMessages.Add(SentMessage(pending, HandoffMessageKind.ReviewRequest));
+
+        var response = new BrowserExtensionAssistantResponse(
+            pending.LastBrowserExtensionRequestId,
+            session.Id,
+            pending.HandoffId,
+            pending.BoundaryId,
+            "received",
+            $"```connector-command\n{{\"protocol\":\"{ConnectorProtocol.Version}\",\"action\":\"complete\",\"handoff_id\":\"{pending.HandoffId}\",\"session_id\":\"{pending.SessionId}\",\"reason\":\"approved\"}}\n```",
+            TargetConversationId: "another",
+            TargetConversationUrl: "https://chatgpt.com/c/another");
 
         var result = BrowserExtensionResponseCorrelation.Validate(response, session);
 

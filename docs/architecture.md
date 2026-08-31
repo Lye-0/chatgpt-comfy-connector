@@ -14,8 +14,8 @@ WPF Desktop
        └─ BrowserExtensionBridge: loopback HTTP/WebSocket transport
 
 Chromium Browser Extension (Manifest V3)
-  ├─ Content Script: status-only page placeholder
-  └─ Background Service Worker: Bridge health, pairing/bootstrap, WebSocket, state, ping
+  ├─ Content Script: ChatGPT DOM input, attachment, and response observation
+  └─ Background Service Worker: Bridge health, pairing/bootstrap, WebSocket, state, ping, managed-tab lifecycle
 ```
 
 ## Project / Chat context providers
@@ -294,7 +294,7 @@ The app does not call ComfyUI management tools such as model download, node inst
 
 ## Browser Extension Bridge
 
-v0.2 Phase 1–4 adds a local transport boundary and a narrow ChatGPT Handoff /
+v0.2 Phase 1–5.2 adds a local transport boundary and a narrow ChatGPT Handoff /
 Response path for the Chromium Extension. The
 Core `IBrowserExtensionBridge` contract and shared state/message models are
 implemented by `Infrastructure/Bridge/BrowserExtensionBridge`. The server uses
@@ -303,6 +303,27 @@ the built-in .NET `HttpListener` WebSocket upgrade and binds only to
 endpoint. `App.xaml.cs` is the manual composition root and injects one Bridge
 instance into `MainWindow` / `MainViewModel`, so the listener starts with the
 Desktop initialization and stops on the close/exit path.
+
+The Background service worker owns one inactive Managed ChatGPT Tab for all
+execution operations. Conversation ID/URL is the durable target identity and
+the tab is only a replaceable browser medium. Project/Chat metadata discovery
+uses a separate inactive Collector Tab, which is created only for the bounded
+sidebar scan and is never used to send a Handoff or observe an assistant
+response. Before `handoff.send`, the
+Background requires Content Script, Conversation, Composer, and shared
+assistant-response watcher readiness. The watcher is pre-registered with the
+current Handoff IDs, records the existing assistant-message baseline, and
+anchors only to the new marker-bearing user message. Initial Handoff, media
+attachment, Review Handoff, and resumed/next-iteration work reuse this same
+managed route; a foreground tab is never selected as a fallback.
+
+When navigation or tab closure replaces the Content Script, the Background
+retains bounded correlation metadata, recreates/rebinds an inactive tab from
+the same Conversation identity, and re-arms the watcher. It may recover an
+accepted send after a lost message-channel response, but it never resends the
+same Handoff solely because the tab or Bridge connection changed. Authenticated
+Handoff and assistant-response envelopes remain queued until Desktop receipt is
+acknowledged.
 
 The protocol has metadata-only `GET /health`, one-time `POST /api/v1/pair`,
 credential-gated `POST /api/v1/bootstrap`, token-gated `POST /api/v1/ping`, and
@@ -314,12 +335,13 @@ credential bootstraps a new short-lived process session token, which is then
 used for the WebSocket hello. The Desktop sends `hello.ack` and one
 `desktop.ready` event; the Extension sends `ping` and receives `pong`. Phase 2
 adds an authenticated `handoff.send` message carrying the exact Bootstrap
-Handoff text and a correlated `handoff.result` response. The Background checks
-only the active, last-focused `https://chatgpt.com/*` tab and relays the request
-to its Content Script; DOM discovery and mutation remain outside the
-Background. The Content Script uses separate textarea/contenteditable editor
-paths, waits for the Send control to become enabled, and confirms a new user
-message containing the current Handoff identifiers before returning `sent`.
+Handoff text and a correlated `handoff.result` response. The Background owns
+one inactive Managed `https://chatgpt.com/*` tab and resolves it from the
+bound Conversation ID/URL; it never uses the user's foreground tab as an
+execution target. DOM discovery and mutation remain outside the Background.
+The Content Script uses separate textarea/contenteditable editor paths, waits
+for the Send control to become enabled, and confirms a new user message
+containing the current Handoff identifiers before returning `sent`.
 Unknown messages are rejected and the Extension has no arbitrary workflow,
 MCP, filesystem, or process command surface. Phase 4's `generate` and
 `complete` actions are accepted only after Desktop-side correlation and strict
@@ -382,12 +404,13 @@ Conversation URLs/IDs are copied into the `CreationSession` binding at start.
 
 After a Session starts, selector changes affect only the next draft and never
 retarget its Handoff, media attachment, Review, or Resume. The Background
-routes an existing bound conversation by conversation ID/URL, searches open
-ChatGPT tabs first, and opens only the exact saved conversation URL when a
-tab must be recovered. A new-chat target continues to use the active ChatGPT
-tab until ChatGPT creates its conversation URL, which is then returned in the
-sent result and persisted by Desktop. The Bridge validates all returned IDs
-and ChatGPT URLs; no credentials, tokens, body text, or arbitrary navigation
+routes an existing bound conversation by conversation ID/URL through its one
+inactive Managed ChatGPT Tab. If that tab must be recovered, it opens only the
+exact saved conversation URL; it never searches for or borrows the user's
+foreground tab. A new-chat target uses the managed project/root URL until
+ChatGPT creates its conversation URL, which is then returned in the sent
+result and persisted by Desktop. The Bridge validates all returned IDs and
+ChatGPT URLs; no credentials, tokens, body text, or arbitrary navigation
 commands are included in the context protocol.
 
 ## UI direction
@@ -409,7 +432,7 @@ Creative intensity is concentrated in the production surface: session idea, work
   `src/ChatGPTComfyConnector.Infrastructure/Storage/PortableStore.cs`, and
   `docs/browser-extension-bridge.md` — local Extension transport,
   pairing/bootstrap authentication, Handoff delivery envelope, persistence,
-  active-tab routing, and lifecycle.
+  Managed-Tab routing, Conversation identity, and lifecycle.
 - `tests/ChatGPTComfyConnector.Tests/CreationPipelineStateMachineTests.cs`,
   `ProtocolTests.cs`, and `SessionAndStorageTests.cs` — state, protocol, provider,
   persistence, and compatibility behavior.

@@ -7,13 +7,15 @@ import { dirname, join } from "node:path";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const source = (await readFile(join(repositoryRoot, "browser-extension", "background.js"), "utf8"))
-  .replace("ensureReconnectAlarm();\nconnect().catch(() => {});", "");
+  .replace("ensureReconnectAlarm();\nconnect().catch(() => {});", "")
+  .replace("const HANDOFF_ACCEPTANCE_RETRY_DELAY_MS = 500;", "const HANDOFF_ACCEPTANCE_RETRY_DELAY_MS = 5;");
 
 const wait = (milliseconds = 0) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function createHarness() {
   let activeTabs = [];
   const tabsById = new Map();
+  const managedStorageValues = {};
   let contentResponse = null;
   let contentError = null;
   let mediaResponse = null;
@@ -21,10 +23,37 @@ async function createHarness() {
   let lastSocket = null;
   let keepaliveCallback = null;
   let keepaliveDelay = null;
+  let scriptInjectionCount = 0;
   const runtimeListeners = [];
   const createdTabs = [];
+  const updatedTabs = [];
   const tabUpdatedListeners = new Set();
+  const tabRemovedListeners = new Set();
   let nextCreatedTabStatus;
+
+  function conversationIdFromUrl(url) {
+    const match = String(url || "").match(/\/c\/([^/?#]+)/i);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  function executionReadyFixture(message) {
+    const tab = tabsById.get(message.targetTabId);
+    const url = message.expectedConversationUrl || tab?.url || "https://chatgpt.com/";
+    const conversationId = message.expectedConversationId || conversationIdFromUrl(url);
+    return {
+      request_id: message.requestId || "",
+      session_id: message.sessionId || "",
+      handoff_id: message.handoffId || "",
+      boundary_id: message.boundaryId || "",
+      status: "ready",
+      stage: "conversation_ready",
+      composer_ready: true,
+      current_context: {
+        ...(conversationId ? { conversation_id: conversationId } : {}),
+        url
+      }
+    };
+  }
 
   class FakeWebSocket {
     static OPEN = 1;
@@ -43,6 +72,13 @@ async function createHarness() {
 
   const chrome = {
     storage: {
+      session: {
+        async get(key) {
+          if (typeof key === "string") return { [key]: managedStorageValues[key] };
+          return { ...managedStorageValues };
+        },
+        async set(value) { Object.assign(managedStorageValues, value); }
+      },
       local: {
         async get() { return {}; },
         async set() {}
@@ -55,21 +91,50 @@ async function createHarness() {
         if (!tab) throw new Error(`No tab with id: ${tabId}`);
         return tab;
       },
-      async create({ url }) {
-        const tab = { id: 100 + createdTabs.length, url, active: true, status: nextCreatedTabStatus };
+      async create({ url, active = true }) {
+        const tab = { id: 100 + createdTabs.length, url, active, status: nextCreatedTabStatus };
         createdTabs.push(tab);
         tabsById.set(tab.id, tab);
-        activeTabs = [tab, ...activeTabs.map((item) => ({ ...item, active: false }))];
+        activeTabs = active
+          ? [tab, ...activeTabs.map((item) => ({ ...item, active: false }))]
+          : [...activeTabs, tab];
         return tab;
+      },
+      async update(tabId, changes = {}) {
+        const tab = tabsById.get(tabId);
+        assert.ok(tab, `Tab ${tabId} should exist before updating it`);
+        Object.assign(tab, changes);
+        updatedTabs.push({ tabId, changes: { ...changes } });
+        if (changes.active === true) activeTabs = activeTabs.map((item) => ({ ...item, active: item.id === tabId }));
+        if (changes.active === false) tab.active = false;
+        for (const listener of tabUpdatedListeners) listener(tabId, { status: tab.status || "complete", ...changes }, tab);
+        return tab;
+      },
+      async remove(tabId) {
+        const tab = tabsById.get(tabId);
+        if (!tab) throw new Error(`No tab with id: ${tabId}`);
+        tabsById.delete(tabId);
+        activeTabs = activeTabs.filter((item) => item.id !== tabId);
+        for (const listener of tabRemovedListeners) listener(tabId, { windowId: 1, isWindowClosing: false });
       },
       async sendMessage(tabId, message) {
         assert.ok(tabsById.has(tabId), `Message target ${tabId} should exist`);
         if (contentError) throw contentError;
-        return contentResponse(message);
+        return contentResponse?.(message) || {};
       },
       onUpdated: {
         addListener(listener) { tabUpdatedListeners.add(listener); },
         removeListener(listener) { tabUpdatedListeners.delete(listener); }
+      },
+      onRemoved: {
+        addListener(listener) { tabRemovedListeners.add(listener); },
+        removeListener(listener) { tabRemovedListeners.delete(listener); }
+      }
+    },
+    scripting: {
+      async executeScript() {
+        scriptInjectionCount += 1;
+        contentError = null;
       }
     },
     runtime: {
@@ -118,7 +183,7 @@ async function createHarness() {
         headers: { get() { return null; } }
       };
     },
-    console
+    console: { info() {}, warn() {}, error() {}, log() {} }
   });
   new Script(source).runInContext(context);
 
@@ -146,12 +211,29 @@ async function createHarness() {
     get socket() { return lastSocket; },
     setActiveTabs(value) {
       activeTabs = value;
-      tabsById.clear();
       for (const tab of value) if (tab?.id !== undefined) tabsById.set(tab.id, tab);
     },
     setContentHandler(handler) {
       contentError = null;
-      contentResponse = handler;
+      contentResponse = async (message) => {
+        const result = await handler?.(message);
+        if (message?.type === "CHATGPT_EXECUTION_READY") {
+          if (result?.status === "error") return result;
+          return result?.status === "ready"
+            ? { ...executionReadyFixture(message), ...result }
+            : executionReadyFixture(message);
+        }
+        if (message?.type === "WATCH_ASSISTANT_RESPONSE" && result?.status === "watching") {
+          return {
+            request_id: message.requestId,
+            session_id: message.sessionId,
+            handoff_id: message.handoffId,
+            boundary_id: message.boundaryId,
+            ...result
+          };
+        }
+        return result;
+      };
     },
     setContentError(error) {
       contentError = error;
@@ -165,7 +247,40 @@ async function createHarness() {
       tab.status = status;
       for (const listener of tabUpdatedListeners) listener(tabId, { status }, tab);
     },
+    setTabUrl(tabId, url) {
+      const tab = tabsById.get(tabId);
+      assert.ok(tab, `Tab ${tabId} should exist before updating its URL`);
+      tab.url = url;
+      for (const listener of tabUpdatedListeners) listener(tabId, { status: "complete", url }, tab);
+    },
+    removeTab(tabId) {
+      tabsById.delete(tabId);
+      activeTabs = activeTabs.filter((tab) => tab.id !== tabId);
+      for (const listener of tabRemovedListeners) listener(tabId, { windowId: 1, isWindowClosing: false });
+    },
     get createdTabs() { return createdTabs; },
+    get updatedTabs() { return updatedTabs; },
+    get managedTabId() { return context.managedTabState?.tabId ?? createdTabs.at(-1)?.id ?? null; },
+    async openAuthenticatedSocket(token = "session-reconnected") {
+      const socketPromise = context.openSocket(token);
+      await wait();
+      assert.ok(lastSocket);
+      lastSocket.onmessage({ data: JSON.stringify({
+        type: "hello.ack",
+        protocol: "chatgpt-comfy-connector.bridge/1"
+      }) });
+      await socketPromise;
+      return lastSocket;
+    },
+    async notifyRuntimeMessage(message, sender) {
+      const listener = runtimeListeners.at(-1);
+      assert.ok(listener, "Background runtime listener should be registered");
+      const effectiveSender = sender || { tab: { id: this.managedTabId ?? 17 } };
+      return await new Promise((resolve) => {
+        const returned = listener(message, effectiveSender, resolve);
+        if (returned !== true) resolve(returned);
+      });
+    },
     setMediaResponse(response) {
       if (response?.error) {
         mediaResponse = { error: response.error };
@@ -204,6 +319,7 @@ async function createHarness() {
       };
     },
     get fetchCalls() { return fetchCalls; },
+    get scriptInjectionCount() { return scriptInjectionCount; },
     triggerKeepalive() {
       assert.ok(keepaliveCallback, "Background did not start a WebSocket keepalive");
       keepaliveCallback();
@@ -240,6 +356,8 @@ const reviewHandoffRequest = {
   handoff_kind: "review",
   target_tab_id: 42,
   target_tab_url: "https://chatgpt.com/c/fixture",
+  target_conversation_id: "fixture",
+  target_conversation_url: "https://chatgpt.com/c/fixture",
   review_media_id: "review-media-fixture",
   review_file_name: "MiniMax_H3_00015_.mp4",
   review_iteration: 2,
@@ -256,7 +374,9 @@ const reviewMediaRequest = {
   mime_type: "video/mp4",
   size: 100000,
   target_tab_id: 42,
-  target_tab_url: "https://chatgpt.com/c/fixture"
+  target_tab_url: "https://chatgpt.com/c/fixture",
+  target_conversation_id: "fixture",
+  target_conversation_url: "https://chatgpt.com/c/fixture"
 };
 
 test("Background keeps an MV3 WebSocket alive below the service-worker idle limit", async () => {
@@ -271,12 +391,12 @@ test("Background keeps an MV3 WebSocket alive below the service-worker idle limi
   assert.match(keepalive.id, /^keepalive-/);
 });
 
-test("Background relays a Handoff to the active ChatGPT tab and returns sent", async () => {
+test("Background uses one inactive Managed ChatGPT Tab instead of the foreground tab", async () => {
   const harness = await createHarness();
-  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
-  let relayedMessage;
+  harness.setActiveTabs([{ id: 17, url: "https://example.invalid/", active: true }]);
+  const relayedMessages = [];
   harness.setContentHandler((message) => {
-    relayedMessage = message;
+    relayedMessages.push(message);
     if (message.type === "WATCH_ASSISTANT_RESPONSE") {
       return {
         request_id: request.request_id,
@@ -302,9 +422,18 @@ test("Background relays a Handoff to the active ChatGPT tab and returns sent", a
   assert.equal(result.request_id, request.request_id);
   assert.equal(result.handoff_id, request.handoff_id);
   assert.equal(result.status, "sent");
-  assert.equal(relayedMessage.type, "WATCH_ASSISTANT_RESPONSE");
-  assert.equal(relayedMessage.sessionId, request.session_id);
-  assert.equal(relayedMessage.boundaryId, request.boundary_id);
+  const managedTab = harness.createdTabs[0];
+  assert.equal(managedTab.active, false);
+  assert.equal(managedTab.url, "https://chatgpt.com/");
+  assert.equal(harness.managedTabId, managedTab.id);
+  assert.equal(harness.createdTabs.length, 1);
+  const watchMessage = relayedMessages.find((message) => message.type === "WATCH_ASSISTANT_RESPONSE");
+  const handoffMessage = relayedMessages.find((message) => message.type === "HANDOFF_SEND");
+  assert.equal(watchMessage.sessionId, request.session_id);
+  assert.equal(watchMessage.boundaryId, request.boundary_id);
+  assert.equal(watchMessage.targetTabId, managedTab.id);
+  assert.equal(watchMessage.prepare, true);
+  assert.equal(handoffMessage.targetTabId, undefined);
 });
 
 test("Background arms the response watcher before acknowledging a fast assistant response", async () => {
@@ -324,7 +453,7 @@ test("Background arms the response watcher before acknowledging a fast assistant
         status: "received",
         payload: "response payload",
         stage: "assistant_response_complete"
-      }, { tab: { id: 17 } });
+      }, { tab: { id: 100 } });
       return {
         request_id: request.request_id,
         session_id: request.session_id,
@@ -352,6 +481,463 @@ test("Background arms the response watcher before acknowledging a fast assistant
   assert.ok(responseIndex >= 0, "The fast response should be relayed");
   assert.ok(handoffIndex >= 0, "The handoff result should be relayed");
   assert.ok(responseIndex < handoffIndex, "The watcher must be armed before handoff.result");
+});
+
+test("Background does not send a Handoff until the pre-send watcher is ready", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  let releaseWatcher;
+  const watcherResult = new Promise((resolve) => { releaseWatcher = resolve; });
+  let watcherRequested = false;
+  harness.setContentHandler((message) => {
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      watcherRequested = true;
+      return watcherResult;
+    }
+    return {
+      request_id: request.request_id,
+      handoff_id: request.handoff_id,
+      status: "sent",
+      stage: "user_message_correlated"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  for (let attempt = 0; attempt < 50 && !watcherRequested; attempt += 1) await wait(5);
+  assert.equal(watcherRequested, true);
+  await wait(20);
+  assert.equal(harness.socket.sent.some((message) => message.type === "handoff.result"), false);
+  releaseWatcher({
+    request_id: request.request_id,
+    session_id: request.session_id,
+    handoff_id: request.handoff_id,
+    boundary_id: request.boundary_id,
+    status: "watching"
+  });
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+  assert.equal(harness.socket.sent.filter((message) => message.type === "handoff.result").length, 1);
+});
+
+test("Background completes a Handoff from Content Script confirmation when the send response is delayed", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => {
+    if (message.type === "HANDOFF_SEND") {
+      return new Promise((resolve) => setTimeout(() => resolve({
+        request_id: request.request_id,
+        handoff_id: request.handoff_id,
+        status: "sent",
+        stage: "user_message_correlated"
+      }), 100));
+    }
+    return {
+      request_id: request.request_id,
+      session_id: request.session_id,
+      handoff_id: request.handoff_id,
+      boundary_id: request.boundary_id,
+      status: "watching"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await wait(10);
+  const confirmation = await harness.notifyRuntimeMessage({
+    type: "HANDOFF_SEND_CONFIRMED",
+    requestId: request.request_id,
+    sessionId: request.session_id,
+    handoffId: request.handoff_id,
+    boundaryId: request.boundary_id,
+    status: "sent",
+    stage: "user_message_correlated"
+  });
+  assert.equal(confirmation.ok, true);
+
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+  assert.equal(result.stage, "user_message_correlated");
+  assert.equal(harness.socket.sent.filter((message) => message.type === "handoff.result").length, 1);
+});
+
+test("Background binds a new Conversation after the early send confirmation", async () => {
+  const harness = await createHarness();
+  const newConversationRequest = {
+    ...request,
+    request_id: "request-new-conversation-bind",
+    handoff_id: "handoff-new-conversation-bind",
+    boundary_id: "boundary-new-conversation-bind",
+    new_conversation: true,
+    target_project_url: "https://chatgpt.com/"
+  };
+  harness.setContentHandler((message) => {
+    if (message.type === "HANDOFF_SEND") {
+      return new Promise((resolve) => setTimeout(() => resolve({
+        request_id: newConversationRequest.request_id,
+        session_id: newConversationRequest.session_id,
+        handoff_id: newConversationRequest.handoff_id,
+        boundary_id: newConversationRequest.boundary_id,
+        status: "sent",
+        stage: "user_message_correlated",
+        current_context: {
+          conversation_id: "conversation-created",
+          url: "https://chatgpt.com/c/conversation-created"
+        }
+      }), 100));
+    }
+    return {
+      request_id: newConversationRequest.request_id,
+      session_id: newConversationRequest.session_id,
+      handoff_id: newConversationRequest.handoff_id,
+      boundary_id: newConversationRequest.boundary_id,
+      status: "watching"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(newConversationRequest, harness.socket);
+  await wait(10);
+  const confirmation = await harness.notifyRuntimeMessage({
+    type: "HANDOFF_SEND_CONFIRMED",
+    requestId: newConversationRequest.request_id,
+    sessionId: newConversationRequest.session_id,
+    handoffId: newConversationRequest.handoff_id,
+    boundaryId: newConversationRequest.boundary_id,
+    status: "sent",
+    stage: "user_message_correlated",
+    current_context: {
+      url: "https://chatgpt.com/"
+    }
+  });
+  assert.equal(confirmation.ok, true);
+
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+  assert.equal(result.target_conversation_id, "conversation-created");
+  assert.equal(result.target_conversation_url, "https://chatgpt.com/c/conversation-created");
+});
+
+test("Background retries acceptance after a new-tab DOM hydration gap without reposting the Handoff", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  let handoffCalls = 0;
+  let acceptanceChecks = 0;
+  harness.setContentHandler((message) => {
+    if (message.type === "HANDOFF_SEND") {
+      handoffCalls += 1;
+      if (handoffCalls === 1) return Promise.reject(new Error("Could not establish connection."));
+      // Model the original page context disappearing after ChatGPT accepted
+      // the post. The recovery path must win before this delayed response.
+      return new Promise((resolve) => setTimeout(() => resolve({
+        request_id: request.request_id,
+        handoff_id: request.handoff_id,
+        status: "error",
+        error_code: "content_script_unavailable",
+        stage: "content_script_timeout"
+      }), 100));
+    }
+    if (message.type === "CHECK_HANDOFF_SENT") {
+      acceptanceChecks += 1;
+      return acceptanceChecks === 1
+        ? {
+            request_id: request.request_id,
+            handoff_id: request.handoff_id,
+            status: "error",
+            error_code: "handoff_not_sent",
+            stage: "handoff_acceptance_not_found"
+          }
+        : {
+            request_id: request.request_id,
+            handoff_id: request.handoff_id,
+            status: "sent",
+            stage: "user_message_already_correlated"
+          };
+    }
+    return {
+      request_id: request.request_id,
+      session_id: request.session_id,
+      handoff_id: request.handoff_id,
+      boundary_id: request.boundary_id,
+      status: "watching"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await wait(15);
+  const ready = await harness.notifyRuntimeMessage({ type: "CONTENT_SCRIPT_READY" });
+  assert.equal(ready.ok, true);
+
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+  assert.equal(acceptanceChecks, 2);
+  assert.equal(handoffCalls, 2, "the second call is the pending original dispatch, not a recovery repost");
+  assert.equal(harness.socket.sent.filter((message) => message.type === "handoff.result").length, 1);
+
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: request.request_id,
+    sessionId: request.session_id,
+    handoffId: request.handoff_id,
+    boundaryId: request.boundary_id,
+    status: "received",
+    payload: "response payload",
+    stage: "assistant_response_complete"
+  }, { tab: { id: 100 } });
+  const response = await harness.waitForSocketMessage(previousCount, (message) => message.type === "assistant.response");
+  assert.equal(response.status, "received");
+  assert.equal(response.request_id, request.request_id);
+  assert.equal(response.handoff_id, request.handoff_id);
+});
+
+test("Background replies on the current Bridge socket even when hello acknowledgement bookkeeping is late", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
+    ? {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      }
+    : { request_id: request.request_id, handoff_id: request.handoff_id, status: "sent" });
+
+  // The Desktop can send the Handoff immediately after its server-side
+  // handshake. The current socket is already authenticated from the
+  // Background's perspective even if the local hello.ack flag has not been
+  // assigned yet.
+  new Script("acknowledgedSocket = null;").runInContext(harness.context);
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+  assert.equal(harness.socket.sent.filter((message) => message.type === "handoff.result").length, 1);
+});
+
+test("Background queues a Handoff ACK until a replacement Bridge socket is authenticated", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => {
+    if (message.type === "HANDOFF_SEND") {
+      // Model an MV3 socket replacement after ChatGPT accepted the user
+      // message but before the background worker can relay handoff.result.
+      new Script("manualDisconnect = true;").runInContext(harness.context);
+      harness.socket.close();
+      return {
+        request_id: request.request_id,
+        handoff_id: request.handoff_id,
+        status: "sent",
+        stage: "user_message_correlated"
+      };
+    }
+    return {
+      request_id: message.requestId,
+      session_id: message.sessionId,
+      handoff_id: message.handoffId,
+      boundary_id: message.boundaryId,
+      status: "watching"
+    };
+  });
+
+  const oldSocket = harness.socket;
+  harness.context.handleBridgeMessage(request, oldSocket);
+  await wait(20);
+  assert.equal(oldSocket.sent.some((message) => message.type === "handoff.result"), false);
+
+  const replacementSocket = await harness.openAuthenticatedSocket();
+  const result = await harness.waitForSocketMessage(0, (message) => message.type === "handoff.result");
+  assert.equal(replacementSocket, harness.socket);
+  assert.equal(result.request_id, request.request_id);
+  assert.equal(result.status, "sent");
+});
+
+test("Background retries a Handoff result that was sent to a stale socket", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
+    ? {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      }
+    : { request_id: request.request_id, handoff_id: request.handoff_id, status: "sent" });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+
+  // The server may have replaced this socket before the browser receives its
+  // close event. A local WebSocket send is therefore not an ACK.
+  const oldSocket = harness.socket;
+  new Script("manualDisconnect = true;").runInContext(harness.context);
+  oldSocket.close();
+
+  const replacementSocket = await harness.openAuthenticatedSocket();
+  const resent = await harness.waitForSocketMessage(0, (message) => message.type === "handoff.result");
+  assert.equal(replacementSocket, harness.socket);
+  assert.equal(resent.request_id, request.request_id);
+  assert.equal(resent.handoff_id, request.handoff_id);
+  assert.equal(resent.status, "sent");
+});
+
+test("Background removes a delivery only after the Desktop receipt ACK", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
+    ? {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      }
+    : { request_id: request.request_id, handoff_id: request.handoff_id, status: "sent" });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await harness.waitForResult(previousCount);
+  const oldSocket = harness.socket;
+  harness.context.handleBridgeMessage({
+    type: "bridge.delivery.ack",
+    delivery_type: "handoff.result",
+    request_id: request.request_id,
+    handoff_id: request.handoff_id,
+    status: "received"
+  }, oldSocket);
+  new Script("manualDisconnect = true;").runInContext(harness.context);
+  oldSocket.close();
+
+  const replacementSocket = await harness.openAuthenticatedSocket();
+  await wait(20);
+  assert.equal(replacementSocket.sent.some((message) => message.type === "handoff.result"), false);
+});
+
+test("Background queues an assistant response across a Bridge socket reconnect", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
+    ? {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      }
+    : { request_id: request.request_id, handoff_id: request.handoff_id, status: "sent" });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await harness.waitForResult(previousCount);
+  const oldSocket = harness.socket;
+  new Script("manualDisconnect = true;").runInContext(harness.context);
+  oldSocket.close();
+
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: request.request_id,
+    sessionId: request.session_id,
+    handoffId: request.handoff_id,
+    boundaryId: request.boundary_id,
+    status: "received",
+    payload: "response payload",
+    stage: "assistant_response_complete"
+  }, { tab: { id: 100 } });
+  await wait(20);
+  assert.equal(oldSocket.sent.filter((message) => message.type === "assistant.response").length, 0);
+
+  const replacementSocket = await harness.openAuthenticatedSocket();
+  const response = await harness.waitForSocketMessage(0, (message) => message.type === "assistant.response");
+  assert.equal(replacementSocket, harness.socket);
+  assert.equal(response.request_id, request.request_id);
+  assert.equal(response.payload, "response payload");
+});
+
+test("Background rearms a response watcher when a replacement Content Script is ready", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  let watchCalls = 0;
+  harness.setContentHandler((message) => {
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      watchCalls += 1;
+      if (watchCalls === 1) {
+        return {
+          request_id: request.request_id,
+          session_id: request.session_id,
+          handoff_id: request.handoff_id,
+          boundary_id: request.boundary_id,
+          status: "watching"
+        };
+      }
+      return {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      };
+    }
+    return {
+      request_id: request.request_id,
+      handoff_id: request.handoff_id,
+      status: "sent"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+  assert.equal(watchCalls, 1);
+
+  await harness.notifyRuntimeMessage({ type: "CONTENT_SCRIPT_READY" });
+  for (let attempt = 0; attempt < 20 && watchCalls < 2; attempt += 1) await wait(5);
+  assert.equal(watchCalls, 2);
+});
+
+test("Background suppresses a duplicate Handoff after the first user message was accepted", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/c/fixture" }]);
+  let handoffSendCount = 0;
+  harness.setContentHandler((message) => {
+    if (message.type === "HANDOFF_SEND") handoffSendCount += 1;
+    return message.type === "WATCH_ASSISTANT_RESPONSE"
+      ? {
+          request_id: message.requestId,
+          session_id: message.sessionId,
+          handoff_id: message.handoffId,
+          boundary_id: message.boundaryId,
+          status: "watching"
+        }
+      : {
+          request_id: message.requestId,
+          handoff_id: message.handoffId,
+          status: "sent"
+        };
+  });
+
+  const firstCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  const firstResult = await harness.waitForResult(firstCount);
+  assert.equal(firstResult.status, "sent");
+
+  const retry = {
+    ...request,
+    request_id: "request-fixture-retry"
+  };
+  const retryCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(retry, harness.socket);
+  const retryResult = await harness.waitForSocketMessage(retryCount, (message) =>
+    message.type === "handoff.result" && message.request_id === retry.request_id);
+
+  assert.equal(retryResult.status, "sent");
+  assert.equal(retryResult.request_id, retry.request_id);
+  assert.equal(retryResult.stage, "handoff_duplicate_suppressed");
+  assert.equal(handoffSendCount, 1);
 });
 
 test("Background reopens the exact bound conversation when its original tab is closed", async () => {
@@ -391,10 +977,10 @@ test("Background reopens the exact bound conversation when its original tab is c
   assert.equal(result.target_conversation_id, "conversation-saved");
   assert.equal(result.target_conversation_url, boundRequest.target_conversation_url);
   assert.deepEqual(harness.createdTabs.map((tab) => tab.url), [boundRequest.target_conversation_url]);
-  assert.equal(relayedMessages[0].type, "HANDOFF_SEND");
-  assert.equal(relayedMessages[0].requestId, boundRequest.request_id);
-  assert.equal(relayedMessages[1].type, "WATCH_ASSISTANT_RESPONSE");
-  assert.equal(relayedMessages[1].targetTabId, 100);
+  const handoffMessage = relayedMessages.find((message) => message.type === "HANDOFF_SEND");
+  const watchMessage = relayedMessages.find((message) => message.type === "WATCH_ASSISTANT_RESPONSE");
+  assert.equal(handoffMessage?.requestId, boundRequest.request_id);
+  assert.equal(watchMessage?.targetTabId, 100);
 });
 
 test("Background waits for a newly opened Conversation before dispatching the Handoff", async () => {
@@ -441,12 +1027,13 @@ test("Background waits for a newly opened Conversation before dispatching the Ha
   const result = await harness.waitForResult(previousCount);
   assert.equal(result.status, "sent");
   assert.deepEqual(harness.createdTabs.map((tab) => tab.url), [boundRequest.target_conversation_url]);
-  assert.equal(relayedMessages[0].type, "HANDOFF_SEND");
-  assert.equal(relayedMessages[1].type, "WATCH_ASSISTANT_RESPONSE");
-  assert.equal(relayedMessages[1].targetTabId, 100);
+  const handoffMessage = relayedMessages.find((message) => message.type === "HANDOFF_SEND");
+  const watchMessage = relayedMessages.find((message) => message.type === "WATCH_ASSISTANT_RESPONSE");
+  assert.equal(handoffMessage?.requestId, boundRequest.request_id);
+  assert.equal(watchMessage?.targetTabId, 100);
 });
 
-test("Background sends a Review Handoff only to its saved target tab and preserves its attachment metadata", async () => {
+test("Background sends a Review Handoff through the Managed Tab and preserves its attachment metadata", async () => {
   const harness = await createHarness();
   harness.setActiveTabs([
     { id: 7, url: "https://example.invalid/" },
@@ -478,8 +1065,9 @@ test("Background sends a Review Handoff only to its saved target tab and preserv
   const result = await harness.waitForResult(previousCount);
 
   assert.equal(result.status, "sent");
-  assert.equal(result.target_tab_id, reviewHandoffRequest.target_tab_id);
+  assert.equal(result.target_tab_id, harness.managedTabId);
   assert.equal(result.target_tab_url, reviewHandoffRequest.target_tab_url);
+  assert.equal(harness.createdTabs[0].active, false);
   const handoffMessage = relayedMessages.find((message) => message.type === "HANDOFF_SEND");
   assert.equal(handoffMessage.type, "HANDOFF_SEND");
   assert.equal(handoffMessage.requestId, reviewHandoffRequest.request_id);
@@ -494,6 +1082,8 @@ test("Background sends a Review Handoff only to its saved target tab and preserv
   assert.equal(handoffMessage.expectedAttachment.iteration, reviewHandoffRequest.review_iteration);
   const watchMessage = relayedMessages.find((message) => message.type === "WATCH_ASSISTANT_RESPONSE");
   assert.equal(watchMessage.review, true);
+  assert.equal(watchMessage.prepare, true);
+  assert.equal(watchMessage.targetTabId, harness.managedTabId);
 
   harness.context.handleAssistantResponseFromContent({
     type: "ASSISTANT_RESPONSE_RESULT",
@@ -504,9 +1094,9 @@ test("Background sends a Review Handoff only to its saved target tab and preserv
     status: "received",
     payload: "review response",
     stage: "assistant_response_complete"
-  }, { tab: { id: reviewHandoffRequest.target_tab_id } });
-  const response = await harness.waitForSocketMessage(previousCount + 1, (message) => message.type === "assistant.response");
-  assert.equal(response.target_tab_id, reviewHandoffRequest.target_tab_id);
+  }, { tab: { id: harness.managedTabId } });
+  const response = await harness.waitForSocketMessage(previousCount, (message) => message.type === "assistant.response");
+  assert.equal(response.target_tab_id, harness.managedTabId);
   assert.equal(response.target_tab_url, reviewHandoffRequest.target_tab_url);
 });
 
@@ -527,7 +1117,7 @@ test("Background preserves Review response correlation when it arrives during wa
         status: "received",
         payload: "review response",
         stage: "assistant_response_complete"
-      }, { tab: { id: reviewHandoffRequest.target_tab_id } });
+      }, { tab: { id: harness.managedTabId } });
       return {
         request_id: reviewHandoffRequest.request_id,
         session_id: reviewHandoffRequest.session_id,
@@ -554,11 +1144,11 @@ test("Background preserves Review response correlation when it arrives during wa
   assert.equal(response.session_id, reviewHandoffRequest.session_id);
   assert.equal(response.handoff_id, reviewHandoffRequest.handoff_id);
   assert.equal(response.boundary_id, reviewHandoffRequest.boundary_id);
-  assert.equal(response.target_tab_id, reviewHandoffRequest.target_tab_id);
+  assert.equal(response.target_tab_id, harness.managedTabId);
   assert.equal(response.target_tab_url, reviewHandoffRequest.target_tab_url);
 });
 
-test("Background rejects a Review response after the saved target tab navigates away", async () => {
+test("Background rejects a Review response after the Managed Tab navigates away", async () => {
   const harness = await createHarness();
   harness.setActiveTabs([{ id: reviewHandoffRequest.target_tab_id, url: reviewHandoffRequest.target_tab_url }]);
   harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
@@ -581,7 +1171,7 @@ test("Background rejects a Review response after the saved target tab navigates 
 
   // The service worker must re-check the URL at response time because the
   // same tab can navigate between the Review send and the assistant result.
-  harness.setActiveTabs([{ id: reviewHandoffRequest.target_tab_id, url: "https://chatgpt.com/c/another-conversation" }]);
+  harness.setTabUrl(harness.managedTabId, "https://chatgpt.com/c/another-conversation");
   harness.context.handleAssistantResponseFromContent({
     type: "ASSISTANT_RESPONSE_RESULT",
     requestId: reviewHandoffRequest.request_id,
@@ -590,13 +1180,13 @@ test("Background rejects a Review response after the saved target tab navigates 
     boundaryId: reviewHandoffRequest.boundary_id,
     status: "received",
     payload: "response from another conversation"
-  }, { tab: { id: reviewHandoffRequest.target_tab_id } });
+  }, { tab: { id: harness.managedTabId } });
 
-  const response = await harness.waitForSocketMessage(previousCount + 1, (message) => message.type === "assistant.response");
+  const response = await harness.waitForSocketMessage(previousCount, (message) => message.type === "assistant.response");
   assert.equal(response.status, "error");
   assert.equal(response.error_code, "review_target_tab_not_found");
   assert.equal(response.stage, "target_tab_check");
-  assert.equal(response.target_tab_id, reviewHandoffRequest.target_tab_id);
+  assert.equal(response.target_tab_id, harness.managedTabId);
   assert.equal(response.target_tab_url, reviewHandoffRequest.target_tab_url);
 });
 
@@ -627,8 +1217,10 @@ test("Background relays a correlated assistant response without parsing its payl
   const previousCount = harness.socket.sent.length;
   harness.context.handleBridgeMessage(request, harness.socket);
   await harness.waitForResult(previousCount);
-  assert.equal(relayedMessages.length, 2);
-  assert.equal(relayedMessages[1].type, "WATCH_ASSISTANT_RESPONSE");
+  assert.equal(relayedMessages.length, 3);
+  assert.ok(relayedMessages.some((message) => message.type === "CHATGPT_EXECUTION_READY"));
+  assert.ok(relayedMessages.some((message) => message.type === "WATCH_ASSISTANT_RESPONSE"));
+  assert.ok(relayedMessages.some((message) => message.type === "HANDOFF_SEND"));
 
   const payload = "```connector-command\n{\"protocol\":\"comfy-connector/1\",\"action\":\"complete\"}\n```";
   harness.context.handleAssistantResponseFromContent({
@@ -640,7 +1232,7 @@ test("Background relays a correlated assistant response without parsing its payl
     status: "received",
     payload,
     stage: "assistant_response_complete"
-  }, { tab: { id: 17 } });
+  }, { tab: { id: 100 } });
 
   const response = await harness.waitForSocketMessage(previousCount + 1, (message) => message.type === "assistant.response");
   assert.deepEqual(response, {
@@ -695,7 +1287,7 @@ test("Background forwards assistant response diagnostics and rejects another tab
     errorCode: "response_timeout",
     stage: "assistant_response_stability_timeout",
     message: "応答待機がタイムアウトしました。"
-  }, { tab: { id: 17 } });
+  }, { tab: { id: 100 } });
   const response = await harness.waitForSocketMessage(previousCount + 1, (message) => message.type === "assistant.response");
   assert.equal(response.status, "error");
   assert.equal(response.error_code, "response_timeout");
@@ -727,7 +1319,7 @@ test("Background keeps the active tab bound when assistant response arrives", as
     boundaryId: request.boundary_id,
     status: "received",
     payload: "response payload"
-  }, { tab: { id: 17 } });
+  }, { tab: { id: 100 } });
   const response = await harness.waitForSocketMessage(previousCount + 1, (message) => message.type === "assistant.response");
   assert.equal(response.request_id, request.request_id);
   assert.equal(response.handoff_id, request.handoff_id);
@@ -765,9 +1357,8 @@ test("Background preserves the original Handoff relay shape before response watc
   });
 });
 
-test("Background forwards normalized metadata-only ChatGPT context", async () => {
+test("Background forwards normalized metadata-only ChatGPT context through an inactive Collector Tab", async () => {
   const harness = await createHarness();
-  harness.setActiveTabs([{ id: 17, url: "https://chatgpt.com/g/g-p-project-a/c/conversation-a" }]);
   let requestedMessage;
   harness.setContentHandler((message) => {
     requestedMessage = message;
@@ -818,6 +1409,9 @@ test("Background forwards normalized metadata-only ChatGPT context", async () =>
 
   assert.equal(requestedMessage.type, "GET_CHATGPT_CONTEXT");
   assert.equal(requestedMessage.mode, "list");
+  assert.equal(harness.createdTabs.length, 1);
+  assert.equal(harness.createdTabs[0].active, false);
+  assert.equal(harness.createdTabs[0].url, "https://chatgpt.com/");
   assert.equal(response.request_id, "context-request-fixture");
   assert.equal(response.status, "ok");
   assert.deepEqual(response.projects, [
@@ -833,6 +1427,64 @@ test("Background forwards normalized metadata-only ChatGPT context", async () =>
   ]);
   assert.equal(response.conversations[0].title, "Visible Chat");
   assert.equal(response.current.project_id, "g-p-project-a");
+});
+
+test("Background keeps the Collector Tab separate from the Managed Execution Tab", async () => {
+  const harness = await createHarness();
+  const relayedMessages = [];
+  harness.setContentHandler((message) => {
+    relayedMessages.push(message);
+    if (message.type === "CHATGPT_EXECUTION_READY") return { status: "ready" };
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      return {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      };
+    }
+    if (message.type === "HANDOFF_SEND") {
+      return {
+        request_id: request.request_id,
+        handoff_id: request.handoff_id,
+        status: "sent"
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [],
+      conversations: [],
+      current: null
+    };
+  });
+
+  const handoffCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  const handoffResult = await harness.waitForResult(handoffCount);
+  assert.equal(handoffResult.status, "sent");
+  const managedTabId = harness.managedTabId;
+
+  const contextCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "context-separation-fixture"
+  }, harness.socket);
+  const contextResult = await harness.waitForSocketMessage(
+    contextCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(contextResult.status, "ok");
+  assert.equal(harness.createdTabs.length, 2);
+  assert.notEqual(harness.createdTabs[0].id, harness.createdTabs[1].id);
+  assert.equal(harness.createdTabs[0].id, managedTabId);
+  assert.equal(harness.createdTabs[0].active, false);
+  assert.equal(harness.createdTabs[1].active, false);
+  assert.equal(relayedMessages.some((message) => message.type === "GET_CHATGPT_CONTEXT"), true);
+  assert.equal(relayedMessages.find((message) => message.type === "GET_CHATGPT_CONTEXT")?.targetTabId, undefined);
 });
 
 test("Background propagates a Content Script send failure instead of upgrading it to sent", async () => {
@@ -857,17 +1509,30 @@ test("Background propagates a Content Script send failure instead of upgrading i
   assert.equal(result.stage, "user_message_not_observed");
 });
 
-test("Background rejects a non-ChatGPT active tab without switching tabs", async () => {
+test("Background ignores a non-ChatGPT foreground tab", async () => {
   const harness = await createHarness();
-  harness.setActiveTabs([{ id: 18, url: "https://example.invalid/" }]);
-  harness.setContentHandler(() => assert.fail("Content Script must not be called"));
+  harness.setActiveTabs([{ id: 18, url: "https://example.invalid/", active: true }]);
+  const relayedMessages = [];
+  harness.setContentHandler((message) => {
+    relayedMessages.push(message);
+    return message.type === "WATCH_ASSISTANT_RESPONSE"
+      ? { status: "watching" }
+      : {
+          request_id: request.request_id,
+          handoff_id: request.handoff_id,
+          status: "sent"
+        };
+  });
 
   const previousCount = harness.socket.sent.length;
   harness.context.handleBridgeMessage(request, harness.socket);
   const result = await harness.waitForResult(previousCount);
 
-  assert.equal(result.status, "error");
-  assert.equal(result.error_code, "active_tab_not_chatgpt");
+  assert.equal(result.status, "sent");
+  assert.equal(harness.createdTabs.length, 1);
+  assert.equal(harness.createdTabs[0].active, false);
+  assert.equal(harness.createdTabs[0].url, "https://chatgpt.com/");
+  assert.equal(relayedMessages.every((message) => message.targetTabId !== 18), true);
 });
 
 test("Background maps an unavailable Content Script to an explicit error", async () => {
@@ -881,24 +1546,107 @@ test("Background maps an unavailable Content Script to an explicit error", async
   const result = await harness.waitForResult(previousCount);
 
   assert.equal(result.status, "error");
-  assert.equal(result.error_code, "content_script_unavailable");
+  assert.equal(result.error_code, "response_watch_unavailable");
+  assert.equal(result.stage, "response_watch_ready_timeout");
 });
 
-test("Background maps a tab disappearing during dispatch to an explicit error", async () => {
+test("Background recovers an invalidated Content Script context before sending", async () => {
   const harness = await createHarness();
-  harness.setActiveTabs([{ id: 20, url: "https://chatgpt.com/c/fixture" }]);
-  harness.setContentHandler(() => null);
-  harness.setContentError(new Error("No tab with id: 20"));
+  harness.setActiveTabs([{ id: 21, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
+    ? {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      }
+    : { request_id: request.request_id, handoff_id: request.handoff_id, status: "sent" });
+  harness.setContentError(new Error("Extension context invalidated."));
 
   const previousCount = harness.socket.sent.length;
   harness.context.handleBridgeMessage(request, harness.socket);
   const result = await harness.waitForResult(previousCount);
 
-  assert.equal(result.status, "error");
-  assert.equal(result.error_code, "content_script_unavailable");
+  assert.equal(result.status, "sent");
+  assert.equal(harness.scriptInjectionCount, 1);
 });
 
-test("Background fetches media with the session token and attaches it to the original non-active ChatGPT tab", async () => {
+test("Background retries when navigation closes the Content Script message port", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 22, url: "https://chatgpt.com/c/fixture" }]);
+  harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
+    ? {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      }
+    : { request_id: request.request_id, handoff_id: request.handoff_id, status: "sent" });
+  harness.setContentError(new Error("The message port closed before a response was received."));
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+
+  assert.equal(result.status, "sent");
+  assert.equal(harness.scriptInjectionCount, 1);
+});
+
+test("Background recreates the Managed Tab after it is closed while watching", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 20, url: "https://example.invalid/", active: true }]);
+  const boundRequest = {
+    ...request,
+    request_id: "close-recovery-request-fixture",
+    handoff_id: "close-recovery-handoff-fixture",
+    boundary_id: "close-recovery-boundary-fixture",
+    target_conversation_id: "conversation-recovery",
+    target_conversation_url: "https://chatgpt.com/c/conversation-recovery"
+  };
+  let watcherCalls = 0;
+  harness.setContentHandler((message) => {
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") watcherCalls += 1;
+    return message.type === "WATCH_ASSISTANT_RESPONSE"
+      ? { status: "watching" }
+      : {
+          request_id: boundRequest.request_id,
+          handoff_id: boundRequest.handoff_id,
+          status: "sent"
+        };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(boundRequest, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+
+  assert.equal(result.status, "sent");
+  assert.equal(harness.createdTabs.length, 1);
+  const removedTabId = harness.managedTabId;
+  harness.removeTab(removedTabId);
+  for (let attempt = 0; attempt < 50 && harness.createdTabs.length < 2; attempt += 1) await wait(5);
+  assert.equal(harness.createdTabs.length, 2);
+  assert.equal(harness.createdTabs[1].active, false);
+  assert.equal(harness.createdTabs[1].url, boundRequest.target_conversation_url);
+  assert.ok(watcherCalls >= 2);
+
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: boundRequest.request_id,
+    sessionId: boundRequest.session_id,
+    handoffId: boundRequest.handoff_id,
+    boundaryId: boundRequest.boundary_id,
+    status: "received",
+    payload: "response payload"
+  }, { tab: { id: harness.managedTabId } });
+  const response = await harness.waitForSocketMessage(previousCount, (message) => message.type === "assistant.response");
+  assert.equal(response.status, "received");
+  assert.equal(response.request_id, boundRequest.request_id);
+  assert.equal(response.handoff_id, boundRequest.handoff_id);
+});
+
+test("Background fetches media with the session token and attaches it through the inactive Managed Tab", async () => {
   const harness = await createHarness();
   // The first tab is active and unrelated.  The target tab is deliberately
   // second to prove Phase 5.1 does not switch to the current active tab.
@@ -929,38 +1677,61 @@ test("Background fetches media with the session token and attaches it to the ori
   assert.equal(result.media_id, reviewMediaRequest.media_id);
   assert.equal(result.status, "attached");
   assert.ok(relayedMessages.length >= 4, "Media should be transferred in more than one bounded message");
-  assert.ok(relayedMessages.every((message) => message.targetTabId === undefined), "Content Script must not receive a local target path or tab metadata");
+  const mediaMessages = relayedMessages.filter((message) => message.type.startsWith("REVIEW_MEDIA_ATTACH_"));
+  assert.ok(mediaMessages.length >= 4, "Media should include begin, bounded chunks, and end messages");
+  assert.ok(mediaMessages.every((message) => message.targetTabId === undefined), "Media messages must not receive local tab metadata");
+  assert.equal(harness.createdTabs[0].active, false);
+  assert.equal(harness.createdTabs[0].url, reviewMediaRequest.target_conversation_url);
   assert.equal(harness.fetchCalls.length, 1);
   assert.match(harness.fetchCalls[0].url, /\/api\/v1\/media\/media-fixture\?/);
   assert.equal(harness.fetchCalls[0].options.headers.Authorization, "Bearer session-fixture");
   assert.equal(harness.fetchCalls[0].options.headers["X-Connector-Client"], "browser-extension");
 });
 
-test("Background rejects a closed or non-ChatGPT Review target without fetching or switching tabs", async () => {
+test("Background does not guess a Review conversation when its identity is missing", async () => {
   const harness = await createHarness();
-  harness.setActiveTabs([{ id: 7, url: "https://chatgpt.com/c/other" }]);
+  harness.setActiveTabs([{ id: 7, url: "https://chatgpt.com/c/other", active: true }]);
+  const unboundRequest = {
+    ...reviewMediaRequest,
+    target_tab_id: undefined,
+    target_tab_url: undefined,
+    target_conversation_id: undefined,
+    target_conversation_url: undefined
+  };
   harness.setContentHandler(() => assert.fail("Content Script must not receive media for a missing target"));
 
   const previousCount = harness.socket.sent.length;
-  harness.context.handleBridgeMessage(reviewMediaRequest, harness.socket);
+  harness.context.handleBridgeMessage(unboundRequest, harness.socket);
   const result = await harness.waitForSocketMessage(previousCount, (message) => message.type === "review.media.result");
   assert.equal(result.status, "error");
-  assert.equal(result.error_code, "review_target_tab_not_found");
+  assert.equal(result.error_code, "target_conversation_not_found");
   assert.equal(harness.fetchCalls.length, 0);
+  assert.equal(harness.createdTabs.length, 0);
 });
 
-test("Background rejects a ChatGPT tab that changed to another conversation", async () => {
+test("Background rejects a Managed Tab whose reported Conversation is different", async () => {
   const harness = await createHarness();
-  harness.setActiveTabs([{ id: 42, url: "https://chatgpt.com/c/another-conversation" }]);
-  harness.setContentHandler(() => ({ status: "attached" }));
+  harness.setActiveTabs([{ id: 42, url: "https://chatgpt.com/c/another-conversation", active: true }]);
+  harness.setContentHandler((message) => {
+    if (message.type === "CHATGPT_EXECUTION_READY") {
+      return {
+        status: "ready",
+        current_context: {
+          conversation_id: "another-conversation",
+          url: "https://chatgpt.com/c/another-conversation"
+        }
+      };
+    }
+    return { status: "attached" };
+  });
 
   const previousCount = harness.socket.sent.length;
   harness.context.handleBridgeMessage(reviewMediaRequest, harness.socket);
   const result = await harness.waitForSocketMessage(previousCount, (message) => message.type === "review.media.result");
 
   assert.equal(result.status, "error");
-  assert.equal(result.error_code, "review_target_tab_not_found");
-  assert.equal(result.stage, "target_tab_check");
+  assert.equal(result.error_code, "target_conversation_mismatch");
+  assert.equal(result.stage, "conversation_ready");
   assert.equal(harness.fetchCalls.length, 0);
 });
 
@@ -968,7 +1739,10 @@ test("Background preserves explicit media expiry and Content Script upload error
   const expired = await createHarness();
   expired.setActiveTabs([{ id: reviewMediaRequest.target_tab_id, url: reviewMediaRequest.target_tab_url }]);
   expired.setMediaResponse({ status: 410, bytes: [] });
-  expired.setContentHandler(() => assert.fail("Expired media must not be dispatched"));
+  expired.setContentHandler((message) => {
+    if (message.type === "CHATGPT_EXECUTION_READY") return null;
+    return assert.fail("Expired media must not be dispatched");
+  });
   const expiredBefore = expired.socket.sent.length;
   expired.context.handleBridgeMessage(reviewMediaRequest, expired.socket);
   const expiredResult = await expired.waitForSocketMessage(expiredBefore, (message) => message.type === "review.media.result");

@@ -1687,6 +1687,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // PendingHandoff and gives the next attempt a durable WAITING
             // timeline entry to update.
             await RecordBootstrapTransportAsync(payload, HandoffTransportState.Waiting, advancePipeline: false);
+            await _store.LogAsync(
+                "automation",
+                $"handoff.send issued request_id={request.RequestId} session_id={request.SessionId} handoff_id={request.HandoffId} boundary_id={request.BoundaryId} target_tab_id={request.TargetTabId?.ToString() ?? "none"} stage=handoff_send_issued");
 
             BrowserExtensionHandoffSendResult result;
             try
@@ -1703,6 +1706,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     "Browser Extension Bridgeとの通信に失敗しました。",
                     "bridge_send");
             }
+
+            await _store.LogAsync(
+                "automation",
+                $"handoff.send completed request_id={result.RequestId} session_id={request.SessionId} handoff_id={result.HandoffId} boundary_id={request.BoundaryId} target_tab_id={result.TargetTabId?.ToString() ?? request.TargetTabId?.ToString() ?? "none"} status={result.Status} error_code={result.ErrorCode ?? "none"} stage=handoff_send_completed");
 
             await RecordBootstrapTransportAsync(
                 payload,
@@ -2075,19 +2082,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return await FailReviewHandoffTransportAsync(payload, pending, failure, automatic);
         }
 
+        // The Extension now resolves one inactive Managed ChatGPT Tab from the
+        // bound conversation identity. The persisted tab fields are legacy
+        // transport metadata only and must not gate Review recovery.
         var targetTabId = session.BrowserExtensionTargetTabId;
         var targetTabUrl = session.BrowserExtensionTargetTabUrl;
-        if (!targetTabId.HasValue || string.IsNullOrWhiteSpace(targetTabUrl))
-        {
-            var failure = new BrowserExtensionHandoffSendResult(
-                Guid.NewGuid().ToString("N"),
-                pending.HandoffId,
-                "error",
-                BrowserExtensionHandoffErrorCodes.ReviewTargetTabNotFound,
-                "初回HandoffのChatGPT送信先が確認できません。",
-                "target_tab_check");
-            return await FailReviewHandoffTransportAsync(payload, pending, failure, automatic);
-        }
 
         if (!automatic)
         {
@@ -2152,6 +2151,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             CreationPipelineStateMachine.ReviewHandoffSending(session, request.RequestId);
             await RecordReviewHandoffTransportAsync(payload, HandoffTransportState.Waiting, null, null, pending.Iteration);
+            await _store.LogAsync(
+                "automation",
+                $"handoff.send issued request_id={request.RequestId} session_id={request.SessionId} handoff_id={request.HandoffId} boundary_id={request.BoundaryId} target_tab_id={request.TargetTabId?.ToString() ?? "none"} stage=handoff_send_issued");
 
             BrowserExtensionHandoffSendResult result;
             try
@@ -2168,6 +2170,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     "Browser Extension Bridgeとの通信に失敗しました。",
                     "bridge_connection");
             }
+
+            await _store.LogAsync(
+                "automation",
+                $"handoff.send completed request_id={result.RequestId} session_id={request.SessionId} handoff_id={result.HandoffId} boundary_id={request.BoundaryId} target_tab_id={result.TargetTabId?.ToString() ?? request.TargetTabId?.ToString() ?? "none"} status={result.Status} error_code={result.ErrorCode ?? "none"} stage=handoff_send_completed");
 
             if (result.IsSent)
             {
@@ -2365,8 +2371,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
             throw new InvalidOperationException("再送対象のReview Handoffが見つかりません。");
         if (session.Pipeline.ReviewMediaAttachment?.State != ReviewMediaAttachmentState.Attached)
             throw new InvalidOperationException("Review対象の生成物添付が完了していません。");
-        if (!session.BrowserExtensionTargetTabId.HasValue || string.IsNullOrWhiteSpace(session.BrowserExtensionTargetTabUrl))
-            throw new InvalidOperationException("初回HandoffのChatGPT送信先が記録されていません。");
         if (IsJobActive) throw new InvalidOperationException("生成中はReview Handoffを再送できません。");
         var message = FindReviewHandoff(pending, pending.Iteration, payload);
         if (message is null || message.State is not (HandoffTransportState.Copied or HandoffTransportState.Failed or HandoffTransportState.Waiting))
@@ -3822,18 +3826,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         var targetTabId = session.BrowserExtensionTargetTabId;
         var targetTabUrl = session.BrowserExtensionTargetTabUrl;
-        if (!targetTabId.HasValue || string.IsNullOrWhiteSpace(targetTabUrl))
-        {
-            await FailReviewMediaAttachmentAsync(
-                session,
-                iteration,
-                outputIdentity,
-                BrowserExtensionReviewMediaErrorCodes.ReviewTargetTabNotFound,
-                "target_tab_check",
-                "このSessionのHandoff送信先ChatGPTタブが記録されていません。");
-            return false;
-        }
-
         if (!IsBrowserExtensionConnected)
         {
             await FailReviewMediaAttachmentAsync(
@@ -3897,7 +3889,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 fileName,
                 mimeType,
                 size,
-                targetTabId.Value,
+                targetTabId,
                 targetTabUrl,
                 session.ConversationId,
                 session.ConversationUrl,
@@ -4721,7 +4713,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             var fields = new List<string>();
             if (!string.IsNullOrWhiteSpace(diagnostic.RequestId)) fields.Add($"request_id={diagnostic.RequestId}");
+            if (!string.IsNullOrWhiteSpace(diagnostic.SessionId)) fields.Add($"session_id={diagnostic.SessionId}");
             if (!string.IsNullOrWhiteSpace(diagnostic.HandoffId)) fields.Add($"handoff_id={diagnostic.HandoffId}");
+            if (!string.IsNullOrWhiteSpace(diagnostic.BoundaryId)) fields.Add($"boundary_id={diagnostic.BoundaryId}");
+            if (diagnostic.TargetTabId.HasValue) fields.Add($"target_tab_id={diagnostic.TargetTabId.Value}");
+            if (!string.IsNullOrWhiteSpace(diagnostic.MediaId)) fields.Add($"media_id={diagnostic.MediaId}");
+            if (diagnostic.Iteration.HasValue) fields.Add($"iteration={diagnostic.Iteration.Value}");
             if (!string.IsNullOrWhiteSpace(diagnostic.Status)) fields.Add($"status={diagnostic.Status}");
             if (!string.IsNullOrWhiteSpace(diagnostic.ErrorCode)) fields.Add($"error_code={diagnostic.ErrorCode}");
             if (!string.IsNullOrWhiteSpace(diagnostic.Stage)) fields.Add($"stage={diagnostic.Stage}");

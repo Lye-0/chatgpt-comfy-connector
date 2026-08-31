@@ -263,9 +263,18 @@ public sealed class BrowserExtensionBridgeTests
         Assert.True(handoffResult.IsSent);
         Assert.Equal(handoff.RequestId, handoffResult.RequestId);
         Assert.Equal(handoff.HandoffId, handoffResult.HandoffId);
+        using var handoffAck = await ReceiveJsonAsync(socket, timeout.Token);
+        Assert.Equal("bridge.delivery.ack", handoffAck.RootElement.GetProperty("type").GetString());
+        Assert.Equal("handoff.result", handoffAck.RootElement.GetProperty("delivery_type").GetString());
+        Assert.Equal(handoff.RequestId, handoffAck.RootElement.GetProperty("request_id").GetString());
+        Assert.Equal(handoff.HandoffId, handoffAck.RootElement.GetProperty("handoff_id").GetString());
         Assert.Contains(diagnostics, item => item.EventName == "bridge connected");
         Assert.Contains(diagnostics, item => item.EventName == "handoff.send requested" && item.RequestId == handoff.RequestId && item.HandoffId == handoff.HandoffId);
         Assert.Contains(diagnostics, item => item.EventName == "websocket send" && item.RequestId == handoff.RequestId && item.HandoffId == handoff.HandoffId);
+        Assert.Contains(diagnostics, item => item.EventName == "handoff.result received"
+            && item.RequestId == handoff.RequestId
+            && item.HandoffId == handoff.HandoffId
+            && item.Stage == "handoff_result_received");
         Assert.Contains(diagnostics, item => item.EventName == "result status" && item.RequestId == handoff.RequestId && item.Status == "sent");
 
         var failedHandoff = handoff with { RequestId = "request-02", HandoffId = "handoff-02" };
@@ -443,6 +452,12 @@ public sealed class BrowserExtensionBridgeTests
             && item.Status == "received"
             && item.Stage == "assistant_response_complete");
         Assert.DoesNotContain(diagnostics, item => item.EventName.Contains(payload, StringComparison.Ordinal));
+
+        using var responseAck = await ReceiveJsonAsync(socket, timeout.Token);
+        Assert.Equal("bridge.delivery.ack", responseAck.RootElement.GetProperty("type").GetString());
+        Assert.Equal("assistant.response", responseAck.RootElement.GetProperty("delivery_type").GetString());
+        Assert.Equal("request-response-01", responseAck.RootElement.GetProperty("request_id").GetString());
+        Assert.Equal("handoff-response-01", responseAck.RootElement.GetProperty("handoff_id").GetString());
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test complete", timeout.Token);
     }
@@ -635,6 +650,60 @@ public sealed class BrowserExtensionBridgeTests
     }
 
     [Fact]
+    public async Task HandoffResultCompletesAfterExtensionReconnect()
+    {
+        var store = new InMemoryPairingStore();
+        await using var bridge = new BrowserExtensionBridge(0, store);
+        var diagnostics = new List<BrowserExtensionBridgeDiagnostic>();
+        bridge.Diagnostic += (_, args) => diagnostics.Add(args.Diagnostic);
+        await bridge.StartAsync();
+        using var client = CreateHttpClient();
+        var credential = await PairAsync(client, bridge);
+        var sessionToken = await BootstrapAsync(client, bridge, credential);
+        using var firstSocket = await ConnectSocketAsync(bridge, sessionToken);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var hello = await ReceiveJsonAsync(firstSocket, timeout.Token);
+        using var ready = await ReceiveJsonAsync(firstSocket, timeout.Token);
+
+        var handoff = new BrowserExtensionHandoffSendRequest(
+            "request-reconnect",
+            "session-reconnect",
+            "handoff-reconnect",
+            "boundary-reconnect",
+            "## ChatGPT Comfy Connector\nhandoff_id: handoff-reconnect\nsession_id: session-reconnect\nboundary_id: boundary-reconnect");
+        var handoffTask = bridge.SendHandoffAsync(handoff, timeout.Token);
+        using var request = await ReceiveJsonAsync(firstSocket, timeout.Token);
+        Assert.Equal("handoff.send", request.RootElement.GetProperty("type").GetString());
+
+        // The service worker can lose its socket after the ChatGPT post has
+        // already been accepted. Close the first connection cleanly, then
+        // deliver the result over the next authenticated connection.
+        await firstSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test reconnect", timeout.Token);
+
+        var replacementToken = await BootstrapAsync(client, bridge, credential);
+        using var replacementSocket = await ConnectSocketAsync(bridge, replacementToken);
+        using var replacementHello = await ReceiveJsonAsync(replacementSocket, timeout.Token);
+        using var replacementReady = await ReceiveJsonAsync(replacementSocket, timeout.Token);
+        Assert.Equal("hello.ack", replacementHello.RootElement.GetProperty("type").GetString());
+        Assert.Equal("desktop.ready", replacementReady.RootElement.GetProperty("event").GetString());
+
+        await SendTextAsync(replacementSocket, JsonSerializer.Serialize(new
+        {
+            type = "handoff.result",
+            request_id = handoff.RequestId,
+            session_id = handoff.SessionId,
+            handoff_id = handoff.HandoffId,
+            boundary_id = handoff.BoundaryId,
+            status = "sent",
+        }), timeout.Token);
+
+        var result = await handoffTask;
+        Assert.True(result.IsSent);
+        Assert.Equal(handoff.RequestId, result.RequestId);
+        Assert.DoesNotContain(diagnostics, item => item.EventName == "result status" && item.ErrorCode == BrowserExtensionHandoffErrorCodes.BridgeDisconnected);
+    }
+
+    [Fact]
     public async Task HandoffSendFailsWithoutConnectedExtensionAndWhenSocketCloses()
     {
         await using var bridge = new BrowserExtensionBridge(0);
@@ -684,14 +753,18 @@ public sealed class BrowserExtensionBridgeTests
 
         var background = File.ReadAllText(Path.Combine(extensionRoot, "background.js"));
         Assert.Contains("message.type === \"handoff.send\"", background, StringComparison.Ordinal);
-        Assert.Contains("chrome.tabs.query({ active: true, lastFocusedWindow: true })", background, StringComparison.Ordinal);
+        Assert.Contains("MANAGED_TAB_STORAGE_KEY", background, StringComparison.Ordinal);
+        Assert.Contains("chrome.tabs.create({ url, active: false })", background, StringComparison.Ordinal);
+        Assert.Contains("function ensureManagedExecutionTab", background, StringComparison.Ordinal);
+        Assert.Contains("conversation is the durable identity", background, StringComparison.Ordinal);
+        Assert.Contains("prepare: true", background, StringComparison.Ordinal);
         Assert.Contains("chrome.tabs.sendMessage(tabId", background, StringComparison.Ordinal);
         Assert.Contains("type: \"handoff.result\"", background, StringComparison.Ordinal);
         Assert.Contains("background received", background, StringComparison.Ordinal);
         Assert.Contains("content script dispatched", background, StringComparison.Ordinal);
         Assert.Contains("response watch armed", background, StringComparison.Ordinal);
         Assert.Contains("review handoff sent", background, StringComparison.Ordinal);
-        Assert.Contains("targetTabId: tabId", background, StringComparison.Ordinal);
+        Assert.Contains("targetTabId: managedTabState.tabId", background, StringComparison.Ordinal);
         Assert.Contains("result status", background, StringComparison.Ordinal);
         Assert.Contains("chrome.scripting.executeScript", background, StringComparison.Ordinal);
         Assert.Contains("CONTENT_SCRIPT_TIMEOUT_MS", background, StringComparison.Ordinal);

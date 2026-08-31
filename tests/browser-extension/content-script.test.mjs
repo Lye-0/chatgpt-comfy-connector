@@ -585,6 +585,8 @@ async function createHarness(options) {
         onMessage: { addListener: (listener) => runtimeListeners.push(listener) },
         sendMessage: options?.runtimeContextInvalidated
           ? () => { throw new Error("Extension context invalidated."); }
+          : options?.runtimeMessageNeverSettles
+            ? () => new Promise(() => {})
           : async (message) => {
             runtimeMessages.push(message);
             return { ok: true };
@@ -599,11 +601,17 @@ async function createHarness(options) {
     "const sendAcceptanceTimeoutMs = 8000;",
     "const sendAcceptanceTimeoutMs = 50;"
   ).replace(
+    "const handoffAcceptancePollIntervalMs = 100;",
+    "const handoffAcceptancePollIntervalMs = 5;"
+  ).replace(
     "const composerStateTimeoutMs = 1500;",
     "const composerStateTimeoutMs = 50;"
   ).replace(
     "const composerMountTimeoutMs = 20000;",
     "const composerMountTimeoutMs = 100;"
+  ).replace(
+    "const newConversationBindingTimeoutMs = 5000;",
+    "const newConversationBindingTimeoutMs = 800;"
   ).replace(
     "const composerPollIntervalMs = 100;",
     "const composerPollIntervalMs = 5;"
@@ -659,6 +667,64 @@ const handoff = {
   payload: "## Handoff\nProtocol: comfy-connector/1\nhandoff_id: handoff-fixture\nboundary_id: boundary-fixture\n"
 };
 
+test("Content Script reports Managed Tab readiness only after the composer and bound Conversation are ready", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  const result = await harness.send({
+    type: "CHATGPT_EXECUTION_READY",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    expectedConversationId: "fixture",
+    expectedConversationUrl: "https://chatgpt.com/c/fixture",
+    requireComposer: true
+  });
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.stage, "conversation_ready");
+  assert.equal(result.composer_ready, true);
+  assert.equal(result.current_context.conversation_id, "fixture");
+  assert.equal(result.current_context.url, "https://chatgpt.com/c/fixture");
+});
+
+test("Content Script can arm a pre-send watcher, then bind it to the newly posted user message", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  const watching = await harness.send({
+    type: "WATCH_ASSISTANT_RESPONSE",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol,
+    prepare: true
+  });
+  assert.equal(watching.status, "watching");
+  assert.equal(watching.stage, "response_watch_ready");
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(harness.messages.some((message) => message.type === "ASSISTANT_RESPONSE_RESULT"), false);
+
+  const sent = await harness.send(handoff);
+  assert.equal(sent.status, "sent");
+  const command = JSON.stringify({
+    protocol: "comfy-connector/1",
+    action: "complete",
+    handoff_id: handoff.handoffId,
+    session_id: handoff.sessionId,
+    reason: "approved"
+  });
+  harness.document.appendAssistantCodeMessage({
+    codeText: command,
+    language: "connector-command",
+    classLanguage: null
+  });
+
+  const response = await harness.waitForRuntimeMessage((message) =>
+    message.type === "ASSISTANT_RESPONSE_RESULT" && message.status === "received");
+  assert.equal(response.requestId, handoff.requestId);
+  assert.equal(response.payload, `\`\`\`connector-command\n${command}\n\`\`\``);
+});
+
 test("Content Script fills a textarea with React-visible input and confirms send", async () => {
   const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
   const result = await harness.send(handoff);
@@ -677,6 +743,42 @@ test("Content Script fills a textarea with React-visible input and confirms send
   assert.equal(harness.document.sendClicked, true);
   assert.equal(harness.document.userMessages.length, 1);
   assert.equal(harness.document.userMessages[0].textContent, handoff.payload);
+  const confirmation = harness.messages.find((message) => message.type === "HANDOFF_SEND_CONFIRMED");
+  assert.ok(confirmation);
+  assert.equal(confirmation.requestId, handoff.requestId);
+  assert.equal(confirmation.sessionId, handoff.sessionId);
+  assert.equal(confirmation.handoffId, handoff.handoffId);
+  assert.equal(confirmation.boundaryId, handoff.boundaryId);
+  assert.equal(confirmation.payload, undefined);
+});
+
+test("Content Script confirms a new-chat post before optional route binding completes", async () => {
+  const harness = await createHarness({
+    composer: "textarea",
+    sendButton: "ready",
+    url: "https://chatgpt.com/g/g-p-fixture"
+  });
+  const newChatHandoff = {
+    ...handoff,
+    requestId: "request-new-chat-fixture",
+    handoffId: "handoff-new-chat-fixture",
+    boundaryId: "boundary-new-chat-fixture",
+    newConversation: true,
+    payload: handoff.payload
+      .replaceAll(handoff.handoffId, "handoff-new-chat-fixture")
+      .replaceAll(handoff.boundaryId, "boundary-new-chat-fixture")
+  };
+
+  const sendPromise = harness.send(newChatHandoff);
+  const confirmation = await harness.waitForRuntimeMessage((message) =>
+    message.type === "HANDOFF_SEND_CONFIRMED"
+      && message.requestId === newChatHandoff.requestId);
+  assert.equal(confirmation.status, "sent");
+  assert.equal(confirmation.handoffId, newChatHandoff.handoffId);
+
+  const result = await sendPromise;
+  assert.equal(result.status, "sent");
+  assert.equal(harness.document.userMessages.length, 1);
 });
 
 test("Content Script waits for a newly loaded ChatGPT composer before sending", async () => {
@@ -691,6 +793,77 @@ test("Content Script waits for a newly loaded ChatGPT composer before sending", 
   assert.equal(harness.document.userMessages[0].textContent, handoff.payload);
 });
 
+test("Content Script reuses an already accepted Handoff instead of posting it twice", async () => {
+  const harness = await createHarness({
+    composer: "textarea",
+    sendButton: "ready",
+    fileInput: false,
+    attachmentVerification: false
+  });
+  harness.document.appendUserMessage(handoff.payload);
+
+  const result = await harness.send({
+    ...handoff,
+    requestId: "request-fixture-retry",
+    review: true,
+    expectedAttachment: {
+      mediaId: "media-fixture",
+      fileName: "already-sent.mp4",
+      iteration: 1
+    }
+  });
+
+  assert.equal(result.status, "sent");
+  assert.equal(result.stage, "user_message_already_correlated");
+  assert.equal(harness.document.sendClicked, false);
+  assert.equal(harness.document.userMessages.length, 1);
+});
+
+test("Content Script confirms an already accepted Handoff after its original context was replaced", async () => {
+  const harness = await createHarness({
+    composer: "textarea",
+    sendButton: "ready"
+  });
+  harness.document.appendUserMessage(handoff.payload);
+
+  const result = await harness.send({
+    type: "CHECK_HANDOFF_SENT",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol,
+    targetTabId: 17
+  });
+
+  assert.equal(result.status, "sent");
+  assert.equal(result.stage, "user_message_already_correlated");
+  assert.equal(harness.document.sendClicked, false);
+  assert.equal(harness.document.userMessages.length, 1);
+});
+
+test("Content Script waits for the accepted user message after a new-tab hydration gap", async () => {
+  const harness = await createHarness({
+    composer: "textarea",
+    sendButton: "ready"
+  });
+  const checkPromise = harness.send({
+    type: "CHECK_HANDOFF_SENT",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol,
+    targetTabId: 17
+  });
+  setTimeout(() => harness.document.appendUserMessage(handoff.payload), 10);
+
+  const result = await checkPromise;
+  assert.equal(result.status, "sent");
+  assert.equal(result.stage, "user_message_already_correlated");
+  assert.equal(harness.document.userMessages.length, 1);
+});
+
 test("Content Script tolerates an invalidated Extension context during best-effort notifications", async () => {
   const harness = await createHarness({
     composer: "textarea",
@@ -699,6 +872,23 @@ test("Content Script tolerates an invalidated Extension context during best-effo
   });
   const result = await harness.send(handoff);
   assert.equal(result.status, "sent");
+});
+
+test("Content Script does not block a confirmed post on the notification response", async () => {
+  const harness = await createHarness({
+    composer: "textarea",
+    sendButton: "ready",
+    runtimeMessageNeverSettles: true
+  });
+
+  const result = await Promise.race([
+    harness.send(handoff),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Handoff completion was blocked by notification ACK")), 100))
+  ]);
+
+  assert.equal(result.status, "sent");
+  assert.equal(harness.document.sendClicked, true);
+  assert.equal(harness.messages.length, 0);
 });
 
 test("Content Script also supports a contenteditable composer", async () => {

@@ -4,8 +4,9 @@
 
 Phase 1 connects the Chromium Browser Extension to the running Desktop
 Connector. Phase 2 adds one narrow action: Desktop can deliver the already
-generated Bootstrap Handoff to the currently active `chatgpt.com` tab, where
-the Content Script fills the composer and submits it. Phase 3.1–3.3 observes
+generated Bootstrap Handoff to one inactive Managed `chatgpt.com` tab owned by
+the Background service worker, where the Content Script fills the composer and
+submits it. Phase 3.1–3.3 observes
 the completed assistant response, validates it on Desktop as a Connector
 Response, and places it into `CHATGPT COMMAND`. Phase 4 connects a strictly
 validated `generate` Response to the existing Desktop APPLY → ComfyUI READY
@@ -16,7 +17,7 @@ discovery is available through the authenticated Extension bridge; message-body
 history sync and autonomous infinite iteration remain out of scope. Phase 5.1 adds one
 more bounded action: after a successful ComfyUI generation, the Desktop can
 register the current Primary Output and have the Extension attach it to the
-same ChatGPT tab. Phase 5.2 then sends a fresh Review Handoff after the
+same ChatGPT Conversation through the Managed Tab. Phase 5.2 then sends a fresh Review Handoff after the
 attachment is verified and can continue the existing APPLY → GENERATE path
 for the next iteration; complete, maximum-iteration, cancellation, and retry
 boundaries remain explicit Desktop state-machine decisions.
@@ -34,6 +35,39 @@ Desktop Connector Bridge
 The Content Script owns ChatGPT DOM access only. All localhost access is owned
 by `browser-extension/background.js`; the Content Script never opens a local
 HTTP or WebSocket connection.
+
+## Managed Background ChatGPT Tab lifecycle
+
+The Background service worker owns exactly one inactive Managed ChatGPT Tab for
+execution. It creates or reuses that tab and navigates it only from the bound
+Conversation ID/URL (or a project-matched new-chat target). The user's
+foreground tab is never selected as an execution target and its active state
+does not affect Handoff, media, Review, or response delivery.
+
+Project/Chat discovery is isolated in a separate inactive Collector Tab. The
+Background creates it on demand, waits for its Content Script, performs the
+metadata-only sidebar scan, then releases it when it was not brought to the
+foreground by the user. The Collector Tab is never used for Handoff, media,
+Review, Resume, or assistant-response observation, and it does not replace the
+Managed Execution Tab's watcher state.
+
+The tab is a replaceable browser medium, not the Conversation identity. Before
+each Handoff, the Background requires these ordered handshakes from the
+Content Script: Content Script ready, target Conversation ready, composer
+ready, and shared assistant-response watcher ready. Only then does it send the
+Handoff. A pre-send watcher first records the current assistant-message
+baseline and waits for the new marker-bearing user message; it does not use an
+older message as an anchor. Initial, media, Review, and resumed/next-iteration
+operations all use this same Managed Tab and watcher infrastructure.
+
+If navigation or tab replacement destroys the Content Script, the Background
+retains only bounded correlation metadata and the durable Conversation
+identity, re-injects or waits for the replacement Content Script, and re-arms
+the same watcher. It may recover an accepted user message, but it never posts
+the same Handoff again merely because an acknowledgement or message channel
+was lost. A closed tab is recreated inactive at the same Conversation URL when
+the operation still has enough identity to do so; otherwise the operation
+stops with an explicit target-identity error.
 
 ## Desktop placement and lifecycle
 
@@ -267,18 +301,16 @@ over the authenticated socket:
 }
 ```
 
-The Background service worker checks the active, last-focused tab and only
-relays this request when its URL is `https://chatgpt.com/*`. It does not move
-the user to another tab and contains no DOM locator code. If a ChatGPT tab was
-already open when the unpacked Extension was reloaded, the Background uses the
-MV3 `scripting` permission to inject `chatgpt-locators.js` and
-`content-script.js` into that exact ChatGPT tab, then retries the message. The
-same readiness path is used when the Background opens a saved Conversation in
-a new tab: `tabs.create` can resolve while the document is still loading, so a
-missing Content Script is retried after the tab reaches `complete`, before the
-MV3 injection fallback is attempted. The target Conversation identity is not
-changed during this wait. The Content Script returns a result, which the
-Background forwards to the Desktop:
+The Background service worker resolves the request to its one inactive Managed
+ChatGPT Tab using Conversation ID/URL as the durable identity. It contains no
+DOM locator code. When the tab is new or was navigated, `tabs.create` or
+`tabs.update` can resolve while the document is still loading, so a missing
+Content Script is retried after the tab reaches `complete`, before the MV3
+injection fallback is attempted. The Background then requires the explicit
+Content Script, Conversation, Composer, and response-watcher readiness
+handshakes. The target Conversation identity is not changed during this wait.
+The Content Script returns a result, which the Background forwards to the
+Desktop:
 
 ```json
 {
@@ -299,7 +331,9 @@ expires.
 On failure, `status` is `error` and the response contains `error_code` and a
 short `message` and, when the Content Script reached a concrete phase, a safe
 `stage`. Supported DOM/target errors include
-`active_tab_not_chatgpt`, `content_script_unavailable`, `composer_not_found`,
+`managed_tab_not_chatgpt`, `managed_tab_create_failed`,
+`managed_tab_navigation_failed`, `target_conversation_not_found`,
+`target_conversation_mismatch`, `content_script_unavailable`, `composer_not_found`,
 `composer_input_failed`, `composer_input_verification_failed`,
 `send_button_not_found`, `send_not_ready`, and `send_failed`. For example, an
 editor whose text is visible but whose Send control remains disabled returns
@@ -335,12 +369,14 @@ Input verification additionally records only boolean presence for `protocol`,
 These contain only request/handoff identifiers and outcome metadata, never
 credentials or the Handoff body.
 
-After the `handoff.result` with `status: "sent"` has been delivered, the
-Background asks the same Content Script to watch the current response. The
-watch is anchored to the newly confirmed user message and is never started
-for a copied or failed Handoff. The Content Script uses the assistant-message
-locator, a message-content locator, `MutationObserver`, polling,
-text-stability, and the generating/stop control state to distinguish a
+The Background asks the same Content Script to prepare the response watcher
+before sending the Handoff. The pre-send watch records the assistant-message
+baseline, then anchors itself only to the newly confirmed user message after
+that Handoff is visible. It is never started for a copied or failed Handoff.
+After `handoff.result` is confirmed as `sent`, the same watcher continues
+without changing its correlation identity. The Content Script uses the
+assistant-message locator, a message-content locator, `MutationObserver`,
+polling, text-stability, and the generating/stop control state to distinguish a
 completed answer from a streaming answer. Status/live-region text such as
 thinking, tool progress, and image-generation progress is excluded. A
 candidate is not eligible until that assistant message contains a
@@ -415,14 +451,14 @@ The authenticated WebSocket carries metadata only:
   "filename": "output.mp4",
   "mime_type": "video/mp4",
   "size": 123456,
-  "target_tab_id": 123,
-  "target_tab_url": "https://chatgpt.com/g/g-example/c/example"
+  "target_conversation_id": "<conversation-id>",
+  "target_conversation_url": "https://chatgpt.com/g/g-example/c/example"
 }
 ```
 
-The Background validates the exact target tab recorded by the successful
-Bootstrap Handoff, then downloads the registered bytes through the
-authenticated loopback endpoint:
+The Background resolves the one Managed Tab from the target Conversation
+identity, then downloads the registered bytes through the authenticated
+loopback endpoint:
 
 ```text
 GET /api/v1/media/{media_id}?session_id=<id>&iteration=<number>
@@ -452,7 +488,8 @@ activity finished before returning:
 The failure response uses `status: "error"`, `error_code`, `stage`, and a
 short message. Supported failures include `review_output_not_found`,
 `media_registration_failed`, `media_expired`, `media_fetch_failed`,
-`media_too_large`, `unsupported_media_type`, `review_target_tab_not_found`,
+`media_too_large`, `unsupported_media_type`, `target_conversation_not_found`,
+`target_conversation_mismatch`,
 `content_script_unavailable`, `attachment_control_not_found`,
 `attachment_input_failed`, `attachment_upload_failed`,
 `attachment_timeout`, `attachment_verification_failed`, and
@@ -472,7 +509,7 @@ Review Handoff.
 ### Phase 5.2: automatic Review and next iteration
 
 Once the media result is `ATTACHED`, Desktop creates a new Review Handoff for
-the same session, target tab, and iteration. It has fresh `handoff_id` and
+the same session, Conversation identity, Managed Tab, and iteration. It has fresh `handoff_id` and
 `boundary_id` values, and is sent through the same authenticated
 `handoff.send` path. The Content Script first verifies that the expected
 attachment is still visible, inserts the Review body, and waits for the
@@ -562,9 +599,10 @@ attempt's `request_id` is new.
   supply an arbitrary URL;
 - no arbitrary command or MCP execution surface exposed to the Extension;
 - bounded HTTP/WebSocket message sizes and a five-second hello timeout.
-- Handoff delivery is limited to the active, last-focused HTTPS `chatgpt.com`
-  tab; the Background cannot choose an arbitrary URL and the Content Script
-  cannot access the Bridge.
+- Handoff, media, Review, and response delivery are limited to one inactive
+  Managed HTTPS `chatgpt.com` tab resolved from the bound Conversation
+  identity; the Background cannot choose an arbitrary URL and the Content
+  Script cannot access the Bridge.
 - Handoff bodies are not included in diagnostics or log messages.
 
 The pairing credential is the long-lived trust relationship; the session token
@@ -579,7 +617,7 @@ operations are not exposed to the Extension.
 ```text
 browser-extension/
 ├─ manifest.json          # Chromium Manifest V3
-├─ background.js          # health, pairing, bootstrap, WebSocket, reconnect, routing
+├─ background.js          # health, pairing, bootstrap, WebSocket, reconnect, managed-tab routing
 ├─ chatgpt-locators.js    # replaceable DOM locators and context metadata extraction
 ├─ content-script.js      # ChatGPT input/send and assistant response watcher
 ├─ popup.html             # connection and first-pairing UI
@@ -598,17 +636,17 @@ browser-extension/
    **Load unpacked**, and select the repository's `browser-extension` folder.
 3. Edge: open `edge://extensions`, enable **Developer mode**, choose **Load
    unpacked**, and select the same folder.
-4. After changing the unpacked Extension files, press **Reload** on the
-   Extension and reload the already-open ChatGPT tab once. The Background can
-   also inject the Content Script into an existing ChatGPT tab, but reloading
-   gives the cleanest development check. Open the Extension popup, enter the
-   Desktop `PAIRING CODE`, and choose
+ 4. After changing the unpacked Extension files, press **Reload** on the
+    Extension. The Background creates or reuses the inactive Managed ChatGPT
+    Tab and can inject the Content Script after its document is ready. Reloading
+    the tab gives the cleanest development check. Open the Extension popup, enter
+    the Desktop `PAIRING CODE`, and choose
    **PAIR DESKTOP**. It should move through `CONNECTING` to `CONNECTED`, show
    `desktop.ready`, and enable `PING`.
-5. Open a target `https://chatgpt.com/` conversation and keep that tab active.
-   Press the Desktop `SEND TO CHATGPT` button. The exact existing Bootstrap
-   Handoff should appear in the composer and be sent; the Desktop timeline
-   should show `SENT`. After ChatGPT finishes, its assistant response should
+ 5. Select the desired Project/Chat in Desktop and press `SEND TO CHATGPT`.
+    The inactive Managed ChatGPT Tab should open or navigate to the bound
+    Conversation, pass its readiness handshakes, and receive the exact Bootstrap
+    Handoff; the Desktop timeline should show `SENT`. After ChatGPT finishes, its assistant response should
    be delivered through the Bridge, pass the Desktop strict Connector Response
    validation, appear in `CHATGPT COMMAND`, and create a `RECEIVED` timeline
    item. A `generate` response then automatically applies the validated slots,
@@ -616,9 +654,11 @@ browser-extension/
    updates OUTPUT/HISTORY. A `complete` response completes only after the
    existing review/output guard passes. The manual Command buttons remain
    available for recovery or deliberate inspection.
-6. Make a non-ChatGPT tab active and press `SEND TO CHATGPT` again. The
-   Desktop should report `active_tab_not_chatgpt` and retain the same pending
-   Handoff; the Clipboard fallback remains available.
+ 6. Switch the user's foreground tab to a non-ChatGPT page and press
+    `SEND TO CHATGPT` again. The send must still use only the inactive Managed
+    ChatGPT Tab; the foreground tab must not change the target or cause a
+    duplicate Handoff. If the Managed Tab is closed, it should be recreated at
+    the bound Conversation URL and resume the pending correlated operation.
 7. Stop the Desktop Connector. The popup should become `DISCONNECTED`; start
    it again and the Service Worker should bootstrap a new session token and
    reconnect automatically or after the next retry/alarm.
@@ -663,10 +703,11 @@ handling, delayed Review Send readiness after media processing, and the
 no-message/unrelated-message failure paths.
 
 `tests/browser-extension/background.test.mjs` uses a mock WebSocket and
-`chrome.tabs` boundary to exercise active-ChatGPT routing, non-ChatGPT rejection,
-Content Script result relay, tab-disappearance/unavailable-Content-Script
-errors, assistant response relay/correlation, MV3 WebSocket keepalive, and safe
-diagnostic fields.
+`chrome.tabs` boundary to exercise inactive Managed-Tab routing independent of
+the foreground tab, Content Script result relay, navigation/tab-disappearance
+recovery, unavailable-Content-Script errors, assistant response
+relay/correlation, MV3 WebSocket keepalive, idempotent Handoff delivery, and
+safe diagnostic fields.
 
 `tests/browser-extension/content-script.test.mjs` also covers response
 anchoring after the matching user message, ignoring the previous assistant

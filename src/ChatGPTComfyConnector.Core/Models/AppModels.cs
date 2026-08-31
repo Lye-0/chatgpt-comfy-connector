@@ -958,8 +958,8 @@ public sealed class CreationSession
     public string? ProjectUrl { get; set; }
     public string? ConversationUrl { get; set; }
     /// <summary>
-    /// Browser tab identity returned by the successful initial Handoff.  It
-    /// is used only to bind Phase 5.1 media attachment to that same tab.
+    /// Legacy execution-medium metadata returned by the Extension. Conversation
+    /// identity is authoritative; the Managed Tab may be recreated later.
     /// </summary>
     public int? BrowserExtensionTargetTabId { get; set; }
     public string? BrowserExtensionTargetTabUrl { get; set; }

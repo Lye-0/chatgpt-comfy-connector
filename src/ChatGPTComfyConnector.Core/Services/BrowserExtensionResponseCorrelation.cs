@@ -101,17 +101,13 @@ public static class BrowserExtensionResponseCorrelation
             return false;
         }
 
-        // Review messages are routed to the tab captured by the initial
-        // Handoff.  The target fields are optional only for old envelopes
-        // written before target correlation was added; current Extension
-        // responses always carry them.
+        // A Managed Tab is only an execution medium.  It may be recreated or
+        // replaced while the same ChatGPT conversation remains bound to the
+        // session, so a changed target_tab_id/url must not reject a valid
+        // Review response.  Conversation identity is the durable boundary.
         if (PendingHandoffReuse.IsReview(pending)
-            && (response.TargetTabId.HasValue || response.TargetTabUrl is not null)
-            && (session.BrowserExtensionTargetTabId is not { } targetId
-                || response.TargetTabId != targetId
-                || !string.Equals(response.TargetTabUrl, session.BrowserExtensionTargetTabUrl, StringComparison.Ordinal)))
+            && !MatchesBoundConversation(response, session, out errorStage))
         {
-            errorStage = "target_conversation_mismatch";
             return false;
         }
 
@@ -126,6 +122,100 @@ public static class BrowserExtensionResponseCorrelation
                 HandoffMessageKind.ReviewRequest => item.Direction == HandoffDirection.ComfyToChatGpt,
                 _ => false,
             });
+
+    private static bool MatchesBoundConversation(
+        BrowserExtensionAssistantResponse response,
+        CreationSession session,
+        out string? errorStage)
+    {
+        errorStage = null;
+        if (response.TargetConversationId is null && response.TargetConversationUrl is null)
+        {
+            // Envelopes from before conversation identity was added remain
+            // readable.  Durable transport IDs still provide the primary
+            // correlation gate above.
+            return true;
+        }
+
+        var boundConversationId = session.ConversationId;
+        var boundConversationUrl = session.ConversationUrl;
+        var responseConversationId = response.TargetConversationId
+            ?? ConversationIdFromUrl(response.TargetConversationUrl);
+
+        if (!string.IsNullOrWhiteSpace(boundConversationId)
+            && !string.Equals(responseConversationId, boundConversationId, StringComparison.Ordinal))
+        {
+            errorStage = "target_conversation_mismatch";
+            return false;
+        }
+
+        if (response.TargetConversationUrl is not null
+            && !string.IsNullOrWhiteSpace(boundConversationUrl)
+            && !SameConversationUrl(response.TargetConversationUrl, boundConversationUrl))
+        {
+            errorStage = "target_conversation_mismatch";
+            return false;
+        }
+
+        // If a response supplies a URL for a bound session but it cannot be
+        // reduced to the same conversation ID, reject it instead of silently
+        // accepting a project/root page as a response source.
+        if (!string.IsNullOrWhiteSpace(boundConversationId)
+            && response.TargetConversationUrl is not null
+            && responseConversationId is null)
+        {
+            errorStage = "target_conversation_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static string? ConversationIdFromUrl(string? value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(uri.Host, "chatgpt.com", StringComparison.OrdinalIgnoreCase)
+            || uri.Port != -1)
+        {
+            return null;
+        }
+
+        var segments = uri.AbsolutePath
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var index = 0; index < segments.Length - 1; index++)
+        {
+            if (!string.Equals(segments[index], "c", StringComparison.OrdinalIgnoreCase)) continue;
+            var id = Uri.UnescapeDataString(segments[index + 1]);
+            return IsSafeConversationId(id) ? id : null;
+        }
+
+        return null;
+    }
+
+    private static bool IsSafeConversationId(string value)
+        => value.Length is > 0 and <= 128
+            && value.All(character => (character is >= 'A' and <= 'Z')
+                || (character is >= 'a' and <= 'z')
+                || (character is >= '0' and <= '9')
+                || character is '.' or '_' or '-');
+
+    private static bool SameConversationUrl(string left, string right)
+    {
+        var leftId = ConversationIdFromUrl(left);
+        var rightId = ConversationIdFromUrl(right);
+        if (leftId is not null || rightId is not null)
+        {
+            return leftId is not null
+                && rightId is not null
+                && string.Equals(leftId, rightId, StringComparison.Ordinal);
+        }
+
+        return string.Equals(
+            left.TrimEnd('/'),
+            right.TrimEnd('/'),
+            StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// Matches only the durable transport identity.  The Desktop uses this

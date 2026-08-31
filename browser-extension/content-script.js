@@ -9,7 +9,11 @@
   const contextRequestMessageType = "GET_CHATGPT_CONTEXT";
   const contextChangedMessageType = "CHATGPT_CONTEXT_CHANGED";
   const responseWatchMessageType = "WATCH_ASSISTANT_RESPONSE";
+  const executionReadyMessageType = "CHATGPT_EXECUTION_READY";
+  const cancelResponseWatchMessageType = "CANCEL_ASSISTANT_RESPONSE_WATCH";
   const responseResultMessageType = "ASSISTANT_RESPONSE_RESULT";
+  const handoffSendConfirmedMessageType = "HANDOFF_SEND_CONFIRMED";
+  const handoffAcceptanceCheckMessageType = "CHECK_HANDOFF_SENT";
   const reviewMediaAttachBeginMessageType = "REVIEW_MEDIA_ATTACH_BEGIN";
   const reviewMediaAttachChunkMessageType = "REVIEW_MEDIA_ATTACH_CHUNK";
   const reviewMediaAttachEndMessageType = "REVIEW_MEDIA_ATTACH_END";
@@ -26,6 +30,7 @@
   // sends therefore get a bounded readiness window of their own; normal
   // Bootstrap sends keep the shorter interactive timeout.
   const reviewComposerStateTimeoutMs = 60000;
+  const handoffAcceptancePollIntervalMs = 100;
   const attachmentControlTimeoutMs = 1500;
   const attachmentVerificationTimeoutMs = 15000;
   const maxMediaBytes = 512 * 1024 * 1024;
@@ -61,6 +66,13 @@
       "media_id",
       "iteration",
       "target_tab_id",
+      "conversation_id",
+      "conversation_url",
+      "project_id",
+      "content_ready",
+      "conversation_ready",
+      "composer_ready",
+      "watcher_ready",
       "composer_type",
       "protocol_found",
       "handoff_id_found",
@@ -130,6 +142,76 @@
     if (errorCode) result.error_code = errorCode;
     if (text) result.message = text;
     if (stage) result.stage = stage;
+    return result;
+  }
+
+  function notifyHandoffSendConfirmed(message, result) {
+    // This is a metadata-only lifecycle signal. It is intentionally separate
+    // from the tabs.sendMessage response because a ChatGPT navigation can
+    // destroy that response channel after the user message was accepted.
+    // This notification is a best-effort, metadata-only side channel.  Do not
+    // await the Background response here: ChatGPT can replace this document
+    // immediately after the user message is accepted, which can leave the
+    // runtime-message Promise pending while the tabs.sendMessage request is
+    // waiting for handleHandoffSend() to return.  The Background races this
+    // notification with the normal response and can recover it from the
+    // marker-bearing user message after a navigation.
+    void sendRuntimeMessage({
+      type: handoffSendConfirmedMessageType,
+      requestId: message?.requestId,
+      sessionId: message?.sessionId,
+      handoffId: message?.handoffId,
+      boundaryId: message?.boundaryId,
+      status: "sent",
+      stage: result?.stage || "user_message_correlated",
+      ...(result?.current_context ? { current_context: result.current_context } : {})
+    });
+  }
+
+  async function handleHandoffAcceptanceCheck(message) {
+    if (!locators || !locators.isChatGptPage?.()) {
+      return resultFor(message, "error", "active_tab_not_chatgpt", "アクティブなタブはChatGPTではありません。", "active_tab_check");
+    }
+    if (!hasRequiredInputMarkers({
+      protocol: message?.protocol,
+      handoffId: message?.handoffId,
+      boundaryId: message?.boundaryId
+    })) {
+      return resultFor(message, "error", "handoff_confirmation_not_correlated", "Handoffの確認に必要な識別子がありません。", "handoff_acceptance_check");
+    }
+
+    const deadline = Date.now() + sendAcceptanceTimeoutMs;
+    let anchor = null;
+    // CONTENT_SCRIPT_READY can precede React hydration in a newly opened Chat
+    // tab. Poll only for the exact marker-bearing user message; this is a
+    // read-only acceptance recovery and never posts the Handoff again.
+    while (Date.now() < deadline) {
+      anchor = locators.findUserMessageWithCorrelation?.(document, {
+        protocol: message.protocol,
+        handoffId: message.handoffId,
+        boundaryId: message.boundaryId
+      }) || null;
+      if (anchor) break;
+      await wait(handoffAcceptancePollIntervalMs);
+    }
+    if (!anchor) {
+      return resultFor(message, "error", "handoff_not_sent", "今回のHandoffに対応するChatGPT user messageが見つかりません。", "handoff_acceptance_not_found");
+    }
+
+    const beforeAssistantMessages = locators.captureAssistantMessageSnapshot?.(document)
+      || { count: 0, elements: new Set() };
+    responseAnchors.set(responseCorrelationKey(message), {
+      anchor,
+      assistantElements: beforeAssistantMessages.elements,
+      createdAt: Date.now()
+    });
+    diagnostic("handoff acceptance found", {
+      ...traceForMessage(message),
+      status: "sent",
+      stage: "handoff_acceptance_recovered"
+    });
+    const result = resultFor(message, "sent", null, null, "user_message_already_correlated");
+    result.current_context = await readCurrentContextAfterHandoff(message);
     return result;
   }
 
@@ -656,11 +738,130 @@
     return locators.findComposer?.() || null;
   }
 
-  async function readCurrentContextAfterHandoff(message) {
-    let current = null;
+  function readCurrentContextSnapshot() {
     try {
-      current = locators.getCurrentChatGptContext?.(document, globalThis.location?.href) || null;
-    } catch (_) { current = null; }
+      return locators.getCurrentChatGptContext?.(document, globalThis.location?.href) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function contextIdentityMatches(current, message) {
+    const expectedConversationId = message?.expectedConversationId || message?.expected_conversation_id || "";
+    const expectedConversationUrl = message?.expectedConversationUrl || message?.expected_conversation_url || "";
+    const expectedProjectId = message?.expectedProjectId || message?.expected_project_id || "";
+    const currentConversationUrl = current?.url || globalThis.location?.href || "";
+    const currentConversationId = current?.conversation_id
+      || current?.conversationId
+      || locators?.conversationIdFromUrl?.(currentConversationUrl)
+      || "";
+    const currentProjectId = current?.project_id || current?.projectId || "";
+
+    if (expectedConversationId && currentConversationId !== expectedConversationId) return false;
+    if (expectedConversationUrl) {
+      const expectedIdFromUrl = locators?.conversationIdFromUrl?.(expectedConversationUrl) || "";
+      const currentIdFromUrl = currentConversationId
+        || locators?.conversationIdFromUrl?.(currentConversationUrl)
+        || "";
+      if (expectedIdFromUrl && currentIdFromUrl !== expectedIdFromUrl) return false;
+      if (!expectedIdFromUrl && currentConversationUrl !== expectedConversationUrl) return false;
+    }
+    if (expectedProjectId && currentProjectId && currentProjectId !== expectedProjectId) return false;
+    if (expectedProjectId && !currentProjectId) {
+      const projectIdFromUrl = locators?.projectIdFromUrl?.(currentConversationUrl) || "";
+      if (projectIdFromUrl && projectIdFromUrl !== expectedProjectId) return false;
+    }
+    if (message?.newConversation === true && expectedConversationId) return false;
+    return true;
+  }
+
+  function executionReadyResultFor(message, status, errorCode, text, stage, currentContext, composerReady = false) {
+    const result = responseResultFor(message, status, errorCode, text, stage);
+    result.composer_ready = composerReady;
+    if (currentContext) result.current_context = currentContext;
+    return result;
+  }
+
+  async function handleChatGptExecutionReady(message) {
+    const trace = traceForMessage(message);
+    diagnostic("execution readiness requested", {
+      ...trace,
+      status: "requested",
+      stage: "conversation_ready_requested"
+    });
+    if (!locators || !locators.isChatGptPage?.()) {
+      return executionReadyResultFor(
+        message,
+        "error",
+        "managed_tab_not_chatgpt",
+        "Managed ChatGPTタブがChatGPTページではありません。",
+        "chatgpt_page_check");
+    }
+
+    const composer = await waitForComposer(message);
+    if (!composer) {
+      diagnostic("execution composer unavailable", {
+        ...trace,
+        status: "error",
+        error_code: "composer_ready_timeout",
+        stage: "composer_ready_timeout"
+      });
+      return executionReadyResultFor(
+        message,
+        "error",
+        "composer_not_found",
+        "Managed ChatGPTタブのcomposer準備がタイムアウトしました。",
+        "composer_ready_timeout");
+    }
+    diagnostic("execution composer ready", {
+      ...trace,
+      status: "ready",
+      stage: "composer_ready",
+      composer_type: composerType(composer)
+    });
+
+    const deadline = Date.now() + composerMountTimeoutMs;
+    let current = readCurrentContextSnapshot();
+    while (Date.now() < deadline) {
+      current = readCurrentContextSnapshot() || current;
+      if (contextIdentityMatches(current, message)) break;
+      await wait(composerPollIntervalMs);
+    }
+    current = readCurrentContextSnapshot() || current;
+    if (!contextIdentityMatches(current, message)) {
+      diagnostic("execution conversation mismatch", {
+        ...trace,
+        status: "error",
+        error_code: "target_conversation_mismatch",
+        stage: "conversation_ready"
+      });
+      return executionReadyResultFor(
+        message,
+        "error",
+        "target_conversation_mismatch",
+        "Managed ChatGPTタブのConversation準備が完了していません。",
+        "conversation_ready",
+        current,
+        true);
+    }
+
+    diagnostic("execution conversation ready", {
+      ...trace,
+      status: "ready",
+      stage: "conversation_ready"
+    });
+    return executionReadyResultFor(
+      message,
+      "ready",
+      null,
+      null,
+      "conversation_ready",
+      current,
+      true);
+  }
+
+  async function readCurrentContextAfterHandoff(message) {
+    let current = readCurrentContextSnapshot();
     if (message?.newConversation !== true
       || (current?.conversation_id && current?.url)) return current;
 
@@ -670,9 +871,7 @@
     const deadline = Date.now() + newConversationBindingTimeoutMs;
     while (Date.now() < deadline) {
       await wait(100);
-      try {
-        current = locators.getCurrentChatGptContext?.(document, globalThis.location?.href) || current;
-      } catch (_) { }
+      current = readCurrentContextSnapshot() || current;
       if (current?.conversation_id && current?.url) return current;
     }
     return current;
@@ -802,6 +1001,7 @@
   }
 
   function assistantCandidatesFor(watcher) {
+    if (!watcher?.anchor) return [];
     // The correlated user-message anchor is the authoritative boundary. Do
     // not discard a post-anchor assistant container merely because ChatGPT
     // reused/reconciled the same DOM node that existed in the pre-send
@@ -829,6 +1029,7 @@
   }
 
   function sendAssistantResponseToBackground(watcher, result) {
+    const currentContext = readCurrentContextSnapshot();
     const message = {
       type: responseResultMessageType,
       requestId: watcher.requestId,
@@ -841,6 +1042,8 @@
     if (result.errorCode) message.errorCode = result.errorCode;
     if (result.message) message.message = result.message;
     if (result.stage) message.stage = result.stage;
+    if (currentContext?.conversation_id) message.targetConversationId = currentContext.conversation_id;
+    if (currentContext?.url) message.targetConversationUrl = currentContext.url;
 
     diagnostic("assistant response emitted", {
       request_id: watcher.requestId,
@@ -914,6 +1117,39 @@
       watcher.timer = null;
     }
     const now = Date.now();
+
+    // A pre-send watcher is deliberately armed before the Handoff is posted.
+    // It must not use an older anchor and must not start its response timeout
+    // until the marker-bearing user message for this exact request exists.
+    if (!watcher.anchor) {
+      const anchor = locators.findUserMessageWithCorrelation?.(document, {
+        protocol: watcher.protocol,
+        handoffId: watcher.handoffId,
+        boundaryId: watcher.boundaryId
+      }) || null;
+      if (!anchor) {
+        watcher.timer = setTimeout(() => evaluateAssistantResponseWatcher(watcher), responsePollIntervalMs);
+        return;
+      }
+      watcher.anchor = anchor;
+      watcher.awaitingUserAnchor = false;
+      watcher.deadline = now + responseTimeoutMs;
+      responseAnchors.set(watcher.key, {
+        anchor,
+        assistantElements: watcher.baselineAssistantElements,
+        createdAt: now
+      });
+      diagnostic(watcher.review === true ? "review anchor found" : "response anchor found", {
+        request_id: watcher.requestId,
+        session_id: watcher.sessionId,
+        handoff_id: watcher.handoffId,
+        boundary_id: watcher.boundaryId,
+        status: "watching",
+        stage: watcher.review === true ? "review_anchor_found" : "response_anchor_found",
+        target_tab_id: watcher.targetTabId
+      });
+    }
+
     const candidates = assistantCandidatesFor(watcher);
     // A visible assistant/status node is not by itself a Connector response.
     // Only the newest post-anchor assistant message whose own content has a
@@ -1002,7 +1238,7 @@
       return;
     }
 
-    if (now >= watcher.deadline) {
+    if (watcher.deadline !== null && now >= watcher.deadline) {
       const errorCode = !watcher.sawAssistantMessage
         ? "assistant_response_not_found"
         : watcher.sawGenerating || generating
@@ -1070,6 +1306,47 @@
       return responseResultFor(message, "watching", null, null, "response_watch_started");
     }
 
+    if (message?.prepare === true) {
+      const beforeAssistantMessages = locators.captureAssistantMessageSnapshot?.(document)
+        || { count: 0, elements: new Set() };
+      const watcher = {
+        key,
+        requestId: message.requestId,
+        sessionId: message.sessionId,
+        handoffId: message.handoffId,
+        boundaryId: message.boundaryId,
+        protocol: message.protocol,
+        review: message.review === true,
+        targetTabId: message?.targetTabId || message?.target_tab_id,
+        anchor: null,
+        awaitingUserAnchor: true,
+        baselineAssistantElements: beforeAssistantMessages.elements,
+        deadline: null,
+        lastChangedAt: Date.now(),
+        candidate: null,
+        candidateText: "",
+        sawAssistantMessage: false,
+        sawGenerating: false,
+        extractionWasEmpty: false,
+        sawNonConnectorAssistant: false,
+        observedAssistantElements: new Set(),
+        ignoredAssistantElements: new Set(),
+        hasCompletionActions: false,
+        observer: null,
+        timer: null,
+        finished: false
+      };
+      responseWatchers.set(key, watcher);
+      diagnostic("response watch armed", {
+        ...traceForMessage(message),
+        status: "watching",
+        stage: "response_watch_armed",
+        target_tab_id: watcher.targetTabId
+      });
+      startAssistantResponseWatcher(watcher);
+      return responseResultFor(message, "watching", null, null, "response_watch_ready");
+    }
+
     const savedAnchor = responseAnchors.get(key);
     const savedAnchorElement = savedAnchor?.anchor?.isConnected === false
       ? null
@@ -1108,6 +1385,7 @@
       handoffId: message.handoffId,
       boundaryId: message.boundaryId,
       protocol: message.protocol,
+      review: message?.review === true,
       targetTabId: message?.targetTabId || message?.target_tab_id,
       anchor,
       baselineAssistantElements: savedAnchor?.assistantElements instanceof Set
@@ -1142,6 +1420,27 @@
     return responseResultFor(message, "watching", null, null, "response_watch_started");
   }
 
+  async function handleCancelResponseWatch(message) {
+    if (!hasResponseContext(message)) {
+      return responseResultFor(message, "error", "response_extraction_failed", "応答監視の識別情報がありません。", "response_context_invalid");
+    }
+    const key = responseCorrelationKey(message);
+    const watcher = responseWatchers.get(key);
+    if (watcher) {
+      watcher.finished = true;
+      watcher.observer?.disconnect?.();
+      if (watcher.timer !== null) clearTimeout(watcher.timer);
+      responseWatchers.delete(key);
+      responseAnchors.delete(key);
+    }
+    diagnostic("response watch cancelled", {
+      ...traceForMessage(message),
+      status: "cancelled",
+      stage: "response_watch_cancelled"
+    });
+    return responseResultFor(message, "cancelled", null, null, "response_watch_cancelled");
+  }
+
   async function handleHandoffSend(message) {
     diagnostic("content script received", {
       request_id: message?.requestId,
@@ -1152,6 +1451,47 @@
     }
     if (typeof message?.payload !== "string" || message.payload.length === 0) {
       return resultFor(message, "error", "composer_input_failed", "Handoff本文が空です。", "payload_validation");
+    }
+
+    // A Bridge retry can arrive after the first user message was accepted but
+    // its transport ACK was delayed. Reuse the marker-bearing message before
+    // touching the composer or Review attachment; posting the same immutable
+    // Handoff a second time would create a duplicate ChatGPT turn.
+    if (hasRequiredInputMarkers({
+      protocol: message?.protocol,
+      handoffId: message?.handoffId,
+      boundaryId: message?.boundaryId
+    })) {
+      let existingAnchor = null;
+      try {
+        existingAnchor = locators.findUserMessageWithCorrelation?.(document, {
+          protocol: message.protocol,
+          handoffId: message.handoffId,
+          boundaryId: message.boundaryId
+        }) || null;
+      } catch (_) { existingAnchor = null; }
+      if (existingAnchor) {
+        const beforeAssistantMessages = locators.captureAssistantMessageSnapshot?.(document)
+          || { count: 0, elements: new Set() };
+        responseAnchors.set(responseCorrelationKey(message), {
+          anchor: existingAnchor,
+          assistantElements: beforeAssistantMessages.elements,
+          createdAt: Date.now()
+        });
+        diagnostic("user message already correlated", {
+          ...traceForMessage(message),
+          status: "sent",
+          stage: "user_message_already_correlated"
+        });
+        const result = resultFor(message, "sent", null, null, "user_message_already_correlated");
+        result.current_context = readCurrentContextSnapshot();
+        // The marker-bearing user message is the transport success boundary.
+        // Notify Background before optional context binding can yield across a
+        // ChatGPT SPA navigation and invalidate this Content Script.
+        notifyHandoffSendConfirmed(message, result);
+        result.current_context = await readCurrentContextAfterHandoff(message);
+        return result;
+      }
     }
 
     const composer = await waitForComposer(message);
@@ -1308,6 +1648,11 @@
       stage: acceptance.stage
     });
     const result = resultFor(message, "sent", null, null, acceptance.stage);
+    // Do not put the Desktop ACK behind new-Conversation URL discovery. Once
+    // the correlated user message exists, the Handoff is already posted;
+    // ChatGPT may replace this page/context while it creates the route.
+    result.current_context = readCurrentContextSnapshot();
+    notifyHandoffSendConfirmed(message, result);
     // For a new Chat, ChatGPT may create the conversation URL only after the
     // user message is accepted. Return metadata discovered from the page so
     // Desktop can bind the created conversation without syncing message text.
@@ -1332,8 +1677,22 @@
           "context_extraction")));
       return true;
     }
+    if (message?.type === executionReadyMessageType) {
+      if (sender?.id && sender.id !== chrome.runtime.id) return false;
+      handleChatGptExecutionReady(message)
+        .then(sendResponse)
+        .catch(() => sendResponse(executionReadyResultFor(
+          message,
+          "error",
+          "conversation_ready_failed",
+          "Managed ChatGPTタブの準備に失敗しました。",
+          "conversation_ready_unexpected")));
+      return true;
+    }
     if (message?.type !== handoffMessageType
+      && message?.type !== handoffAcceptanceCheckMessageType
       && message?.type !== responseWatchMessageType
+      && message?.type !== cancelResponseWatchMessageType
       && message?.type !== reviewMediaAttachBeginMessageType
       && message?.type !== reviewMediaAttachChunkMessageType
       && message?.type !== reviewMediaAttachEndMessageType) return false;
@@ -1341,6 +1700,10 @@
 
     const operation = message?.type === responseWatchMessageType
       ? handleWatchAssistantResponse(message)
+      : message?.type === cancelResponseWatchMessageType
+        ? handleCancelResponseWatch(message)
+      : message?.type === handoffAcceptanceCheckMessageType
+        ? handleHandoffAcceptanceCheck(message)
       : message?.type === handoffMessageType
         ? handleHandoffSend(message)
         : message?.type === reviewMediaAttachBeginMessageType
@@ -1358,6 +1721,9 @@
     return true;
   });
 
-  void sendRuntimeMessage({ type: "CONTENT_SCRIPT_READY" });
+  void sendRuntimeMessage({
+    type: "CONTENT_SCRIPT_READY",
+    context: readCurrentContextSnapshot()
+  });
   installContextMonitor();
 })();

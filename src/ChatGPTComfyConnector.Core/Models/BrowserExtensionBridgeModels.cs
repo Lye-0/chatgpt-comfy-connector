@@ -287,6 +287,8 @@ public sealed record BrowserExtensionMediaAttachRequest(
     string? TargetTabUrl = null,
     string? TargetConversationId = null,
     string? TargetConversationUrl = null,
+    // Kept as an optional compatibility field. Media delivery targets the
+    // bound Conversation and never routes by Project metadata.
     string? TargetProjectId = null);
 
 public sealed record BrowserExtensionMediaAttachResult(

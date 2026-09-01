@@ -2295,6 +2295,15 @@ async function ensureManagedExecutionTab(message, trace = traceForMessage(messag
   if (message?.new_conversation !== undefined && typeof message.new_conversation !== "boolean") {
     throw managedTabError("target_conversation_invalid", "target_conversation_check", "新規Conversation指定が不正です。");
   }
+  const identity = conversationTargetFromMessage(message);
+  if (identity.errorCode) throw managedTabError(identity.errorCode, identity.errorStage, "ChatGPTの対象Conversation情報が不正です。");
+
+  const target = managedConversationTarget(message, identity);
+  // Conversation ID/URL is the durable execution identity. Project metadata
+  // is only required when the operation has to open a new Conversation; for
+  // an existing Conversation, stale Project metadata must never block media
+  // delivery or Handoff routing.
+  const requiresProjectMetadata = target.newConversation === true;
   const requestedProjectId = message?.target_project_id === undefined || message?.target_project_id === null
     ? null
     : safeContextIdentifier(message.target_project_id);
@@ -2304,25 +2313,24 @@ async function ensureManagedExecutionTab(message, trace = traceForMessage(messag
       || (safeChatGptContextUrl(message.target_project_url) === "https://chatgpt.com/"
         ? "https://chatgpt.com/"
         : null);
-  if (message?.target_project_id !== undefined
+  if (requiresProjectMetadata
+    && message?.target_project_id !== undefined
     && message?.target_project_id !== null
     && !requestedProjectId) {
     throw managedTabError("target_project_invalid", "target_project_check", "ChatGPT Project情報が不正です。");
   }
-  if (message?.target_project_url !== undefined
+  if (requiresProjectMetadata
+    && message?.target_project_url !== undefined
     && message?.target_project_url !== null
     && !requestedProjectUrl) {
     throw managedTabError("target_project_invalid", "target_project_check", "ChatGPT Project URLが不正です。");
   }
-  if (requestedProjectId
+  if (requiresProjectMetadata
+    && requestedProjectId
     && requestedProjectUrl !== "https://chatgpt.com/"
     && chatGptProjectId(requestedProjectUrl) !== requestedProjectId) {
     throw managedTabError("target_project_invalid", "target_project_check", "ChatGPT Project IDとURLが一致しません。");
   }
-  const identity = conversationTargetFromMessage(message);
-  if (identity.errorCode) throw managedTabError(identity.errorCode, identity.errorStage, "ChatGPTの対象Conversation情報が不正です。");
-
-  const target = managedConversationTarget(message, identity);
   let tab = await getManagedExecutionTab(trace);
   if (!tab) {
     const startUrl = target.newConversation

@@ -545,7 +545,8 @@ public sealed class BrowserExtensionBridgeTests
                 registration.MimeType,
                 registration.Size,
                 17,
-                "https://chatgpt.com/c/fixture");
+                "https://chatgpt.com/c/fixture",
+                TargetProjectId: "Project (stale display label)");
             var attachTask = bridge.SendMediaAttachAsync(attachRequest, timeout.Token);
             using var attachEnvelope = await ReceiveJsonAsync(socket, timeout.Token);
             Assert.Equal("review.media.attach", attachEnvelope.RootElement.GetProperty("type").GetString());
@@ -553,6 +554,7 @@ public sealed class BrowserExtensionBridgeTests
             Assert.Equal(sessionId, attachEnvelope.RootElement.GetProperty("session_id").GetString());
             Assert.Equal(2, attachEnvelope.RootElement.GetProperty("iteration").GetInt32());
             Assert.Equal(17, attachEnvelope.RootElement.GetProperty("target_tab_id").GetInt32());
+            Assert.False(attachEnvelope.RootElement.TryGetProperty("target_project_id", out _));
             Assert.False(attachEnvelope.RootElement.TryGetProperty("full_path", out _));
             Assert.False(attachEnvelope.RootElement.TryGetProperty("allowed_root", out _));
 

@@ -1688,6 +1688,50 @@ test("Background fetches media with the session token and attaches it through th
   assert.equal(harness.fetchCalls[0].options.headers["X-Connector-Client"], "browser-extension");
 });
 
+test("Background ignores stale Project metadata when media targets an existing Conversation", async () => {
+  const harness = await createHarness();
+  const requestWithStaleProject = {
+    ...reviewMediaRequest,
+    target_project_id: "Project (stale display label)"
+  };
+  harness.setActiveTabs([{ id: requestWithStaleProject.target_tab_id, url: requestWithStaleProject.target_tab_url }]);
+  harness.setMediaResponse({ bytes: new Uint8Array(requestWithStaleProject.size) });
+  harness.setContentHandler((message) => {
+    if (message.type === "REVIEW_MEDIA_ATTACH_BEGIN") return { status: "receiving" };
+    if (message.type === "REVIEW_MEDIA_ATTACH_CHUNK") return { status: "receiving" };
+    if (message.type === "REVIEW_MEDIA_ATTACH_END") return { status: "attached", stage: "attachment_verified" };
+    return null;
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(requestWithStaleProject, harness.socket);
+  const result = await harness.waitForSocketMessage(previousCount, (message) => message.type === "review.media.result");
+
+  assert.equal(result.status, "attached");
+  assert.equal(result.error_code, undefined);
+});
+
+test("Background still rejects invalid Project metadata when opening a new Conversation", async () => {
+  const harness = await createHarness();
+  const invalidNewConversation = {
+    ...request,
+    request_id: "new-conversation-invalid-project-request",
+    handoff_id: "new-conversation-invalid-project-handoff",
+    boundary_id: "new-conversation-invalid-project-boundary",
+    new_conversation: true,
+    target_project_id: "Project (stale display label)"
+  };
+  harness.setContentHandler(() => assert.fail("Invalid new-Conversation Project metadata must not reach Content Script"));
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(invalidNewConversation, harness.socket);
+  const result = await harness.waitForSocketMessage(previousCount, (message) => message.type === "handoff.result");
+
+  assert.equal(result.status, "error");
+  assert.equal(result.error_code, "target_project_invalid");
+  assert.equal(result.stage, "target_project_check");
+});
+
 test("Background does not guess a Review conversation when its identity is missing", async () => {
   const harness = await createHarness();
   harness.setActiveTabs([{ id: 7, url: "https://chatgpt.com/c/other", active: true }]);

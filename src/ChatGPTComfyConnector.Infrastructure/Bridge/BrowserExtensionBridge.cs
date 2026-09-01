@@ -636,8 +636,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             || (request.TargetConversationUrl is not null && !IsChatGptUrl(request.TargetConversationUrl))
             || request.TargetConversationId is { } conversationIdForUrl
                 && request.TargetConversationUrl is { } conversationUrl
-                && !string.Equals(ConversationIdFromUrl(conversationUrl), conversationIdForUrl, StringComparison.Ordinal)
-            || request.TargetProjectId is { } projectId && !IsSafeIdentifier(projectId))
+                && !string.Equals(ConversationIdFromUrl(conversationUrl), conversationIdForUrl, StringComparison.Ordinal))
         {
             return MediaError(request, BrowserExtensionReviewMediaErrorCodes.MediaRegistrationFailed, "Review添付の識別情報が不正です。", "media_request_validation");
         }
@@ -699,7 +698,6 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 target_tab_url = request.TargetTabUrl,
                 target_conversation_id = request.TargetConversationId,
                 target_conversation_url = request.TargetConversationUrl,
-                target_project_id = request.TargetProjectId,
             }, cancellationToken);
 
             var result = await pending.Completion.Task.WaitAsync(MediaAttachResponseTimeout, cancellationToken);

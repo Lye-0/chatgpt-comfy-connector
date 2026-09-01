@@ -74,12 +74,14 @@
       "composer_ready",
       "watcher_ready",
       "composer_type",
+      "extracted_length",
       "protocol_found",
       "handoff_id_found",
       "boundary_id_found"
     ]) {
       if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
       if (typeof fields[key] === "boolean") safe[key] = fields[key];
+      if (Number.isSafeInteger(fields[key]) && fields[key] >= 0) safe[key] = fields[key];
     }
     try {
       console.info(`[ChatGPT Comfy Connector] ${eventName}`, safe);
@@ -1178,6 +1180,18 @@
     }
     if (candidate) {
       watcher.sawAssistantMessage = true;
+      if (!watcher.connectorCandidateDetected) {
+        watcher.connectorCandidateDetected = true;
+        diagnostic("connector candidate detected", {
+          request_id: watcher.requestId,
+          session_id: watcher.sessionId,
+          handoff_id: watcher.handoffId,
+          boundary_id: watcher.boundaryId,
+          status: "observed",
+          stage: "connector_candidate_detected",
+          target_tab_id: watcher.targetTabId
+        });
+      }
       if (!watcher.observedAssistantElements.has(candidate)) {
         watcher.observedAssistantElements.add(candidate);
         diagnostic("assistant message observed", {
@@ -1198,12 +1212,23 @@
         watcher.candidate = candidate;
         watcher.candidateText = text;
         watcher.lastChangedAt = now;
+        watcher.textStableReported = false;
         diagnostic("assistant response observed", {
           request_id: watcher.requestId,
           session_id: watcher.sessionId,
           handoff_id: watcher.handoffId,
           boundary_id: watcher.boundaryId,
           stage: "assistant_message_observed",
+          target_tab_id: watcher.targetTabId
+        });
+        diagnostic("assistant extraction complete", {
+          request_id: watcher.requestId,
+          session_id: watcher.sessionId,
+          handoff_id: watcher.handoffId,
+          boundary_id: watcher.boundaryId,
+          status: text.trim() ? "extracted" : "empty",
+          stage: "assistant_extraction_complete",
+          extracted_length: text.length,
           target_tab_id: watcher.targetTabId
         });
       }
@@ -1226,10 +1251,52 @@
       watcher.sawGenerating = true;
     }
 
-    if (candidate
+    const textStable = Boolean(candidate
       && watcher.candidateText.trim()
-      && now - watcher.lastChangedAt >= responseStabilityMs
-      && !generating) {
+      && now - watcher.lastChangedAt >= responseStabilityMs);
+    if (textStable && !watcher.textStableReported) {
+      watcher.textStableReported = true;
+      diagnostic("assistant text stable", {
+        request_id: watcher.requestId,
+        session_id: watcher.sessionId,
+        handoff_id: watcher.handoffId,
+        boundary_id: watcher.boundaryId,
+        status: "stable",
+        stage: "assistant_text_stable",
+        target_tab_id: watcher.targetTabId
+      });
+    }
+
+    // ChatGPT's Stop control is page/composer scoped rather than tied to the
+    // assistant turn being watched. During Review, it can remain visible for
+    // unrelated page work even after this assistant turn exposes its enabled
+    // completion actions. A stable Connector candidate with those per-turn
+    // actions is therefore completion evidence; a global Stop control alone
+    // must not keep a completed Review response in streaming forever.
+    const assistantGenerationFinished = !generating || watcher.hasCompletionActions;
+    if (assistantGenerationFinished && textStable && !watcher.generationFinishedReported) {
+      watcher.generationFinishedReported = true;
+      diagnostic("assistant generation finished", {
+        request_id: watcher.requestId,
+        session_id: watcher.sessionId,
+        handoff_id: watcher.handoffId,
+        boundary_id: watcher.boundaryId,
+        status: "complete",
+        stage: "assistant_generation_finished",
+        target_tab_id: watcher.targetTabId
+      });
+    }
+
+    if (candidate && textStable && assistantGenerationFinished) {
+      diagnostic("connector candidate complete", {
+        request_id: watcher.requestId,
+        session_id: watcher.sessionId,
+        handoff_id: watcher.handoffId,
+        boundary_id: watcher.boundaryId,
+        status: "complete",
+        stage: "connector_candidate_complete",
+        target_tab_id: watcher.targetTabId
+      });
       finishAssistantResponseWatcher(watcher, {
         status: "received",
         payload: watcher.candidateText,
@@ -1331,6 +1398,9 @@
         sawNonConnectorAssistant: false,
         observedAssistantElements: new Set(),
         ignoredAssistantElements: new Set(),
+        connectorCandidateDetected: false,
+        textStableReported: false,
+        generationFinishedReported: false,
         hasCompletionActions: false,
         observer: null,
         timer: null,
@@ -1401,6 +1471,9 @@
       sawNonConnectorAssistant: false,
       observedAssistantElements: new Set(),
       ignoredAssistantElements: new Set(),
+      connectorCandidateDetected: false,
+      textStableReported: false,
+      generationFinishedReported: false,
       hasCompletionActions: false,
       observer: null,
       timer: null,

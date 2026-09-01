@@ -381,7 +381,11 @@ completed answer from a streaming answer. Status/live-region text such as
 thinking, tool progress, and image-generation progress is excluded. A
 candidate is not eligible until that assistant message contains a
 `connector-command` code block (or the equivalent fenced text) and its
-response is stable and correlated to the anchor:
+  response is stable and correlated to the anchor. The watcher uses completion
+  actions on that assistant turn as per-message completion evidence; a page-wide
+  Stop control that remains visible for unrelated work does not keep an already
+  stable Review response in the streaming state. A Stop control without
+  per-message completion evidence still keeps the watcher waiting:
 
 ```json
 {

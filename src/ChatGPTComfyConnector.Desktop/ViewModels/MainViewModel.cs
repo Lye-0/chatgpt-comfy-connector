@@ -3892,8 +3892,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 targetTabId,
                 targetTabUrl,
                 session.ConversationId,
-                session.ConversationUrl,
-                session.ProjectId));
+                session.ConversationUrl));
         }
         catch (Exception)
         {

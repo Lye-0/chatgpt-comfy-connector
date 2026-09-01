@@ -1157,6 +1157,8 @@ test("Content Script waits for streaming to stop before reporting assistant resp
     statusText: "より詳細な画像を生成しています。少々お待ちください。",
     contentRoot: true
   });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(harness.messages.some((message) => message.type === "ASSISTANT_RESPONSE_RESULT"), false);
   harness.document.removeButton(stopButton);
   const result = await harness.waitForRuntimeMessage((message) => message.type === "ASSISTANT_RESPONSE_RESULT");
   assert.equal(result.status, "received");
@@ -1363,8 +1365,6 @@ test("Content Script arms a Review response watcher with the Review identity and
     },
     payload: "## Review Handoff\nProtocol: comfy-connector/1\nhandoff_id: review-handoff-watcher-fixture\nboundary_id: review-boundary-watcher-fixture\n"
   };
-  assert.equal((await harness.send(review)).status, "sent");
-
   const watching = await harness.send({
     type: "WATCH_ASSISTANT_RESPONSE",
     requestId: review.requestId,
@@ -1373,9 +1373,11 @@ test("Content Script arms a Review response watcher with the Review identity and
     boundaryId: review.boundaryId,
     protocol: review.protocol,
     targetTabId: 42,
+    prepare: true,
     review: true
   });
   assert.equal(watching.status, "watching");
+  assert.equal((await harness.send(review)).status, "sent");
 
   const command = JSON.stringify({
     protocol: "comfy-connector/1",
@@ -1384,11 +1386,19 @@ test("Content Script arms a Review response watcher with the Review identity and
     session_id: review.sessionId,
     reason: "approved"
   });
-  harness.document.appendAssistantCodeMessage({
+  const finalMessage = harness.document.appendAssistantCodeMessage({
     codeText: command,
     language: "connector-command",
     classLanguage: null
   });
+  // ChatGPT can leave its page-level Stop control visible for unrelated work.
+  // The enabled action on this exact assistant turn is the stronger completion
+  // signal and must allow the Review response to be emitted.
+  harness.document.addStopButton();
+  finalMessage.appendChild(new FakeButton(harness.document, {
+    "data-testid": "copy-turn",
+    "aria-label": "Copy"
+  }));
   const result = await harness.waitForRuntimeMessage((message) =>
     message.type === "ASSISTANT_RESPONSE_RESULT" && message.status === "received");
 

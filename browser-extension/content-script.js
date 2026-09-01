@@ -38,6 +38,10 @@
   const responseTimeoutMs = 120000;
   const responseStabilityMs = 900;
   const responsePollIntervalMs = 100;
+  // Lifecycle telemetry is intentionally sparse.  The watcher itself still
+  // polls at responsePollIntervalMs for functional detection, but diagnostics
+  // are emitted at most once per state transition or ten seconds.
+  const responseLifecycleTelemetryIntervalMs = 10000;
   const locators = globalThis.ChatGptComfyConnectorLocators;
   const responseAnchors = new Map();
   const responseWatchers = new Map();
@@ -77,7 +81,13 @@
       "extracted_length",
       "protocol_found",
       "handoff_id_found",
-      "boundary_id_found"
+      "boundary_id_found",
+      "document_visibility_state",
+      "document_hidden",
+      "document_was_discarded",
+      "content_script_alive",
+      "watcher_state",
+      "assistant_state"
     ]) {
       if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
       if (typeof fields[key] === "boolean") safe[key] = fields[key];
@@ -117,6 +127,58 @@
       target_tab_id: message?.targetTabId ?? message?.target_tab_id,
       ...fields
     };
+  }
+
+  function contentLifecycleTrace(watcher = null, fields = {}) {
+    const trace = {
+      ...(watcher ? traceForMessage({
+        requestId: watcher.requestId,
+        sessionId: watcher.sessionId,
+        handoffId: watcher.handoffId,
+        boundaryId: watcher.boundaryId,
+        targetTabId: watcher.targetTabId
+      }) : {}),
+      content_script_alive: true,
+      document_visibility_state: typeof document.visibilityState === "string"
+        ? document.visibilityState
+        : "unknown",
+      watcher_state: watcher && !watcher.finished ? "armed" : "idle",
+      ...fields
+    };
+    if (typeof document.hidden === "boolean") trace.document_hidden = document.hidden;
+    if (typeof document.wasDiscarded === "boolean") trace.document_was_discarded = document.wasDiscarded;
+    return trace;
+  }
+
+  function responseLifecycleTrace(watcher, fields = {}) {
+    return contentLifecycleTrace(watcher, fields);
+  }
+
+  function watcherForLifecycleTelemetry() {
+    return responseWatchers.values().next().value || null;
+  }
+
+  function emitResponseLifecycleTelemetry(watcher, assistantState, stage = "response_waiting_periodic", force = false) {
+    if (!watcher) return;
+    const now = Date.now();
+    const changed = watcher.lifecycleTelemetryState !== assistantState;
+    if (!force
+      && !changed
+      && now - (watcher.lifecycleTelemetryAt || 0) < responseLifecycleTelemetryIntervalMs) return;
+    watcher.lifecycleTelemetryState = assistantState;
+    watcher.lifecycleTelemetryAt = now;
+    diagnostic("response lifecycle telemetry", responseLifecycleTrace(watcher, {
+      status: assistantState === "completed" ? "completed" : "waiting",
+      stage,
+      assistant_state: assistantState
+    }));
+  }
+
+  function assistantStateForResult(watcher, result) {
+    if (result?.status === "received") return "completed";
+    if (result?.errorCode === "response_stream_interrupted") return "streaming";
+    if (watcher?.candidate && watcher.candidateText?.trim()) return "stable_wait";
+    return "not_detected";
   }
 
   function resultFor(message, status, errorCode, text, stage) {
@@ -330,6 +392,20 @@
       } catch (_) { }
     }
     emitCurrentContext();
+  }
+
+  function installLifecycleTelemetry() {
+    if (globalThis.__chatgptComfyLifecycleTelemetryInstalled
+      || typeof document.addEventListener !== "function") return;
+    globalThis.__chatgptComfyLifecycleTelemetryInstalled = true;
+    document.addEventListener("visibilitychange", () => {
+      const watcher = watcherForLifecycleTelemetry();
+      diagnostic("document visibility changed", contentLifecycleTrace(watcher, {
+        status: "observed",
+        stage: "document_visibility_changed",
+        assistant_state: watcher?.lifecycleTelemetryState || "not_detected"
+      }));
+    });
   }
 
   function responseCorrelationKey(message) {
@@ -1048,25 +1124,24 @@
     if (currentContext?.url) message.targetConversationUrl = currentContext.url;
 
     diagnostic("assistant response emitted", {
-      request_id: watcher.requestId,
-      session_id: watcher.sessionId,
-      handoff_id: watcher.handoffId,
-      boundary_id: watcher.boundaryId,
+      ...responseLifecycleTrace(watcher, {
       status: result.status,
       error_code: result.errorCode,
       stage: "assistant_response_emitted",
-      target_tab_id: watcher.targetTabId
+      target_tab_id: watcher.targetTabId,
+      assistant_state: assistantStateForResult(watcher, result),
+      watcher_state: "idle"
+      })
     });
 
     void sendRuntimeMessage(message, () => {
       diagnostic("assistant response delivery failed", {
-        request_id: watcher.requestId,
-        session_id: watcher.sessionId,
-        handoff_id: watcher.handoffId,
-        boundary_id: watcher.boundaryId,
+        ...responseLifecycleTrace(watcher, {
         status: "error",
         error_code: "bridge_disconnected",
-        stage: "response_background_dispatch"
+        stage: "response_background_dispatch",
+        watcher_state: "idle"
+        })
       });
     });
   }
@@ -1074,39 +1149,44 @@
   function finishAssistantResponseWatcher(watcher, result) {
     if (watcher.finished) return;
     watcher.finished = true;
+    emitResponseLifecycleTelemetry(
+      watcher,
+      assistantStateForResult(watcher, result),
+      result.status === "received" ? "assistant_message_complete" : result.stage,
+      true);
     if (watcher.observer) watcher.observer.disconnect();
     if (watcher.timer !== null) clearTimeout(watcher.timer);
     responseWatchers.delete(watcher.key);
     responseAnchors.delete(watcher.key);
     if (result.status === "received") {
       diagnostic("assistant message complete", {
-        request_id: watcher.requestId,
-        session_id: watcher.sessionId,
-        handoff_id: watcher.handoffId,
-        boundary_id: watcher.boundaryId,
+        ...responseLifecycleTrace(watcher, {
         status: "received",
         stage: "assistant_message_complete",
-        target_tab_id: watcher.targetTabId
+        target_tab_id: watcher.targetTabId,
+        assistant_state: "completed",
+        watcher_state: "idle"
+        })
       });
       diagnostic("assistant response correlated", {
-        request_id: watcher.requestId,
-        session_id: watcher.sessionId,
-        handoff_id: watcher.handoffId,
-        boundary_id: watcher.boundaryId,
+        ...responseLifecycleTrace(watcher, {
         status: "received",
         stage: result.stage,
-        target_tab_id: watcher.targetTabId
+        target_tab_id: watcher.targetTabId,
+        assistant_state: "completed",
+        watcher_state: "idle"
+        })
       });
     } else {
       diagnostic("assistant response failed", {
-        request_id: watcher.requestId,
-        session_id: watcher.sessionId,
-        handoff_id: watcher.handoffId,
-        boundary_id: watcher.boundaryId,
+        ...responseLifecycleTrace(watcher, {
         status: "error",
         error_code: result.errorCode,
         stage: result.stage,
-        target_tab_id: watcher.targetTabId
+        target_tab_id: watcher.targetTabId,
+        assistant_state: assistantStateForResult(watcher, result),
+        watcher_state: "idle"
+        })
       });
     }
     sendAssistantResponseToBackground(watcher, result);
@@ -1130,6 +1210,7 @@
         boundaryId: watcher.boundaryId
       }) || null;
       if (!anchor) {
+        emitResponseLifecycleTelemetry(watcher, "not_detected", "response_anchor_waiting");
         watcher.timer = setTimeout(() => evaluateAssistantResponseWatcher(watcher), responsePollIntervalMs);
         return;
       }
@@ -1150,6 +1231,7 @@
         stage: watcher.review === true ? "review_anchor_found" : "response_anchor_found",
         target_tab_id: watcher.targetTabId
       });
+      emitResponseLifecycleTelemetry(watcher, "not_detected", "response_anchor_found", true);
     }
 
     const candidates = assistantCandidatesFor(watcher);
@@ -1231,6 +1313,16 @@
           extracted_length: text.length,
           target_tab_id: watcher.targetTabId
         });
+        if (now - (watcher.domChangeTelemetryAt || 0) >= responseLifecycleTelemetryIntervalMs) {
+          watcher.domChangeTelemetryAt = now;
+          diagnostic("assistant DOM changed", responseLifecycleTrace(watcher, {
+            status: "observed",
+            stage: "assistant_dom_changed",
+            assistant_state: watcher.sawGenerating ? "streaming" : "stable_wait",
+            extracted_length: text.length,
+            target_tab_id: watcher.targetTabId
+          }));
+        }
       }
       if (!text.trim()) watcher.extractionWasEmpty = true;
       watcher.hasCompletionActions = Boolean(locators.hasAssistantCompletionActions?.(candidate));
@@ -1239,34 +1331,19 @@
     const generating = Boolean(locators.isGenerating?.(document));
     if (generating) {
       if (!watcher.sawGenerating) {
-        diagnostic("assistant response streaming", {
-          request_id: watcher.requestId,
-          session_id: watcher.sessionId,
-          handoff_id: watcher.handoffId,
-          boundary_id: watcher.boundaryId,
+        diagnostic("assistant response streaming", responseLifecycleTrace(watcher, {
           stage: "assistant_response_streaming",
+          assistant_state: "streaming",
           target_tab_id: watcher.targetTabId
-        });
+        }));
       }
       watcher.sawGenerating = true;
+      emitResponseLifecycleTelemetry(watcher, "streaming", "assistant_response_streaming");
     }
 
     const textStable = Boolean(candidate
       && watcher.candidateText.trim()
       && now - watcher.lastChangedAt >= responseStabilityMs);
-    if (textStable && !watcher.textStableReported) {
-      watcher.textStableReported = true;
-      diagnostic("assistant text stable", {
-        request_id: watcher.requestId,
-        session_id: watcher.sessionId,
-        handoff_id: watcher.handoffId,
-        boundary_id: watcher.boundaryId,
-        status: "stable",
-        stage: "assistant_text_stable",
-        target_tab_id: watcher.targetTabId
-      });
-    }
-
     // ChatGPT's Stop control is page/composer scoped rather than tied to the
     // assistant turn being watched. During Review, it can remain visible for
     // unrelated page work even after this assistant turn exposes its enabled
@@ -1274,29 +1351,45 @@
     // actions is therefore completion evidence; a global Stop control alone
     // must not keep a completed Review response in streaming forever.
     const assistantGenerationFinished = !generating || watcher.hasCompletionActions;
+    if (textStable && !watcher.textStableReported) {
+      watcher.textStableReported = true;
+      diagnostic("assistant text stable", responseLifecycleTrace(watcher, {
+        status: "stable",
+        stage: "assistant_text_stable",
+        assistant_state: assistantGenerationFinished ? "completed" : "stable_wait",
+        target_tab_id: watcher.targetTabId
+      }));
+    }
+
+    const assistantState = candidate && textStable && assistantGenerationFinished
+      ? "completed"
+      : generating
+        ? "streaming"
+        : candidate && watcher.candidateText.trim()
+          ? "stable_wait"
+          : "not_detected";
+    emitResponseLifecycleTelemetry(
+      watcher,
+      assistantState,
+      assistantState === "completed" ? "assistant_generation_finished" : "response_waiting_periodic",
+      assistantState === "completed");
     if (assistantGenerationFinished && textStable && !watcher.generationFinishedReported) {
       watcher.generationFinishedReported = true;
-      diagnostic("assistant generation finished", {
-        request_id: watcher.requestId,
-        session_id: watcher.sessionId,
-        handoff_id: watcher.handoffId,
-        boundary_id: watcher.boundaryId,
+      diagnostic("assistant generation finished", responseLifecycleTrace(watcher, {
         status: "complete",
         stage: "assistant_generation_finished",
+        assistant_state: "completed",
         target_tab_id: watcher.targetTabId
-      });
+      }));
     }
 
     if (candidate && textStable && assistantGenerationFinished) {
-      diagnostic("connector candidate complete", {
-        request_id: watcher.requestId,
-        session_id: watcher.sessionId,
-        handoff_id: watcher.handoffId,
-        boundary_id: watcher.boundaryId,
+      diagnostic("connector candidate complete", responseLifecycleTrace(watcher, {
         status: "complete",
         stage: "connector_candidate_complete",
+        assistant_state: "completed",
         target_tab_id: watcher.targetTabId
-      });
+      }));
       finishAssistantResponseWatcher(watcher, {
         status: "received",
         payload: watcher.candidateText,
@@ -1365,11 +1458,11 @@
     const key = responseCorrelationKey(message);
     const existing = responseWatchers.get(key);
     if (existing) {
-      diagnostic("response watch armed", {
-        ...traceForMessage(message),
+      diagnostic("response watch armed", contentLifecycleTrace(existing, {
         status: "watching",
-        stage: "response_watch_armed"
-      });
+        stage: "response_watch_armed",
+        watcher_state: "armed"
+      }));
       return responseResultFor(message, "watching", null, null, "response_watch_started");
     }
 
@@ -1402,17 +1495,21 @@
         textStableReported: false,
         generationFinishedReported: false,
         hasCompletionActions: false,
+        lifecycleTelemetryAt: 0,
+        lifecycleTelemetryState: null,
+        domChangeTelemetryAt: 0,
         observer: null,
         timer: null,
         finished: false
       };
       responseWatchers.set(key, watcher);
-      diagnostic("response watch armed", {
-        ...traceForMessage(message),
+      diagnostic("response watch armed", contentLifecycleTrace(watcher, {
         status: "watching",
         stage: "response_watch_armed",
+        watcher_state: "armed",
         target_tab_id: watcher.targetTabId
-      });
+      }));
+      emitResponseLifecycleTelemetry(watcher, "not_detected", "response_watch_armed", true);
       startAssistantResponseWatcher(watcher);
       return responseResultFor(message, "watching", null, null, "response_watch_ready");
     }
@@ -1475,20 +1572,21 @@
       textStableReported: false,
       generationFinishedReported: false,
       hasCompletionActions: false,
+      lifecycleTelemetryAt: 0,
+      lifecycleTelemetryState: null,
+      domChangeTelemetryAt: 0,
       observer: null,
       timer: null,
       finished: false
     };
     responseWatchers.set(key, watcher);
-    diagnostic("response watch armed", {
-      request_id: watcher.requestId,
-      session_id: watcher.sessionId,
-      handoff_id: watcher.handoffId,
-      boundary_id: watcher.boundaryId,
+    diagnostic("response watch armed", contentLifecycleTrace(watcher, {
       status: "watching",
       stage: "response_watch_armed",
+      watcher_state: "armed",
       target_tab_id: watcher.targetTabId
-    });
+    }));
+    emitResponseLifecycleTelemetry(watcher, "not_detected", "response_watch_armed", true);
     startAssistantResponseWatcher(watcher);
     return responseResultFor(message, "watching", null, null, "response_watch_started");
   }
@@ -1506,11 +1604,12 @@
       responseWatchers.delete(key);
       responseAnchors.delete(key);
     }
-    diagnostic("response watch cancelled", {
+    diagnostic("response watch cancelled", contentLifecycleTrace(watcher, {
       ...traceForMessage(message),
       status: "cancelled",
-      stage: "response_watch_cancelled"
-    });
+      stage: "response_watch_cancelled",
+      watcher_state: "idle"
+    }));
     return responseResultFor(message, "cancelled", null, null, "response_watch_cancelled");
   }
 
@@ -1794,9 +1893,16 @@
     return true;
   });
 
+  diagnostic("content script lifecycle", contentLifecycleTrace(null, {
+    status: "ready",
+    stage: "content_script_ready",
+    assistant_state: "not_detected",
+    watcher_state: "idle"
+  }));
   void sendRuntimeMessage({
     type: "CONTENT_SCRIPT_READY",
     context: readCurrentContextSnapshot()
   });
+  installLifecycleTelemetry();
   installContextMonitor();
 })();

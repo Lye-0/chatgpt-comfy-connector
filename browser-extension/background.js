@@ -54,6 +54,10 @@ const HANDOFF_ACCEPTANCE_RETRY_DELAY_MS = 500;
 const HANDOFF_ACCEPTANCE_RETRY_TIMEOUT_MS = CONTENT_SCRIPT_TIMEOUT_MS;
 const RESPONSE_WATCH_REARM_DELAY_MS = 500;
 const RESPONSE_WATCH_REARM_TIMEOUT_MS = 120000;
+// Lifecycle diagnostics are intentionally sparse.  A pending response watch
+// gets one metadata-only snapshot every ten seconds; state-change events are
+// still emitted immediately by the Chrome event listeners below.
+const MANAGED_TAB_LIFECYCLE_TELEMETRY_INTERVAL_MS = 10000;
 const HANDOFF_DELIVERY_CACHE_MS = 10 * 60 * 1000;
 // A WebSocket send succeeding locally does not prove that the Desktop still
 // owns that socket. Keep Handoff/assistant-response envelopes until the Desktop explicitly
@@ -138,6 +142,7 @@ let managedTabStateOperation = Promise.resolve();
 const managedHandoffOperations = new Map();
 const managedMediaOperations = new Map();
 const contentScriptReadyTabs = new Map();
+const managedTabTelemetrySnapshots = new Map();
 let collectorTabState = { tabId: null, lifecycle: "Idle" };
 let collectorTabStateOperation = Promise.resolve();
 
@@ -210,6 +215,21 @@ function diagnostic(eventName, fields = {}) {
     "stage",
     "lifecycle",
     "target_tab_id",
+    "tab_id",
+    "window_id",
+    "event_tab_id",
+    "event_window_id",
+    "tab_active",
+    "tab_discarded",
+    "tab_frozen",
+    "tab_auto_discardable",
+    "window_focused",
+    "tab_status",
+    "managed_tab_exists",
+    "content_script_alive",
+    "watcher_state",
+    "assistant_state",
+    "changed_state",
     "content_ready",
     "conversation_ready",
     "composer_ready",
@@ -217,6 +237,7 @@ function diagnostic(eventName, fields = {}) {
   ]) {
     if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
     if (typeof fields[key] === "number" && Number.isSafeInteger(fields[key])) safe[key] = fields[key];
+    if (typeof fields[key] === "boolean") safe[key] = fields[key];
   }
   try {
     console.info(`[ChatGPT Comfy Connector] ${eventName}`, safe);
@@ -251,6 +272,135 @@ function managedTabTrace(fields = {}) {
     ...(managedTabState.conversationUrl ? { conversation_url: managedTabState.conversationUrl } : {}),
     ...fields
   };
+}
+
+function responseWatchForTab(tabId) {
+  if (!Number.isSafeInteger(tabId) || tabId < 0) return null;
+  const current = managedTabState.currentRequestId
+    ? responseWatches.get(managedTabState.currentRequestId)
+    : null;
+  if (current?.tabId === tabId) return current;
+  return [...responseWatches.values()].find((pending) => pending.tabId === tabId) || null;
+}
+
+function managedTabTelemetryIdentity(tabId) {
+  const pending = responseWatchForTab(tabId);
+  if (pending) {
+    return {
+      request_id: pending.requestId,
+      session_id: pending.sessionId,
+      handoff_id: pending.handoffId,
+      boundary_id: pending.boundaryId
+    };
+  }
+  if (tabId === managedTabState.tabId) {
+    return {
+      request_id: managedTabState.currentRequestId,
+      session_id: managedTabState.currentSessionId,
+      handoff_id: managedTabState.currentHandoffId,
+      boundary_id: managedTabState.currentBoundaryId
+    };
+  }
+  return {};
+}
+
+async function readManagedTabLifecycleSnapshot(tabId, tabHint = null, fallbackWindowId = null) {
+  const snapshot = {};
+  if (Number.isSafeInteger(tabId) && tabId >= 0) {
+    snapshot.tab_id = tabId;
+    snapshot.target_tab_id = tabId;
+  }
+
+  let tab = tabHint;
+  if (!tab && Number.isSafeInteger(tabId) && tabId >= 0 && typeof chrome.tabs?.get === "function") {
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch (_) {
+      tab = null;
+    }
+  }
+  if (!tab) return { ...snapshot, managed_tab_exists: false };
+
+  snapshot.managed_tab_exists = true;
+  if (Number.isSafeInteger(tab.id)) {
+    snapshot.tab_id = tab.id;
+    snapshot.target_tab_id = tab.id;
+  }
+  if (Number.isSafeInteger(tab.windowId)) snapshot.window_id = tab.windowId;
+  else if (Number.isSafeInteger(fallbackWindowId)) snapshot.window_id = fallbackWindowId;
+  if (typeof tab.active === "boolean") snapshot.tab_active = tab.active;
+  if (typeof tab.discarded === "boolean") snapshot.tab_discarded = tab.discarded;
+  if (typeof tab.frozen === "boolean") snapshot.tab_frozen = tab.frozen;
+  if (typeof tab.autoDiscardable === "boolean") snapshot.tab_auto_discardable = tab.autoDiscardable;
+  if (typeof tab.status === "string") snapshot.tab_status = tab.status;
+
+  if (Number.isSafeInteger(snapshot.window_id) && typeof chrome.windows?.get === "function") {
+    try {
+      const window = await chrome.windows.get(snapshot.window_id);
+      if (typeof window?.focused === "boolean") snapshot.window_focused = window.focused;
+    } catch (_) {
+      // Lifecycle telemetry must never affect the managed-tab transport.
+    }
+  }
+  return snapshot;
+}
+
+function recordManagedTabLifecycleTelemetry(stage, fields = {}, tabId = managedTabState.tabId, tabHint = null, fallbackWindowId = null) {
+  const resolvedTabId = Number.isSafeInteger(tabId) && tabId >= 0 ? tabId : null;
+  const pending = responseWatchForTab(resolvedTabId);
+  const contentScriptAlive = resolvedTabId !== null
+    && (contentScriptReadyTabs.has(resolvedTabId)
+      || (resolvedTabId === managedTabState.tabId && managedTabState.contentReady === true));
+  const base = {
+    ...managedTabTelemetryIdentity(resolvedTabId),
+    ...(resolvedTabId !== null ? { tab_id: resolvedTabId, target_tab_id: resolvedTabId } : {}),
+    lifecycle: managedTabState.lifecycle,
+    content_script_alive: contentScriptAlive,
+    watcher_state: pending
+      ? (pending.watcherReady ? "armed" : "requested")
+      : (resolvedTabId === managedTabState.tabId && managedTabState.watcherReady ? "armed" : "idle"),
+    ...fields,
+    stage
+  };
+
+  void readManagedTabLifecycleSnapshot(resolvedTabId, tabHint, fallbackWindowId).then((snapshot) => {
+    const telemetry = { ...base, ...snapshot, stage };
+    const previous = resolvedTabId === null
+      ? null
+      : managedTabTelemetrySnapshots.get(resolvedTabId);
+    const changedStates = [];
+    for (const key of ["tab_discarded", "tab_frozen", "tab_active", "window_focused"]) {
+      if (previous
+        && typeof previous[key] === "boolean"
+        && typeof telemetry[key] === "boolean"
+        && previous[key] !== telemetry[key]) {
+        changedStates.push(key);
+      }
+    }
+    if (previous
+      && typeof previous.managed_tab_exists === "boolean"
+      && previous.managed_tab_exists !== telemetry.managed_tab_exists) {
+      changedStates.push("managed_tab_exists");
+    }
+
+    diagnostic("managed tab lifecycle telemetry", telemetry);
+    if (changedStates.length > 0) {
+      diagnostic("managed tab lifecycle state changed", {
+        ...telemetry,
+        status: "changed",
+        stage: "managed_tab_state_changed",
+        changed_state: changedStates.join(",")
+      });
+    }
+    if (resolvedTabId !== null) managedTabTelemetrySnapshots.set(resolvedTabId, telemetry);
+  }).catch(() => {
+    diagnostic("managed tab lifecycle telemetry", {
+      ...base,
+      managed_tab_exists: false,
+      status: "unknown",
+      stage
+    });
+  });
 }
 
 function managedTabLifecycle(lifecycle, fields = {}) {
@@ -543,6 +693,7 @@ function forgetResponseWatchesForIdentity(message, exceptRequestId = null) {
       && pending.sessionId === message?.session_id
       && pending.handoffId === message?.handoff_id
       && pending.boundaryId === message?.boundary_id) {
+      stopResponseWatchLifecycleTelemetry(pending);
       responseWatches.delete(requestId);
       void dispatchToContentScript(
         pending.tabId,
@@ -714,6 +865,7 @@ function clearResponseWatchesForSocket(bridgeSocket, discard = false) {
   for (const [requestId, pending] of responseWatches) {
     if (pending.bridgeSocket !== bridgeSocket) continue;
     if (discard) {
+      stopResponseWatchLifecycleTelemetry(pending);
       responseWatches.delete(requestId);
       continue;
     }
@@ -1692,6 +1844,32 @@ function responseWatchTraceForPending(pending, fields = {}) {
   };
 }
 
+function stopResponseWatchLifecycleTelemetry(pending) {
+  if (!pending || pending.lifecycleTelemetryTimer === null) return;
+  clearTimeout(pending.lifecycleTelemetryTimer);
+  pending.lifecycleTelemetryTimer = null;
+}
+
+function scheduleResponseWatchLifecycleTelemetry(pending) {
+  if (!pending || pending.lifecycleTelemetryTimer !== null) return;
+  pending.lifecycleTelemetryTimer = setTimeout(() => {
+    pending.lifecycleTelemetryTimer = null;
+    if (responseWatches.get(pending.requestId) !== pending) return;
+    recordManagedTabLifecycleTelemetry(
+      "response_waiting_periodic",
+      responseWatchTraceForPending(pending, {
+        status: "waiting",
+        watcher_state: pending.watcherReady ? "armed" : "requested"
+      }),
+      pending.tabId);
+    scheduleResponseWatchLifecycleTelemetry(pending);
+  }, MANAGED_TAB_LIFECYCLE_TELEMETRY_INTERVAL_MS);
+  // Node-based regression tests should not be held open by an observational
+  // timer. Chrome timers do not expose unref(), so production behavior is
+  // unchanged.
+  pending.lifecycleTelemetryTimer?.unref?.();
+}
+
 function scheduleResponseWatchRearm(pending) {
   if (!pending || pending.rearmTimer !== null || pending.rearmDeadline <= Date.now()) return;
   pending.rearmTimer = setTimeout(() => {
@@ -1707,12 +1885,20 @@ function failResponseWatch(pending, errorCode, stage, message = "ChatGPTのassis
     clearTimeout(pending.rearmTimer);
     pending.rearmTimer = null;
   }
+  stopResponseWatchLifecycleTelemetry(pending);
   responseWatches.delete(pending.requestId);
   diagnostic("assistant response watch failed", responseWatchTraceForPending(pending, {
     status: "error",
     error_code: errorCode,
     stage
   }));
+  recordManagedTabLifecycleTelemetry("response_watch_failed", responseWatchTraceForPending(pending, {
+    status: "error",
+    error_code: errorCode,
+    stage,
+    assistant_state: errorCode === "response_stream_interrupted" ? "streaming" : "not_detected",
+    watcher_state: "idle"
+  }), pending.tabId);
   sendAssistantResponseToBridge({
     request_id: pending.requestId,
     session_id: pending.sessionId,
@@ -1775,6 +1961,11 @@ async function rearmResponseWatchesForTab(tabId) {
           status: "watching",
           stage: "response_watch_rearmed"
         }));
+        recordManagedTabLifecycleTelemetry("response_watch_rearmed", responseWatchTraceForPending(pending, {
+          status: "watching",
+          stage: "response_watch_rearmed",
+          watcher_state: "armed"
+        }), pending.tabId);
       } else {
         const errorCode = watchResult?.error_code || "content_script_unavailable";
         const stage = watchResult?.stage || "response_watch_rearm_result_invalid";
@@ -2233,6 +2424,12 @@ async function createManagedExecutionTab(url, trace) {
     stage: "managed_tab_created",
     target_tab_id: created.id
   });
+  recordManagedTabLifecycleTelemetry("managed_tab_created", {
+    ...trace,
+    status: "created",
+    stage: "managed_tab_created",
+    target_tab_id: created.id
+  }, created.id, created);
   return created;
 }
 
@@ -2663,9 +2860,11 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket, options
     watchDispatching: true,
     rearmInProgress: false,
     rearmTimer: null,
-    rearmDeadline: Date.now() + RESPONSE_WATCH_REARM_TIMEOUT_MS
+    rearmDeadline: Date.now() + RESPONSE_WATCH_REARM_TIMEOUT_MS,
+    lifecycleTelemetryTimer: null
   };
   responseWatches.set(requestId, pending);
+  scheduleResponseWatchLifecycleTelemetry(pending);
 
   let watchResult;
   try {
@@ -2693,6 +2892,7 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket, options
     });
     pending.watchDispatching = false;
     if (preSend) {
+      stopResponseWatchLifecycleTelemetry(pending);
       responseWatches.delete(requestId);
       managedTabLifecycle("Failed", { tabId, watcherReady: false });
     } else {
@@ -2717,6 +2917,7 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket, options
     });
     pending.watchDispatching = false;
     if (preSend) {
+      stopResponseWatchLifecycleTelemetry(pending);
       responseWatches.delete(requestId);
       managedTabLifecycle("Failed", { tabId, watcherReady: false });
     } else {
@@ -2737,6 +2938,11 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket, options
     stage: preSend ? "response_watch_ready" : "response_watch_armed",
     target_tab_id: tabId
   });
+  recordManagedTabLifecycleTelemetry("response_watch_armed", responseWatchTraceForPending(pending, {
+    status: "watching",
+    stage: "response_watch_armed",
+    watcher_state: "armed"
+  }), tabId);
   return true;
 }
 
@@ -2792,6 +2998,7 @@ function cancelResponseWatch(requestId) {
   const pending = responseWatches.get(requestId);
   if (!pending) return;
   if (pending.rearmTimer !== null) clearTimeout(pending.rearmTimer);
+  stopResponseWatchLifecycleTelemetry(pending);
   responseWatches.delete(requestId);
   void dispatchToContentScript(
     pending.tabId,
@@ -2816,6 +3023,11 @@ async function sendHandoffToManagedTab(message, bridgeSocket) {
   let responseWatchReady = false;
   let responseWatchPreArmed = false;
   try {
+    recordManagedTabLifecycleTelemetry("handoff_send_before", {
+      ...traceForMessage(message),
+      status: "pending",
+      stage: "handoff_send_before"
+    });
     const target = await resolveHandoffTarget(message);
     if (target.error) {
       result = target.error;
@@ -3069,6 +3281,15 @@ async function sendHandoffToManagedTab(message, bridgeSocket) {
       currentHandoffId: message.handoff_id,
       currentBoundaryId: message.boundary_id
     });
+    recordManagedTabLifecycleTelemetry(
+      message.handoff_kind === "review" ? "review_handoff_sent" : "handoff_sent",
+      {
+        ...traceForMessage(message, { target_tab_id: targetTabId }),
+        status: "sent",
+        stage: message.handoff_kind === "review" ? "review_handoff_sent" : "handoff_sent",
+        watcher_state: responseWatches.has(message.request_id) ? "armed" : "idle"
+      },
+      targetTabId);
   } else {
     managedTabLifecycle("Failed", { tabId: targetTabId, watcherReady: false });
   }
@@ -3166,6 +3387,16 @@ async function handleAssistantResponseFromContent(message, sender) {
       error_code: "response_not_correlated",
       stage: "response_watch_context"
     });
+    recordManagedTabLifecycleTelemetry("response_correlation_rejected", {
+      request_id: requestId,
+      session_id: sessionId,
+      handoff_id: handoffId,
+      boundary_id: boundaryId,
+      status: "error",
+      error_code: "response_not_correlated",
+      stage: "response_watch_context",
+      watcher_state: "idle"
+    }, sender?.tab?.id);
     return;
   }
   if (Number.isSafeInteger(managedTabState.tabId) && managedTabState.tabId !== pending.tabId) {
@@ -3179,6 +3410,16 @@ async function handleAssistantResponseFromContent(message, sender) {
       stage: "managed_tab_context",
       target_tab_id: sender?.tab?.id
     });
+    recordManagedTabLifecycleTelemetry("response_correlation_rejected", {
+      request_id: requestId,
+      session_id: sessionId,
+      handoff_id: handoffId,
+      boundary_id: boundaryId,
+      status: "error",
+      error_code: "response_not_correlated",
+      stage: "managed_tab_context",
+      watcher_state: "idle"
+    }, sender?.tab?.id);
     return;
   }
   diagnostic("response correlation started", {
@@ -3200,6 +3441,16 @@ async function handleAssistantResponseFromContent(message, sender) {
       error_code: "response_not_correlated",
       stage: "response_identity_mismatch"
     });
+    recordManagedTabLifecycleTelemetry("response_correlation_rejected", {
+      request_id: requestId,
+      session_id: sessionId,
+      handoff_id: handoffId,
+      boundary_id: boundaryId,
+      status: "error",
+      error_code: "response_not_correlated",
+      stage: "response_identity_mismatch",
+      watcher_state: "armed"
+    }, pending.tabId);
     return;
   }
 
@@ -3230,6 +3481,7 @@ async function handleAssistantResponseFromContent(message, sender) {
       || targetTab.id !== pending.tabId
       || !isChatGptTab(targetTab)
       || !targetConversationMatches) {
+      stopResponseWatchLifecycleTelemetry(pending);
       responseWatches.delete(requestId);
       diagnostic("response correlation rejected", {
         request_id: requestId,
@@ -3241,6 +3493,12 @@ async function handleAssistantResponseFromContent(message, sender) {
         stage: "target_tab_check",
         target_tab_id: pending.tabId
       });
+      recordManagedTabLifecycleTelemetry("response_correlation_rejected", responseWatchTraceForPending(pending, {
+        status: "error",
+        error_code: "review_target_tab_not_found",
+        stage: "target_tab_check",
+        watcher_state: "idle"
+      }), pending.tabId);
       sendAssistantResponseToBridge({
         request_id: requestId,
         session_id: sessionId,
@@ -3261,6 +3519,7 @@ async function handleAssistantResponseFromContent(message, sender) {
     if (responseConversationId
       && pending.targetConversationId
       && responseConversationId !== pending.targetConversationId) {
+      stopResponseWatchLifecycleTelemetry(pending);
       responseWatches.delete(requestId);
       diagnostic("response correlation rejected", {
         request_id: requestId,
@@ -3272,6 +3531,12 @@ async function handleAssistantResponseFromContent(message, sender) {
         stage: "response_conversation_check",
         target_tab_id: pending.tabId
       });
+      recordManagedTabLifecycleTelemetry("response_correlation_rejected", responseWatchTraceForPending(pending, {
+        status: "error",
+        error_code: "target_conversation_mismatch",
+        stage: "response_conversation_check",
+        watcher_state: "idle"
+      }), pending.tabId);
       sendAssistantResponseToBridge({
         request_id: requestId,
         session_id: sessionId,
@@ -3290,6 +3555,7 @@ async function handleAssistantResponseFromContent(message, sender) {
     }
   }
 
+  stopResponseWatchLifecycleTelemetry(pending);
   responseWatches.delete(requestId);
   let status = message?.status;
   let errorCode = message?.errorCode || message?.error_code;
@@ -3321,6 +3587,17 @@ async function handleAssistantResponseFromContent(message, sender) {
     stage: "assistant_response_received",
     target_tab_id: pending.tabId
   });
+  recordManagedTabLifecycleTelemetry("assistant_response_received", responseWatchTraceForPending(pending, {
+    status,
+    error_code: errorCode,
+    stage: "assistant_response_received",
+    assistant_state: status === "received"
+      ? "completed"
+      : errorCode === "response_stream_interrupted"
+        ? "streaming"
+        : "not_detected",
+    watcher_state: "idle"
+  }), pending.tabId);
   if (status === "received") {
     managedTabLifecycle("ResponseReceived", {
       tabId: pending.tabId,
@@ -3339,6 +3616,12 @@ async function handleAssistantResponseFromContent(message, sender) {
       stage: "response_correlation_accepted",
       target_tab_id: pending.tabId
     });
+    recordManagedTabLifecycleTelemetry("response_correlation_accepted", responseWatchTraceForPending(pending, {
+      status: "accepted",
+      stage: "response_correlation_accepted",
+      assistant_state: "completed",
+      watcher_state: "idle"
+    }), pending.tabId);
   } else {
     diagnostic("response correlation rejected", {
       request_id: requestId,
@@ -3350,6 +3633,13 @@ async function handleAssistantResponseFromContent(message, sender) {
       stage: "response_correlation_rejected",
       target_tab_id: pending.tabId
     });
+    recordManagedTabLifecycleTelemetry("response_correlation_rejected", responseWatchTraceForPending(pending, {
+      status: "error",
+      error_code: errorCode,
+      stage: "response_correlation_rejected",
+      assistant_state: errorCode === "response_stream_interrupted" ? "streaming" : "not_detected",
+      watcher_state: "idle"
+    }), pending.tabId);
   }
   sendAssistantResponseToBridge({
     request_id: requestId,
@@ -3690,7 +3980,15 @@ chrome.runtime.onStartup.addListener(() => {
 // still-pending watcher when the replacement reports ready; the Background is
 // the owner of the correlation identity, so the new script can safely locate
 // the same marker-bearing user message and continue from there.
-chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo) => {
+chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
+  if (Number.isSafeInteger(managedTabState.tabId) && tabId === managedTabState.tabId
+    && ["status", "active", "discarded", "frozen", "autoDiscardable", "url"]
+      .some((key) => Object.prototype.hasOwnProperty.call(changeInfo || {}, key))) {
+    recordManagedTabLifecycleTelemetry("tabs_on_updated", {
+      status: "observed",
+      stage: "tabs_on_updated"
+    }, tabId, tab);
+  }
   if (Number.isSafeInteger(managedTabState.tabId) && tabId === managedTabState.tabId
     && changeInfo?.status === "loading") {
     contentScriptReadyTabs.delete(tabId);
@@ -3722,7 +4020,26 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo) => {
   }
 });
 
-chrome.tabs.onRemoved?.addListener?.((tabId) => {
+chrome.tabs.onActivated?.addListener?.((activeInfo) => {
+  if (!Number.isSafeInteger(managedTabState.tabId)) return;
+  recordManagedTabLifecycleTelemetry("tabs_on_activated", {
+    status: "observed",
+    stage: "tabs_on_activated",
+    event_tab_id: activeInfo?.tabId,
+    event_window_id: activeInfo?.windowId
+  }, managedTabState.tabId, null, activeInfo?.windowId);
+});
+
+chrome.windows?.onFocusChanged?.addListener?.((windowId) => {
+  if (!Number.isSafeInteger(managedTabState.tabId)) return;
+  recordManagedTabLifecycleTelemetry("windows_on_focus_changed", {
+    status: "observed",
+    stage: "windows_on_focus_changed",
+    event_window_id: windowId
+  }, managedTabState.tabId, null, windowId);
+});
+
+chrome.tabs.onRemoved?.addListener?.((tabId, removeInfo) => {
   if (tabId === collectorTabState.tabId) {
     collectorTabState = { tabId: null, lifecycle: "Idle" };
     diagnostic("collector tab removed", {
@@ -3733,6 +4050,12 @@ chrome.tabs.onRemoved?.addListener?.((tabId) => {
   }
   if (tabId !== managedTabState.tabId) return;
   contentScriptReadyTabs.delete(tabId);
+  recordManagedTabLifecycleTelemetry("tabs_on_removed", {
+    status: "error",
+    error_code: "managed_tab_closed",
+    stage: "tabs_on_removed",
+    managed_tab_exists: false
+  }, tabId, null, removeInfo?.windowId);
   diagnostic("managed tab removed", {
     ...managedTabTrace({ target_tab_id: tabId }),
     status: "error",
@@ -3781,6 +4104,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       case "CONTENT_SCRIPT_READY":
         if (Number.isSafeInteger(_sender?.tab?.id)) {
           const readyTabId = _sender.tab.id;
+          const wasReady = contentScriptReadyTabs.has(readyTabId);
           const context = normalizeCurrentContext(message?.context);
           contentScriptReadyTabs.set(readyTabId, {
             readyAt: Date.now(),
@@ -3791,6 +4115,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             status: "ready",
             stage: "content_script_ready"
           });
+          recordManagedTabLifecycleTelemetry(
+            wasReady ? "content_script_reconnect" : "content_script_ready",
+            {
+              status: "ready",
+              stage: wasReady ? "content_script_reconnect" : "content_script_ready",
+              content_script_alive: true
+            },
+            readyTabId,
+            _sender.tab);
           if (readyTabId === managedTabState.tabId) {
             managedTabLifecycle("WaitingContentScript", {
               tabId: readyTabId,

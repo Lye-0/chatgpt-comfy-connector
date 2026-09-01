@@ -29,6 +29,10 @@ async function createHarness() {
   const updatedTabs = [];
   const tabUpdatedListeners = new Set();
   const tabRemovedListeners = new Set();
+  const tabActivatedListeners = new Set();
+  const windowFocusChangedListeners = new Set();
+  const windowStates = new Map([[1, { id: 1, focused: true }]]);
+  const diagnostics = [];
   let nextCreatedTabStatus;
 
   function conversationIdFromUrl(url) {
@@ -92,20 +96,40 @@ async function createHarness() {
         return tab;
       },
       async create({ url, active = true }) {
-        const tab = { id: 100 + createdTabs.length, url, active, status: nextCreatedTabStatus };
+        const tab = {
+          id: 100 + createdTabs.length,
+          windowId: 1,
+          url,
+          active,
+          status: nextCreatedTabStatus,
+          discarded: false,
+          frozen: false,
+          autoDiscardable: true
+        };
         createdTabs.push(tab);
         tabsById.set(tab.id, tab);
+        if (!windowStates.has(tab.windowId)) windowStates.set(tab.windowId, { id: tab.windowId, focused: false });
         activeTabs = active
           ? [tab, ...activeTabs.map((item) => ({ ...item, active: false }))]
           : [...activeTabs, tab];
+        if (active) {
+          for (const listener of tabActivatedListeners) listener({ tabId: tab.id, windowId: tab.windowId });
+        }
         return tab;
       },
       async update(tabId, changes = {}) {
         const tab = tabsById.get(tabId);
         assert.ok(tab, `Tab ${tabId} should exist before updating it`);
+        const wasActive = tab.active === true;
         Object.assign(tab, changes);
         updatedTabs.push({ tabId, changes: { ...changes } });
-        if (changes.active === true) activeTabs = activeTabs.map((item) => ({ ...item, active: item.id === tabId }));
+        if (changes.active === true) {
+          activeTabs = activeTabs.map((item) => ({ ...item, active: item.id === tabId }));
+          tab.active = true;
+          if (!wasActive) {
+            for (const listener of tabActivatedListeners) listener({ tabId, windowId: tab.windowId });
+          }
+        }
         if (changes.active === false) tab.active = false;
         for (const listener of tabUpdatedListeners) listener(tabId, { status: tab.status || "complete", ...changes }, tab);
         return tab;
@@ -129,6 +153,21 @@ async function createHarness() {
       onRemoved: {
         addListener(listener) { tabRemovedListeners.add(listener); },
         removeListener(listener) { tabRemovedListeners.delete(listener); }
+      },
+      onActivated: {
+        addListener(listener) { tabActivatedListeners.add(listener); },
+        removeListener(listener) { tabActivatedListeners.delete(listener); }
+      }
+    },
+    windows: {
+      async get(windowId) {
+        const window = windowStates.get(windowId);
+        if (!window) throw new Error(`No window with id: ${windowId}`);
+        return window;
+      },
+      onFocusChanged: {
+        addListener(listener) { windowFocusChangedListeners.add(listener); },
+        removeListener(listener) { windowFocusChangedListeners.delete(listener); }
       }
     },
     scripting: {
@@ -183,7 +222,12 @@ async function createHarness() {
         headers: { get() { return null; } }
       };
     },
-    console: { info() {}, warn() {}, error() {}, log() {} }
+    console: {
+      info(...args) { diagnostics.push(args); },
+      warn() {},
+      error() {},
+      log() {}
+    }
   });
   new Script(source).runInContext(context);
 
@@ -210,8 +254,13 @@ async function createHarness() {
     context,
     get socket() { return lastSocket; },
     setActiveTabs(value) {
-      activeTabs = value;
-      for (const tab of value) if (tab?.id !== undefined) tabsById.set(tab.id, tab);
+      activeTabs = value.map((tab) => {
+        if (tab?.id === undefined) return tab;
+        if (!Number.isSafeInteger(tab.windowId)) tab.windowId = 1;
+        if (!windowStates.has(tab.windowId)) windowStates.set(tab.windowId, { id: tab.windowId, focused: false });
+        tabsById.set(tab.id, tab);
+        return tab;
+      });
     },
     setContentHandler(handler) {
       contentError = null;
@@ -253,6 +302,27 @@ async function createHarness() {
       tab.url = url;
       for (const listener of tabUpdatedListeners) listener(tabId, { status: "complete", url }, tab);
     },
+    activateTab(tabId, windowId = null) {
+      const tab = tabsById.get(tabId);
+      assert.ok(tab, `Tab ${tabId} should exist before activation`);
+      if (Number.isSafeInteger(windowId)) tab.windowId = windowId;
+      activeTabs = activeTabs.map((item) => item.windowId === tab.windowId
+        ? { ...item, active: item.id === tabId }
+        : item);
+      tab.active = true;
+      for (const listener of tabActivatedListeners) listener({ tabId, windowId: tab.windowId });
+    },
+    focusWindow(windowId) {
+      if (!windowStates.has(windowId)) windowStates.set(windowId, { id: windowId, focused: false });
+      for (const window of windowStates.values()) window.focused = window.id === windowId;
+      for (const listener of windowFocusChangedListeners) listener(windowId);
+    },
+    setTabLifecycle(tabId, changes = {}) {
+      const tab = tabsById.get(tabId);
+      assert.ok(tab, `Tab ${tabId} should exist before lifecycle update`);
+      Object.assign(tab, changes);
+      for (const listener of tabUpdatedListeners) listener(tabId, { ...changes }, tab);
+    },
     removeTab(tabId) {
       tabsById.delete(tabId);
       activeTabs = activeTabs.filter((tab) => tab.id !== tabId);
@@ -260,6 +330,7 @@ async function createHarness() {
     },
     get createdTabs() { return createdTabs; },
     get updatedTabs() { return updatedTabs; },
+    get diagnostics() { return diagnostics; },
     get managedTabId() { return context.managedTabState?.tabId ?? createdTabs.at(-1)?.id ?? null; },
     async openAuthenticatedSocket(token = "session-reconnected") {
       const socketPromise = context.openSocket(token);
@@ -434,6 +505,76 @@ test("Background uses one inactive Managed ChatGPT Tab instead of the foreground
   assert.equal(watchMessage.targetTabId, managedTab.id);
   assert.equal(watchMessage.prepare, true);
   assert.equal(handoffMessage.targetTabId, undefined);
+});
+
+test("Background records Managed Tab activation, focus, and discard lifecycle state without changing routing", async () => {
+  const harness = await createHarness();
+  harness.setNextCreatedTabStatus("complete");
+  harness.setActiveTabs([{
+    id: 17,
+    windowId: 1,
+    url: "https://example.invalid/",
+    active: true
+  }]);
+  harness.setContentHandler((message) => message.type === "WATCH_ASSISTANT_RESPONSE"
+    ? {
+      request_id: request.request_id,
+      session_id: request.session_id,
+      handoff_id: request.handoff_id,
+      boundary_id: request.boundary_id,
+      status: "watching"
+    }
+    : {
+      request_id: request.request_id,
+      handoff_id: request.handoff_id,
+      status: "sent",
+      stage: "user_message_correlated"
+    });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+  const managedTabId = harness.managedTabId;
+  assert.ok(Number.isSafeInteger(managedTabId));
+
+  // Let the creation/send snapshots settle before comparing the later state.
+  await wait(10);
+  harness.activateTab(17);
+  await wait(10);
+  harness.focusWindow(2);
+  await wait(10);
+  harness.setTabLifecycle(managedTabId, {
+    active: false,
+    discarded: true,
+    frozen: true,
+    status: "complete"
+  });
+  await wait(10);
+
+  const entries = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields && typeof fields === "object");
+  const created = entries.find((fields) =>
+    fields.stage === "managed_tab_created" && fields.managed_tab_exists === true);
+  assert.equal(created.managed_tab_exists, true);
+  assert.equal(created.tab_id, managedTabId);
+  assert.equal(created.tab_active, false);
+  assert.equal(created.tab_discarded, false);
+  assert.equal(created.tab_frozen, false);
+  assert.equal(created.tab_auto_discardable, true);
+  assert.equal(created.window_focused, true);
+  assert.equal(created.tab_status, "complete");
+  assert.ok(entries.some((fields) => fields.stage === "tabs_on_activated" && fields.tab_active === false));
+  assert.ok(entries.some((fields) => fields.stage === "windows_on_focus_changed" && fields.window_focused === false));
+  assert.ok(entries.some((fields) => fields.stage === "managed_tab_state_changed"
+    && fields.changed_state.includes("tab_discarded")
+    && fields.changed_state.includes("tab_frozen")));
+  assert.ok(entries.some((fields) => fields.stage === "handoff_send_before"
+    && fields.request_id === request.request_id));
+  assert.ok(entries.some((fields) => fields.stage === "response_watch_armed"
+    && fields.watcher_state === "armed"));
+  assert.equal(entries.some((fields) => Object.prototype.hasOwnProperty.call(fields, "payload")), false);
 });
 
 test("Background arms the response watcher before acknowledging a fast assistant response", async () => {
@@ -1293,6 +1434,18 @@ test("Background forwards assistant response diagnostics and rejects another tab
   assert.equal(response.error_code, "response_timeout");
   assert.equal(response.stage, "assistant_response_stability_timeout");
   assert.equal(response.message, "応答待機がタイムアウトしました。");
+  await wait(10);
+  const telemetryEntries = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields && typeof fields === "object");
+  const timeoutTelemetry = telemetryEntries.find((fields) =>
+    fields.stage === "assistant_response_received"
+      && fields.error_code === "response_timeout"
+      && fields.watcher_state === "idle");
+  assert.equal(timeoutTelemetry.watcher_state, "idle");
+  assert.equal(timeoutTelemetry.assistant_state, "not_detected");
+  assert.ok(telemetryEntries.some((fields) => fields.stage === "response_correlation_rejected"
+    && fields.error_code === "response_timeout"));
 });
 
 test("Background keeps the active tab bound when assistant response arrives", async () => {

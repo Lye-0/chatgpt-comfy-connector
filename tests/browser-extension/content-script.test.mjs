@@ -258,6 +258,10 @@ class FakeClipboardEvent extends FakeEvent {
 class FakeDocument {
   constructor({ composer = "textarea", composerMountDelayMs = 0, sendButton = "ready", sendButtonReadyAfterMs = 0, plusLabel = "写真やファイルを追加", contentEditableInsert = "exec-command", composerReadTransform = null, url = "https://chatgpt.com/c/fixture", initialAssistantMessages = [], fileInput = true, attachmentVerification = true, attachmentUploading = false } = {}) {
     this.activeElement = null;
+    this.listeners = new Map();
+    this.visibilityState = "visible";
+    this.hidden = false;
+    this.wasDiscarded = false;
     this.composers = [];
     this.sendButtons = [];
     this.buttons = [];
@@ -544,6 +548,12 @@ class FakeDocument {
     return { removeAllRanges() {}, addRange() {} };
   }
 
+  addEventListener(type, handler) { this.listeners.set(type, handler); }
+  dispatchEvent(event) {
+    this.listeners.get(event.type)?.(event);
+    return true;
+  }
+
   execCommand(command, _showUi, payload) {
     if (command !== "insertText" || !this.activeElement || this.contentEditableInsert === "paste") return false;
     this.activeElement.textContent = payload;
@@ -555,8 +565,14 @@ async function createHarness(options) {
   const document = new FakeDocument(options);
   const runtimeListeners = [];
   const runtimeMessages = [];
+  const diagnostics = [];
   const context = createContext({
-    console,
+    console: {
+      info(...args) { diagnostics.push(args); },
+      warn() {},
+      error() {},
+      log() {}
+    },
     URL,
     Promise,
     Map,
@@ -638,6 +654,7 @@ async function createHarness(options) {
   return {
     context,
     document,
+    get diagnostics() { return diagnostics; },
     async send(message) {
       let response;
       const listener = runtimeListeners.find((candidate) => candidate(message, { id: "fixture-extension" }, (value) => { response = value; }) === true);
@@ -1231,6 +1248,40 @@ test("Content Script reports an explicit timeout when no post-anchor assistant r
   assert.equal(result.status, "error");
   assert.equal(result.errorCode, "assistant_response_not_found");
   assert.equal(result.stage, "assistant_message_not_found");
+});
+
+test("Content Script records visibility and the final watcher state when response waiting times out", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send({
+    type: "WATCH_ASSISTANT_RESPONSE",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol
+  })).status, "watching");
+
+  harness.document.visibilityState = "hidden";
+  harness.document.hidden = true;
+  harness.document.wasDiscarded = true;
+  harness.document.dispatchEvent(new FakeEvent("visibilitychange"));
+  const result = await harness.waitForRuntimeMessage((message) => message.type === "ASSISTANT_RESPONSE_RESULT");
+  assert.equal(result.status, "error");
+
+  const lifecycleEntries = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields && typeof fields === "object");
+  const visibility = lifecycleEntries.find((fields) => fields.stage === "document_visibility_changed");
+  assert.equal(visibility.document_visibility_state, "hidden");
+  assert.equal(visibility.document_hidden, true);
+  assert.equal(visibility.document_was_discarded, true);
+  assert.equal(visibility.content_script_alive, true);
+  assert.equal(visibility.watcher_state, "armed");
+  assert.equal(visibility.request_id, handoff.requestId);
+  const finalState = lifecycleEntries.find((fields) =>
+    fields.stage === "assistant_message_not_found" && fields.watcher_state === "idle");
+  assert.equal(finalState.assistant_state, "not_detected");
 });
 
 const mediaBegin = {

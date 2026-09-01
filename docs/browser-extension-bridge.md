@@ -69,6 +69,29 @@ was lost. A closed tab is recreated inactive at the same Conversation URL when
 the operation still has enough identity to do so; otherwise the operation
 stops with an explicit target-identity error.
 
+### Managed Tab lifecycle telemetry
+
+The Background emits metadata-only `managed tab lifecycle telemetry` entries
+for Managed Tab creation, Handoff send boundaries, watcher arm/re-arm, response
+completion/error, periodic response waiting, Content Script readiness, and the
+`tabs.onActivated`, `tabs.onUpdated`, `tabs.onRemoved`, and
+`windows.onFocusChanged` events. The snapshot includes `tab_id`, `window_id`,
+`tab_active`, `tab_discarded`, `tab_frozen`, `tab_auto_discardable`,
+`window_focused`, `tab_status`, `managed_tab_exists`, `content_script_alive`,
+the bounded correlation IDs, and `watcher_state`. A
+`managed tab lifecycle state changed` entry identifies changes to active,
+focused, discarded, frozen, or existence state.
+
+The Content Script emits `content script lifecycle`, `document visibility
+changed`, and `response lifecycle telemetry` entries. These include
+`document_visibility_state`, `document_hidden`, `document_was_discarded`,
+`content_script_alive`, `watcher_state`, and `assistant_state` (`not_detected`,
+`streaming`, `stable_wait`, or `completed`). Periodic watcher diagnostics are
+throttled to one entry per ten seconds, in addition to state transitions.
+Neither side logs Handoff/Response bodies, credentials, tokens, media content,
+or local filesystem paths. Telemetry only reads state; it does not activate,
+disable discard, reload, or recreate a tab.
+
 ## Desktop placement and lifecycle
 
 - Core contract and shared message/state models:

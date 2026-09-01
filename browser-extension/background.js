@@ -51,12 +51,25 @@ const MANAGED_SEND_CONFIRMATION_TIMEOUT_MS = CONTENT_SCRIPT_TIMEOUT_MS;
 // second result a bounded chance to bind the Conversation without delaying
 // existing-conversation sends.
 const NEW_CONVERSATION_BINDING_GRACE_MS = 6000;
-// Context discovery has a separate short-lived tab. It must never borrow the
-// Managed Execution Tab, because discovery and execution have different DOM
-// lifecycles and a sidebar scan must not reset an active response watcher.
+// Context discovery has a separate Collector Window. It must never borrow the
+// Managed Execution Window, because discovery and execution have different DOM
+// lifecycles and a sidebar/project scan must not reset an active response watcher.
+const COLLECTOR_WINDOW_STORAGE_KEY = "chatGptCollectorWindow";
 const COLLECTOR_TAB_URL = "https://chatgpt.com/";
-const COLLECTOR_TAB_CREATE_TIMEOUT_MS = 15000;
+const COLLECTOR_WINDOW_CREATE_TIMEOUT_MS = 15000;
 const COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS = 30000;
+const COLLECTOR_WINDOW_SIZE_FACTOR = 0.25;
+const COLLECTOR_WINDOW_MIN_WIDTH = 640;
+const COLLECTOR_WINDOW_MIN_HEIGHT = 480;
+const COLLECTOR_WINDOW_FALLBACK_WIDTH = 960;
+const COLLECTOR_WINDOW_FALLBACK_HEIGHT = 540;
+const COLLECTOR_MAX_PROJECTS = 5000;
+const COLLECTOR_MAX_CONVERSATIONS = 10000;
+const COLLECTOR_PROJECT_SCROLL_MAX = 128;
+const COLLECTOR_ROOT_TIMEOUT_MS = 120000;
+const COLLECTOR_CONTEXT_TIMEOUT_MS = 150000;
+const COLLECTOR_PROJECT_TIMEOUT_MS = 30000;
+const COLLECTOR_PROJECT_RESOLUTION_TIMEOUT_MS = 4000;
 // A replacement Content Script can become ready before ChatGPT has hydrated
 // the newly opened conversation's message list. Keep checking the same
 // marker-bearing user message without ever issuing another Handoff send.
@@ -129,6 +142,10 @@ const acceptedHandoffs = new Map();
 // complete the Desktop Handoff request without posting a second message.
 const pendingHandoffSends = new Map();
 const contextRequests = new Map();
+// A refresh is a replaceable discovery operation. The latest request owns
+// the Collector Window result; an older request may finish a currently
+// running Chrome call, but it must never send or publish its stale snapshot.
+let collectorContextGeneration = 0;
 let socketKeepaliveTimer = null;
 let socketKeepaliveSocket = null;
 const defaultManagedTabState = {
@@ -155,8 +172,21 @@ const managedHandoffOperations = new Map();
 const managedMediaOperations = new Map();
 const contentScriptReadyTabs = new Map();
 const managedTabTelemetrySnapshots = new Map();
-let collectorTabState = { tabId: null, lifecycle: "Idle" };
-let collectorTabStateOperation = Promise.resolve();
+const defaultCollectorWindowState = {
+  windowId: null,
+  tabId: null,
+  windowState: "Idle",
+  lifecycle: "Idle",
+  currentProjectId: null,
+  projectIndex: -1,
+  totalProjects: 0,
+  discoveredProjectCount: 0,
+  discoveredChatCount: 0,
+  retryCount: 0,
+  requestId: null
+};
+let collectorWindowState = { ...defaultCollectorWindowState };
+let collectorWindowStateOperation = Promise.resolve();
 
 const managedTabStateReady = (async () => {
   try {
@@ -171,6 +201,20 @@ const managedTabStateReady = (async () => {
     // in-memory state when the first execution request arrives.
   }
   return managedTabState;
+})();
+
+const collectorWindowStateReady = (async () => {
+  try {
+    const storage = chrome.storage.session || chrome.storage.local;
+    const stored = await storage.get(COLLECTOR_WINDOW_STORAGE_KEY);
+    if (stored?.[COLLECTOR_WINDOW_STORAGE_KEY] && typeof stored[COLLECTOR_WINDOW_STORAGE_KEY] === "object") {
+      collectorWindowState = { ...defaultCollectorWindowState, ...stored[COLLECTOR_WINDOW_STORAGE_KEY] };
+    }
+  } catch (_) {
+    // The Collector Window is recoverable state. A storage failure must not
+    // prevent the next refresh from creating a fresh isolated window.
+  }
+  return collectorWindowState;
 })();
 
 const stateReady = (async () => {
@@ -231,6 +275,17 @@ function diagnostic(eventName, fields = {}) {
     "execution_window_state",
     "execution_window_exists",
     "execution_window_minimized",
+    "collector_window_id",
+    "collector_window_focused",
+    "collector_window_state",
+    "collector_window_exists",
+    "collector_tab_id",
+    "current_project_id",
+    "project_index",
+    "total_projects",
+    "discovered_project_count",
+    "discovered_chat_count",
+    "retry_count",
     "target_tab_id",
     "tab_id",
     "window_id",
@@ -529,10 +584,23 @@ function withManagedTabOperation(operation) {
   return next;
 }
 
-function withCollectorTabOperation(operation) {
-  const next = collectorTabStateOperation.then(operation, operation);
-  collectorTabStateOperation = next.catch(() => {});
+function withCollectorWindowOperation(operation) {
+  const next = collectorWindowStateOperation.then(operation, operation);
+  collectorWindowStateOperation = next.catch(() => {});
   return next;
+}
+
+function isCurrentCollectorRequest(pending) {
+  return Number.isSafeInteger(pending?.generation)
+    && pending.generation === collectorContextGeneration;
+}
+
+function throwIfCollectorRequestSuperseded(pending) {
+  if (isCurrentCollectorRequest(pending)) return;
+  throw bridgeError(
+    "ChatGPT Contextの古いRefresh結果は破棄されました。",
+    0,
+    "context_refresh_superseded");
 }
 
 function deferred() {
@@ -1177,123 +1245,387 @@ function waitForTabReady(tabId, timeoutMs = CONTENT_SCRIPT_READY_TIMEOUT_MS) {
   });
 }
 
-function collectorTabLifecycle(lifecycle, fields = {}) {
-  collectorTabState = {
-    ...collectorTabState,
+function collectorWindowStorage() {
+  return chrome.storage.session || chrome.storage.local;
+}
+
+function persistCollectorWindowState() {
+  const stored = {
+    windowId: collectorWindowState.windowId,
+    tabId: collectorWindowState.tabId,
+    windowState: collectorWindowState.windowState,
+    lifecycle: collectorWindowState.lifecycle
+  };
+  return collectorWindowStorage().set({ [COLLECTOR_WINDOW_STORAGE_KEY]: stored }).catch(() => {});
+}
+
+function collectorWindowLifecycle(lifecycle, fields = {}) {
+  collectorWindowState = {
+    ...collectorWindowState,
     lifecycle,
     ...fields
   };
-  diagnostic("collector tab lifecycle", {
+  void persistCollectorWindowState();
+  diagnostic("collector window lifecycle", {
     lifecycle,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: collectorWindowState.tabId,
+    current_project_id: collectorWindowState.currentProjectId,
+    project_index: collectorWindowState.projectIndex,
+    total_projects: collectorWindowState.totalProjects,
+    discovered_project_count: collectorWindowState.discoveredProjectCount,
+    discovered_chat_count: collectorWindowState.discoveredChatCount,
+    retry_count: collectorWindowState.retryCount,
     status: lifecycle === "Failed" ? "error" : "pending",
-    stage: `collector_tab_${String(lifecycle || "unknown").toLowerCase()}`,
-    target_tab_id: collectorTabState.tabId
+    stage: `collector_window_${String(lifecycle || "unknown").toLowerCase()}`,
+    target_tab_id: collectorWindowState.tabId,
+    window_id: collectorWindowState.windowId
   });
 }
 
-async function getCollectorTab() {
-  if (!Number.isSafeInteger(collectorTabState.tabId) || collectorTabState.tabId < 0) return null;
+async function getCollectorWindow(windowId = collectorWindowState.windowId) {
+  await collectorWindowStateReady;
+  if (!Number.isSafeInteger(windowId) || windowId < 0 || typeof chrome.windows?.get !== "function") return null;
   try {
-    const tab = await chrome.tabs.get(collectorTabState.tabId);
-    if (!tab || tab.id === undefined || !isChatGptTab(tab)) {
-      collectorTabState = { tabId: null, lifecycle: "Idle" };
-      return null;
-    }
-    return tab;
+    const window = await chrome.windows.get(windowId);
+    if (!window || window.type && window.type !== "normal") return null;
+    return window;
   } catch (_) {
-    collectorTabState = { tabId: null, lifecycle: "Idle" };
     return null;
   }
 }
 
-async function createCollectorTab(trace) {
-  const existing = await getCollectorTab();
-  if (existing) {
-    collectorTabLifecycle("Ready", { tabId: existing.id });
-    diagnostic("collector tab reused", {
-      ...trace,
-      status: "reused",
-      stage: "collector_tab_reused",
-      target_tab_id: existing.id
-    });
-    return existing;
+async function tabsInCollectorWindow(windowId) {
+  if (!Number.isSafeInteger(windowId) || typeof chrome.tabs?.query !== "function") return [];
+  try {
+    const tabs = await chrome.tabs.query({ windowId });
+    return Array.isArray(tabs) ? tabs : [];
+  } catch (_) {
+    return [];
   }
-  if (typeof chrome.tabs.create !== "function") {
+}
+
+async function findCollectorWindowTab(windowId) {
+  const tabs = await tabsInCollectorWindow(windowId);
+  return tabs.find((tab) => tab?.id === collectorWindowState.tabId)
+    || tabs.find((tab) => isChatGptTab(tab))
+    || null;
+}
+
+async function makeCollectorWindowUsable(window, trace = {}) {
+  if (!window || !Number.isSafeInteger(window.id)) return null;
+  let usable = window;
+  const changes = {};
+  if (window.state === "minimized") changes.state = "normal";
+  if (window.focused === true) changes.focused = false;
+  if (Object.keys(changes).length > 0 && typeof chrome.windows?.update === "function") {
+    try {
+      usable = await chrome.windows.update(window.id, changes) || { ...window, ...changes };
+    } catch (error) {
+      diagnostic("collector window restore failed", {
+        ...trace,
+        collector_window_id: window.id,
+        error_code: error?.code || "collector_window_restore_failed",
+        status: "error",
+        stage: "collector_window_restore"
+      });
+    }
+  }
+  collectorWindowState = {
+    ...collectorWindowState,
+    windowId: window.id,
+    windowState: usable.state || "normal"
+  };
+  diagnostic("collector window usable", {
+    ...trace,
+    collector_window_id: usable.id,
+    collector_window_focused: usable.focused === true,
+    collector_window_state: usable.state || "normal",
+    collector_window_exists: true,
+    status: "ready",
+    stage: "collector_window_usable"
+  });
+  return usable;
+}
+
+async function collectorWindowCreateData(url) {
+  let referenceWindow = null;
+  if (typeof chrome.windows?.getLastFocused === "function") {
+    try { referenceWindow = await chrome.windows.getLastFocused({ populate: false }); } catch (_) { }
+  }
+  const referenceWidth = Number.isSafeInteger(referenceWindow?.width) && referenceWindow.width > 0
+    ? referenceWindow.width : COLLECTOR_WINDOW_FALLBACK_WIDTH;
+  const referenceHeight = Number.isSafeInteger(referenceWindow?.height) && referenceWindow.height > 0
+    ? referenceWindow.height : COLLECTOR_WINDOW_FALLBACK_HEIGHT;
+  return {
+    url,
+    focused: false,
+    state: "normal",
+    type: "normal",
+    width: Math.max(COLLECTOR_WINDOW_MIN_WIDTH, Math.floor(referenceWidth * COLLECTOR_WINDOW_SIZE_FACTOR)),
+    height: Math.max(COLLECTOR_WINDOW_MIN_HEIGHT, Math.floor(referenceHeight * COLLECTOR_WINDOW_SIZE_FACTOR))
+  };
+}
+
+async function enforceCollectorTab(tab, trace = {}) {
+  if (!tab || !Number.isSafeInteger(tab.id)) return tab;
+  if (tab.windowId !== collectorWindowState.windowId) {
+    throw bridgeError("Collector TabがCollector Windowにありません。", 0, "collector_tab_wrong_window");
+  }
+  if (tab.discarded === true || tab.frozen === true) {
+    throw bridgeError("Collector Tabがdiscardedまたはfrozenになっています。", 0, "collector_tab_state_changed");
+  }
+  const changes = {};
+  if (tab.active !== true) changes.active = true;
+  if (tab.autoDiscardable !== false) changes.autoDiscardable = false;
+  let normalized = tab;
+  if (Object.keys(changes).length > 0 && typeof chrome.tabs?.update === "function") {
+    try {
+      normalized = await chrome.tabs.update(tab.id, changes) || { ...tab, ...changes };
+    } catch (_) {
+      throw bridgeError("Collector Tabの実行状態を設定できません。", 0, "collector_tab_state_failed");
+    }
+  }
+  collectorWindowState = { ...collectorWindowState, tabId: normalized.id };
+  diagnostic("collector tab state enforced", {
+    ...trace,
+    collector_window_id: normalized.windowId,
+    collector_tab_id: normalized.id,
+    target_tab_id: normalized.id,
+    tab_active: normalized.active === true,
+    tab_auto_discardable: normalized.autoDiscardable === false ? false : normalized.autoDiscardable,
+    status: "enforced",
+    stage: "collector_tab_state_enforced"
+  });
+  return normalized;
+}
+
+function collectorTabNeedsRecovery(tab) {
+  return tab?.discarded === true || tab?.frozen === true;
+}
+
+async function replaceCollectorTab(tab, trace = {}) {
+  if (!tab || !Number.isSafeInteger(tab.id)
+    || tab.windowId !== collectorWindowState.windowId) {
+    throw bridgeError("Collector TabのRecovery対象が一致しません。", 0, "collector_tab_wrong_window");
+  }
+  collectorWindowLifecycle("RecoveringTab", {
+    windowId: tab.windowId,
+    tabId: null,
+    currentProjectId: null,
+    projectIndex: -1
+  });
+  diagnostic("collector tab recovery requested", {
+    ...trace,
+    collector_window_id: tab.windowId,
+    collector_tab_id: tab.id,
+    target_tab_id: tab.id,
+    tab_active: tab.active === true,
+    tab_discarded: tab.discarded === true,
+    tab_frozen: tab.frozen === true,
+    tab_auto_discardable: tab.autoDiscardable,
+    status: "recovering",
+    error_code: tab.discarded === true ? "collector_tab_discarded" : "collector_tab_frozen",
+    stage: "collector_tab_recovery_requested"
+  });
+  if (typeof chrome.tabs?.remove !== "function") {
+    throw bridgeError("Collector TabをRecoveryできません。", 0, "collector_tab_recovery_failed");
+  }
+  try {
+    await chrome.tabs.remove(tab.id);
+  } catch (_) {
+    // The tab may have been closed concurrently. Verify the exact ID before
+    // allowing the caller to create a replacement; otherwise two Collector
+    // Tabs could be left in the same Window.
+  }
+  if (typeof chrome.tabs?.get === "function") {
+    try {
+      await chrome.tabs.get(tab.id);
+      throw bridgeError("Collector Tabの旧インスタンスを閉じられませんでした。", 0, "collector_tab_recovery_failed");
+    } catch (error) {
+      if (error?.code === "collector_tab_recovery_failed") throw error;
+    }
+  }
+  return null;
+}
+
+async function createCollectorTabInWindow(windowId, url, trace = {}) {
+  if (typeof chrome.tabs?.create !== "function") {
     throw bridgeError("ChatGPT Context収集用タブを作成できません。", 0, "collector_tab_create_failed");
   }
-
-  collectorTabLifecycle("Preparing", { tabId: null });
-  diagnostic("collector tab create requested", {
-    ...trace,
-    status: "requested",
-    stage: "collector_tab_create"
-  });
   let created;
-  let createTimeout = null;
   try {
-    created = await Promise.race([
-      chrome.tabs.create({ url: COLLECTOR_TAB_URL, active: false }),
-      new Promise((_, reject) => {
-        createTimeout = setTimeout(() => reject(bridgeError(
-          "ChatGPT Context収集用タブの作成がタイムアウトしました。",
-          0,
-          "collector_tab_create_timeout")), COLLECTOR_TAB_CREATE_TIMEOUT_MS);
-      })
-    ]);
-  } finally {
-    if (createTimeout !== null) clearTimeout(createTimeout);
+    created = await chrome.tabs.create({ url, windowId, active: true });
+  } catch (_) {
+    throw bridgeError("ChatGPT Context収集用タブを作成できません。", 0, "collector_tab_create_failed");
   }
   if (!created || !Number.isSafeInteger(created.id) || created.id < 0) {
     throw bridgeError("ChatGPT Context収集用タブを作成できません。", 0, "collector_tab_create_failed");
   }
-  collectorTabState = { tabId: created.id, lifecycle: "Preparing" };
-  collectorTabLifecycle("Preparing", { tabId: created.id });
+  collectorWindowState = { ...collectorWindowState, windowId, tabId: created.id };
+  collectorWindowLifecycle("PreparingTab", { windowId, tabId: created.id });
   diagnostic("collector tab created", {
     ...trace,
+    collector_window_id: windowId,
+    collector_tab_id: created.id,
+    target_tab_id: created.id,
     status: "created",
-    stage: "collector_tab_created",
-    target_tab_id: created.id
+    stage: "collector_tab_created"
   });
+  return await enforceCollectorTab(created, trace);
+}
 
-  if (!(await waitForTabReady(created.id, COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS))) {
-    collectorTabLifecycle("Failed", { tabId: created.id });
+async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
+  await collectorWindowStateReady;
+  let window = await getCollectorWindow();
+  if (!window) {
+    if (Number.isSafeInteger(collectorWindowState.windowId)) {
+      diagnostic("collector window unavailable", {
+        ...trace,
+        collector_window_id: collectorWindowState.windowId,
+        collector_window_exists: false,
+        status: "recovering",
+        stage: "collector_window_lookup"
+      });
+    }
+    if (typeof chrome.windows?.create !== "function") {
+      throw bridgeError("ChatGPT Context収集用Windowを作成できません。", 0, "collector_window_create_failed");
+    }
+    collectorWindowLifecycle("PreparingWindow", { windowId: null, tabId: null });
+    let created;
+    let createTimeout = null;
+    try {
+      const data = await collectorWindowCreateData(url);
+      created = await Promise.race([
+        chrome.windows.create(data),
+        new Promise((_, reject) => {
+          createTimeout = setTimeout(() => reject(bridgeError(
+            "ChatGPT Context収集用Windowの作成がタイムアウトしました。",
+            0,
+            "collector_window_create_timeout")), COLLECTOR_WINDOW_CREATE_TIMEOUT_MS);
+        })
+      ]);
+    } finally {
+      if (createTimeout !== null) clearTimeout(createTimeout);
+    }
+    if (!created || !Number.isSafeInteger(created.id) || created.id < 0) {
+      throw bridgeError("ChatGPT Context収集用Windowを作成できません。", 0, "collector_window_create_failed");
+    }
+    window = await makeCollectorWindowUsable({ ...created, state: created.state || "normal" }, trace);
+    diagnostic("collector window created", {
+      ...trace,
+      collector_window_id: window.id,
+      collector_window_focused: window.focused === true,
+      collector_window_state: window.state || "normal",
+      collector_window_exists: true,
+      status: "created",
+      stage: "collector_window_created"
+    });
+  } else {
+    window = await makeCollectorWindowUsable(window, trace);
+  }
+
+  let tab = await findCollectorWindowTab(window.id);
+  if (collectorTabNeedsRecovery(tab)) {
+    await replaceCollectorTab(tab, trace);
+    tab = null;
+  }
+  if (!tab) tab = await createCollectorTabInWindow(window.id, url, trace);
+  else {
+    collectorWindowState = { ...collectorWindowState, windowId: window.id, tabId: tab.id };
+    collectorWindowLifecycle("PreparingTab", { windowId: window.id, tabId: tab.id });
+    tab = await enforceCollectorTab(tab, trace);
+  }
+  if (!(await waitForTabReady(tab.id, COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS))) {
+    collectorWindowLifecycle("Failed", { windowId: window.id, tabId: tab.id });
     throw bridgeError(
       "ChatGPT Context収集用タブの読み込みがタイムアウトしました。",
       0,
       "collector_tab_navigation_timeout");
   }
-  collectorTabLifecycle("WaitingContentScript", { tabId: created.id });
-  return created;
+  collectorWindowLifecycle("WaitingContentScript", { windowId: window.id, tabId: tab.id });
+  return tab;
+}
+
+async function navigateCollectorTab(tab, url, trace = {}) {
+  if (!tab || !Number.isSafeInteger(tab.id) || tab.windowId !== collectorWindowState.windowId) {
+    throw bridgeError("Collector Tabを移動できません。", 0, "collector_tab_wrong_window");
+  }
+  if (collectorTabNeedsRecovery(tab)) {
+    await replaceCollectorTab(tab, trace);
+    tab = await ensureCollectorWindow(COLLECTOR_TAB_URL, trace);
+  }
+  const targetUrl = safeChatGptContextUrl(url) || COLLECTOR_TAB_URL;
+  const currentUrl = safeChatGptContextUrl(tab.url);
+  let updated = tab;
+  if (currentUrl !== targetUrl && typeof chrome.tabs?.update === "function") {
+    collectorWindowLifecycle("NavigatingProject", { tabId: tab.id });
+    contentScriptReadyTabs.delete(tab.id);
+    try {
+      updated = await chrome.tabs.update(tab.id, {
+        url: targetUrl,
+        active: true,
+        autoDiscardable: false
+      }) || { ...tab, url: targetUrl, active: true, autoDiscardable: false };
+    } catch (_) {
+      throw bridgeError("Collector TabのProjectページ移動に失敗しました。", 0, "collector_tab_navigation_failed");
+    }
+  }
+  updated = await enforceCollectorTab(updated, trace);
+  if (!(await waitForTabReady(updated.id, COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS))) {
+    throw bridgeError("Collector TabのProjectページ読み込みがタイムアウトしました。", 0, "collector_tab_navigation_timeout");
+  }
+  return updated;
+}
+
+async function getCollectorTab() {
+  await collectorWindowStateReady;
+  const window = await getCollectorWindow();
+  if (!window) {
+    collectorWindowState = { ...defaultCollectorWindowState };
+    void persistCollectorWindowState();
+    return null;
+  }
+  const tab = await findCollectorWindowTab(window.id);
+  if (!tab) {
+    collectorWindowState = { ...collectorWindowState, windowId: window.id, tabId: null };
+    void persistCollectorWindowState();
+    return null;
+  }
+  if (collectorTabNeedsRecovery(tab)) {
+    await replaceCollectorTab(tab);
+    return null;
+  }
+  collectorWindowState = { ...collectorWindowState, windowId: window.id, tabId: tab.id };
+  return await enforceCollectorTab(tab);
 }
 
 async function releaseCollectorTab(tab) {
-  if (!tab || collectorTabState.tabId !== tab.id) return;
-  collectorTabState = { tabId: null, lifecycle: "Idle" };
+  if (!tab || collectorWindowState.tabId !== tab.id) return;
   let current = tab;
   try { current = await chrome.tabs.get(tab.id); } catch (_) { current = null; }
-
-  // Never close a collector tab after the user has explicitly brought it to
-  // the foreground. The tab was created inactive, but keeping it avoids
-  // changing a user's browser state if they chose to inspect it.
-  if (current?.active === true || typeof chrome.tabs.remove !== "function") {
-    diagnostic("collector tab retained", {
-      status: "ready",
-      stage: "collector_tab_retained",
-      target_tab_id: tab.id
-    });
+  if (!current) {
+    collectorWindowState = { ...collectorWindowState, tabId: null, lifecycle: "Recoverable" };
+    void persistCollectorWindowState();
     return;
   }
-  try {
-    await chrome.tabs.remove(tab.id);
-    diagnostic("collector tab released", {
-      status: "completed",
-      stage: "collector_tab_released",
-      target_tab_id: tab.id
-    });
-  } catch (_) {
-    // The tab may already have been closed by the browser. Discovery has
-    // completed, so this cleanup failure must not affect its result.
+  if (collectorTabNeedsRecovery(current)) {
+    await replaceCollectorTab(current);
+    return;
   }
+  try { await enforceCollectorTab(current); } catch (_) { }
+  collectorWindowLifecycle("Ready", {
+    tabId: current.id,
+    currentProjectId: null,
+    projectIndex: -1
+  });
+  diagnostic("collector window retained", {
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: current.id,
+    target_tab_id: current.id,
+    status: "ready",
+    stage: "collector_window_retained"
+  });
 }
 
 async function dispatchToContentScript(tabId, message, trace, options = {}) {
@@ -1520,6 +1852,16 @@ function sendChatGptContextResponseToBridge(result, pending) {
 async function completeContextRequest(contentResult, pending) {
   if (!pending || contextRequests.get(pending.requestId) !== pending) return;
   contextRequests.delete(pending.requestId);
+  if (!isCurrentCollectorRequest(pending)) {
+    diagnostic("chatgpt.context stale result discarded", {
+      request_id: pending.requestId,
+      status: "discarded",
+      error_code: "context_refresh_superseded",
+      stage: "context_stale_result_discarded",
+      target_tab_id: pending.tabId
+    });
+    return;
+  }
   const result = normalizeContextResult(contentResult, pending);
   diagnostic("chatgpt.context result", {
     request_id: pending.requestId,
@@ -1529,6 +1871,258 @@ async function completeContextRequest(contentResult, pending) {
     target_tab_id: pending.tabId
   });
   sendChatGptContextResponseToBridge(result, pending);
+}
+
+function collectorProjectTarget(project) {
+  const projectId = safeContextIdentifier(project?.project_id || project?.projectId)
+    || chatGptProjectId(project?.url);
+  if (!projectId) return null;
+  const projectUrl = safeChatGptProjectUrl(project?.url)
+    || `https://chatgpt.com/g/${encodeURIComponent(projectId)}/project`;
+  return { projectId, projectUrl };
+}
+
+function mergeCollectorMetadata(destination, source, forcedProjectId = null) {
+  if (!source || typeof source !== "object") {
+    throw bridgeError("ChatGPT CollectorからContextを取得できませんでした。", 0, "context_extraction_failed");
+  }
+  const requestId = source.requestId || source.request_id;
+  if (requestId !== destination.requestId || (source.mode || "list") !== "list") {
+    throw bridgeError("ChatGPT Context responseの識別情報が一致しません。", 0, "context_response_correlation_failed");
+  }
+  if (source.status === "error") {
+    throw bridgeError(
+      source.message || "ChatGPTのContext取得に失敗しました。",
+      0,
+      source.errorCode || source.error_code || "context_extraction_failed");
+  }
+  if (source.status !== "ok"
+    || !Array.isArray(source.projects)
+    || !Array.isArray(source.conversations)) {
+    throw bridgeError("ChatGPT Context responseが不正です。", 0, "context_response_invalid");
+  }
+  if (Number.isSafeInteger(source.unresolved_project_count) && source.unresolved_project_count > 0) {
+    throw bridgeError(
+      "ChatGPT ProjectのIDを完全には取得できませんでした。",
+      0,
+      "context_projects_incomplete");
+  }
+
+  for (const sourceProject of source.projects) {
+    const projectId = safeContextIdentifier(sourceProject?.project_id || sourceProject?.projectId);
+    const discoveryKey = safeContextIdentifier(sourceProject?.discovery_key || sourceProject?.discoveryKey);
+    const title = typeof sourceProject?.title === "string" ? sourceProject.title.trim().slice(0, 512) : "";
+    const url = safeChatGptContextUrl(sourceProject?.url);
+    if (forcedProjectId && projectId && forcedProjectId !== projectId) continue;
+    // A Project-page response is scoped by the requested ID. If a stale
+    // sidebar also contributes several title-only rows, none of those rows
+    // is safe to relabel as the requested Project.
+    if (forcedProjectId && !projectId && source.projects.length > 1) continue;
+    const effectiveProjectId = forcedProjectId || projectId;
+    if (!title || (!effectiveProjectId && !discoveryKey)) continue;
+    const existing = destination.projects.find((candidate) =>
+      effectiveProjectId && candidate.project_id === effectiveProjectId
+        || !effectiveProjectId && discoveryKey && candidate.discovery_key === discoveryKey);
+    if (!existing) {
+      if (destination.projects.length >= COLLECTOR_MAX_PROJECTS) {
+        throw bridgeError("ChatGPT Project metadataの件数上限を超えました。", 0, "context_metadata_limit");
+      }
+      destination.projects.push({
+        ...(effectiveProjectId ? { project_id: effectiveProjectId } : {}),
+        title,
+        ...(url ? { url } : {}),
+        ...(discoveryKey ? { discovery_key: discoveryKey } : {})
+      });
+    } else {
+      if (title && (!existing.title || /^Project\s*\(/i.test(existing.title))) existing.title = title;
+      if (url && !existing.url) existing.url = url;
+      if (effectiveProjectId) existing.project_id = effectiveProjectId;
+      if (discoveryKey && !existing.discovery_key) existing.discovery_key = discoveryKey;
+    }
+  }
+
+  for (const sourceConversation of source.conversations) {
+    const conversationId = safeContextIdentifier(
+      sourceConversation?.conversation_id || sourceConversation?.conversationId);
+    const title = typeof sourceConversation?.title === "string"
+      ? sourceConversation.title.trim().slice(0, 512) : "";
+    const url = safeChatGptContextUrl(sourceConversation?.url);
+    const explicitProjectId = safeContextIdentifier(
+      sourceConversation?.project_id || sourceConversation?.projectId);
+    if (!conversationId || !title || !url) continue;
+    if (forcedProjectId && explicitProjectId && forcedProjectId !== explicitProjectId) continue;
+    const projectId = forcedProjectId || explicitProjectId;
+    const projectTitle = typeof (sourceConversation?.project_title || sourceConversation?.projectTitle) === "string"
+      ? String(sourceConversation.project_title || sourceConversation.projectTitle).trim().slice(0, 512) : "";
+    const existing = destination.conversations.find((candidate) =>
+      candidate.conversation_id === conversationId);
+    if (!existing) {
+      if (destination.conversations.length >= COLLECTOR_MAX_CONVERSATIONS) {
+        throw bridgeError("ChatGPT Chat metadataの件数上限を超えました。", 0, "context_metadata_limit");
+      }
+      destination.conversations.push({
+        conversation_id: conversationId,
+        title,
+        url,
+        ...(projectId ? { project_id: projectId } : {}),
+        ...(projectTitle ? { project_title: projectTitle } : {})
+      });
+    } else {
+      if (title && (!existing.title || existing.title === conversationId)) existing.title = title;
+      if (url && !existing.url) existing.url = url;
+      if (projectId && !existing.project_id) existing.project_id = projectId;
+      if (projectTitle && !existing.project_title) existing.project_title = projectTitle;
+    }
+  }
+  if (!destination.current && source.current) destination.current = source.current;
+}
+
+async function collectCompleteChatGptContext(tab, pending, request) {
+  throwIfCollectorRequestSuperseded(pending);
+  const aggregate = {
+    type: CHATGPT_CONTEXT_RESULT_MESSAGE_TYPE,
+    requestId: pending.requestId,
+    mode: "list",
+    status: "ok",
+    projects: [],
+    conversations: [],
+    current: null
+  };
+  const rootResult = await dispatchToContentScript(tab.id, {
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: pending.requestId,
+    mode: "list",
+    collection: "root",
+    maxScrolls: COLLECTOR_PROJECT_SCROLL_MAX,
+    maxMoreClicks: 12,
+    timeoutMs: COLLECTOR_ROOT_TIMEOUT_MS,
+    resolveProjectIds: true,
+    maxProjectResolutions: COLLECTOR_MAX_PROJECTS,
+    projectResolutionTimeoutMs: COLLECTOR_PROJECT_RESOLUTION_TIMEOUT_MS
+  }, request, {
+    timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
+    timeoutStage: "collector_content_script_timeout"
+  });
+  mergeCollectorMetadata(aggregate, rootResult);
+  throwIfCollectorRequestSuperseded(pending);
+  collectorWindowLifecycle("CollectingProjects", {
+    tabId: tab.id,
+    currentProjectId: null,
+    projectIndex: -1,
+    totalProjects: aggregate.projects.length,
+    discoveredProjectCount: aggregate.projects.length,
+    discoveredChatCount: aggregate.conversations.length
+  });
+
+  const projects = aggregate.projects.slice(0, COLLECTOR_MAX_PROJECTS);
+  for (let index = 0; index < projects.length; index += 1) {
+    throwIfCollectorRequestSuperseded(pending);
+    const target = collectorProjectTarget(projects[index]);
+    collectorWindowLifecycle("CollectingProject", {
+      tabId: tab.id,
+      currentProjectId: target?.projectId || null,
+      projectIndex: index,
+      totalProjects: projects.length,
+      discoveredProjectCount: aggregate.projects.length,
+      discoveredChatCount: aggregate.conversations.length
+    });
+    if (!target) {
+      diagnostic("collector project skipped", {
+        request_id: pending.requestId,
+        project_index: index,
+        total_projects: projects.length,
+        status: "skipped",
+        stage: "collector_project_identity_missing"
+      });
+      continue;
+    }
+    tab = await navigateCollectorTab(
+      await ensureCollectorWindow(COLLECTOR_TAB_URL, {
+        request_id: pending.requestId,
+        project_id: target.projectId,
+        project_index: index,
+        total_projects: projects.length
+      }),
+      target.projectUrl,
+      {
+        request_id: pending.requestId,
+        project_id: target.projectId,
+        project_index: index,
+        total_projects: projects.length
+      });
+    pending.tabId = tab.id;
+    throwIfCollectorRequestSuperseded(pending);
+    const projectResult = await dispatchToContentScript(tab.id, {
+      type: "GET_CHATGPT_CONTEXT",
+      requestId: pending.requestId,
+      mode: "list",
+      collection: "project",
+      projectId: target.projectId,
+      maxScrolls: COLLECTOR_PROJECT_SCROLL_MAX,
+      timeoutMs: COLLECTOR_PROJECT_TIMEOUT_MS
+    }, request, {
+      timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
+      timeoutStage: "collector_project_content_script_timeout"
+    });
+    throwIfCollectorRequestSuperseded(pending);
+    mergeCollectorMetadata(aggregate, projectResult, target.projectId);
+    collectorWindowLifecycle("CollectingProject", {
+      tabId: tab.id,
+      currentProjectId: target.projectId,
+      projectIndex: index,
+      totalProjects: projects.length,
+      discoveredProjectCount: aggregate.projects.length,
+      discoveredChatCount: aggregate.conversations.length
+    });
+  }
+  collectorWindowLifecycle("Collected", {
+    tabId: tab.id,
+    currentProjectId: null,
+    projectIndex: projects.length,
+    totalProjects: projects.length,
+    discoveredProjectCount: aggregate.projects.length,
+    discoveredChatCount: aggregate.conversations.length
+  });
+  return aggregate;
+}
+
+async function collectContextWithRecovery(tab, pending, request) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      throwIfCollectorRequestSuperseded(pending);
+      if (attempt > 0) {
+        collectorWindowLifecycle("Recovering", {
+          retryCount: attempt,
+          currentProjectId: null,
+          projectIndex: -1
+        });
+        tab = await ensureCollectorWindow(COLLECTOR_TAB_URL, {
+          request_id: pending.requestId,
+          retry_count: attempt
+        });
+        pending.tabId = tab.id;
+      }
+      tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
+        request_id: pending.requestId,
+        retry_count: attempt
+      });
+      pending.tabId = tab.id;
+      return await collectCompleteChatGptContext(tab, pending, request);
+    } catch (error) {
+      if (!isCurrentCollectorRequest(pending)) throw error;
+      lastError = error;
+      collectorWindowState = { ...collectorWindowState, retryCount: attempt + 1 };
+      diagnostic("collector recovery requested", {
+        request_id: pending.requestId,
+        retry_count: attempt + 1,
+        error_code: error?.code || "collector_collection_failed",
+        status: "recovering",
+        stage: "collector_recovery_requested"
+      });
+    }
+  }
+  throw lastError || bridgeError("ChatGPT Context収集に失敗しました。", 0, "context_extraction_failed");
 }
 
 async function requestChatGptContext(message, bridgeSocket, currentOnly) {
@@ -1549,22 +2143,40 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
     return;
   }
 
-  // Context discovery is deliberately isolated from execution. A temporary
-  // inactive Collector Tab can collect the sidebar even when the user has no
-  // ChatGPT tab open; it is never reused as the Managed Execution Tab.
-  await withCollectorTabOperation(async () => {
+  const generation = ++collectorContextGeneration;
+
+  // Context discovery is deliberately isolated from execution. A single
+  // active tab inside the connector-owned Collector Window is reused for the
+  // root sidebar scan and every Project page; it is never reused as the
+  // Managed Execution Tab or a user's foreground tab.
+  await withCollectorWindowOperation(async () => {
     let tab = null;
-    const pending = { requestId, currentOnly, bridgeSocket, tabId: null, message: request };
+    const pending = { requestId, currentOnly, bridgeSocket, tabId: null, message: request, generation };
     try {
+      throwIfCollectorRequestSuperseded(pending);
       if (bridgeSocket !== socket || bridgeSocket.readyState !== WebSocket.OPEN) {
         await completeContextRequest(
           contextResultError(request, "bridge_disconnected", "Desktop Bridgeに接続されていません。", "bridge_connection"),
           pending);
         return;
       }
-      tab = await createCollectorTab({
+      collectorWindowState = {
+        ...collectorWindowState,
+        requestId,
+        retryCount: 0,
+        currentProjectId: null,
+        projectIndex: -1,
+        totalProjects: 0,
+        discoveredProjectCount: 0,
+        discoveredChatCount: 0
+      };
+      tab = await ensureCollectorWindow(COLLECTOR_TAB_URL, {
         request_id: requestId,
         stage: currentOnly ? "context_current_requested" : "context_list_requested"
+      });
+      tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
+        request_id: requestId,
+        stage: currentOnly ? "context_current_navigation" : "context_list_navigation"
       });
       pending.tabId = tab.id;
       contextRequests.set(requestId, pending);
@@ -1572,18 +2184,35 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
         request_id: requestId,
         status: "requested",
         stage: currentOnly ? "context_current_requested" : "context_list_requested",
-        target_tab_id: tab.id
+        target_tab_id: tab.id,
+        collector_window_id: collectorWindowState.windowId,
+        collector_tab_id: tab.id
       });
-      const contentResult = await dispatchToContentScript(tab.id, {
-        type: "GET_CHATGPT_CONTEXT",
-        requestId,
-        mode: pending.currentOnly ? "current" : "list"
-      }, request, {
-        timeoutMs: CONTENT_SCRIPT_TIMEOUT_MS,
-        timeoutStage: "collector_content_script_timeout"
-      });
+      const contentResult = pending.currentOnly
+        ? await dispatchToContentScript(tab.id, {
+          type: "GET_CHATGPT_CONTEXT",
+          requestId,
+          mode: "current",
+          collection: "root"
+        }, request, {
+          timeoutMs: CONTENT_SCRIPT_TIMEOUT_MS,
+          timeoutStage: "collector_content_script_timeout"
+        })
+        : await collectContextWithRecovery(tab, pending, request);
+      throwIfCollectorRequestSuperseded(pending);
       await completeContextRequest(contentResult, pending);
     } catch (error) {
+      if (!isCurrentCollectorRequest(pending)) {
+        if (contextRequests.get(requestId) === pending) contextRequests.delete(requestId);
+        diagnostic("chatgpt.context request superseded", {
+          request_id: requestId,
+          status: "discarded",
+          error_code: "context_refresh_superseded",
+          stage: "context_request_superseded",
+          target_tab_id: pending.tabId
+        });
+        return;
+      }
       const errorCode = error?.code || "context_extraction_failed";
       const errorStage = error?.stage || "context_content_script_dispatch";
       if (!contextRequests.has(requestId)) {
@@ -4390,6 +5019,55 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
     && tabId === managedTabState.tabId
     && Number.isSafeInteger(managedTabState.executionWindowId)
     && tab?.windowId === managedTabState.executionWindowId;
+  const isCollectorWindowTab = Number.isSafeInteger(collectorWindowState.tabId)
+    && tabId === collectorWindowState.tabId
+    && Number.isSafeInteger(collectorWindowState.windowId)
+    && tab?.windowId === collectorWindowState.windowId;
+  if (isCollectorWindowTab
+    && ["status", "active", "discarded", "frozen", "autoDiscardable", "url"]
+      .some((key) => Object.prototype.hasOwnProperty.call(changeInfo || {}, key))) {
+    diagnostic("collector tab updated", {
+      status: "observed",
+      stage: "collector_tabs_on_updated",
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: tabId,
+      target_tab_id: tabId,
+      tab_active: tab?.active === true,
+      tab_discarded: tab?.discarded === true,
+      tab_frozen: tab?.frozen === true,
+      tab_auto_discardable: tab?.autoDiscardable,
+      tab_status: typeof tab?.status === "string" ? tab.status : changeInfo?.status
+    });
+  }
+  if (isCollectorWindowTab && changeInfo?.status === "loading") {
+    contentScriptReadyTabs.delete(tabId);
+    collectorWindowLifecycle("WaitingContentScript", {
+      windowId: collectorWindowState.windowId,
+      tabId,
+      currentProjectId: collectorWindowState.currentProjectId
+    });
+  }
+  if (isCollectorWindowTab
+    && (changeInfo?.discarded === true || changeInfo?.frozen === true)) {
+    collectorWindowLifecycle("Recoverable", {
+      windowId: collectorWindowState.windowId,
+      tabId,
+      currentProjectId: null,
+      projectIndex: -1
+    });
+    diagnostic("collector tab recovery requested", {
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: tabId,
+      target_tab_id: tabId,
+      tab_active: tab?.active === true,
+      tab_discarded: tab?.discarded === true,
+      tab_frozen: tab?.frozen === true,
+      tab_auto_discardable: tab?.autoDiscardable,
+      status: "requested",
+      error_code: changeInfo.discarded === true ? "collector_tab_discarded" : "collector_tab_frozen",
+      stage: "collector_tab_state_changed"
+    });
+  }
   if (isManagedExecutionTab
     && ["status", "active", "discarded", "frozen", "autoDiscardable", "url"]
       .some((key) => Object.prototype.hasOwnProperty.call(changeInfo || {}, key))) {
@@ -4455,6 +5133,49 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onActivated?.addListener?.((activeInfo) => {
+  const hasCollectorWindow = Number.isSafeInteger(collectorWindowState.windowId)
+    && Number.isSafeInteger(collectorWindowState.tabId);
+  if (hasCollectorWindow) {
+    diagnostic("collector tab activated", {
+      status: "observed",
+      stage: "collector_tabs_on_activated",
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: collectorWindowState.tabId,
+      target_tab_id: activeInfo?.tabId,
+      event_tab_id: activeInfo?.tabId,
+      event_window_id: activeInfo?.windowId,
+      tab_active: activeInfo?.windowId === collectorWindowState.windowId
+        && activeInfo?.tabId === collectorWindowState.tabId
+    });
+    if (activeInfo?.windowId === collectorWindowState.windowId
+      && activeInfo?.tabId !== collectorWindowState.tabId
+      && typeof chrome.tabs?.get === "function") {
+      diagnostic("collector tab activation restore requested", {
+        collector_window_id: collectorWindowState.windowId,
+        collector_tab_id: collectorWindowState.tabId,
+        target_tab_id: collectorWindowState.tabId,
+        event_tab_id: activeInfo?.tabId,
+        event_window_id: activeInfo?.windowId,
+        status: "requested",
+        stage: "collector_tab_activation_restore"
+      });
+      chrome.tabs.get(collectorWindowState.tabId)
+        .then((tab) => collectorTabNeedsRecovery(tab)
+          ? replaceCollectorTab(tab, { stage: "collector_tab_activation_restore" })
+            .then(() => ensureCollectorWindow(COLLECTOR_TAB_URL, { stage: "collector_tab_activation_restore" }))
+          : enforceCollectorTab(tab, { stage: "collector_tab_activation_restore" }))
+        .catch((error) => {
+          diagnostic("collector tab activation restore failed", {
+            collector_window_id: collectorWindowState.windowId,
+            collector_tab_id: collectorWindowState.tabId,
+            target_tab_id: collectorWindowState.tabId,
+            status: "error",
+            error_code: error?.code || "collector_tab_state_failed",
+            stage: "collector_tab_activation_restore"
+          });
+        });
+    }
+  }
   if (!Number.isSafeInteger(managedTabState.tabId)) return;
   recordManagedTabLifecycleTelemetry("tabs_on_activated", {
     status: "observed",
@@ -4490,6 +5211,35 @@ chrome.tabs.onActivated?.addListener?.((activeInfo) => {
 });
 
 chrome.windows?.onFocusChanged?.addListener?.((windowId) => {
+  const hasCollectorWindow = Number.isSafeInteger(collectorWindowState.windowId);
+  if (hasCollectorWindow) {
+    diagnostic("collector window focus changed", {
+      status: "observed",
+      stage: "collector_windows_on_focus_changed",
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: collectorWindowState.tabId,
+      collector_window_focused: windowId === collectorWindowState.windowId,
+      event_window_id: windowId
+    });
+    if (windowId === collectorWindowState.windowId
+      && typeof chrome.windows?.get === "function") {
+      void getCollectorWindow(windowId)
+        .then((window) => makeCollectorWindowUsable(window, {
+          event_window_id: windowId,
+          stage: "collector_window_focus_restore"
+        }))
+        .catch((error) => {
+          diagnostic("collector window focus restoration failed", {
+            collector_window_id: collectorWindowState.windowId,
+            collector_tab_id: collectorWindowState.tabId,
+            event_window_id: windowId,
+            status: "error",
+            error_code: error?.code || "collector_window_focus_restore_failed",
+            stage: "collector_window_focus_restore"
+          });
+        });
+    }
+  }
   if (!Number.isSafeInteger(managedTabState.tabId)
     && !Number.isSafeInteger(managedTabState.executionWindowId)) return;
   recordManagedTabLifecycleTelemetry("windows_on_focus_changed", {
@@ -4521,12 +5271,20 @@ chrome.windows?.onFocusChanged?.addListener?.((windowId) => {
 });
 
 chrome.tabs.onRemoved?.addListener?.((tabId, removeInfo) => {
-  if (tabId === collectorTabState.tabId) {
-    collectorTabState = { tabId: null, lifecycle: "Idle" };
+  if (tabId === collectorWindowState.tabId) {
+    collectorWindowState = {
+      ...collectorWindowState,
+      tabId: null,
+      lifecycle: "Recoverable"
+    };
+    void persistCollectorWindowState();
     diagnostic("collector tab removed", {
       status: "pending",
       stage: "collector_tab_removed",
-      target_tab_id: tabId
+      target_tab_id: tabId,
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: tabId,
+      collector_window_exists: true
     });
   }
   if (tabId !== managedTabState.tabId) return;
@@ -4551,6 +5309,19 @@ chrome.tabs.onRemoved?.addListener?.((tabId, removeInfo) => {
 });
 
 chrome.windows?.onRemoved?.addListener?.((windowId) => {
+  if (windowId === collectorWindowState.windowId) {
+    const collectorTabId = collectorWindowState.tabId;
+    collectorWindowState = { ...defaultCollectorWindowState };
+    void persistCollectorWindowState();
+    diagnostic("collector window removed", {
+      status: "pending",
+      stage: "collector_window_removed",
+      collector_window_id: windowId,
+      collector_tab_id: collectorTabId,
+      collector_window_exists: false,
+      target_tab_id: collectorTabId
+    });
+  }
   if (windowId !== managedTabState.executionWindowId) return;
   const managedTabId = managedTabState.tabId;
   recordManagedTabLifecycleTelemetry("windows_on_removed", {

@@ -79,6 +79,16 @@ public sealed record BrowserExtensionChatGptContextSnapshot(
     public bool IsSuccess => string.Equals(Status, "ok", StringComparison.Ordinal);
 }
 
+/// <summary>
+/// Persisted metadata-only discovery cache. Request/transport state and the
+/// current page are intentionally excluded so the cache never becomes a
+/// transcript or a credential-bearing recovery record.
+/// </summary>
+public sealed record BrowserExtensionChatGptContextCache(
+    IReadOnlyList<BrowserExtensionChatGptProjectEntry> Projects,
+    IReadOnlyList<BrowserExtensionChatGptConversationEntry> Conversations,
+    DateTimeOffset UpdatedAt);
+
 public sealed class BrowserExtensionChatGptContextChangedEventArgs(
     BrowserExtensionChatGptCurrentContext context) : EventArgs
 {

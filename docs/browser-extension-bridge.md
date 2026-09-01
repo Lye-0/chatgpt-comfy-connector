@@ -52,12 +52,12 @@ Tab only from the bound Conversation ID/URL (or a project-matched new-chat
 target). The user's foreground tab and its active/focus state do not affect
 Handoff, media, Review, or response delivery.
 
-Project/Chat discovery is isolated in a separate inactive Collector Tab. The
-Background creates it on demand, waits for its Content Script, performs the
-metadata-only sidebar scan, then releases it when it was not brought to the
-foreground by the user. The Collector Tab is never used for Handoff, media,
-Review, Resume, or assistant-response observation, and it does not replace the
-Managed Execution Tab's watcher state.
+Project/Chat discovery is isolated in a separate non-focused Collector Window
+with one active Collector Tab. The Background creates or reuses that Window on
+demand, keeps its only Collector Tab active and non-discardable, scans the root
+sidebar, and reuses the same tab for every Project page. The Collector Window
+is never used for Handoff, media, Review, Resume, or assistant-response
+observation, and it does not replace the Managed Execution Tab's watcher state.
 
 The Execution Window and tab are replaceable browser media, not the Conversation
 identity. Before
@@ -164,7 +164,7 @@ The list response contains bounded entries of the following shape:
   "status": "ok",
   "projects": [
     { "project_id": "g-p-example", "title": "制作", "url": "https://chatgpt.com/g/g-p-example/project" },
-    { "title": "表示されたProject", "discovery_key": "project-a1b2c3" }
+    { "project_id": "g-p-example-2", "title": "表示されたProject", "url": "https://chatgpt.com/g/g-p-example-2/project" }
   ],
   "conversations": [
     { "conversation_id": "<conversation-id>", "title": "新しい制作", "url": "https://chatgpt.com/g/g-p-example/c/<conversation-id>", "project_id": "g-p-example", "project_title": "制作" },
@@ -181,11 +181,12 @@ The list response contains bounded entries of the following shape:
 ```
 
 Projectless conversations have no `project_id` and are shown under
-`Projectなし`. A Project row that is visible in the sidebar but does not
-expose a public Project ID is represented by `title` plus a deterministic
-`discovery_key`; the key is only for deduplication/display selection and is
-never sent as a ChatGPT Project ID. Such a row is not offered as a new-chat
-send target until a real ID or URL is discovered. The Desktop always provides
+`Projectなし`. Some ChatGPT versions render a Project row as a button without
+an ID-bearing attribute. During a Collector refresh, the Content Script opens
+that row, reads the resulting Project route, and uses the route ID; it never
+uses the title as identity. If a row cannot be resolved within the bounded
+navigation window, the Collector returns `context_projects_incomplete` rather
+than publishing an incomplete Project catalog. The Desktop always provides
 an explicit `＋ 新しいChat` choice for a resolvable Project; selecting it does
 not fabricate a conversation ID. A catalog is
 reported as `Loading`, `Loaded`, `Empty`, `Disconnected`, or `Error`, and the
@@ -194,14 +195,24 @@ sidebar changes can emit a current-context event, but that event never
 changes the active Desktop session or starts a Handoff by itself.
 
 List discovery first expands bounded `さらに表示`/`もっと見る` controls, then
-scans the sidebar scroll container in small steps. It merges Project entries by
-`project_id` when available, otherwise by `discovery_key`, and merges
-conversations by `conversation_id`. The original sidebar `scrollTop` is
-restored in a `finally` path. This handles the observed lazy/virtualized DOM
-without selecting a Chat, navigating to a Project, changing the composer, or
-sending a Handoff. A title-only row can be displayed safely, but the current
-ChatGPT DOM does not provide enough public metadata to invent its Project URL
-or ID.
+scans the root sidebar in small steps for all visible Project and Projectless
+Conversation metadata. Button-only Project rows are resolved one at a time by
+opening the row in the Collector Tab and reading the resulting SPA Project URL;
+the title is only a display label. The resolved entries are merged by
+`project_id`, and conversations are merged by `conversation_id`. For every
+resolved Project, the same Collector Tab navigates to its Project page and
+scans the page's lazy/virtualized Conversation region with bounded scrolling,
+timeout, and cancellation. The original scroll positions are restored in
+`finally` paths. The Collector result is therefore an ID-complete metadata
+snapshot without selecting a Chat, changing the composer, or sending a
+Handoff.
+
+The Collector Window is independent from the Managed Execution Window. A
+closed Collector Window or Tab is recreated/reused for the next refresh, while
+the current refresh generation prevents an older result from replacing a newer
+snapshot. Desktop persists only Project/Conversation metadata in its portable
+cache; message bodies, prompts, attachments, credentials, and tokens are not
+cached or logged.
 
 When a session is bound to an existing Chat, Desktop persists its conversation
 ID and canonical URL in the session binding. Handoff, media attachment, and

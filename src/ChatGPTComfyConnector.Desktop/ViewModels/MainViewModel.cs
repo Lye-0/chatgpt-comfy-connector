@@ -63,6 +63,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _workflowRenameText = string.Empty;
     private readonly IProjectChatProvider _contextProvider;
     private ProjectChatCatalog _contextCatalog = new();
+    // Context refreshes are replaceable.  The latest refresh owns the
+    // observable catalog; a slower Collector response must not restore an
+    // older Project/Chat snapshot after a newer refresh has started.
+    private long _contextLoadVersion;
     private readonly ProjectContextOption _createProjectOption = new() { Key = "__create_project__", DisplayName = "＋ 新しいProjectを作成", IsCreateAction = true };
     private readonly ChatContextOption _createChatOption = new() { Key = "__create_chat__", DisplayName = "＋ 新しいChatを作成", IsCreateAction = true };
     private ProjectContextOption? _selectedProject;
@@ -3085,7 +3089,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private async Task InitializeContextProviderAsync()
     {
-        await LoadContextCatalogAsync();
+        var bindings = Sessions.Select(session => session.ToProjectChatBindingSnapshot()).ToArray();
+        var cached = await LoadCachedContextCatalogAsync(bindings);
+        if (cached is not null)
+        {
+            _contextCatalog = cached;
+            NotifyContextCatalogChanged();
+            RefreshProjectOptions(CurrentSession?.EffectiveProjectContextKey, CurrentSession?.EffectiveChatContextKey);
+        }
+
+        await LoadContextCatalogAsync(preserveExistingCatalog: cached is not null);
         if (CurrentSession is not null)
         {
             var project = FindProjectForSession(CurrentSession);
@@ -3107,24 +3120,58 @@ public sealed class MainViewModel : INotifyPropertyChanged
         string? preferredChatKey = null,
         CancellationToken cancellationToken = default)
     {
-        await LoadContextCatalogAsync(cancellationToken);
-        RefreshProjectOptions(preferredProjectKey ?? CurrentSession?.EffectiveProjectContextKey, preferredChatKey ?? CurrentSession?.EffectiveChatContextKey);
+        var applied = await LoadContextCatalogAsync(preserveExistingCatalog: true, cancellationToken: cancellationToken);
+        if (applied)
+            RefreshProjectOptions(preferredProjectKey ?? CurrentSession?.EffectiveProjectContextKey, preferredChatKey ?? CurrentSession?.EffectiveChatContextKey);
     }
 
-    private async Task LoadContextCatalogAsync(CancellationToken cancellationToken = default)
+    private async Task<ProjectChatCatalog?> LoadCachedContextCatalogAsync(
+        IReadOnlyCollection<ProjectChatBindingSnapshot> bindings,
+        CancellationToken cancellationToken = default)
     {
-        _contextCatalog = new ProjectChatCatalog
+        if (_contextProvider is not IProjectChatCacheProvider cacheProvider) return null;
+        try
         {
-            ProviderId = _contextProvider.ProviderId,
-            LoadState = ProjectChatCatalogLoadState.Loading,
-        };
+            return await cacheProvider.LoadCachedAsync(bindings, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<bool> LoadContextCatalogAsync(
+        bool preserveExistingCatalog = false,
+        CancellationToken cancellationToken = default)
+    {
+        var loadVersion = Interlocked.Increment(ref _contextLoadVersion);
+        if (preserveExistingCatalog && _contextCatalog.Projects.Count > 0)
+        {
+            _contextCatalog.LoadState = ProjectChatCatalogLoadState.Loading;
+            _contextCatalog.ErrorCode = null;
+            _contextCatalog.ErrorMessage = null;
+        }
+        else
+        {
+            _contextCatalog = new ProjectChatCatalog
+            {
+                ProviderId = _contextProvider.ProviderId,
+                LoadState = ProjectChatCatalogLoadState.Loading,
+            };
+        }
         NotifyContextCatalogChanged();
 
         try
         {
-            _contextCatalog = await _contextProvider.LoadAsync(
+            var catalog = await _contextProvider.LoadAsync(
                 Sessions.Select(session => session.ToProjectChatBindingSnapshot()).ToArray(),
                 cancellationToken);
+            if (Volatile.Read(ref _contextLoadVersion) != loadVersion) return false;
+            _contextCatalog = catalog;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -3132,6 +3179,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
+            if (Volatile.Read(ref _contextLoadVersion) != loadVersion) return false;
             _contextCatalog = new ProjectChatCatalog
             {
                 ProviderId = _contextProvider.ProviderId,
@@ -3142,6 +3190,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         NotifyContextCatalogChanged();
+        return true;
     }
 
     private void RefreshProjectOptions(string? preferredProjectKey = null, string? preferredChatKey = null)

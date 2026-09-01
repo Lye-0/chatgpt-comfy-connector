@@ -28,6 +28,32 @@ public interface IBrowserExtensionPairingStore
     Task SaveBrowserExtensionPairingAsync(BrowserExtensionPairingRecord pairing, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Optional metadata-only cache for an external Project/Chat provider. It is
+/// separate from IPortableStore so existing store implementations and local
+/// context formats remain source-compatible.
+/// </summary>
+public interface IChatGptContextCacheStore
+{
+    Task<BrowserExtensionChatGptContextCache?> LoadChatGptContextCacheAsync(
+        CancellationToken cancellationToken = default);
+    Task SaveChatGptContextCacheAsync(
+        BrowserExtensionChatGptContextCache cache,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Optional provider capability used by the Desktop to render a previous
+/// metadata snapshot immediately while a fresh discovery runs in the
+/// background/foreground loading path.
+/// </summary>
+public interface IProjectChatCacheProvider
+{
+    Task<ProjectChatCatalog?> LoadCachedAsync(
+        IReadOnlyCollection<ProjectChatBindingSnapshot> existingBindings,
+        CancellationToken cancellationToken = default);
+}
+
 public interface IProjectChatProvider
 {
     string ProviderId { get; }

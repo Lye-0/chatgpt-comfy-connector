@@ -225,6 +225,76 @@ public sealed class ChatGptContextProviderTests
         Assert.Equal(session.ConversationUrl, binding.ChatExternalUrl);
     }
 
+    [Fact]
+    public async Task SavesLiveMetadataSnapshotAndRestoresItWhenTheExtensionIsUnavailable()
+    {
+        var store = new StubPortableStore();
+        var liveSnapshot = new BrowserExtensionChatGptContextSnapshot(
+            "live-request",
+            "ok",
+            [new BrowserExtensionChatGptProjectEntry(
+                "g-p-cached",
+                "Cached Project",
+                "https://chatgpt.com/g/g-p-cached/project")],
+            [new BrowserExtensionChatGptConversationEntry(
+                "conversation-cached",
+                "Cached Chat",
+                "https://chatgpt.com/g/g-p-cached/c/conversation-cached",
+                "g-p-cached",
+                "Cached Project")]);
+
+        var liveProvider = new ChatGptProjectChatProvider(new StubBridge(liveSnapshot), store);
+        await liveProvider.LoadAsync([]);
+
+        Assert.NotNull(store.Cache);
+        Assert.Equal("g-p-cached", store.Cache!.Projects.Single().ProjectId);
+        Assert.Equal("conversation-cached", store.Cache.Conversations.Single().ConversationId);
+
+        var offlineProvider = new ChatGptProjectChatProvider(new StubBridge(
+            new BrowserExtensionChatGptContextSnapshot(
+                "offline-request",
+                "error",
+                [],
+                [],
+                ErrorCode: "bridge_disconnected",
+                Message: "Extension未接続",
+                Stage: "bridge_connection")), store);
+        var restored = await offlineProvider.LoadAsync([]);
+
+        Assert.Equal(ProjectChatCatalogLoadState.Loaded, restored.LoadState);
+        var project = Assert.Single(restored.Projects, item => item.ExternalId == "g-p-cached");
+        Assert.Single(project.Chats, item => item.ExternalId == "conversation-cached");
+    }
+
+    [Fact]
+    public async Task LoadsCachedCatalogBeforeFreshDiscoveryCanReplaceIt()
+    {
+        var store = new StubPortableStore
+        {
+            Cache = new BrowserExtensionChatGptContextCache(
+                [new BrowserExtensionChatGptProjectEntry(
+                    "g-p-old",
+                    "Old Project",
+                    "https://chatgpt.com/g/g-p-old/project")],
+                [new BrowserExtensionChatGptConversationEntry(
+                    "conversation-old",
+                    "Old Chat",
+                    "https://chatgpt.com/g/g-p-old/c/conversation-old",
+                    "g-p-old",
+                    "Old Project")],
+                DateTimeOffset.UtcNow)
+        };
+        var provider = new ChatGptProjectChatProvider(
+            new StubBridge(new BrowserExtensionChatGptContextSnapshot("fresh", "ok", [], [])), store);
+
+        var cached = await ((IProjectChatCacheProvider)provider).LoadCachedAsync([]);
+
+        Assert.NotNull(cached);
+        Assert.Single(cached!.Projects, item => item.ExternalId == "g-p-old");
+        Assert.Single(cached.Projects.Single(item => item.ExternalId == "g-p-old").Chats,
+            item => item.ExternalId == "conversation-old");
+    }
+
     private sealed class StubBridge(BrowserExtensionChatGptContextSnapshot snapshot) : IBrowserExtensionBridge
     {
         public BrowserExtensionBridgeStatus Status => new(
@@ -258,14 +328,22 @@ public sealed class ChatGptContextProviderTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class StubPortableStore : IPortableStore
+    private sealed class StubPortableStore : IPortableStore, IChatGptContextCacheStore
     {
+        public BrowserExtensionChatGptContextCache? Cache { get; set; }
         public Task<AppSettings?> LoadSettingsAsync(CancellationToken cancellationToken = default) => Task.FromResult<AppSettings?>(null);
         public Task SaveSettingsAsync(AppSettings settings, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<IReadOnlyList<CreationSession>> LoadSessionsAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<CreationSession>>([]);
         public Task SaveSessionAsync(CreationSession session, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<LocalContextCatalog?> LoadLocalContextsAsync(CancellationToken cancellationToken = default) => Task.FromResult<LocalContextCatalog?>(null);
         public Task SaveLocalContextsAsync(LocalContextCatalog catalog, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<BrowserExtensionChatGptContextCache?> LoadChatGptContextCacheAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(Cache);
+        public Task SaveChatGptContextCacheAsync(BrowserExtensionChatGptContextCache cache, CancellationToken cancellationToken = default)
+        {
+            Cache = cache;
+            return Task.CompletedTask;
+        }
         public Task<string> CreateWorkflowBackupAsync(WorkflowIdentity workflow, string workflowRoot, string reason, CancellationToken cancellationToken = default) => Task.FromResult("backup");
         public Task<IReadOnlyList<string>> ListWorkflowBackupsAsync(WorkflowIdentity workflow, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<string>>([]);
         public Task RestoreWorkflowBackupAsync(WorkflowIdentity workflow, string workflowRoot, string backupPath, CancellationToken cancellationToken = default) => Task.CompletedTask;

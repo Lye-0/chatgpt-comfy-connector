@@ -9,7 +9,7 @@ namespace ChatGPTComfyConnector.Infrastructure.Contexts;
 /// for this feature, so the provider deliberately delegates discovery to the
 /// Content Script and keeps the Desktop side free of DOM knowledge.
 /// </summary>
-public sealed class ChatGptProjectChatProvider : IProjectChatProvider
+public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectChatCacheProvider
 {
     public const string NoProjectKey = "__chatgpt_no_project__";
     public const string NewConversationKey = "__chatgpt_new_conversation__";
@@ -17,6 +17,7 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider
     private const string ChatGptRootUrl = "https://chatgpt.com/";
     private readonly IBrowserExtensionBridge _bridge;
     private readonly LocalProjectChatProvider _legacyLocalProvider;
+    private readonly IChatGptContextCacheStore? _cacheStore;
 
     public ChatGptProjectChatProvider(
         IBrowserExtensionBridge bridge,
@@ -24,6 +25,7 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider
     {
         _bridge = bridge;
         _legacyLocalProvider = new LocalProjectChatProvider(store);
+        _cacheStore = store as IChatGptContextCacheStore;
     }
 
     public string ProviderId => ContextProviderIds.ChatGptExtension;
@@ -32,10 +34,43 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider
         IReadOnlyCollection<ProjectChatBindingSnapshot> existingBindings,
         CancellationToken cancellationToken = default)
     {
-        BrowserExtensionChatGptContextSnapshot snapshot;
+        var snapshot = await LoadLiveSnapshotAsync(cancellationToken);
+        if (snapshot.IsSuccess)
+        {
+            await SaveCacheIfAvailableAsync(snapshot, cancellationToken);
+        }
+        else
+        {
+            var cached = await LoadCachedSnapshotAsync(cancellationToken);
+            if (cached is not null)
+            {
+                // A stale metadata snapshot is still safe to display and is
+                // preferable to erasing the user's selections while the
+                // Extension is disconnected. The next successful refresh
+                // replaces it with the complete Collector result.
+                return await BuildCatalogAsync(ToSnapshot(cached), existingBindings, cancellationToken);
+            }
+        }
+
+        return await BuildCatalogAsync(snapshot, existingBindings, cancellationToken);
+    }
+
+    public async Task<ProjectChatCatalog?> LoadCachedAsync(
+        IReadOnlyCollection<ProjectChatBindingSnapshot> existingBindings,
+        CancellationToken cancellationToken = default)
+    {
+        var cached = await LoadCachedSnapshotAsync(cancellationToken);
+        return cached is null
+            ? null
+            : await BuildCatalogAsync(ToSnapshot(cached), existingBindings, cancellationToken);
+    }
+
+    private async Task<BrowserExtensionChatGptContextSnapshot> LoadLiveSnapshotAsync(
+        CancellationToken cancellationToken)
+    {
         try
         {
-            snapshot = await _bridge.GetChatGptContextAsync(cancellationToken: cancellationToken);
+            return await _bridge.GetChatGptContextAsync(cancellationToken: cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -43,7 +78,7 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider
         }
         catch (Exception ex)
         {
-            snapshot = new(
+            return new(
                 Guid.NewGuid().ToString("N"),
                 "error",
                 [],
@@ -52,6 +87,66 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider
                 Message: ex.Message,
                 Stage: "context_discovery");
         }
+    }
+
+    private async Task SaveCacheIfAvailableAsync(
+        BrowserExtensionChatGptContextSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        if (_cacheStore is null) return;
+        try
+        {
+            await _cacheStore.SaveChatGptContextCacheAsync(
+                new BrowserExtensionChatGptContextCache(
+                    snapshot.Projects.ToArray(),
+                    snapshot.Conversations.ToArray(),
+                    DateTimeOffset.UtcNow),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // Cache persistence is best effort; a live discovery must not be
+            // reported as failed because a local cache write was unavailable.
+        }
+    }
+
+    private async Task<BrowserExtensionChatGptContextCache?> LoadCachedSnapshotAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_cacheStore is null) return null;
+        try
+        {
+            return await _cacheStore.LoadChatGptContextCacheAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static BrowserExtensionChatGptContextSnapshot ToSnapshot(
+        BrowserExtensionChatGptContextCache cache)
+        => new(
+            "cached",
+            "ok",
+            cache.Projects,
+            cache.Conversations,
+            Current: null,
+            Stage: "context_cache_loaded");
+
+    private async Task<ProjectChatCatalog> BuildCatalogAsync(
+        BrowserExtensionChatGptContextSnapshot snapshot,
+        IReadOnlyCollection<ProjectChatBindingSnapshot> existingBindings,
+        CancellationToken cancellationToken)
+    {
 
         var catalog = new ProjectChatCatalog
         {

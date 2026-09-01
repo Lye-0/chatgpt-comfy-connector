@@ -326,6 +326,7 @@ public sealed class PortableLayout
         Backups = Path.Combine(Root, "backups");
         Cache = Path.Combine(Root, "cache");
         ContextsFile = Path.Combine(Data, "chatgpt-contexts.json");
+        ChatGptContextCacheFile = Path.Combine(Cache, "chatgpt-context-cache.json");
     }
 
     public string Root { get; }
@@ -336,6 +337,7 @@ public sealed class PortableLayout
     public string Backups { get; }
     public string Cache { get; }
     public string ContextsFile { get; }
+    public string ChatGptContextCacheFile { get; }
     public string SettingsFile => Path.Combine(Config, "settings.json");
     public string BrowserExtensionPairingFile => Path.Combine(Config, "browser-extension-pairing.json");
     public string LogFile => Path.Combine(Logs, "connector.log");

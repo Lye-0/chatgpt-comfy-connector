@@ -6,7 +6,7 @@ using ChatGPTComfyConnector.Core.Services;
 
 namespace ChatGPTComfyConnector.Infrastructure.Storage;
 
-public sealed class PortableStore : IPortableStore, IBrowserExtensionPairingStore
+public sealed class PortableStore : IPortableStore, IBrowserExtensionPairingStore, IChatGptContextCacheStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -69,6 +69,15 @@ public sealed class PortableStore : IPortableStore, IBrowserExtensionPairingStor
 
     public Task SaveLocalContextsAsync(LocalContextCatalog catalog, CancellationToken cancellationToken = default)
         => AtomicWriteAsync(_layout.ContextsFile, catalog, cancellationToken);
+
+    public Task<BrowserExtensionChatGptContextCache?> LoadChatGptContextCacheAsync(
+        CancellationToken cancellationToken = default)
+        => ReadAsync<BrowserExtensionChatGptContextCache>(_layout.ChatGptContextCacheFile, cancellationToken);
+
+    public Task SaveChatGptContextCacheAsync(
+        BrowserExtensionChatGptContextCache cache,
+        CancellationToken cancellationToken = default)
+        => AtomicWriteAsync(_layout.ChatGptContextCacheFile, cache, cancellationToken);
 
     public async Task<string> CreateWorkflowBackupAsync(WorkflowIdentity workflow, string workflowRoot, string reason, CancellationToken cancellationToken = default)
     {

@@ -77,6 +77,9 @@ class FakeMetadataNode {
     };
     visit(this);
     if (selector === "*") return descendants;
+    if (selector.includes("scrollport")) {
+      return descendants.filter((element) => element.getAttribute("class")?.includes("scrollport"));
+    }
     if (selector.includes("data-marquee-text")) {
       return descendants.filter((element) => element.getAttribute("data-marquee-text") !== null);
     }
@@ -145,7 +148,25 @@ class FakeMetadataDocument extends FakeMetadataNode {
   }
 }
 
-function loadLocators(document) {
+class FakeProjectDocument extends FakeMetadataNode {
+  constructor(href, sidebar, content, title = "Project A | ChatGPT") {
+    super(null, "DOCUMENT");
+    this.ownerDocument = this;
+    this.location = { href };
+    this.title = title;
+    this.sidebar = sidebar;
+    this.content = content;
+    this.appendChild(sidebar);
+    this.appendChild(content);
+  }
+
+  querySelectorAll(selector) {
+    if (selector.startsWith("nav[")) return [this.sidebar];
+    return super.querySelectorAll(selector);
+  }
+}
+
+function loadLocators(document, globals = {}) {
   const context = createContext({
     URL,
     Map,
@@ -154,6 +175,7 @@ function loadLocators(document) {
     Boolean,
     document,
     location: document.location,
+    ...globals,
     globalThis: null,
     console
   });
@@ -300,6 +322,39 @@ test("async sidebar discovery expands more, scans virtualized rows, deduplicates
   assert.equal(sidebar.scrollTop, initialScrollTop);
 });
 
+test("async sidebar discovery resolves title-only Project rows from their navigated IDs", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["同名Project", "同名Project"], [], null);
+  document.sidebar = sidebar;
+  const projectIds = ["g-p-first", "g-p-second"];
+  sidebar.projectRows.forEach((row, index) => {
+    row.click = () => {
+      document.location.href = `https://chatgpt.com/g/${projectIds[index]}/project`;
+    };
+  });
+  const history = {
+    back() { document.location.href = rootHref; }
+  };
+
+  const locators = loadLocators(document, {
+    history,
+    setTimeout,
+    clearTimeout
+  });
+  const snapshot = await locators.collectChatGptContextAsync(document, rootHref, {
+    maxScrolls: 4,
+    maxMoreClicks: 1,
+    resolveProjectIds: true,
+    projectResolutionTimeoutMs: 500
+  });
+
+  assert.deepEqual(Array.from(snapshot.projects, (project) => project.project_id), projectIds);
+  assert.equal(snapshot.projects.every((project) => project.url.endsWith("/project")), true);
+  assert.equal(snapshot.unresolved_project_count, 0);
+  assert.equal(document.location.href, rootHref);
+});
+
 test("current expanded Project row receives the ID from the current route and classifies its chats", () => {
   const href = "https://chatgpt.com/g/g-p-current/c/conversation-current";
   const document = new FakeMetadataDocument(href, null);
@@ -340,6 +395,78 @@ test("merges an ID-bearing Project link into a fallback row without a ghost entr
   assert.equal(snapshot.projects[0].title, "Project A");
   assert.equal(snapshot.projects[0].url, "https://chatgpt.com/g/g-p-alpha/project");
   assert.equal(snapshot.projects[0].discovery_key !== undefined, true);
+});
+
+test("Project page collection scans conversation metadata outside the sidebar and scopes it by Project ID", async () => {
+  const href = "https://chatgpt.com/g/g-p-alpha/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const content = new FakeMetadataNode(null, "MAIN");
+  const alphaChat = new FakeMetadataNode(null, "A", "", {
+    href: "/c/conversation-alpha"
+  });
+  alphaChat.appendChild(new FakeMetadataNode(null, "SPAN", "Alpha chat", { "data-marquee-text": "true" }));
+  const secondAlphaChat = new FakeMetadataNode(null, "A", "", {
+    href: "/g/g-p-alpha/c/conversation-second"
+  });
+  secondAlphaChat.appendChild(new FakeMetadataNode(null, "SPAN", "Second alpha chat", { "data-marquee-text": "true" }));
+  const otherProjectChat = new FakeMetadataNode(null, "A", "Other", {
+    href: "/g/g-p-beta/c/conversation-other"
+  });
+  content.appendChild(alphaChat);
+  content.appendChild(secondAlphaChat);
+  content.appendChild(otherProjectChat);
+  const document = new FakeProjectDocument(href, sidebar, content);
+  for (const node of [sidebar, content, alphaChat, secondAlphaChat, otherProjectChat]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, "g-p-alpha");
+
+  assert.deepEqual(Array.from(snapshot.projects, (project) => project.project_id), ["g-p-alpha"]);
+  assert.deepEqual(Array.from(snapshot.conversations, (conversation) => conversation.conversation_id), [
+    "conversation-alpha",
+    "conversation-second"
+  ]);
+  assert.ok(snapshot.conversations.every((conversation) => conversation.project_id === "g-p-alpha"));
+});
+
+test("Project page collection follows lazy Project chat growth with bounded scrolling", async () => {
+  const href = "https://chatgpt.com/g/g-p-lazy/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const content = new FakeMetadataNode(null, "MAIN", "", { class: "scrollport" });
+  content.scrollTop = 0;
+  content.clientHeight = 100;
+  content.scrollHeight = 280;
+  const firstChat = new FakeMetadataNode(null, "A", "", { href: "/c/conversation-lazy-first" });
+  firstChat.appendChild(new FakeMetadataNode(null, "SPAN", "First lazy chat", { "data-marquee-text": "true" }));
+  const secondChat = new FakeMetadataNode(null, "A", "", { href: "/c/conversation-lazy-second" });
+  secondChat.appendChild(new FakeMetadataNode(null, "SPAN", "Second lazy chat", { "data-marquee-text": "true" }));
+  content.appendChild(firstChat);
+  let lazyChatAttached = false;
+  Object.defineProperty(content, "scrollTop", {
+    configurable: true,
+    get() { return this._scrollTop || 0; },
+    set(value) {
+      this._scrollTop = value;
+      if (value > 0 && !lazyChatAttached) {
+        lazyChatAttached = true;
+        this.appendChild(secondChat);
+      }
+    }
+  });
+  const document = new FakeProjectDocument(href, sidebar, content, "Lazy Project | ChatGPT");
+  for (const node of [sidebar, content, firstChat, secondChat]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, "g-p-lazy", {
+    maxScrolls: 8,
+    timeoutMs: 5000
+  });
+
+  assert.deepEqual(Array.from(snapshot.conversations, (conversation) => conversation.conversation_id), [
+    "conversation-lazy-first",
+    "conversation-lazy-second"
+  ]);
+  assert.equal(content.scrollTop, 0);
 });
 
 function assertProject(projects, projectId) {

@@ -1674,11 +1674,11 @@ test("Background preserves the original Handoff relay shape before response watc
   });
 });
 
-test("Background forwards normalized metadata-only ChatGPT context through an inactive Collector Tab", async () => {
+test("Background forwards a complete metadata snapshot through an active Collector Window Tab", async () => {
   const harness = await createHarness();
-  let requestedMessage;
+  const requestedMessages = [];
   harness.setContentHandler((message) => {
-    requestedMessage = message;
+    requestedMessages.push(message);
     return {
       type: "CHATGPT_CONTEXT_RESULT",
       requestId: message.requestId,
@@ -1724,11 +1724,20 @@ test("Background forwards normalized metadata-only ChatGPT context through an in
     previousCount,
     (message) => message.type === "chatgpt.context.list.response");
 
-  assert.equal(requestedMessage.type, "GET_CHATGPT_CONTEXT");
-  assert.equal(requestedMessage.mode, "list");
+  assert.equal(requestedMessages[0].type, "GET_CHATGPT_CONTEXT");
+  assert.equal(requestedMessages[0].mode, "list");
+  assert.equal(requestedMessages[0].collection, "root");
+  assert.equal(requestedMessages[1].collection, "project");
   assert.equal(harness.createdTabs.length, 1);
-  assert.equal(harness.createdTabs[0].active, false);
-  assert.equal(harness.createdTabs[0].url, "https://chatgpt.com/");
+  assert.equal(harness.createdTabs[0].active, true);
+  assert.equal(harness.createdTabs[0].autoDiscardable, false);
+  assert.notEqual(harness.createdTabs[0].windowId, 1);
+  assert.equal(harness.createdTabs[0].url, "https://chatgpt.com/g/g-p-project-a/project");
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.createdWindows[0].focused, false);
+  assert.equal(harness.createdWindows[0].state, "normal");
+  assert.equal(harness.createdWindows[0].width, 640);
+  assert.equal(harness.createdWindows[0].height, 480);
   assert.equal(response.request_id, "context-request-fixture");
   assert.equal(response.status, "ok");
   assert.deepEqual(response.projects, [
@@ -1746,7 +1755,33 @@ test("Background forwards normalized metadata-only ChatGPT context through an in
   assert.equal(response.current.project_id, "g-p-project-a");
 });
 
-test("Background keeps the Collector Tab separate from the Managed Execution Tab", async () => {
+test("Background does not publish a Project catalog when a Collector row has no resolvable ID", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => ({
+    type: "CHATGPT_CONTEXT_RESULT",
+    requestId: message.requestId,
+    mode: "list",
+    status: "ok",
+    projects: [],
+    conversations: [],
+    unresolved_project_count: message.collection === "root" ? 1 : 0,
+    current: null
+  }));
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "context-incomplete-project-fixture"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "context_projects_incomplete");
+});
+
+test("Background keeps the Collector Window separate from the Managed Execution Window", async () => {
   const harness = await createHarness();
   const relayedMessages = [];
   harness.setContentHandler((message) => {
@@ -1799,9 +1834,319 @@ test("Background keeps the Collector Tab separate from the Managed Execution Tab
   assert.notEqual(harness.createdTabs[0].id, harness.createdTabs[1].id);
   assert.equal(harness.createdTabs[0].id, managedTabId);
   assert.equal(harness.createdTabs[0].active, true);
-  assert.equal(harness.createdTabs[1].active, false);
+  assert.equal(harness.createdTabs[1].active, true);
+  assert.equal(harness.createdTabs[1].autoDiscardable, false);
+  assert.notEqual(harness.createdTabs[0].windowId, harness.createdTabs[1].windowId);
+  assert.equal(harness.createdWindows.length, 2);
+  assert.equal(harness.createdWindows[1].focused, false);
   assert.equal(relayedMessages.some((message) => message.type === "GET_CHATGPT_CONTEXT"), true);
   assert.equal(relayedMessages.find((message) => message.type === "GET_CHATGPT_CONTEXT")?.targetTabId, undefined);
+});
+
+test("Background visits every Project with one reusable Collector Tab and merges Projectless chats", async () => {
+  const harness = await createHarness();
+  const collectionMessages = [];
+  harness.setContentHandler((message) => {
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    collectionMessages.push({ collection: message.collection, projectId: message.projectId });
+    if (message.collection === "project" && message.projectId === "g-p-project-a") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [{
+          project_id: "g-p-project-a",
+          title: "同名Project",
+          url: "https://chatgpt.com/g/g-p-project-a/project"
+        }],
+        conversations: [{
+          conversation_id: "conversation-a",
+          title: "同名Chat",
+          url: "https://chatgpt.com/g/g-p-project-a/c/conversation-a",
+          project_id: "g-p-project-a",
+          project_title: "同名Project"
+        }],
+        current: null
+      };
+    }
+    if (message.collection === "project" && message.projectId === "g-p-project-b") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [{
+          project_id: "g-p-project-b",
+          title: "同名Project",
+          url: "https://chatgpt.com/g/g-p-project-b/project"
+        }],
+        conversations: [{
+          conversation_id: "conversation-b",
+          title: "同名Chat",
+          url: "https://chatgpt.com/g/g-p-project-b/c/conversation-b",
+          project_id: "g-p-project-b",
+          project_title: "同名Project"
+        }],
+        current: null
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [
+        {
+          project_id: "g-p-project-a",
+          title: "同名Project",
+          url: "https://chatgpt.com/g/g-p-project-a/project"
+        },
+        {
+          project_id: "g-p-project-b",
+          title: "同名Project",
+          url: "https://chatgpt.com/g/g-p-project-b/project"
+        }
+      ],
+      conversations: [{
+        conversation_id: "conversation-free",
+        title: "Project外Chat",
+        url: "https://chatgpt.com/c/conversation-free"
+      }],
+      current: null
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "complete-context-fixture"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.deepEqual(collectionMessages, [
+    { collection: "root", projectId: undefined },
+    { collection: "project", projectId: "g-p-project-a" },
+    { collection: "project", projectId: "g-p-project-b" }
+  ]);
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.createdTabs.length, 1);
+  assert.equal(harness.createdTabs[0].active, true);
+  assert.equal(harness.createdTabs[0].autoDiscardable, false);
+  assert.deepEqual(response.projects.map((project) => project.project_id), [
+    "g-p-project-a",
+    "g-p-project-b"
+  ]);
+  assert.deepEqual(response.conversations.map((conversation) => conversation.conversation_id), [
+    "conversation-free",
+    "conversation-a",
+    "conversation-b"
+  ]);
+});
+
+test("Background returns the Collector Tab to the root before a later full refresh", async () => {
+  const harness = await createHarness();
+  const collectionMessages = [];
+  harness.setContentHandler((message) => {
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    collectionMessages.push({ requestId: message.requestId, collection: message.collection });
+    if (message.collection === "project") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [{ project_id: "g-p-refresh", title: "Refresh Project", url: "https://chatgpt.com/g/g-p-refresh/project" }],
+        conversations: [{
+          conversation_id: "conversation-refresh",
+          title: "Refresh Chat",
+          url: "https://chatgpt.com/g/g-p-refresh/c/conversation-refresh",
+          project_id: "g-p-refresh"
+        }],
+        current: null
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [{ project_id: "g-p-refresh", title: "Refresh Project", url: "https://chatgpt.com/g/g-p-refresh/project" }],
+      conversations: [],
+      current: null
+    };
+  });
+
+  const firstCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-root-first"
+  }, harness.socket);
+  await harness.waitForSocketMessage(firstCount, (message) =>
+    message.type === "chatgpt.context.list.response" && message.request_id === "collector-root-first");
+
+  const secondCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-root-second"
+  }, harness.socket);
+  await harness.waitForSocketMessage(secondCount, (message) =>
+    message.type === "chatgpt.context.list.response" && message.request_id === "collector-root-second");
+
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.createdTabs.length, 1);
+  assert.ok(harness.updatedTabs.some((entry) => entry.changes.url === "https://chatgpt.com/"));
+  assert.deepEqual(collectionMessages.map((entry) => entry.collection), [
+    "root", "project", "root", "project"
+  ]);
+});
+
+test("Background discards a stale Collector refresh result when a newer refresh starts", async () => {
+  const harness = await createHarness();
+  let oldRootStarted = false;
+  let releaseOldRoot;
+  const oldRoot = new Promise((resolve) => { releaseOldRoot = resolve; });
+  harness.setContentHandler(async (message) => {
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    if (message.requestId === "collector-stale-old" && message.collection === "root") {
+      oldRootStarted = true;
+      await oldRoot;
+    }
+    const isNew = message.requestId === "collector-stale-new";
+    const projectId = isNew ? "g-p-new" : "g-p-old";
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [{
+        project_id: projectId,
+        title: isNew ? "New Project" : "Old Project",
+        url: `https://chatgpt.com/g/${projectId}/project`
+      }],
+      conversations: [],
+      current: null
+    };
+  });
+
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-stale-old"
+  }, harness.socket);
+  for (let attempt = 0; attempt < 20 && !oldRootStarted; attempt += 1) await wait(2);
+  assert.equal(oldRootStarted, true);
+
+  const newCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-stale-new"
+  }, harness.socket);
+  releaseOldRoot();
+
+  const newest = await harness.waitForSocketMessage(newCount, (message) =>
+    message.type === "chatgpt.context.list.response" && message.request_id === "collector-stale-new");
+  assert.equal(newest.status, "ok");
+  assert.deepEqual(newest.projects.map((project) => project.project_id), ["g-p-new"]);
+  assert.equal(harness.socket.sent.some((message) =>
+    message.type === "chatgpt.context.list.response" && message.request_id === "collector-stale-old"), false);
+});
+
+test("Background recovers a closed Collector Tab or Window without touching the Execution Window", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => ({
+    type: "CHATGPT_CONTEXT_RESULT",
+    requestId: message.requestId,
+    mode: "list",
+    status: "ok",
+    projects: [],
+    conversations: [],
+    current: null
+  }));
+
+  const firstRequestCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-recovery-first"
+  }, harness.socket);
+  await harness.waitForSocketMessage(firstRequestCount, (message) => message.request_id === "collector-recovery-first");
+  const collectorWindowId = harness.createdWindows[0].id;
+  const collectorTabId = harness.createdTabs[0].id;
+  harness.removeTab(collectorTabId);
+
+  const secondRequestCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-recovery-second"
+  }, harness.socket);
+  await harness.waitForSocketMessage(secondRequestCount, (message) => message.request_id === "collector-recovery-second");
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.createdTabs.length, 2);
+  assert.equal(harness.createdTabs[1].windowId, collectorWindowId);
+  assert.equal(harness.createdTabs[1].active, true);
+  assert.equal(harness.createdTabs[1].autoDiscardable, false);
+
+  await harness.closeExecutionWindow(collectorWindowId);
+  const thirdRequestCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-recovery-third"
+  }, harness.socket);
+  await harness.waitForSocketMessage(thirdRequestCount, (message) => message.request_id === "collector-recovery-third");
+  assert.equal(harness.createdWindows.length, 2);
+  assert.equal(harness.createdTabs[2].active, true);
+  assert.equal(harness.createdTabs[2].autoDiscardable, false);
+});
+
+test("Background replaces discarded or frozen Collector Tabs without creating duplicates", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => ({
+    type: "CHATGPT_CONTEXT_RESULT",
+    requestId: message.requestId,
+    mode: "list",
+    status: "ok",
+    projects: [],
+    conversations: [],
+    current: null
+  }));
+
+  const requestContext = async (requestId) => {
+    const previousCount = harness.socket.sent.length;
+    harness.context.handleBridgeMessage({
+      type: "chatgpt.context.list.request",
+      request_id: requestId
+    }, harness.socket);
+    return await harness.waitForSocketMessage(
+      previousCount,
+      (message) => message.type === "chatgpt.context.list.response" && message.request_id === requestId);
+  };
+
+  await requestContext("collector-state-first");
+  const collectorWindowId = harness.createdWindows[0].id;
+  let collectorTabId = harness.createdTabs[0].id;
+  for (const [index, change] of [
+    { discarded: true },
+    { frozen: true }
+  ].entries()) {
+    harness.setTabLifecycle(collectorTabId, change);
+    const response = await requestContext(`collector-state-${index + 2}`);
+    assert.equal(response.status, "ok");
+    assert.equal(harness.createdWindows.length, 1);
+    assert.equal(harness.createdTabs.length, index + 2);
+    assert.equal(harness.createdTabs.at(-1).windowId, collectorWindowId);
+    assert.equal(harness.createdTabs.at(-1).active, true);
+    assert.equal(harness.createdTabs.at(-1).autoDiscardable, false);
+    assert.equal(harness.getTab(collectorTabId), undefined);
+    collectorTabId = harness.createdTabs.at(-1).id;
+  }
+
+  await wait(5);
+  const stateErrors = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields && fields.stage === "collector_tab_state_changed")
+    .map((fields) => fields.error_code);
+  assert.deepEqual(stateErrors, ["collector_tab_discarded", "collector_tab_frozen"]);
 });
 
 test("Background propagates a Content Script send failure instead of upgrading it to sent", async () => {

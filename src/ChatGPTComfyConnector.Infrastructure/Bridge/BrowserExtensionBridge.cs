@@ -28,7 +28,12 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     private const int MaxWebSocketMessageBytes = 256 * 1024;
     private const int MaxHandoffPayloadBytes = 192 * 1024;
     private const int MaxAssistantResponseBytes = 256 * 1024;
-    private const int MaxChatGptContextEntries = 5000;
+    // Project/Chat discovery is a complete metadata snapshot rather than a
+    // visible-sidebar sample. Keep independent bounded limits so a large
+    // conversation history can be accepted without allowing an unbounded
+    // bridge message.
+    private const int MaxChatGptContextProjects = 5000;
+    private const int MaxChatGptContextConversations = 10000;
     private const long MaxReviewMediaBytes = 512L * 1024 * 1024;
     private const int MaxPairingAttempts = 5;
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
@@ -2468,7 +2473,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         out string? error)
     {
         error = null;
-        if (element.ValueKind != JsonValueKind.Array || element.GetArrayLength() > MaxChatGptContextEntries)
+        if (element.ValueKind != JsonValueKind.Array || element.GetArrayLength() > MaxChatGptContextProjects)
         {
             error = "invalid_context_projects";
             return false;
@@ -2507,7 +2512,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         out string? error)
     {
         error = null;
-        if (element.ValueKind != JsonValueKind.Array || element.GetArrayLength() > MaxChatGptContextEntries)
+        if (element.ValueKind != JsonValueKind.Array || element.GetArrayLength() > MaxChatGptContextConversations)
         {
             error = "invalid_context_conversations";
             return false;

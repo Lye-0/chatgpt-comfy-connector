@@ -41,8 +41,12 @@ When the Execution Window is first created, its width and height are each set
 to about half of the last-focused browser window (roughly one quarter of its
 area); an internal fallback size is used if those bounds are unavailable.
 
-Project/Chat discovery uses a separate inactive Collector Tab. It is created
-only for the metadata-only sidebar scan and is never used for Handoff, media,
-Review, Resume, or assistant-response observation. If a user explicitly brings
-that temporary tab to the foreground, the extension leaves it open rather than
-changing the user's browser state.
+Project/Chat discovery uses a separate non-focused Collector Window with one
+active Collector Tab. The tab is reused for the root sidebar and every Project
+page, and is never used for Handoff, media, Review, Resume, or
+assistant-response observation. Button-only Project rows are opened in that
+Collector Tab to resolve their route IDs before Project-page traversal; a
+title is never used as identity. The Collector Window is independent from the
+Managed Execution Window and the user's foreground tabs. Its metadata-only
+snapshot is persisted by Desktop so the previous list can be shown while a
+new bounded refresh runs.

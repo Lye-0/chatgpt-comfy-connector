@@ -312,9 +312,11 @@ the Window uses approximately half the last-focused browser window's width and
 height (roughly one quarter of its area), with a bounded fallback size.
 Conversation ID/URL
 is the durable target identity and the window/tab are only replaceable browser
-media. Project/Chat metadata discovery uses a separate inactive Collector Tab,
-which is created only for the bounded sidebar scan and is never used to send a
-Handoff or observe an assistant response. Before `handoff.send`, the
+media. Project/Chat metadata discovery uses a separate non-focused Collector
+Window with one active Collector Tab. The Collector Window is created or
+reused only for metadata discovery, traverses the root sidebar and each Project
+page, and is never used to send a Handoff or observe an assistant response.
+Before `handoff.send`, the
 Background requires Content Script, Conversation, Composer, and shared
 assistant-response watcher readiness. The watcher is pre-registered with the
 current Handoff IDs, records the existing assistant-message baseline, and
@@ -390,19 +392,26 @@ Project is grouped under `Projectなし`, and `＋ 新しいChat` represents a
 new-chat target whose conversation ID is not known until the first Handoff is
 accepted.
 
-The list request uses a locator-owned sidebar discovery helper. It expands a
-bounded number of `さらに表示`/`もっと見る` controls, scans the sidebar
-scroll container incrementally for lazy/virtualized rows, merges duplicate
-Project/Conversation metadata, and restores the original scroll position.
-Project rows without a public ID are returned with a deterministic
-`discovery_key` for display/deduplication only; Desktop does not treat that
-key as a Project identity and does not offer an unsafe new-chat target for the
-unresolved row. A later scan can merge that row into a real Project ID when a
-conversation or Project URL exposes one.
+The list request uses a locator-owned Collector discovery helper. It expands a
+bounded number of `さらに表示`/`もっと見る` controls, scans the root sidebar
+incrementally for lazy/virtualized Project and Projectless Conversation rows,
+then reuses the same active Collector Tab to visit each resolved Project URL.
+Button-only Project rows are opened one at a time in that Collector Tab so the
+resulting SPA Project URL supplies the real ID; a title is never used as an
+identity. Each resolved Project page is scanned with bounded incremental
+scrolling until no new Conversation IDs appear; duplicate
+Project/Conversation metadata is merged by ID and the original scroll
+positions are restored. If a Project row cannot be resolved within the
+bounded navigation window, the refresh returns `context_projects_incomplete`
+instead of publishing an incomplete catalog.
 
 `chatgpt.context.list.request` and
 `chatgpt.context.current.request` travel over the existing authenticated
-WebSocket and return only bounded Project/Conversation metadata. The
+WebSocket and return only bounded Project/Conversation metadata. The complete
+list result is persisted as a metadata-only local cache; Desktop can show that
+snapshot immediately at startup and replace it only when the newest Collector
+refresh completes. Collector refresh generations discard stale results, while
+the Execution Window and its Managed Tab remain untouched. The
 Content Script also emits a deduplicated `chatgpt.context.changed` event for
 SPA navigation and visible link changes. Desktop keeps Loading, Loaded,
 Empty, Disconnected, and Error states distinct; refresh preserves stable

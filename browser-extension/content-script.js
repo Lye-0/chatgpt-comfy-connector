@@ -292,6 +292,9 @@
     if (errorCode) result.errorCode = errorCode;
     if (text) result.message = text;
     if (stage) result.stage = stage;
+    if (Number.isSafeInteger(data.unresolved_project_count)) {
+      result.unresolved_project_count = data.unresolved_project_count;
+    }
     return result;
   }
 
@@ -310,8 +313,28 @@
       let value;
       if (currentOnly) {
         value = locators.getCurrentChatGptContext?.(document, globalThis.location?.href);
+      } else if (message?.collection === "project"
+        && typeof locators.collectChatGptProjectContextAsync === "function") {
+        value = await locators.collectChatGptProjectContextAsync(
+          document,
+          globalThis.location?.href,
+          message.projectId || message.project_id,
+          {
+            maxScrolls: message.maxScrolls,
+            timeoutMs: message.timeoutMs,
+            resolveProjectIds: message.resolveProjectIds === true,
+            maxProjectResolutions: message.maxProjectResolutions,
+            projectResolutionTimeoutMs: message.projectResolutionTimeoutMs
+          });
       } else if (typeof locators.collectChatGptContextAsync === "function") {
-        value = await locators.collectChatGptContextAsync(document, globalThis.location?.href);
+        value = await locators.collectChatGptContextAsync(document, globalThis.location?.href, {
+          maxScrolls: message.maxScrolls,
+          maxMoreClicks: message.maxMoreClicks,
+          timeoutMs: message.timeoutMs,
+          resolveProjectIds: message.resolveProjectIds === true,
+          maxProjectResolutions: message.maxProjectResolutions,
+          projectResolutionTimeoutMs: message.projectResolutionTimeoutMs
+        });
       } else {
         value = locators.collectChatGptContext?.(document, globalThis.location?.href);
       }

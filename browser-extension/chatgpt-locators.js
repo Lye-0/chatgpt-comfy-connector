@@ -375,14 +375,31 @@
     ].map((value) => metadataIdentifier(value)).find(Boolean);
     if (explicit) return explicit;
     const href = chatGptMetadataUrl(attributeValue(element, "href"), baseUrl);
-    return projectIdFromUrl(href);
+    if (href) return projectIdFromUrl(href);
+
+    // ChatGPT currently renders some project rows as buttons whose link is a
+    // descendant rather than an attribute on the row itself. Inspect only
+    // metadata-bearing descendants so an ID can be recovered without using a
+    // title as identity.
+    const relatedAnchors = uniqueElements(["a[href]"], element);
+    for (const anchor of relatedAnchors) {
+      const relatedHref = chatGptMetadataUrl(attributeValue(anchor, "href"), baseUrl);
+      const relatedId = projectIdFromUrl(relatedHref);
+      if (relatedId) return relatedId;
+    }
+    return null;
   }
 
   function projectUrlFromElement(element, baseUrl) {
     const explicit = chatGptMetadataUrl(
       attributeValue(element, "data-project-url") || attributeValue(element, "href"),
       baseUrl);
-    return explicit && isProjectHomeUrl(explicit) ? explicit : null;
+    if (explicit && isProjectHomeUrl(explicit)) return explicit;
+    for (const anchor of uniqueElements(["a[href]"], element)) {
+      const related = chatGptMetadataUrl(attributeValue(anchor, "href"), baseUrl);
+      if (related && isProjectHomeUrl(related)) return related;
+    }
+    return null;
   }
 
   function projectTitleFromRelatedAnchor(anchor, projectId, projectAnchors = [], projectRows = []) {
@@ -659,6 +676,137 @@
     return { projects, conversations };
   }
 
+  function documentHref(root, fallbackUrl = globalThis.location?.href) {
+    let href = "";
+    try { href = root?.location?.href || globalThis.location?.href || ""; } catch (_) { href = ""; }
+    return chatGptMetadataUrl(href, fallbackUrl)
+      || chatGptMetadataUrl(fallbackUrl, fallbackUrl)
+      || String(fallbackUrl || "");
+  }
+
+  function waitForLocatorDelay(milliseconds) {
+    const delay = Math.max(0, Number(milliseconds) || 0);
+    if (delay === 0 || typeof globalThis.setTimeout !== "function") return Promise.resolve();
+    return new Promise((resolve) => globalThis.setTimeout(resolve, delay));
+  }
+
+  async function waitForProjectNavigation(root, previousUrl, timeoutMs) {
+    const deadline = Date.now() + Math.max(250, Math.min(15000, Number(timeoutMs) || 5000));
+    while (Date.now() < deadline) {
+      const currentUrl = documentHref(root, previousUrl);
+      const projectId = projectIdFromUrl(currentUrl);
+      if (projectId && currentUrl !== previousUrl) return { projectId, url: currentUrl };
+      await waitForLocatorDelay(50);
+    }
+    return null;
+  }
+
+  async function restoreRootAfterProjectNavigation(root, rootUrl, timeoutMs) {
+    const currentUrl = documentHref(root, rootUrl);
+    if (!projectIdFromUrl(currentUrl)) return;
+
+    const historyObject = globalThis.history;
+    if (typeof historyObject?.back === "function") {
+      try { historyObject.back(); } catch (_) { }
+      const deadline = Date.now() + Math.max(250, Math.min(10000, Number(timeoutMs) || 5000));
+      while (Date.now() < deadline) {
+        if (!projectIdFromUrl(documentHref(root, rootUrl))) return;
+        await waitForLocatorDelay(50);
+      }
+    }
+
+    // A test harness or a SPA variant may not expose a usable history stack.
+    // pushState keeps this recovery in the current document and lets the page
+    // router observe the same URL transition without forcing a reload.
+    if (projectIdFromUrl(documentHref(root, rootUrl))
+      && typeof historyObject?.pushState === "function") {
+      try {
+        historyObject.pushState({}, "", rootUrl);
+        if (typeof globalThis.dispatchEvent === "function" && typeof globalThis.Event === "function") {
+          globalThis.dispatchEvent(new globalThis.Event("popstate"));
+        }
+      } catch (_) { }
+    }
+  }
+
+  function projectRowResolutionKey(row, rows, scrollTop) {
+    const title = metadataTextKey(visibleTitleFromElement(row, ""));
+    const index = rows.indexOf(row);
+    const occurrence = rows
+      .slice(0, Math.max(0, index))
+      .filter((candidate) => metadataTextKey(visibleTitleFromElement(candidate, "")) === title)
+      .length;
+    return `${Math.max(0, Number(scrollTop) || 0)}:${index}:${occurrence}:${title}`;
+  }
+
+  async function resolveVisibleProjectRowsAsync(root, rootUrl, options, state) {
+    const sidebar = findSidebarRoot(root);
+    const scrollContainer = findSidebarScrollContainer(root);
+    const originalScrollTop = scrollContainer && typeof scrollContainer.scrollTop === "number"
+      ? scrollContainer.scrollTop : null;
+    const resolved = [];
+    const maxRows = Math.max(1, Math.min(500, Number(options.maxProjectResolutions) || 256));
+    const resolutionTimeoutMs = Math.max(250, Math.min(15000, Number(options.projectResolutionTimeoutMs) || 5000));
+    const collectionDeadline = Number.isFinite(options.deadline) ? options.deadline : Number.POSITIVE_INFINITY;
+
+    try {
+      for (let attempt = 0; attempt < maxRows && Date.now() < collectionDeadline; attempt += 1) {
+        if (options.signal?.aborted) {
+          const error = new Error("Collection cancelled");
+          error.name = "AbortError";
+          throw error;
+        }
+        const rows = findProjectRows(sidebar);
+        const currentUrl = documentHref(root, rootUrl);
+        const scrollTop = scrollContainer && typeof scrollContainer.scrollTop === "number"
+          ? scrollContainer.scrollTop : 0;
+        const candidate = rows.find((row) => {
+          if (projectIdFromElement(row, currentUrl)) return false;
+          const key = projectRowResolutionKey(row, rows, scrollTop);
+          return !state.attemptedKeys.has(key);
+        });
+        if (!candidate) break;
+
+        const key = projectRowResolutionKey(candidate, rows, scrollTop);
+        state.attemptedKeys.add(key);
+        const title = visibleTitleFromElement(candidate, "");
+        const previousUrl = currentUrl;
+        if (typeof candidate.click !== "function") continue;
+        try {
+          candidate.click();
+        } catch (_) {
+          continue;
+        }
+
+        const remainingMs = collectionDeadline - Date.now();
+        if (remainingMs <= 0) break;
+        const navigation = await waitForProjectNavigation(
+          root,
+          previousUrl,
+          Math.min(resolutionTimeoutMs, remainingMs));
+        if (!navigation) continue;
+        if (!state.resolvedIds.has(navigation.projectId)) {
+          state.resolvedIds.add(navigation.projectId);
+          const projectUrl = isProjectHomeUrl(navigation.url)
+            ? navigation.url
+            : `https://chatgpt.com/g/${encodeURIComponent(navigation.projectId)}/project`;
+          resolved.push({
+            project_id: navigation.projectId,
+            title: metadataTitle(title, `Project (${navigation.projectId})`),
+            url: projectUrl
+          });
+        }
+        await restoreRootAfterProjectNavigation(root, rootUrl, resolutionTimeoutMs);
+        await waitForLocatorDelay(options.settleMs);
+      }
+    } finally {
+      if (scrollContainer && originalScrollTop !== null) {
+        try { scrollContainer.scrollTop = originalScrollTop; } catch (_) { }
+      }
+    }
+    return resolved;
+  }
+
   function documentTitleFallback(root, conversationId) {
     let title = "";
     try { title = root?.title || ""; } catch (_) { title = ""; }
@@ -711,19 +859,53 @@
       && typeof scrollContainer.clientHeight === "number";
     const originalScrollTop = canScroll ? scrollContainer.scrollTop : null;
     const maxScrolls = Math.max(1, Math.min(64, Number(options.maxScrolls) || 32));
+    const deadline = Date.now() + Math.max(1000, Math.min(120000, Number(options.timeoutMs) || 30000));
+    const initialSettleMs = options.initialSettleMs === undefined
+      ? 250
+      : Math.max(0, Math.min(2000, Number(options.initialSettleMs) || 0));
+    const ensureCollectionActive = () => {
+      if (options.signal?.aborted) {
+        const error = new Error("Collection cancelled");
+        error.name = "AbortError";
+        throw error;
+      }
+      return Date.now() < deadline;
+    };
+    const resolveProjectIds = options.resolveProjectIds === true;
+    const projectResolutionState = {
+      attemptedKeys: new Set(),
+      resolvedIds: new Set()
+    };
+    const collectAndResolveVisibleProjects = async () => {
+      if (!resolveProjectIds) return;
+      ensureCollectionActive();
+      const resolved = await resolveVisibleProjectRowsAsync(
+        root,
+        url,
+        { ...options, deadline },
+        projectResolutionState);
+      for (const project of resolved) mergeContextProjectCatalog(merged, { projects: [project] });
+      ensureCollectionActive();
+    };
     try {
+      ensureCollectionActive();
+      if (initialSettleMs > 0) await waitForSidebarMutation(root, initialSettleMs);
+      ensureCollectionActive();
       const initial = collectContextEntries(root, url);
       mergeContextProjectCatalog(merged, initial);
       mergeContextConversationCatalog(merged, initial);
       await expandSidebarMoreButtons(root, options);
+      await collectAndResolveVisibleProjects();
       let stagnantPasses = 0;
       for (let pass = 0; pass < maxScrolls; pass += 1) {
+        if (!ensureCollectionActive()) break;
         const beforeCount = merged.projects.length + merged.conversations.length;
         const beforeTop = canScroll ? Number(scrollContainer.scrollTop) || 0 : 0;
         const beforeHeight = canScroll ? Number(scrollContainer.scrollHeight) || 0 : 0;
         const snapshot = collectContextEntries(root, url);
         mergeContextProjectCatalog(merged, snapshot);
         mergeContextConversationCatalog(merged, snapshot);
+        await collectAndResolveVisibleProjects();
         const added = merged.projects.length + merged.conversations.length - beforeCount;
         if (!canScroll) break;
 
@@ -734,22 +916,221 @@
         if (nextTop <= beforeTop) break;
         try { scrollContainer.scrollTop = nextTop; } catch (_) { break; }
         await waitForSidebarMutation(root, options.settleMs);
+        if (!ensureCollectionActive()) break;
         const afterTop = Number(scrollContainer.scrollTop) || 0;
         const afterHeight = Number(scrollContainer.scrollHeight) || 0;
         if (afterTop === beforeTop && afterHeight === beforeHeight && added === 0) stagnantPasses += 1;
         else stagnantPasses = 0;
         if (stagnantPasses >= 2) break;
       }
+      const unresolvedProjects = resolveProjectIds
+        ? merged.projects.filter((project) => !project.project_id).length
+        : 0;
       return {
-        projects: merged.projects,
+        // A Collector request asks for ID-complete metadata. Unresolved
+        // title-only rows are not emitted as if they were real Projects; the
+        // caller can retry/recover instead of offering an identity that is
+        // not safe to navigate to.
+        projects: resolveProjectIds
+          ? merged.projects.filter((project) => project.project_id)
+          : merged.projects,
         conversations: merged.conversations,
-        current: getCurrentChatGptContextFromEntries(merged, root, url)
+        current: getCurrentChatGptContextFromEntries(merged, root, url),
+        ...(resolveProjectIds ? { unresolved_project_count: unresolvedProjects } : {})
       };
     } finally {
       if (canScroll && originalScrollTop !== null) {
         try { scrollContainer.scrollTop = originalScrollTop; } catch (_) { }
       }
     }
+  }
+
+  function conversationIdFromElement(element) {
+    const explicit = [
+      attributeValue(element, "data-conversation-id"),
+      attributeValue(element, "data-conversation-id-value"),
+      attributeValue(element, "data-thread-id")
+    ].map((value) => metadataIdentifier(value)).find(Boolean);
+    if (explicit) return explicit;
+    return conversationIdFromUrl(attributeValue(element, "href"));
+  }
+
+  function isDescendantOf(element, ancestor) {
+    if (!element || !ancestor) return false;
+    if (element === ancestor) return true;
+    let current = element.parentElement;
+    for (let depth = 0; current && depth < 32; depth += 1, current = current.parentElement) {
+      if (current === ancestor) return true;
+    }
+    return false;
+  }
+
+  function projectTitleFromPage(root, projectId, url) {
+    const sidebar = findSidebarRoot(root);
+    const rows = findProjectRows(sidebar).filter((row) => projectIdFromElement(row, url) === projectId);
+    const rowTitle = rows.map((row) => visibleTitleFromElement(row, "")).find(Boolean);
+    if (rowTitle) return rowTitle;
+
+    const pageTitleSelectors = [
+      "h1",
+      '[data-project-title]',
+      '[data-project-name]',
+      '[data-testid*="project-title"]',
+      '[data-testid*="project-name"]'
+    ];
+    for (const candidate of uniqueElements(pageTitleSelectors, root)
+      .filter((element) => isVisible(element) && !isDescendantOf(element, sidebar))) {
+      const title = visibleTitleFromElement(candidate, "");
+      if (title) return title;
+    }
+
+    let documentTitle = "";
+    try { documentTitle = root?.title || ""; } catch (_) { documentTitle = ""; }
+    documentTitle = documentTitle.replace(/\s*[|·-]\s*ChatGPT\s*$/i, "").trim();
+    return metadataTitle(documentTitle, `Project (${projectId})`);
+  }
+
+  function projectPageConversationElements(root) {
+    return uniqueElements([
+      "a[href]",
+      "[data-conversation-id]",
+      "[data-conversation-id-value]",
+      "[data-thread-id]"
+    ], root);
+  }
+
+  function collectProjectContextEntries(
+    root = globalThis.document,
+    url = globalThis.location?.href,
+    projectId) {
+    const normalizedProjectId = metadataIdentifier(projectId);
+    if (!normalizedProjectId) return { projects: [], conversations: [] };
+
+    const sidebar = findSidebarRoot(root);
+    const projectUrl = isProjectHomeUrl(url)
+      ? chatGptMetadataUrl(url, url)
+      : projectUrlFromConversationUrl(url, normalizedProjectId)
+        || `https://chatgpt.com/g/${encodeURIComponent(normalizedProjectId)}/project`;
+    const projectTitle = projectTitleFromPage(root, normalizedProjectId, url);
+    const projects = [{
+      project_id: normalizedProjectId,
+      title: projectTitle,
+      ...(projectUrl ? { url: projectUrl } : {})
+    }];
+    const conversations = [];
+    const conversationById = new Map();
+
+    for (const element of projectPageConversationElements(root)) {
+      const href = chatGptMetadataUrl(attributeValue(element, "href"), url);
+      const conversationId = conversationIdFromElement(element) || conversationIdFromUrl(href);
+      if (!conversationId) continue;
+      const explicitProjectId = projectIdFromUrl(href);
+      if (explicitProjectId && explicitProjectId !== normalizedProjectId) continue;
+      // A /c/<id> link inside the sidebar is not enough to prove that it
+      // belongs to the opened Project. Project-page content outside the
+      // sidebar is explicitly scoped by the requested Project ID.
+      if (!explicitProjectId && sidebar !== root && isDescendantOf(element, sidebar)) continue;
+      const conversationUrl = href
+        || `https://chatgpt.com/g/${encodeURIComponent(normalizedProjectId)}/c/${encodeURIComponent(conversationId)}`;
+      const entry = {
+        conversation_id: conversationId,
+        title: conversationTitleFromAnchor(element, conversationId),
+        url: conversationUrl,
+        project_id: normalizedProjectId,
+        project_title: projectTitle
+      };
+      const existing = conversationById.get(conversationId);
+      if (!existing) {
+        conversationById.set(conversationId, entry);
+        conversations.push(entry);
+      } else {
+        if (entry.title && (!existing.title || existing.title === conversationId)) existing.title = entry.title;
+        if (entry.url && !existing.url) existing.url = entry.url;
+      }
+    }
+    return { projects, conversations };
+  }
+
+  function findProjectPageScrollContainers(root, sidebar) {
+    const candidates = uniqueElements(sidebarScrollContainerSelectors, root)
+      .filter((candidate) => candidate !== sidebar
+        && !isDescendantOf(candidate, sidebar)
+        && typeof candidate.scrollTop === "number"
+        && typeof candidate.scrollHeight === "number"
+        && typeof candidate.clientHeight === "number");
+    if (candidates.length > 0) return candidates;
+    if (root
+      && typeof root.scrollTop === "number"
+      && typeof root.scrollHeight === "number"
+      && typeof root.clientHeight === "number") return [root];
+    return [];
+  }
+
+  async function collectChatGptProjectContextAsync(
+    root = globalThis.document,
+    url = globalThis.location?.href,
+    projectId,
+    options = {}) {
+    const normalizedProjectId = metadataIdentifier(projectId);
+    if (!normalizedProjectId) return { projects: [], conversations: [], current: getCurrentChatGptContext(root, url) };
+
+    const merged = { projects: [], conversations: [] };
+    const sidebar = findSidebarRoot(root);
+    const containers = findProjectPageScrollContainers(root, sidebar);
+    const deadline = Date.now() + Math.max(1000, Math.min(120000, Number(options.timeoutMs) || 30000));
+    const maxScrolls = Math.max(1, Math.min(128, Number(options.maxScrolls) || 64));
+    const initialSettleMs = options.initialSettleMs === undefined
+      ? 250
+      : Math.max(0, Math.min(2000, Number(options.initialSettleMs) || 0));
+    const collect = () => {
+      if (options.signal?.aborted) {
+        const error = new Error("Collection cancelled");
+        error.name = "AbortError";
+        throw error;
+      }
+      if (Date.now() >= deadline) return false;
+      const snapshot = collectProjectContextEntries(root, url, normalizedProjectId);
+      mergeContextProjectCatalog(merged, snapshot);
+      mergeContextConversationCatalog(merged, snapshot);
+      return true;
+    };
+
+    if (initialSettleMs > 0) await waitForSidebarMutation(root, initialSettleMs);
+    collect();
+    for (const container of containers) {
+      const originalScrollTop = Number(container.scrollTop) || 0;
+      let stagnantPasses = 0;
+      try {
+        for (let pass = 0; pass < maxScrolls && Date.now() < deadline; pass += 1) {
+          const beforeCount = merged.conversations.length;
+          const beforeTop = Number(container.scrollTop) || 0;
+          const beforeHeight = Number(container.scrollHeight) || 0;
+          collect();
+          const maxTop = Math.max(0, beforeHeight - (Number(container.clientHeight) || 0));
+          if (beforeTop >= maxTop) break;
+          const step = Math.max(1, Math.floor((Number(container.clientHeight) || 1) * 0.8));
+          const nextTop = Math.min(maxTop, beforeTop + step);
+          if (nextTop <= beforeTop) break;
+          try { container.scrollTop = nextTop; } catch (_) { break; }
+          await waitForSidebarMutation(root, options.settleMs);
+          collect();
+          const afterTop = Number(container.scrollTop) || 0;
+          const afterHeight = Number(container.scrollHeight) || 0;
+          const added = merged.conversations.length - beforeCount;
+          if (added === 0 && afterTop === beforeTop && afterHeight === beforeHeight) stagnantPasses += 1;
+          else stagnantPasses = 0;
+          if (stagnantPasses >= 2) break;
+        }
+      } finally {
+        try { container.scrollTop = originalScrollTop; } catch (_) { }
+      }
+    }
+
+    return {
+      projects: merged.projects,
+      conversations: merged.conversations,
+      current: getCurrentChatGptContextFromEntries(merged, root, url)
+    };
   }
 
   function isVisible(element) {
@@ -1688,6 +2069,7 @@
     projectIdFromUrl,
     collectChatGptContext,
     collectChatGptContextAsync,
+    collectChatGptProjectContextAsync,
     getCurrentChatGptContext,
     findSidebarRoot,
     findSidebarScrollContainer,

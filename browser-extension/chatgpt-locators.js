@@ -150,24 +150,14 @@
   const metadataTitleMaxLength = 512;
   const metadataUrlMaxLength = 2048;
 
-  // ChatGPT's sidebar has changed from link-based project entries to an
-  // unfurl button followed by conversation links. Keep these selectors in
-  // the metadata locator layer; the Content Script must not know either DOM
-  // shape or the sidebar's scroll implementation.
+  // These are the selectors used by the previously successful Project
+  // discovery implementation. Keep the Project catalogue path deliberately
+  // small: it reads metadata from the known ChatGPT history sidebar and never
+  // clicks an unknown row to infer an identity.
   const sidebarRootSelectors = [
     'nav[aria-label="チャット履歴"]',
     'nav[aria-label="Chat history"]',
-    'nav[aria-label*="history" i]',
-    'nav[aria-label*="履歴"]',
-    'nav[data-sidebar]',
-    '[data-testid="sidebar"]',
-    '[data-testid*="sidebar" i]',
-    '[data-sidebar="true"]',
-    '[role="navigation"]',
-    'aside',
-    'nav',
-    '[class*="sidebar" i]',
-    '[id*="sidebar" i]'
+    'nav[data-sidebar]'
   ];
   const sidebarScrollContainerSelectors = [
     '[data-sidebar-scroll-container="true"]',
@@ -176,17 +166,8 @@
     '[class*="overflow-y-auto"]'
   ];
   const projectRowSelectors = [
-    '[data-sidebar-item="true"]',
     '[role="button"][data-sidebar-item="true"]',
-    '[data-sidebar-item="true"][role="button"]',
-    '[role="treeitem"]',
-    '[role="button"][aria-expanded]',
-    '[data-project-id]',
-    '[data-project-id-value]',
-    '[data-project-url]',
-    '[data-testid*="project-item" i]',
-    '[data-testid*="project-row" i]',
-    '[data-testid*="gizmo" i]'
+    '[data-sidebar-item="true"][role="button"]'
   ];
   const metadataEntrySelectors = [
     'a[href]',
@@ -278,9 +259,9 @@
     return null;
   }
 
-  function projectIdFromUrl(value = globalThis.location?.href, baseUrl = globalThis.location?.href) {
+  function projectIdFromUrl(value = globalThis.location?.href) {
     try {
-      const parsed = new URL(value || "", baseUrl);
+      const parsed = new URL(value || "", globalThis.location?.href);
       if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com" || parsed.port !== "") return null;
       for (const name of ["project_id", "projectId"]) {
         const fromQuery = metadataIdentifier(parsed.searchParams.get(name));
@@ -288,7 +269,7 @@
       }
     } catch (_) { }
 
-    const segments = decodedPathSegments(value, baseUrl);
+    const segments = decodedPathSegments(value);
     for (let index = 0; index < segments.length - 1; index += 1) {
       if (segments[index].toLowerCase() !== "g") continue;
       const projectId = metadataIdentifier(segments[index + 1]);
@@ -298,14 +279,6 @@
       if (projectId?.toLowerCase().startsWith("g-p-")) return projectId;
     }
 
-    // During a SPA transition ChatGPT can temporarily expose the Project
-    // identity without the surrounding `/g/` segment. Accept only the
-    // explicit Project prefix in that case; generic `/g/g-...` GPT routes
-    // remain excluded.
-    const embeddedProjectId = segments
-      .map((segment) => metadataIdentifier(segment))
-      .find((segment) => segment?.toLowerCase().startsWith("g-p-"));
-    if (embeddedProjectId) return embeddedProjectId;
     return null;
   }
 
@@ -348,9 +321,8 @@
 
   function stableMetadataKey(prefix, value) {
     const text = String(value ?? "");
-    // FNV-1a keeps the key deterministic without putting a title into the
-    // bridge identity. It is only a discovery key for a visible project row
-    // that has no public project id in the current ChatGPT DOM.
+    // This is a display/discovery key only. It is never used as a Project
+    // identity or as a navigation target.
     let hash = 2166136261;
     for (let index = 0; index < text.length; index += 1) {
       hash ^= text.charCodeAt(index);
@@ -434,77 +406,18 @@
   function projectIdFromElement(element, baseUrl) {
     const explicit = [
       attributeValue(element, "data-project-id"),
-      attributeValue(element, "data-project-id-value"),
-      attributeValue(element, "data-project"),
-      attributeValue(element, "data-gizmo-id")
+      attributeValue(element, "data-project-id-value")
     ].map((value) => metadataIdentifier(value)).find(Boolean);
     if (explicit) return explicit;
-
-    // Inspect the raw route before canonicalization. The canonical metadata
-    // URL deliberately removes query/hash data, while an SPA transition may
-    // carry the Project ID in a query parameter. Only a Project-home route is
-    // accepted here; a conversation row can itself contain `/g/g-p-.../c/`
-    // and must not be promoted to a Project row.
-    for (const attribute of ["href", "data-href", "data-url", "data-project-url"]) {
-      const raw = attributeValue(element, attribute);
-      const canonical = chatGptMetadataUrl(raw, baseUrl);
-      const projectId = projectIdFromUrl(raw, baseUrl);
-      if (projectId && (isProjectRouteUrl(canonical) || attribute === "data-project-url")) return projectId;
-    }
-
-    // ChatGPT currently renders some project rows as buttons whose link is a
-    // descendant rather than an attribute on the row itself. Inspect only
-    // metadata-bearing descendants so an ID can be recovered without using a
-    // title as identity.
-    const relatedAnchors = metadataElementsInRoot(element);
-    for (const anchor of relatedAnchors) {
-      const relatedHref = attributeValue(anchor, "href");
-      const relatedId = isProjectRouteUrl(chatGptMetadataUrl(relatedHref, baseUrl))
-        ? projectIdFromUrl(relatedHref, baseUrl)
-        : null;
-      if (relatedId) return relatedId;
-    }
-
-    const containsConversation = metadataElementsInRoot(element).some((candidate) =>
-      candidate !== element
-      && (conversationIdFromElement(candidate) || conversationIdFromUrl(attributeValue(candidate, "href"))));
-    if (containsConversation) return null;
-
-    // A few builds put the route token in a test/state attribute instead of
-    // an href. Recover only an explicit g-p-* token; never promote a title or
-    // an arbitrary opaque value to an identity.
-    const attributeText = [
-      attributeValue(element, "data-testid"),
-      attributeValue(element, "data-state"),
-      attributeValue(element, "aria-controls")
-    ].join(" ");
-    const token = attributeText.match(/(?:^|[^A-Za-z0-9])((?:g-p-)[A-Za-z0-9._-]{1,124})(?:$|[^A-Za-z0-9._-])/i)?.[1];
-    return metadataIdentifier(token);
+    const href = chatGptMetadataUrl(attributeValue(element, "href"), baseUrl);
+    return projectIdFromUrl(href);
   }
 
   function projectUrlFromElement(element, baseUrl) {
     const projectId = projectIdFromElement(element, baseUrl);
-    const explicit = chatGptMetadataUrl(
-      attributeValue(element, "data-project-url")
-        || attributeValue(element, "data-href")
-        || attributeValue(element, "href"),
-      baseUrl);
-    if (explicit && isProjectRouteUrl(explicit)) {
-      return isProjectHomeUrl(explicit)
-        ? explicit
-        : `https://chatgpt.com/g/${encodeURIComponent(projectId)}/project`;
-    }
-    for (const anchor of metadataElementsInRoot(element)) {
-      const related = metadataHrefFromElement(anchor, baseUrl);
-      if (related && isProjectRouteUrl(related)) {
-        return isProjectHomeUrl(related)
-          ? related
-          : `https://chatgpt.com/g/${encodeURIComponent(projectId)}/project`;
-      }
-    }
-    return projectId
-      ? `https://chatgpt.com/g/${encodeURIComponent(projectId)}/project`
-      : null;
+    const explicit = chatGptMetadataUrl(attributeValue(element, "data-project-url"), baseUrl)
+      || chatGptMetadataUrl(attributeValue(element, "href"), baseUrl);
+    return explicit && isProjectHomeUrl(explicit) ? explicit : null;
   }
 
   function projectTitleFromRelatedAnchor(anchor, projectId, projectAnchors = [], projectRows = []) {
@@ -542,107 +455,28 @@
     return uniqueElements(metadataEntrySelectors, root);
   }
 
-  function sidebarRootScore(element) {
-    if (!element) return Number.NEGATIVE_INFINITY;
-    const semantic = [
-      attributeValue(element, "aria-label"),
-      attributeValue(element, "data-testid"),
-      attributeValue(element, "data-sidebar"),
-      attributeValue(element, "class")
-    ].join(" ").toLowerCase();
-    const entries = metadataElementsInRoot(element);
-    const projectLinks = entries.filter((candidate) =>
-      isProjectRouteUrl(metadataHrefFromElement(candidate, documentHref(element)))).length;
-    const conversationLinks = entries.filter((candidate) =>
-      conversationIdFromElement(candidate)).length;
-    const projectRows = uniqueElements(projectRowSelectors, element)
-      .filter((candidate) => isLikelyProjectRow(candidate, documentHref(element)));
-    let score = 0;
-    if (element.tagName?.toLowerCase() === "nav") score += 20;
-    if (element.tagName?.toLowerCase() === "aside") score += 15;
-    if (semantic.includes("sidebar")) score += 100;
-    if (semantic.includes("chat history") || semantic.includes("chat-history") || semantic.includes("履歴")) score += 80;
-    // Project rows are often buttons without a route-bearing descendant. A
-    // score based only on anchors therefore preferred the currently expanded
-    // Project subtree over the outer sidebar that contains the full Project
-    // catalog. Count the visible, Project-like rows as first-class evidence.
-    score += projectLinks * 40 + conversationLinks * 8 + projectRows.length * 60;
-    const metrics = scrollMetricsFor(element);
-    if (metrics?.canScroll) score += 10;
-    return score;
-  }
-
   function findSidebarRoot(root = globalThis.document) {
     const matches = uniqueElements(sidebarRootSelectors, root)
       .filter((element) => element !== root);
-    if (matches.length === 0) return root;
-
-    // ChatGPT can keep a hidden mobile/sidebar shell alongside the visible
-    // desktop shell. Choosing the first selector match made discovery depend
-    // on DOM order and commonly returned only the currently open Project.
-    // Prefer a visible, metadata-bearing shell and use semantic score as a
-    // tie-breaker.
-    const visibleMatches = matches.filter((element) => isVisible(element));
-    const candidates = visibleMatches.length > 0 ? visibleMatches : matches;
-    return candidates
-      .map((element, index) => ({ element, index, score: sidebarRootScore(element) }))
-      .sort((left, right) => right.score - left.score || left.index - right.index)[0]?.element || root;
-  }
-
-  function isLikelyProjectRow(element, baseUrl) {
-    if (!element || !isVisible(element)) return false;
-    const title = visibleTitleFromElement(element, "");
-    if (!title) return false;
-    const explicitProjectHome = [
-      "href",
-      "data-href",
-      "data-project-url"
-    ].map((attribute) => chatGptMetadataUrl(attributeValue(element, attribute), baseUrl))
-      .some((value) => isProjectRouteUrl(value));
-    const descendantProjectHome = metadataElementsInRoot(element)
-      .some((anchor) => isProjectRouteUrl(metadataHrefFromElement(anchor, baseUrl)));
-    const explicitProjectId = [
-      attributeValue(element, "data-project-id"),
-      attributeValue(element, "data-project-id-value"),
-      attributeValue(element, "data-project"),
-      attributeValue(element, "data-gizmo-id")
-    ].some((value) => Boolean(metadataIdentifier(value)));
-    if (explicitProjectHome || descendantProjectHome || explicitProjectId) return true;
-
-    // A conversation can itself carry the generic sidebar-item attribute.
-    // Never promote that leaf to a Project just because it has a title.
-    if (conversationIdFromElement(element)) return false;
-
-    // A Project without a public route is represented by an expandable row.
-    // Do not classify ordinary conversation rows as Projects merely because
-    // ChatGPT uses the same generic sidebar-item attribute for both.
-    const hasExpandedState = element.getAttribute("aria-expanded") !== null;
-    const role = attributeValue(element, "role").toLowerCase();
-    const semantic = [
-      attributeValue(element, "data-testid"),
-      attributeValue(element, "data-project"),
-      attributeValue(element, "data-project-title"),
-      attributeValue(element, "data-project-name")
-    ].join(" ").toLowerCase();
-    const projectRowSemantics = hasExpandedState
-      || role === "treeitem"
-      || semantic.includes("project")
-      || explicitProjectHome
-      || explicitProjectId;
-    const hasConversation = metadataElementsInRoot(element).some((candidate) =>
-      candidate !== element
-      && (conversationIdFromElement(candidate) || conversationIdFromUrl(attributeValue(candidate, "href"))));
-    // An expanded Project row legitimately owns its nested Chat links. The
-    // presence of those links must not hide the Project itself; generic
-    // sidebar-item conversation wrappers, however, remain excluded.
-    if (hasConversation) return projectRowSemantics;
-    return projectRowSemantics || attributeValue(element, "data-sidebar-item") === "true";
+    return matches[0] || root;
   }
 
   function projectRowsInSidebar(sidebar, baseUrl = globalThis.location?.href) {
     if (!sidebar?.querySelectorAll) return [];
     return sortInDocumentOrder(uniqueElements(projectRowSelectors, sidebar)
-      .filter((element) => isLikelyProjectRow(element, baseUrl)));
+      .filter((element) => isVisible(element)));
+  }
+
+  function expandedProjectRowsInSidebar(sidebar) {
+    if (!sidebar?.querySelectorAll) return [];
+    const candidates = uniqueElements([
+      '[data-sidebar-item="true"]',
+      '[role="treeitem"]',
+      '[role="button"]'
+    ], sidebar);
+    return candidates.filter((element) => isVisible(element)
+      && attributeValue(element, "aria-expanded").toLowerCase() === "true"
+      && Boolean(visibleTitleFromElement(element, "")));
   }
 
   function findProjectRows(root = globalThis.document) {
@@ -675,9 +509,6 @@
     const sidebarMatches = uniqueElements(sidebarRootSelectors, root);
     const sidebar = findSidebarRoot(root);
     const sidebarContainerExists = sidebarMatches.length > 0;
-    const projectRows = sidebarContainerExists
-      ? projectRowsInSidebar(sidebar, documentHref(root))
-      : [];
     let projectRowLocatorReady = false;
     for (const selector of projectRowSelectors) {
       try {
@@ -689,25 +520,19 @@
         // its virtualized sidebar subtree.
       }
     }
-    const projectSectionMarkers = sidebarContainerExists
-      ? uniqueElements(projectSectionSelectors, sidebar).filter((element) => isVisible(element))
-      : [];
-    let projectAnchors = [];
-    try {
-      projectAnchors = sidebarContainerExists
-        ? metadataElementsInRoot(sidebar)
-          .filter((anchor) => isProjectRouteUrl(metadataHrefFromElement(anchor)))
-        : [];
-    } catch (_) {
-      projectAnchors = [];
-    }
-    // The section shell can be below the current virtualized viewport. Treat
-    // the sidebar/scroll structure as ready independently from the Project
-    // section; root discovery must scroll until that section appears before a
-    // zero-Project result can be considered complete.
+    // Readiness must not perform Project discovery. In particular, do not
+    // enumerate the current virtualized rows or select/probe a scrollport
+    // here. The one-shot discovery routine owns that work and freezes the
+    // selected Sidebar/scroll container for the duration of its scan.
     const projectSectionExists = sidebarContainerExists
-      && (projectRows.length > 0 || projectAnchors.length > 0 || projectSectionMarkers.length > 0);
-    const scrollContainer = findSidebarScrollContainer(root);
+      && (uniqueElements(projectSectionSelectors, sidebar).some((element) => isVisible(element))
+        || metadataElementsInRoot(sidebar)
+          .some((element) => isProjectRouteUrl(metadataHrefFromElement(element))));
+    const knownScrollContainerExists = sidebar
+      && (Boolean(scrollMetricsFor(sidebar))
+        || sidebarScrollContainerSelectors.some((selector) => {
+          try { return sidebar.querySelectorAll?.(selector)?.length > 0; } catch (_) { return false; }
+        }));
     const desktopLayout = contentInnerWidth >= 770;
     const sidebarExpectedVisible = desktopLayout;
     return {
@@ -720,11 +545,13 @@
       project_row_locator_ready: projectRowLocatorReady,
       desktop_layout: desktopLayout,
       sidebar_expected_visible: sidebarExpectedVisible,
-      sidebar_scroll_container_found: Boolean(scrollContainer),
+      // This is a non-mutating structural check only. The actual container
+      // is selected once by collectChatGptContextAsync and is never re-bound
+      // from this readiness path.
+      sidebar_scroll_container_found: Boolean(knownScrollContainerExists),
       sidebar_ready: desktopLayout
         && sidebarContainerExists
         && projectRowLocatorReady
-        && Boolean(scrollContainer)
     };
   }
 
@@ -765,7 +592,8 @@
     }
   }
 
-  function projectSectionState(root = globalThis.document, sidebar = findSidebarRoot(root)) {
+  function projectSectionState(root = globalThis.document, sidebarOverride = null) {
+    const sidebar = sidebarOverride || findSidebarRoot(root);
     const rows = sidebar ? projectRowsInSidebar(sidebar, documentHref(root)) : [];
     const markers = sidebar
       ? uniqueElements(projectSectionSelectors, sidebar).filter((element) => isVisible(element))
@@ -790,8 +618,11 @@
     scrollContainer = null,
     noGrowthCount = 0,
     discoveredProjectCount = 0,
-    scrollComplete = null) {
-    const sidebar = findSidebarRoot(root);
+    scrollComplete = null,
+    sidebarOverride = null,
+    scrollDirection = null,
+    restoreCount = 0) {
+    const sidebar = sidebarOverride || findSidebarRoot(root);
     const metrics = scrollMetricsFor(scrollContainer);
     const section = projectSectionState(root, sidebar);
     const normalizedNoGrowth = Math.max(0, Math.round(Number(noGrowthCount) || 0));
@@ -810,7 +641,11 @@
       project_section_found: section.projectSectionFound,
       no_growth_count: normalizedNoGrowth,
       sidebar_scroll_complete: complete,
-      sidebar_scroll_container_found: Boolean(scrollContainer)
+      sidebar_scroll_container_found: Boolean(scrollContainer),
+      sidebar_scroll_direction: scrollDirection === "down" || scrollDirection === "none"
+        ? scrollDirection
+        : null,
+      sidebar_restore_count: Math.max(0, Math.round(Number(restoreCount) || 0))
     };
   }
 
@@ -830,79 +665,46 @@
     return candidates;
   }
 
-  function findSidebarScrollContainer(root = globalThis.document) {
-    const sidebar = findSidebarRoot(root);
-    const candidates = [
-      sidebar,
-      ...uniqueElements(sidebarScrollContainerSelectors, sidebar),
-      ...discoveredScrollContainerCandidates(sidebar)
-    ].filter((candidate, index, all) => all.indexOf(candidate) === index);
+  function findSidebarScrollContainer(root = globalThis.document, sidebarOverride = null) {
+    const sidebar = sidebarOverride || findSidebarRoot(root);
     const rows = projectRowsInSidebar(sidebar, documentHref(root));
-    const metadataEntries = metadataElementsInRoot(sidebar);
-    const projectMetadataEntries = metadataEntries.filter((entry) =>
-      isProjectRouteUrl(metadataHrefFromElement(entry, documentHref(root))));
-    const containsProjectEntry = (candidate) => candidate === sidebar
-      || rows.some((row) => candidate === row
-        || candidate.contains?.(row)
-        || isDescendantOf(row, candidate))
-      || projectMetadataEntries.some((entry) => candidate === entry
-        || candidate.contains?.(entry)
-        || isDescendantOf(entry, candidate));
-    const containsMetadata = (candidate) => candidate === sidebar
-      || metadataEntries.some((entry) => candidate === entry
-        || candidate.contains?.(entry)
-        || isDescendantOf(entry, candidate));
-    const elementDepth = (candidate) => {
-      let depth = 0;
-      for (let current = candidate?.parentElement; current; current = current.parentElement) depth += 1;
-      return depth;
-    };
-    const measured = candidates
-      .map((candidate) => ({
-        candidate,
-        metrics: scrollMetricsFor(candidate),
-        containsProjectEntry: containsProjectEntry(candidate),
-        containsMetadata: containsMetadata(candidate),
-        depth: elementDepth(candidate)
-      }))
-      .filter((item) => item.metrics);
-    // Root Project discovery must advance the list that owns Project rows.
-    // An expanded Project can contain a second, deeper Chat-only scrollport;
-    // choosing the deepest metadata owner would then keep the Project list at
-    // its first viewport and explain a catalog that contains only the current
-    // Project. Prefer Project-row ownership before generic metadata.
-    const scrollableWithProjectRows = measured
-      .filter((item) => item.metrics.canScroll
-        && item.containsProjectEntry
-        && canMoveScrollContainer(item.candidate, item.metrics))
-      .sort((left, right) => right.depth - left.depth);
-    if (scrollableWithProjectRows[0]) return scrollableWithProjectRows[0].candidate;
-    const scrollableWithMetadata = measured
-      .filter((item) => item.metrics.canScroll
-        && item.containsMetadata
-        && canMoveScrollContainer(item.candidate, item.metrics))
-      .sort((left, right) => right.depth - left.depth);
-    if (scrollableWithMetadata[0]) return scrollableWithMetadata[0].candidate;
-    const scrollable = measured
-      .filter((item) => item.metrics.canScroll && canMoveScrollContainer(item.candidate, item.metrics))
-      .sort((left, right) => right.depth - left.depth)[0];
-    if (scrollable) return scrollable.candidate;
-    if (measured.some((item) => item.metrics.canScroll)) return null;
-    const staticContainer = measured.find((item) => !item.metrics.canScroll);
-    return staticContainer?.candidate || null;
+    const candidates = [sidebar, ...uniqueElements(sidebarScrollContainerSelectors, sidebar)];
+    const containsProjectRow = (candidate) => candidate === sidebar
+      || rows.some((row) => candidate === row || candidate.contains?.(row));
+    const hasScrollMetrics = (candidate) => candidate
+      && typeof candidate.scrollTop === "number"
+      && typeof candidate.scrollHeight === "number"
+      && typeof candidate.clientHeight === "number";
+    const scrollable = candidates.find((candidate) =>
+      containsProjectRow(candidate)
+      && hasScrollMetrics(candidate)
+      && candidate.scrollHeight > candidate.clientHeight);
+    if (scrollable) return scrollable;
+    return candidates.find((candidate) => containsProjectRow(candidate) && hasScrollMetrics(candidate)) || sidebar;
   }
 
   function isMoreButton(element) {
     if (!element || !isVisible(element)) return false;
-    if (attributeValue(element, "data-sidebar-more") === "true") return true;
+    const explicitlyMarked = attributeValue(element, "data-sidebar-more") === "true";
+    // ChatGPT uses the same role/button primitives for Project rows, Chat
+    // rows, and utility controls. Only a dedicated More marker may override
+    // the identity guard; a generic sidebar item must never be clicked just
+    // because its title happens to contain "more"/"さらに表示".
+    if (!explicitlyMarked && attributeValue(element, "data-sidebar-item") === "true") return false;
+    if (!explicitlyMarked && conversationIdFromElement(element)) return false;
+    if (explicitlyMarked) return true;
     const visible = visibleElementText(element);
     const label = `${visible} ${attributeValue(element, "aria-label")}`.trim();
-    return (element.tagName === "BUTTON" || attributeValue(element, "role") === "button")
-      && moreButtonTextPattern.test(label);
+    // A role=button is also used by Project and conversation rows. The old
+    // discovery route only expands an actual utility button unless ChatGPT
+    // marks it explicitly, so a generic row named "さらに表示" cannot be
+    // navigated or treated as a discovery control.
+    return element.tagName === "BUTTON" && moreButtonTextPattern.test(label);
   }
 
-  function findMoreButtons(root = globalThis.document) {
-    return sortInDocumentOrder(uniqueElements(moreButtonSelectors, findSidebarRoot(root))
+  function findMoreButtons(root = globalThis.document, sidebarOverride = null) {
+    const sidebar = sidebarOverride || findSidebarRoot(root);
+    return sortInDocumentOrder(uniqueElements(moreButtonSelectors, sidebar)
       .filter((element) => isMoreButton(element)));
   }
 
@@ -933,12 +735,13 @@
     });
   }
 
-  async function expandSidebarMoreButtons(root, options = {}) {
+  async function expandSidebarMoreButtons(root, options = {}, sidebarOverride = null) {
     const maxClicks = Math.max(0, Math.min(12, Number(options.maxMoreClicks) || 8));
     const clicked = new Set();
     let clicks = 0;
     while (clicks < maxClicks) {
-      const button = findMoreButtons(root).find((candidate) => !clicked.has(candidate));
+      const button = findMoreButtons(root, sidebarOverride)
+        .find((candidate) => !clicked.has(candidate));
       if (!button) break;
       clicked.add(button);
       try { button.click?.(); } catch (_) { break; }
@@ -1012,16 +815,19 @@
     }
   }
 
-  function collectContextEntries(root = globalThis.document, url = globalThis.location?.href) {
+  function collectContextEntries(
+    root = globalThis.document,
+    url = globalThis.location?.href,
+    sidebarOverride = null) {
     const projects = [];
     const conversations = [];
     const projectById = new Map();
     const conversationById = new Map();
-    const sidebarRoot = findSidebarRoot(root);
-    const metadataElements = metadataElementsInRoot(sidebarRoot);
-    const projectAnchors = metadataElements.filter((element) =>
-      isProjectRouteUrl(metadataHrefFromElement(element, url)));
-    const projectRows = projectRowsInSidebar(sidebarRoot, url);
+    const sidebarRoot = sidebarOverride || findSidebarRoot(root);
+    let anchors = [];
+    try { anchors = Array.from(sidebarRoot?.querySelectorAll?.("a[href]") || []); } catch (_) { anchors = []; }
+    const projectAnchors = anchors.filter((anchor) => isProjectHomeUrl(attributeValue(anchor, "href")));
+    const projectRows = projectRowsInSidebar(sidebarRoot, documentHref(root));
     const currentProjectId = projectIdFromUrl(url);
 
     const upsertProject = (projectId, title, projectUrl, discoveryKey) => {
@@ -1035,9 +841,9 @@
       return entry;
     };
 
-    // Project rows are the source of ordering and visible titles. In the
-    // current DOM they have no public href/id, so keep a stable display-only
-    // discovery key instead of inventing a g-p-* identity.
+    // This is the old successful discovery route: read the visible Project
+    // rows and anchors from the known history sidebar. Rows are never clicked
+    // and no Project ID is inferred from a navigation side effect.
     for (const row of projectRows) {
       const title = visibleTitleFromElement(row);
       if (!title) continue;
@@ -1063,20 +869,17 @@
     }
 
     for (const anchor of projectAnchors) {
-      const projectUrl = projectUrlFromElement(anchor, url)
-        || metadataHrefFromElement(anchor, url);
-      const projectId = projectIdFromElement(anchor, url)
-        || projectIdFromUrl(projectUrl, url);
+      const projectUrl = chatGptMetadataUrl(attributeValue(anchor, "href"), url);
+      const projectId = projectIdFromUrl(projectUrl);
       if (!projectId) continue;
       upsertProject(projectId, projectTitleFromAnchor(anchor, projectId), projectUrl);
     }
 
-    for (const anchor of metadataElements) {
-      const href = metadataHrefFromElement(anchor, url);
-      const conversationId = conversationIdFromElement(anchor) || conversationIdFromUrl(href);
-      if (!conversationId) continue;
-      const projectId = projectIdFromElement(anchor, url)
-        || projectIdFromUrl(href, url);
+    for (const anchor of anchors) {
+      const href = chatGptMetadataUrl(attributeValue(anchor, "href"), url);
+      const conversationId = conversationIdFromUrl(href);
+      if (!href || !conversationId) continue;
+      const projectId = projectIdFromUrl(href);
       const projectTitle = projectId
         ? projectTitleFromRelatedAnchor(anchor, projectId, projectAnchors, projectRows)
           || projectById.get(projectId)?.title
@@ -1128,128 +931,6 @@
     return new Promise((resolve) => globalThis.setTimeout(resolve, delay));
   }
 
-  async function waitForProjectNavigation(root, previousUrl, timeoutMs) {
-    const deadline = Date.now() + Math.max(250, Math.min(15000, Number(timeoutMs) || 5000));
-    while (Date.now() < deadline) {
-      const currentUrl = documentHref(root, previousUrl);
-      const projectId = projectIdFromUrl(currentUrl);
-      if (projectId && currentUrl !== previousUrl) return { projectId, url: currentUrl };
-      await waitForLocatorDelay(50);
-    }
-    return null;
-  }
-
-  async function restoreRootAfterProjectNavigation(root, rootUrl, timeoutMs) {
-    const currentUrl = documentHref(root, rootUrl);
-    if (!projectIdFromUrl(currentUrl)) return;
-
-    const historyObject = globalThis.history;
-    if (typeof historyObject?.back === "function") {
-      try { historyObject.back(); } catch (_) { }
-      const deadline = Date.now() + Math.max(250, Math.min(10000, Number(timeoutMs) || 5000));
-      while (Date.now() < deadline) {
-        if (!projectIdFromUrl(documentHref(root, rootUrl))) return;
-        await waitForLocatorDelay(50);
-      }
-    }
-
-    // A test harness or a SPA variant may not expose a usable history stack.
-    // pushState keeps this recovery in the current document and lets the page
-    // router observe the same URL transition without forcing a reload.
-    if (projectIdFromUrl(documentHref(root, rootUrl))
-      && typeof historyObject?.pushState === "function") {
-      try {
-        historyObject.pushState({}, "", rootUrl);
-        if (typeof globalThis.dispatchEvent === "function" && typeof globalThis.Event === "function") {
-          globalThis.dispatchEvent(new globalThis.Event("popstate"));
-        }
-      } catch (_) { }
-    }
-  }
-
-  function projectRowResolutionKey(row, rows, scrollTop) {
-    const title = metadataTextKey(visibleTitleFromElement(row, ""));
-    const index = rows.indexOf(row);
-    const occurrence = rows
-      .slice(0, Math.max(0, index))
-      .filter((candidate) => metadataTextKey(visibleTitleFromElement(candidate, "")) === title)
-      .length;
-    return `${Math.max(0, Number(scrollTop) || 0)}:${index}:${occurrence}:${title}`;
-  }
-
-  async function resolveVisibleProjectRowsAsync(root, rootUrl, options, state) {
-    const initialScrollContainer = findSidebarScrollContainer(root);
-    const originalScrollTop = initialScrollContainer && typeof initialScrollContainer.scrollTop === "number"
-      ? initialScrollContainer.scrollTop : null;
-    const resolved = [];
-    const maxRows = Math.max(1, Math.min(500, Number(options.maxProjectResolutions) || 256));
-    const resolutionTimeoutMs = Math.max(250, Math.min(15000, Number(options.projectResolutionTimeoutMs) || 5000));
-    const collectionDeadline = Number.isFinite(options.deadline) ? options.deadline : Number.POSITIVE_INFINITY;
-
-    try {
-      for (let attempt = 0; attempt < maxRows && Date.now() < collectionDeadline; attempt += 1) {
-        if (options.signal?.aborted) {
-          const error = new Error("Collection cancelled");
-          error.name = "AbortError";
-          throw error;
-        }
-        // Project navigation is an SPA transition. ChatGPT commonly replaces
-        // the entire sidebar subtree on the return to `/`, so never keep a
-        // reference to the pre-navigation root or scrollport.
-        const sidebar = findSidebarRoot(root);
-        const scrollContainer = findSidebarScrollContainer(root);
-        const currentUrl = documentHref(root, rootUrl);
-        const rows = projectRowsInSidebar(sidebar, currentUrl);
-        const scrollTop = scrollContainer && typeof scrollContainer.scrollTop === "number"
-          ? scrollContainer.scrollTop : 0;
-        const candidate = rows.find((row) => {
-          if (projectIdFromElement(row, currentUrl)) return false;
-          const key = projectRowResolutionKey(row, rows, scrollTop);
-          return !state.attemptedKeys.has(key);
-        });
-        if (!candidate) break;
-
-        const key = projectRowResolutionKey(candidate, rows, scrollTop);
-        state.attemptedKeys.add(key);
-        const title = visibleTitleFromElement(candidate, "");
-        const previousUrl = currentUrl;
-        if (typeof candidate.click !== "function") continue;
-        try {
-          candidate.click();
-        } catch (_) {
-          continue;
-        }
-
-        const remainingMs = collectionDeadline - Date.now();
-        if (remainingMs <= 0) break;
-        const navigation = await waitForProjectNavigation(
-          root,
-          previousUrl,
-          Math.min(resolutionTimeoutMs, remainingMs));
-        if (!navigation) continue;
-        if (!state.resolvedIds.has(navigation.projectId)) {
-          state.resolvedIds.add(navigation.projectId);
-          const projectUrl = isProjectHomeUrl(navigation.url)
-            ? navigation.url
-            : `https://chatgpt.com/g/${encodeURIComponent(navigation.projectId)}/project`;
-          resolved.push({
-            project_id: navigation.projectId,
-            title: metadataTitle(title, `Project (${navigation.projectId})`),
-            url: projectUrl
-          });
-        }
-        await restoreRootAfterProjectNavigation(root, rootUrl, resolutionTimeoutMs);
-        await waitForLocatorDelay(options.settleMs);
-      }
-    } finally {
-      const restoreContainer = findSidebarScrollContainer(root) || initialScrollContainer;
-      if (restoreContainer && originalScrollTop !== null) {
-        try { restoreContainer.scrollTop = originalScrollTop; } catch (_) { }
-      }
-    }
-    return resolved;
-  }
-
   function documentTitleFallback(root, conversationId) {
     let title = "";
     try { title = root?.title || ""; } catch (_) { title = ""; }
@@ -1296,9 +977,15 @@
     url = globalThis.location?.href,
     options = {}) {
     const merged = { projects: [], conversations: [] };
-    let scrollContainer = findSidebarScrollContainer(root);
-    let initialMetrics = scrollMetricsFor(scrollContainer);
-    const originalScrollTop = initialMetrics ? initialMetrics.scrollTop : null;
+    // Resolve the Sidebar and its scroll container exactly once for the root
+    // Project scan. Do not let virtualized DOM updates or final telemetry
+    // replace either object while the monotonic scan is in progress.
+    const sidebar = findSidebarRoot(root);
+    const scrollContainer = findSidebarScrollContainer(root, sidebar);
+    const canScroll = scrollContainer && typeof scrollContainer.scrollTop === "number"
+      && typeof scrollContainer.scrollHeight === "number"
+      && typeof scrollContainer.clientHeight === "number";
+    const originalScrollTop = canScroll ? scrollContainer.scrollTop : null;
     const maxScrolls = Math.max(1, Math.min(64, Number(options.maxScrolls) || 32));
     const deadline = Date.now() + Math.max(1000, Math.min(120000, Number(options.timeoutMs) || 30000));
     const initialSettleMs = options.initialSettleMs === undefined
@@ -1312,102 +999,57 @@
       }
       return Date.now() < deadline;
     };
-    const resolveProjectIds = options.resolveProjectIds === true;
-    const projectResolutionState = {
-      attemptedKeys: new Set(),
-      resolvedIds: new Set()
-    };
-    let noGrowthCount = 0;
-    let sidebarScrollComplete = initialMetrics
-      ? (!initialMetrics.canScroll || initialMetrics.atBottom)
-      : false;
-    const refreshScrollContainer = () => {
-      const previousMetrics = scrollMetricsFor(scrollContainer);
-      const nextContainer = findSidebarScrollContainer(root);
-      if (nextContainer && nextContainer !== scrollContainer) {
-        const previousTop = previousMetrics?.scrollTop;
-        if (Number.isFinite(previousTop)) {
-          try { nextContainer.scrollTop = previousTop; } catch (_) { }
-        }
-      }
-      scrollContainer = nextContainer;
-      initialMetrics = initialMetrics || scrollMetricsFor(scrollContainer);
-      return scrollContainer;
-    };
-    const collectAndResolveVisibleProjects = async () => {
-      if (!resolveProjectIds) return;
-      ensureCollectionActive();
-      const resolved = await resolveVisibleProjectRowsAsync(
-        root,
-        url,
-        { ...options, deadline },
-        projectResolutionState);
-      for (const project of resolved) mergeContextProjectCatalog(merged, { projects: [project] });
-      ensureCollectionActive();
-    };
+    const allowSidebarControls = options.allowSidebarControls !== false;
+    const projectDiscoverySource = typeof options.projectDiscoverySource === "string"
+      && options.projectDiscoverySource.trim().length > 0
+      ? options.projectDiscoverySource.trim().slice(0, 128)
+      : "existing_project_section_metadata";
+    let stagnantPasses = 0;
+    let sidebarScrollComplete = !canScroll;
+    const scrollDirection = canScroll ? "down" : "none";
+    let sidebarRestoreCount = 0;
+    let result = null;
     try {
       ensureCollectionActive();
       if (initialSettleMs > 0) await waitForSidebarMutation(root, initialSettleMs);
       ensureCollectionActive();
-      const initial = collectContextEntries(root, url);
+      const initial = collectContextEntries(root, url, sidebar);
       mergeContextProjectCatalog(merged, initial);
       mergeContextConversationCatalog(merged, initial);
-      await expandSidebarMoreButtons(root, options);
-      await collectAndResolveVisibleProjects();
-      refreshScrollContainer();
-      if (scrollContainer && !scrollMetricsFor(scrollContainer)?.canScroll) {
-        sidebarScrollComplete = true;
-      }
+      if (allowSidebarControls) await expandSidebarMoreButtons(root, options, sidebar);
       for (let pass = 0; pass < maxScrolls; pass += 1) {
         if (!ensureCollectionActive()) break;
-        refreshScrollContainer();
         const beforeCount = merged.projects.length + merged.conversations.length;
-        const beforeMetrics = scrollMetricsFor(scrollContainer);
-        const snapshot = collectContextEntries(root, url);
+        const beforeTop = canScroll ? Number(scrollContainer.scrollTop) || 0 : 0;
+        const beforeHeight = canScroll ? Number(scrollContainer.scrollHeight) || 0 : 0;
+        const clientHeight = canScroll ? Number(scrollContainer.clientHeight) || 0 : 0;
+        const snapshot = collectContextEntries(root, url, sidebar);
         mergeContextProjectCatalog(merged, snapshot);
         mergeContextConversationCatalog(merged, snapshot);
-        await collectAndResolveVisibleProjects();
-        let added = merged.projects.length + merged.conversations.length - beforeCount;
-        if (!beforeMetrics) break;
-        if (!beforeMetrics.canScroll || beforeMetrics.atBottom) {
+        const added = merged.projects.length + merged.conversations.length - beforeCount;
+        if (!canScroll) break;
+
+        const maxTop = Math.max(0, beforeHeight - clientHeight);
+        if (beforeTop >= maxTop) {
           sidebarScrollComplete = true;
           break;
         }
-        const maxTop = Math.max(0, beforeMetrics.scrollHeight - beforeMetrics.clientHeight);
-        const step = Math.max(1, Math.floor(Math.max(1, beforeMetrics.clientHeight) * 0.8));
-        const nextTop = Math.min(maxTop, beforeMetrics.scrollTop + step);
-        if (nextTop <= beforeMetrics.scrollTop) {
-          noGrowthCount += 1;
-          sidebarScrollComplete = noGrowthCount >= 2 || beforeMetrics.atBottom;
-          if (sidebarScrollComplete) break;
-          continue;
-        }
-        try {
-          scrollContainer.scrollTop = nextTop;
-        } catch (_) {
-          noGrowthCount += 1;
-          sidebarScrollComplete = noGrowthCount >= 2;
-          if (sidebarScrollComplete) break;
-          continue;
-        }
+        const step = Math.max(1, Math.floor(Math.max(1, clientHeight) * 0.8));
+        const nextTop = Math.min(maxTop, beforeTop + step);
+        if (nextTop <= beforeTop) break;
+        try { scrollContainer.scrollTop = nextTop; } catch (_) { break; }
         await waitForSidebarMutation(root, options.settleMs);
         if (!ensureCollectionActive()) break;
-        refreshScrollContainer();
-        const afterSnapshot = collectContextEntries(root, url);
-        mergeContextProjectCatalog(merged, afterSnapshot);
-        mergeContextConversationCatalog(merged, afterSnapshot);
-        await collectAndResolveVisibleProjects();
-        added = merged.projects.length + merged.conversations.length - beforeCount;
-        const afterMetrics = scrollMetricsFor(scrollContainer);
-        if (!afterMetrics) break;
-        if (added === 0
-          && afterMetrics.scrollTop === beforeMetrics.scrollTop
-          && afterMetrics.scrollHeight === beforeMetrics.scrollHeight) {
-          noGrowthCount += 1;
+        const afterTop = Number(scrollContainer.scrollTop) || 0;
+        const afterHeight = Number(scrollContainer.scrollHeight) || 0;
+        if (added === 0 && afterTop === beforeTop && afterHeight === beforeHeight) {
+          stagnantPasses += 1;
         } else {
-          noGrowthCount = 0;
+          stagnantPasses = 0;
         }
-        if (afterMetrics.atBottom || noGrowthCount >= 2) {
+        // Keep the old scan order: the next pass collects the rows exposed by
+        // this scroll, including the final viewport at the bottom.
+        if (stagnantPasses >= 2) {
           sidebarScrollComplete = true;
           break;
         }
@@ -1416,35 +1058,37 @@
       sidebarScrollComplete = sidebarScrollComplete
         || Boolean(finalMetrics && (!finalMetrics.canScroll
           || finalMetrics.atBottom
-          || noGrowthCount >= 2));
-      const unresolvedProjects = resolveProjectIds
-        ? merged.projects.filter((project) => !project.project_id).length
-        : 0;
-      const projects = resolveProjectIds
-        ? merged.projects.filter((project) => project.project_id)
-        : merged.projects;
-      return {
-        // A Collector request asks for ID-complete metadata. Unresolved
-        // title-only rows are not emitted as if they were real Projects; the
-        // caller can retry/recover instead of offering an identity that is
-        // not safe to navigate to.
-        projects,
+          || stagnantPasses >= 2));
+      result = {
+        // Project discovery is deliberately kept metadata-only. The
+        // Collector receives these established Project URLs and performs the
+        // later Chat scan by direct navigation in its single Collector Tab.
+        projects: merged.projects,
         conversations: merged.conversations,
         current: getCurrentChatGptContextFromEntries(merged, root, url),
-        ...(resolveProjectIds ? { unresolved_project_count: unresolvedProjects } : {}),
+        project_discovery_source: projectDiscoverySource,
         ...sidebarScrollTelemetry(
           root,
           scrollContainer,
-          noGrowthCount,
-          projects.length,
-          sidebarScrollComplete)
+          stagnantPasses,
+          merged.projects.length,
+          sidebarScrollComplete,
+          sidebar,
+          scrollDirection,
+          0)
       };
     } finally {
-      const restoreContainer = findSidebarScrollContainer(root) || scrollContainer;
-      if (restoreContainer && originalScrollTop !== null) {
-        try { restoreContainer.scrollTop = originalScrollTop; } catch (_) { }
+      if (scrollContainer && originalScrollTop !== null) {
+        try {
+          scrollContainer.scrollTop = originalScrollTop;
+          sidebarRestoreCount = 1;
+        } catch (_) { }
       }
     }
+    if (result) {
+      result.sidebar_restore_count = sidebarRestoreCount;
+    }
+    return result;
   }
 
   function conversationIdFromElement(element) {
@@ -1520,8 +1164,7 @@
     if (!element || !sidebar) return false;
     const currentProjectId = projectIdFromUrl(chatGptMetadataUrl(url, url));
     const normalizedTitle = String(projectTitle || "").trim().toLowerCase();
-    const expandedProjectRows = projectRows.filter((row) =>
-      attributeValue(row, "aria-expanded").toLowerCase() === "true");
+    const expandedProjectRows = expandedProjectRowsInSidebar(sidebar);
     let current = element;
     for (let depth = 0; current && depth < 32; depth += 1, current = current.parentElement) {
       if (projectIdFromElement(current, url) === normalizedProjectId) return true;
@@ -1544,8 +1187,7 @@
     // Keep the route-based fallback deliberately narrow: one expanded row and
     // one visible Project row means the sidebar has an unambiguous owner.
     return currentProjectId === normalizedProjectId
-      && expandedProjectRows.length === 1
-      && projectRows.length === 1;
+      && expandedProjectRows.length === 1;
   }
 
   function collectProjectContextEntries(

@@ -296,13 +296,18 @@
     if (Number.isSafeInteger(data.unresolved_project_count)) {
       result.unresolved_project_count = data.unresolved_project_count;
     }
+    if (typeof data.project_discovery_source === "string"
+      && data.project_discovery_source.length <= 128) {
+      result.project_discovery_source = data.project_discovery_source;
+    }
     for (const key of [
       "sidebar_scroll_top",
       "sidebar_scroll_height",
       "sidebar_client_height",
       "visible_project_rows",
       "discovered_project_count",
-      "no_growth_count"
+      "no_growth_count",
+      "sidebar_restore_count"
     ]) {
       if (Number.isSafeInteger(data[key])) result[key] = data[key];
     }
@@ -314,6 +319,9 @@
       "sidebar_scroll_container_found"
     ]) {
       if (typeof data[key] === "boolean") result[key] = data[key];
+    }
+    if (data.sidebar_scroll_direction === "down" || data.sidebar_scroll_direction === "none") {
+      result.sidebar_scroll_direction = data.sidebar_scroll_direction;
     }
     return result;
   }
@@ -395,18 +403,15 @@
           {
             maxScrolls: message.maxScrolls,
             timeoutMs: message.timeoutMs,
-            resolveProjectIds: message.resolveProjectIds === true,
-            maxProjectResolutions: message.maxProjectResolutions,
-            projectResolutionTimeoutMs: message.projectResolutionTimeoutMs
+            projectDiscoverySource: message.projectDiscoverySource
           });
       } else if (typeof locators.collectChatGptContextAsync === "function") {
         value = await locators.collectChatGptContextAsync(document, globalThis.location?.href, {
           maxScrolls: message.maxScrolls,
           maxMoreClicks: message.maxMoreClicks,
           timeoutMs: message.timeoutMs,
-          resolveProjectIds: message.resolveProjectIds === true,
-          maxProjectResolutions: message.maxProjectResolutions,
-          projectResolutionTimeoutMs: message.projectResolutionTimeoutMs
+          allowSidebarControls: message.allowSidebarControls !== false,
+          projectDiscoverySource: message.projectDiscoverySource
         });
       } else {
         value = locators.collectChatGptContext?.(document, globalThis.location?.href);

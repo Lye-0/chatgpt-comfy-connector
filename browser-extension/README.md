@@ -43,22 +43,28 @@ area); an internal fallback size is used if those bounds are unavailable.
 
 Project/Chat discovery uses a separate non-focused Collector Window with one
 active Collector Tab. The tab is reused for the root sidebar and every Project
-page. Project rows may be route-bearing links or expandable buttons, and a
-title is never used as identity. The tab is never used for Handoff, media, Review, Resume, or
-assistant-response observation. Button-only Project rows are opened in that
-Collector Tab to resolve their route IDs before Project-page traversal; a
-title is never used as identity. The Collector Window is independent from the
+page. Root Project discovery reuses the previously successful metadata-only
+route exactly once per refresh generation: the known ChatGPT history sidebar, its visible
+`data-sidebar-item="true"` rows, Project-home anchors, and the same bounded
+sidebar scroll. It may expand a dedicated `さらに表示`/`もっと見る` button, but
+never clicks a generic row or navigates to infer an ID; `/schedule`,
+`/plugins`, search, and ordinary Chat rows therefore cannot become Project
+targets. The tab is never used for Handoff, media, Review, Resume, or
+assistant-response observation. A route-less Project entry is incomplete
+discovery and causes a bounded refresh to fail rather than triggering
+navigation to guess its identity. The Collector Window is independent from the
 Managed Execution Window and the user's foreground tabs. Its metadata-only
 snapshot is persisted by Desktop so the previous list can be shown while a
 new bounded refresh runs. It starts at about half the reference window width
 and height (with an outer-width floor near 820px), then verifies the Content
-Script viewport and desktop sidebar structure before collecting. The Project
-section may be below a virtualized viewport, so the locator selects the
-visible sidebar shell containing the Project catalog and the Project-owning
-element whose `scrollTop` actually moves, collects after each lazy-load settle,
-and requires bottom/no-growth plus a discovered Project section before
-completion. A bounded zero-Project result fails as
+Script viewport and desktop sidebar structure without scrolling or collecting
+Project rows. The one-shot locator call then selects the visible sidebar shell
+and one Project-owning element whose `scrollTop` actually moves, collects after
+each lazy-load settle using monotonically increasing scroll positions, restores
+the saved position once, and requires bottom/no-growth plus a discovered
+Project section before completion. A bounded zero-Project result fails as
 `context_projects_incomplete` instead of being published as an empty
-successful snapshot. Window membership is reconciled before each scan so the
+successful snapshot. Window membership is reconciled before the single root
+scan so the
 initial `windows.create({ url })` Tab is reused and duplicate Collector Tabs
 are removed.

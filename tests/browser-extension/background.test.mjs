@@ -1735,9 +1735,9 @@ test("Background forwards a complete metadata snapshot through an active Collect
           url: "https://chatgpt.com/g/g-p-project-a/project"
         },
         {
-          project_id: null,
+          project_id: "g-p-project-visible",
           title: "Visible Project",
-          discovery_key: "project-visible-01"
+          url: "https://chatgpt.com/g/g-p-project-visible/project"
         }
       ],
       conversations: [
@@ -1777,7 +1777,7 @@ test("Background forwards a complete metadata snapshot through an active Collect
   assert.equal(harness.createdTabs[0].active, true);
   assert.equal(harness.createdTabs[0].autoDiscardable, false);
   assert.notEqual(harness.createdTabs[0].windowId, 1);
-  assert.equal(harness.createdTabs[0].url, "https://chatgpt.com/g/g-p-project-a/project");
+  assert.equal(harness.createdTabs[0].url, "https://chatgpt.com/g/g-p-project-visible/project");
   assert.equal(harness.createdWindows.length, 1);
   assert.equal(harness.createdWindows[0].focused, false);
   assert.equal(harness.createdWindows[0].state, "normal");
@@ -1792,8 +1792,9 @@ test("Background forwards a complete metadata snapshot through an active Collect
       url: "https://chatgpt.com/g/g-p-project-a/project"
     },
     {
+      project_id: "g-p-project-visible",
       title: "Visible Project",
-      discovery_key: "project-visible-01"
+      url: "https://chatgpt.com/g/g-p-project-visible/project"
     }
   ]);
   assert.equal(response.conversations[0].title, "Visible Chat");
@@ -1958,9 +1959,116 @@ test("Background does not mark a wide zero-Project Collector scan as Collected",
 
   assert.equal(response.status, "error");
   assert.equal(response.error_code, "context_projects_incomplete");
-  assert.equal(rootCalls, 3);
+  assert.equal(rootCalls, 1);
+  const discoveryRuns = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_discovery_start");
+  assert.equal(discoveryRuns.length, 1);
+  assert.equal(discoveryRuns[0].project_discovery_call_count, 1);
   assert.equal(harness.diagnostics.some(([, fields]) =>
     fields?.stage === "collector_window_collected"), false);
+});
+
+test("Background uses the received Project array as the discovery handoff source of truth", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.collection === "project") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [{
+          project_id: "g-p-array-source",
+          title: "Array Source Project",
+          url: "https://chatgpt.com/g/g-p-array-source/project"
+        }],
+        conversations: [],
+        current: null
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [{
+        project_id: "g-p-array-source",
+        title: "Array Source Project",
+        url: "https://chatgpt.com/g/g-p-array-source/project"
+      }],
+      conversations: [],
+      current: null,
+      // Simulate stale content-side telemetry while preserving the actual
+      // top-level projects array returned by the Content Script.
+      discovered_project_count: 0
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-array-source-fixture"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(response.status, "ok");
+  assert.deepEqual(response.projects.map((project) => project.project_id), ["g-p-array-source"]);
+  const received = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_result_received");
+  assert.equal(received.response_shape, "top_level_arrays");
+  assert.equal(received.background_projects_length, 1);
+  assert.equal(received.discovered_project_count, 1);
+  assert.equal(received.content_discovered_project_count, 0);
+  assert.equal(harness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_project_result_handoff"), true);
+});
+
+test("Background rejects a Project array lost between Content Script telemetry and the result envelope", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [],
+      conversations: [],
+      current: null,
+      visible_project_rows: 10,
+      discovered_project_count: 10,
+      project_section_found: true,
+      sidebar_scroll_complete: true,
+      sidebar_at_bottom: true
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-array-loss-fixture"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "context_projects_incomplete");
+  const received = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_result_received");
+  assert.equal(received.discovered_project_count, 0);
+  assert.equal(received.background_projects_length, 0);
+  assert.equal(received.content_discovered_project_count, 10);
+  assert.equal(received.response_shape, "top_level_arrays");
+  assert.equal(harness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_project_result_handoff_incomplete"
+    && fields.error_code === "collector_project_result_handoff_mismatch"), true);
 });
 
 test("Background does not complete a Collector scan before the Project section is found", async () => {
@@ -2014,7 +2122,12 @@ test("Background does not complete a Collector scan before the Project section i
 
   assert.equal(response.status, "error");
   assert.equal(response.error_code, "context_projects_incomplete");
-  assert.equal(rootCalls, 3);
+  assert.equal(rootCalls, 1);
+  const discoveryRuns = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_discovery_start");
+  assert.equal(discoveryRuns.length, 1);
+  assert.equal(discoveryRuns[0].project_discovery_call_count, 1);
   assert.equal(harness.diagnostics.some(([, fields]) =>
     fields?.stage === "collector_window_collected"), false);
 });
@@ -2026,9 +2139,10 @@ test("Background does not publish a Project catalog when a Collector row has no 
     requestId: message.requestId,
     mode: "list",
     status: "ok",
-    projects: [],
+    projects: message.collection === "root"
+      ? [{ title: "タイトルだけのProject", discovery_key: "project-title-only" }]
+      : [],
     conversations: [],
-    unresolved_project_count: message.collection === "root" ? 1 : 0,
     current: null
   }));
 
@@ -2043,6 +2157,32 @@ test("Background does not publish a Project catalog when a Collector row has no 
 
   assert.equal(response.status, "error");
   assert.equal(response.error_code, "context_projects_incomplete");
+  const resolution = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_metadata_resolution");
+  assert.equal(resolution.discovered_project_count, 1);
+  assert.equal(resolution.resolved_project_count, 0);
+  assert.equal(resolution.unresolved_project_count, 1);
+  const item = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_metadata_item");
+  assert.equal(item.project_index, 0);
+  assert.equal(item.title_present, true);
+  assert.equal(item.project_id_present, false);
+  assert.equal(item.url_present, false);
+  assert.equal(item.resolution_status, "unresolved");
+  assert.equal(item.unresolved_reason, "missing_stable_identity");
+  const failure = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_metadata_resolution_failed");
+  assert.equal(failure.discovered_project_count, 1);
+  assert.equal(failure.resolved_project_count, 0);
+  assert.equal(failure.unresolved_project_count, 1);
+  const reason = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_metadata_unresolved_reason_failed");
+  assert.equal(reason.unresolved_reason, "missing_stable_identity");
+  assert.equal(reason.unresolved_reason_count, 1);
 });
 
 test("Background keeps the Collector Window separate from the Managed Execution Window", async () => {
@@ -2114,9 +2254,11 @@ test("Background keeps the Collector Window separate from the Managed Execution 
 test("Background visits every Project with one reusable Collector Tab and merges Projectless chats", async () => {
   const harness = await createHarness();
   const collectionMessages = [];
+  let rootCollectionMessage = null;
   harness.setContentHandler((message) => {
     if (message.type !== "GET_CHATGPT_CONTEXT") return {};
     collectionMessages.push({ collection: message.collection, projectId: message.projectId });
+    if (message.collection === "root") rootCollectionMessage = message;
     if (message.collection === "project" && message.projectId === "g-p-project-a") {
       return {
         type: "CHATGPT_CONTEXT_RESULT",
@@ -2199,6 +2341,18 @@ test("Background visits every Project with one reusable Collector Tab and merges
     { collection: "project", projectId: "g-p-project-a" },
     { collection: "project", projectId: "g-p-project-b" }
   ]);
+  assert.equal(rootCollectionMessage.projectDiscoverySource, "existing_project_section_metadata");
+  assert.equal(rootCollectionMessage.allowSidebarControls, true);
+  assert.equal(rootCollectionMessage.resolveProjectIds, undefined);
+  assert.equal(rootCollectionMessage.maxProjectResolutions, undefined);
+  assert.deepEqual(
+    harness.updatedTabs
+      .filter((entry) => typeof entry.changes?.url === "string")
+      .map((entry) => ({ tabId: entry.tabId, url: entry.changes.url })),
+    [
+      { tabId: harness.createdTabs[0].id, url: "https://chatgpt.com/g/g-p-project-a/project" },
+      { tabId: harness.createdTabs[0].id, url: "https://chatgpt.com/g/g-p-project-b/project" }
+    ]);
   assert.equal(harness.createdWindows.length, 1);
   assert.equal(harness.createdTabs.length, 1);
   assert.equal(harness.createdTabs[0].active, true);
@@ -2207,11 +2361,100 @@ test("Background visits every Project with one reusable Collector Tab and merges
     "g-p-project-a",
     "g-p-project-b"
   ]);
+  const resolution = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_metadata_resolution");
+  assert.equal(resolution.discovered_project_count, 2);
+  assert.equal(resolution.resolved_project_count, 2);
+  assert.equal(resolution.unresolved_project_count, 0);
+  const resolutionItems = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_metadata_item");
+  assert.deepEqual(resolutionItems.map((fields) => fields.project_index), [0, 1]);
+  assert.ok(resolutionItems.every((fields) =>
+    fields.title_present === true
+    && fields.project_id_present === true
+    && fields.url_present === true
+    && fields.resolution_status === "resolved"
+    && fields.unresolved_reason === "none"));
+  const diagnosticEntries = harness.diagnostics.map(([eventName, fields]) => ({ eventName, fields }));
+  const resultReceivedIndex = diagnosticEntries.findIndex((entry) =>
+    entry.fields?.stage === "collector_project_result_received");
+  const resolutionIndex = diagnosticEntries.findIndex((entry) =>
+    entry.fields?.stage === "collector_project_metadata_resolution");
+  const discoveryCompleteIndex = diagnosticEntries.findIndex((entry) =>
+    entry.fields?.stage === "collector_project_discovery_complete");
+  const projectNavigationIndexes = diagnosticEntries
+    .map((entry, index) => entry.fields?.stage === "collector_project_url_navigation" ? index : -1)
+    .filter((index) => index >= 0);
+  assert.ok(resultReceivedIndex >= 0);
+  assert.ok(resolutionIndex > resultReceivedIndex);
+  assert.ok(discoveryCompleteIndex > resolutionIndex);
+  assert.ok(projectNavigationIndexes.length > 0);
+  assert.ok(projectNavigationIndexes.every((index) => index > discoveryCompleteIndex));
+  assert.equal(resolution.background_projects_length, resolution.discovered_project_count);
   assert.deepEqual(response.conversations.map((conversation) => conversation.conversation_id), [
     "conversation-free",
     "conversation-a",
     "conversation-b"
   ]);
+});
+
+test("Background does not restart Project discovery after a Project Chat scan failure", async () => {
+  const harness = await createHarness();
+  const collectionMessages = [];
+  let rootCalls = 0;
+  harness.setContentHandler((message) => {
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    collectionMessages.push(message.collection);
+    if (message.collection === "root") {
+      rootCalls += 1;
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [{
+          project_id: "g-p-chat-scan-failure",
+          title: "Project with a failed Chat scan",
+          url: "https://chatgpt.com/g/g-p-chat-scan-failure/project"
+        }],
+        conversations: [],
+        current: null,
+        sidebar_scroll_complete: true,
+        project_section_found: true,
+        sidebar_scroll_direction: "down",
+        sidebar_restore_count: 1
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "error",
+      errorCode: "collector_project_chat_scan_failed",
+      message: "fixture failure"
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-project-chat-scan-failure"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "collector_project_chat_scan_failed");
+  assert.equal(rootCalls, 1);
+  assert.deepEqual(collectionMessages, ["root", "project"]);
+  const discoveryEvents = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage?.startsWith("collector_project_discovery_"));
+  assert.equal(discoveryEvents.filter((fields) => fields.stage === "collector_project_discovery_start").length, 1);
+  assert.equal(discoveryEvents.some((fields) => fields.stage === "collector_project_discovery_already_completed"), false);
 });
 
 test("Background returns the Collector Tab to the root before a later full refresh", async () => {
@@ -2269,6 +2512,14 @@ test("Background returns the Collector Tab to the root before a later full refre
   assert.deepEqual(collectionMessages.map((entry) => entry.collection), [
     "root", "project", "root", "project"
   ]);
+  const navigationStages = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_root_url_navigation"
+      || fields?.stage === "collector_project_url_navigation");
+  assert.equal(navigationStages.filter((fields) => fields.stage === "collector_root_url_navigation").length, 1);
+  assert.equal(navigationStages.filter((fields) => fields.stage === "collector_project_url_navigation").length, 2);
+  assert.equal(navigationStages.find((fields) => fields.stage === "collector_root_url_navigation")
+    .collector_navigation_target, "https://chatgpt.com/");
 });
 
 test("Background discards a stale Collector refresh result when a newer refresh starts", async () => {

@@ -60,14 +60,18 @@ is never used for Handoff, media, Review, Resume, or assistant-response
 observation, and it does not replace the Managed Execution Tab's watcher state.
 The Collector Window starts at roughly half the reference window width and
 height, with an outer-width floor of about 820px. Before discovery, the
-Content Script reports `window.innerWidth` and sidebar structure readiness; the
-Background widens the non-focused Window and rechecks until the desktop
-sidebar viewport and an actual scroll container are available. The Project
-section itself may be virtualized below the initial view, so discovery performs
-the bounded scroll and lazy-load scan before declaring it ready. A bounded
-zero-Project result is reported as `context_projects_incomplete`, never as a
-successful empty snapshot. Each lifecycle reconciliation verifies one Window
-member, the active Collector Tab ID, and the non-discardable tab state.
+Content Script reports `window.innerWidth` and non-mutating sidebar structure
+readiness; the Background widens the non-focused Window and rechecks until the
+desktop sidebar viewport is available. Readiness never scrolls or collects
+Project rows. The root Project discovery call is a one-shot operation for its
+refresh generation: it selects one Sidebar and one scroll container, scans only
+downward through the virtualized Project section, restores the saved position
+once, and then freezes the resulting Project metadata while the Collector Tab
+visits Project URLs for Chat discovery. A bounded zero-Project result is
+reported as `context_projects_incomplete`, never as a successful empty
+snapshot. Each lifecycle reconciliation verifies one Window member, the active
+Collector Tab ID, and the non-discardable tab state; lifecycle events do not
+restart a completed Project discovery.
 
 The Execution Window and tab are replaceable browser media, not the Conversation
 identity. Before
@@ -191,12 +195,14 @@ The list response contains bounded entries of the following shape:
 ```
 
 Projectless conversations have no `project_id` and are shown under
-`Projectなし`. Some ChatGPT versions render a Project row as a button without
-an ID-bearing attribute. During a Collector refresh, the Content Script opens
-that row, reads the resulting Project route, and uses the route ID; it never
-uses the title as identity. If a row cannot be resolved within the bounded
-navigation window, the Collector returns `context_projects_incomplete` rather
-than publishing an incomplete Project catalog. The Desktop always provides
+`Projectなし`. Project discovery reuses the previously successful
+metadata-only Sidebar route: it reads the known ChatGPT history sidebar's
+visible `data-sidebar-item="true"` rows and Project-home anchors. A dedicated
+`さらに表示`/`もっと見る` utility button may be expanded, but generic sidebar
+rows, navigation controls, search UI, and title-only rows are never clicked to
+infer a Project ID. If a Project entry is not ID/URL-complete, the Collector returns
+`context_projects_incomplete` rather than publishing an incomplete Project
+catalog. The Desktop always provides
 an explicit `＋ 新しいChat` choice for a resolvable Project; selecting it does
 not fabricate a conversation ID. A catalog is
 reported as `Loading`, `Loaded`, `Empty`, `Disconnected`, or `Error`, and the
@@ -204,17 +210,26 @@ context panel has an explicit refresh action. Push/pop-state and relevant
 sidebar changes can emit a current-context event, but that event never
 changes the active Desktop session or starts a Handoff by itself.
 
-List discovery first expands bounded `さらに表示`/`もっと見る` controls, then
-selects the visible sidebar shell with the largest Project evidence and its
-actual Project-owning scroll container before scanning in small steps for all
-visible Project and Projectless Conversation metadata. A scroll is accepted only when
-the element's `scrollTop` changes; rows are collected again after each bounded
-lazy-load settle, and completion requires the Project section, bottom or
-bounded no-growth, and ID-complete merge. Button-only Project rows are resolved one at a time by
-opening the row in the Collector Tab and reading the resulting SPA Project URL;
-the title is only a display label. The resolved entries are merged by
-`project_id`, and conversations are merged by `conversation_id`. For every
-resolved Project, the same Collector Tab navigates to its Project page and
+After the root scan, the Background emits metadata-only Project resolution
+diagnostics. `collector_project_metadata_resolution` contains the discovered,
+resolved, and unresolved counts, while `collector_project_metadata_item`
+contains only each row's index, title/ID/URL presence, resolution status, and
+an unresolved reason. When the refresh fails with
+`context_projects_incomplete`, the corresponding `collector_project_metadata_resolution_failed`
+and reason-count entries preserve the same aggregate without logging Project
+titles, IDs, URLs, message bodies, credentials, tokens, media, or local paths.
+
+List discovery first performs the single bounded root Project scan. It expands
+only bounded, dedicated `さらに表示`/`もっと見る` controls, then scans the same
+known Sidebar scroll container in small steps for visible Project and
+Projectless Conversation metadata. A scroll is accepted only when the
+element's `scrollTop` changes; rows are collected again after each bounded
+lazy-load settle, and completion requires the bounded scan to finish and an
+ID-complete merge. No Project row is opened during this
+phase, so `/schedule`, `/plugins`, search controls, and other generic Sidebar
+navigation cannot become discovery targets. The resolved Project entries are
+merged by `project_id`, and conversations are merged by `conversation_id`. For
+every resolved Project, the same Collector Tab navigates directly to its Project URL and
 scans every independent Project chat scrollport with the same actual-container
 selection, bounded scrolling, timeout, and cancellation. The active scrollport
 is rebound by logical container position after SPA replacement rather than

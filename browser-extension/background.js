@@ -67,18 +67,17 @@ const COLLECTOR_WINDOW_MIN_WIDTH = 820;
 const COLLECTOR_WINDOW_MIN_HEIGHT = 480;
 const COLLECTOR_WINDOW_FALLBACK_WIDTH = 960;
 const COLLECTOR_WINDOW_FALLBACK_HEIGHT = 540;
+const COLLECTOR_INITIAL_TAB_WAIT_MS = 1500;
+const COLLECTOR_INITIAL_TAB_POLL_MS = 50;
 const COLLECTOR_MAX_PROJECTS = 5000;
 const COLLECTOR_MAX_CONVERSATIONS = 10000;
 const COLLECTOR_PROJECT_SCROLL_MAX = 128;
 const COLLECTOR_ROOT_TIMEOUT_MS = 120000;
 const COLLECTOR_CONTEXT_TIMEOUT_MS = 150000;
 const COLLECTOR_PROJECT_TIMEOUT_MS = 30000;
-const COLLECTOR_PROJECT_RESOLUTION_TIMEOUT_MS = 4000;
 const COLLECTOR_VIEWPORT_MAX_RETRIES = 4;
 const COLLECTOR_SIDEBAR_READY_MAX_RETRIES = 8;
 const COLLECTOR_VIEWPORT_RETRY_DELAY_MS = 250;
-const COLLECTOR_PROJECT_DISCOVERY_MAX_RETRIES = 3;
-const COLLECTOR_PROJECT_DISCOVERY_RETRY_DELAY_MS = 350;
 // A replacement Content Script can become ready before ChatGPT has hydrated
 // the newly opened conversation's message list. Keep checking the same
 // marker-bearing user message without ever issuing another Handoff send.
@@ -186,7 +185,10 @@ const defaultCollectorWindowState = {
   tabId: null,
   windowState: "Idle",
   lifecycle: "Idle",
+  projectDiscoverySource: "existing_project_section_metadata",
   currentProjectId: null,
+  currentProjectUrl: null,
+  collectorNavigationTarget: null,
   projectIndex: -1,
   totalProjects: 0,
   discoveredProjectCount: 0,
@@ -210,10 +212,21 @@ const defaultCollectorWindowState = {
   visibleProjectRows: 0,
   projectSectionFound: false,
   noGrowthCount: 0,
+  refreshGeneration: null,
+  projectDiscoveryRunId: null,
+  projectDiscoveryCallCount: 0,
+  projectDiscoveryStarted: false,
+  projectDiscoveryCompleted: false,
+  projectDiscoveryCaller: null,
+  projectDiscoveryInFlight: false,
+  projectDiscoveryAlreadyCompleted: false,
+  projectDiscoveryScrollDirection: null,
+  projectDiscoveryRestoreCount: 0,
   requestId: null
 };
 let collectorWindowState = { ...defaultCollectorWindowState };
 let collectorWindowStateOperation = Promise.resolve();
+let projectDiscoverySequence = 0;
 
 const managedTabStateReady = (async () => {
   try {
@@ -307,20 +320,46 @@ function diagnostic(eventName, fields = {}) {
     "collector_window_state",
     "collector_window_exists",
     "collector_tab_id",
+    "active_tab_id_in_collector_window",
+    "collector_navigation_target",
+    "project_discovery_source",
     "current_project_id",
+    "current_project_url",
     "project_index",
     "total_projects",
     "discovered_project_count",
     "discovered_chat_count",
     "retry_count",
     "project_discovery_retry_count",
+    "refresh_generation",
+    "project_discovery_run_id",
+    "project_discovery_call_count",
+    "project_discovery_started",
+    "project_discovery_completed",
+    "project_discovery_result_received",
+    "project_discovery_caller",
+    "project_discovery_in_flight",
+    "project_discovery_already_completed",
+    "project_discovery_scroll_direction",
+    "project_discovery_restore_count",
+    "content_discovered_project_count",
+    "background_projects_length",
+    "response_shape",
+    "resolved_project_count",
+    "unresolved_project_count",
+    "reported_unresolved_project_count",
+    "unresolved_reason_count",
+    "title_present",
+    "project_id_present",
+    "url_present",
+    "resolution_status",
+    "unresolved_reason",
     "collector_window_width",
     "collector_window_height",
     "collector_content_inner_width",
     "collector_content_inner_height",
     "sidebar_expected_visible",
     "viewport_retry_count",
-    "active_tab_id_in_collector_window",
     "collector_tab_active",
     "tab_count_in_collector_window",
     "sidebar_container_exists",
@@ -653,6 +692,106 @@ function throwIfCollectorRequestSuperseded(pending) {
     "ChatGPT Contextの古いRefresh結果は破棄されました。",
     0,
     "context_refresh_superseded");
+}
+
+function createProjectDiscoveryState(pending) {
+  projectDiscoverySequence += 1;
+  const refreshGeneration = Number.isSafeInteger(pending?.generation)
+    ? pending.generation
+    : 0;
+  return {
+    refreshGeneration,
+    runId: `refresh-${refreshGeneration}-project-${projectDiscoverySequence}`,
+    callCount: 0,
+    started: false,
+    completed: false,
+    caller: null,
+    inFlight: false,
+    alreadyCompleted: false,
+    scrollDirection: null,
+    restoreCount: 0,
+    result: null,
+    promise: null
+  };
+}
+
+function projectDiscoveryStateFor(pending) {
+  if (!pending || typeof pending !== "object") return createProjectDiscoveryState(null);
+  if (!pending.projectDiscovery) pending.projectDiscovery = createProjectDiscoveryState(pending);
+  return pending.projectDiscovery;
+}
+
+function syncProjectDiscoveryTelemetry(pending, discovery) {
+  if (!discovery || (pending && !isCurrentCollectorRequest(pending))) return;
+  collectorWindowState = {
+    ...collectorWindowState,
+    refreshGeneration: discovery.refreshGeneration,
+    projectDiscoveryRunId: discovery.runId,
+    projectDiscoveryCallCount: discovery.callCount,
+    projectDiscoveryStarted: discovery.started,
+    projectDiscoveryCompleted: discovery.completed,
+    projectDiscoveryCaller: discovery.caller,
+    projectDiscoveryInFlight: discovery.inFlight,
+    projectDiscoveryAlreadyCompleted: discovery.alreadyCompleted,
+    projectDiscoveryScrollDirection: discovery.scrollDirection,
+    projectDiscoveryRestoreCount: discovery.restoreCount
+  };
+}
+
+function recordProjectDiscoveryTelemetry(eventName, pending, fields = {}) {
+  const discovery = projectDiscoveryStateFor(pending);
+  syncProjectDiscoveryTelemetry(pending, discovery);
+  diagnostic(eventName, {
+    request_id: pending?.requestId,
+    refresh_generation: discovery.refreshGeneration,
+    project_discovery_run_id: discovery.runId,
+    project_discovery_call_count: discovery.callCount,
+    project_discovery_started: discovery.started,
+    project_discovery_completed: discovery.completed,
+    project_discovery_caller: discovery.caller,
+    project_discovery_in_flight: discovery.inFlight,
+    project_discovery_already_completed: discovery.alreadyCompleted,
+    project_discovery_scroll_direction: discovery.scrollDirection,
+    project_discovery_restore_count: discovery.restoreCount,
+    ...fields
+  });
+}
+
+function projectDiscoveryTraceFields(pending) {
+  const discovery = pending?.projectDiscovery;
+  if (!discovery) return {};
+  return {
+    refresh_generation: discovery.refreshGeneration,
+    project_discovery_run_id: discovery.runId,
+    project_discovery_call_count: discovery.callCount,
+    project_discovery_started: discovery.started === true,
+    project_discovery_completed: discovery.completed === true,
+    project_discovery_caller: discovery.caller,
+    project_discovery_in_flight: discovery.inFlight === true,
+    project_discovery_already_completed: discovery.alreadyCompleted === true,
+    project_discovery_scroll_direction: discovery.scrollDirection,
+    project_discovery_restore_count: discovery.restoreCount
+  };
+}
+
+function markCollectorRequestMediumLost(tabId, windowId, reason) {
+  for (const pending of contextRequests.values()) {
+    if (!pending) continue;
+    const sameTab = Number.isSafeInteger(tabId) && pending.tabId === tabId;
+    const sameWindow = Number.isSafeInteger(windowId)
+      && pending.collectorWindowId === windowId;
+    if (!sameTab && !sameWindow) continue;
+    pending.collectorMediumLost = true;
+    pending.collectorMediumLossReason = reason || "collector_medium_lost";
+    diagnostic("collector request medium lost", {
+      request_id: pending.requestId,
+      target_tab_id: tabId,
+      event_window_id: windowId,
+      status: "recoverable",
+      error_code: pending.collectorMediumLossReason,
+      stage: "collector_request_medium_lost"
+    });
+  }
 }
 
 function deferred() {
@@ -1322,13 +1461,26 @@ function collectorWindowLifecycle(lifecycle, fields = {}) {
     lifecycle,
     collector_window_id: collectorWindowState.windowId,
     collector_tab_id: collectorWindowState.tabId,
+    project_discovery_source: collectorWindowState.projectDiscoverySource,
     current_project_id: collectorWindowState.currentProjectId,
+    current_project_url: collectorWindowState.currentProjectUrl,
+    collector_navigation_target: collectorWindowState.collectorNavigationTarget,
     project_index: collectorWindowState.projectIndex,
     total_projects: collectorWindowState.totalProjects,
     discovered_project_count: collectorWindowState.discoveredProjectCount,
     discovered_chat_count: collectorWindowState.discoveredChatCount,
     retry_count: collectorWindowState.retryCount,
     project_discovery_retry_count: collectorWindowState.projectDiscoveryRetryCount,
+    refresh_generation: collectorWindowState.refreshGeneration,
+    project_discovery_run_id: collectorWindowState.projectDiscoveryRunId,
+    project_discovery_call_count: collectorWindowState.projectDiscoveryCallCount,
+    project_discovery_started: collectorWindowState.projectDiscoveryStarted,
+    project_discovery_completed: collectorWindowState.projectDiscoveryCompleted,
+    project_discovery_caller: collectorWindowState.projectDiscoveryCaller,
+    project_discovery_in_flight: collectorWindowState.projectDiscoveryInFlight,
+    project_discovery_already_completed: collectorWindowState.projectDiscoveryAlreadyCompleted,
+    project_discovery_scroll_direction: collectorWindowState.projectDiscoveryScrollDirection,
+    project_discovery_restore_count: collectorWindowState.projectDiscoveryRestoreCount,
     collector_window_width: collectorWindowState.windowWidth,
     collector_window_height: collectorWindowState.windowHeight,
     collector_content_inner_width: collectorWindowState.contentInnerWidth,
@@ -1571,10 +1723,25 @@ function recordCollectorScrollTelemetry(source, pending = null, trace = {}) {
   const sidebarScrollHeight = integerOrNull(source?.sidebar_scroll_height);
   const sidebarClientHeight = integerOrNull(source?.sidebar_client_height);
   const visibleProjectRows = integerOrNull(source?.visible_project_rows) || 0;
-  const discoveredProjectCount = integerOrNull(source?.discovered_project_count);
+  const contentDiscoveredProjectCount = integerOrNull(source?.discovered_project_count);
+  // The response array is the Background's source of truth.  The content
+  // script's count is retained separately as a diagnostic so a stale or
+  // differently-shaped response cannot make the two layers appear to agree.
+  const discoveredProjectCount = Array.isArray(source?.projects)
+    ? source.projects.length
+    : contentDiscoveredProjectCount;
   const noGrowthCount = integerOrNull(source?.no_growth_count) || 0;
+  const restoreCount = integerOrNull(source?.sidebar_restore_count);
+  const scrollDirection = source?.sidebar_scroll_direction === "down"
+    || source?.sidebar_scroll_direction === "none"
+    ? source.sidebar_scroll_direction
+    : null;
   collectorWindowState = {
     ...collectorWindowState,
+    projectDiscoverySource: typeof source?.project_discovery_source === "string"
+      && source.project_discovery_source.trim().length > 0
+      ? source.project_discovery_source.trim().slice(0, 128)
+      : collectorWindowState.projectDiscoverySource,
     sidebarScrollTop,
     sidebarScrollHeight,
     sidebarClientHeight,
@@ -1585,13 +1752,21 @@ function recordCollectorScrollTelemetry(source, pending = null, trace = {}) {
       ? collectorWindowState.discoveredProjectCount
       : discoveredProjectCount,
     projectSectionFound: source?.project_section_found === true,
-    noGrowthCount
+    noGrowthCount,
+    ...(restoreCount === null ? {} : { projectDiscoveryRestoreCount: restoreCount }),
+    ...(scrollDirection ? { projectDiscoveryScrollDirection: scrollDirection } : {})
   };
+  if (pending?.projectDiscovery) {
+    if (scrollDirection) pending.projectDiscovery.scrollDirection = scrollDirection;
+    if (restoreCount !== null) pending.projectDiscovery.restoreCount = restoreCount;
+    syncProjectDiscoveryTelemetry(pending, pending.projectDiscovery);
+  }
   diagnostic("collector sidebar scroll observed", {
     ...trace,
     request_id: pending?.requestId || trace.request_id,
     collector_window_id: collectorWindowState.windowId,
     collector_tab_id: targetTabId,
+    project_discovery_source: collectorWindowState.projectDiscoverySource,
     sidebar_scroll_top: sidebarScrollTop,
     sidebar_scroll_height: sidebarScrollHeight,
     sidebar_client_height: sidebarClientHeight,
@@ -1599,14 +1774,84 @@ function recordCollectorScrollTelemetry(source, pending = null, trace = {}) {
     sidebar_at_bottom: source?.sidebar_at_bottom === true,
     visible_project_rows: visibleProjectRows,
     discovered_project_count: collectorWindowState.discoveredProjectCount,
+    content_discovered_project_count: contentDiscoveredProjectCount,
     project_section_found: source?.project_section_found === true,
     no_growth_count: noGrowthCount,
+    project_discovery_scroll_direction: scrollDirection,
+    project_discovery_restore_count: restoreCount,
     sidebar_scroll_complete: source?.sidebar_scroll_complete === true,
     status: "observed",
     stage: trace.stage || "collector_sidebar_scroll_observed",
     target_tab_id: targetTabId
   });
   void persistCollectorWindowState();
+}
+
+function collectorProjectDiscoveryResultShape(source) {
+  const hasProjectsArray = Array.isArray(source?.projects);
+  const hasConversationsArray = Array.isArray(source?.conversations);
+  const contentDiscoveredProjectCount = Number.isSafeInteger(source?.discovered_project_count)
+    && source.discovered_project_count >= 0
+    ? source.discovered_project_count
+    : null;
+  const backgroundProjectsLength = hasProjectsArray ? source.projects.length : 0;
+  let responseShape = "invalid";
+  if (hasProjectsArray && hasConversationsArray) responseShape = "top_level_arrays";
+  else if (hasProjectsArray) responseShape = "top_level_projects_only";
+  else if (source?.context && typeof source.context === "object"
+    && Array.isArray(source.context.projects)) responseShape = "nested_context_projects";
+  else if (source?.result && typeof source.result === "object"
+    && Array.isArray(source.result.projects)) responseShape = "nested_result_projects";
+
+  return {
+    hasProjectsArray,
+    hasConversationsArray,
+    contentDiscoveredProjectCount,
+    backgroundProjectsLength,
+    responseShape,
+    countMismatch: contentDiscoveredProjectCount !== null
+      && contentDiscoveredProjectCount !== backgroundProjectsLength
+  };
+}
+
+function recordCollectorProjectDiscoveryResult(source, pending) {
+  const shape = collectorProjectDiscoveryResultShape(source);
+  if (pending && typeof pending === "object") {
+    pending.collectorProjectDiscoveryResultShape = shape;
+  }
+  const base = {
+    project_discovery_result_received: true,
+    discovered_project_count: shape.backgroundProjectsLength,
+    background_projects_length: shape.backgroundProjectsLength,
+    response_shape: shape.responseShape,
+    target_tab_id: pending?.tabId
+  };
+  if (shape.contentDiscoveredProjectCount !== null) {
+    base.content_discovered_project_count = shape.contentDiscoveredProjectCount;
+  }
+  recordProjectDiscoveryTelemetry("collector project discovery result received", pending, {
+    ...base,
+    status: shape.hasProjectsArray && shape.hasConversationsArray ? "received" : "error",
+    error_code: shape.hasProjectsArray && shape.hasConversationsArray
+      ? undefined
+      : "collector_project_result_shape_mismatch",
+    stage: "collector_project_result_received"
+  });
+  if (shape.countMismatch) {
+    diagnostic("collector project result handoff mismatch", {
+      request_id: pending?.requestId,
+      refresh_generation: pending?.projectDiscovery?.refreshGeneration,
+      project_discovery_run_id: pending?.projectDiscovery?.runId,
+      project_discovery_call_count: pending?.projectDiscovery?.callCount,
+      project_discovery_started: pending?.projectDiscovery?.started === true,
+      project_discovery_completed: pending?.projectDiscovery?.completed === true,
+      ...base,
+      status: "error",
+      error_code: "collector_project_result_handoff_mismatch",
+      stage: "collector_project_result_handoff"
+    });
+  }
+  return shape;
 }
 
 async function getCollectorWindow(windowId = collectorWindowState.windowId) {
@@ -1629,6 +1874,16 @@ async function tabsInCollectorWindow(windowId) {
   } catch (_) {
     return [];
   }
+}
+
+async function waitForCollectorWindowTabs(windowId, timeoutMs = COLLECTOR_INITIAL_TAB_WAIT_MS) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  let tabs = await tabsInCollectorWindow(windowId);
+  while (tabs.length === 0 && Date.now() < deadline) {
+    await wait(Math.min(COLLECTOR_INITIAL_TAB_POLL_MS, Math.max(0, deadline - Date.now())));
+    tabs = await tabsInCollectorWindow(windowId);
+  }
+  return tabs;
 }
 
 async function findCollectorWindowTab(windowId) {
@@ -1858,6 +2113,10 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
   // windows.create({ url }) already creates the first Tab. Reconcile the
   // complete Window before considering tabs.create so that the initial Tab is
   // reused and any stale duplicate is removed deterministically.
+  // Chrome creates the initial Tab as part of windows.create({ url }). On a
+  // real profile the tabs.query result can briefly lag that creation. Wait for
+  // that authoritative Tab instead of creating a second one during the gap.
+  await waitForCollectorWindowTabs(window.id);
   let tab = await reconcileCollectorWindowTabs(
     window.id,
     collectorWindowState.tabId,
@@ -1905,10 +2164,62 @@ async function navigateCollectorTab(tab, url, trace = {}) {
     tab = await ensureCollectorWindow(COLLECTOR_TAB_URL, trace);
   }
   const targetUrl = safeChatGptContextUrl(url) || COLLECTOR_TAB_URL;
+  const projectUrl = safeChatGptProjectUrl(targetUrl);
+  const isProjectNavigation = projectUrl !== null;
+  if (isProjectNavigation && trace.project_discovery_completed !== true) {
+    diagnostic("collector Project navigation blocked before discovery", {
+      request_id: trace.request_id,
+      project_id: trace.project_id,
+      project_index: trace.project_index,
+      total_projects: trace.total_projects,
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: tab.id,
+      collector_navigation_target: targetUrl,
+      project_discovery_completed: false,
+      status: "error",
+      error_code: "collector_project_navigation_before_discovery",
+      stage: "collector_project_navigation_guard",
+      target_tab_id: tab.id
+    });
+    throw bridgeError(
+      "Project一覧の確定前にProjectページへ移動することはできません。",
+      0,
+      "collector_project_navigation_before_discovery");
+  }
   const currentUrl = safeChatGptContextUrl(tab.url);
+  const navigationTrace = {
+    ...trace,
+    currentProjectId: isProjectNavigation
+      ? (trace.project_id || chatGptProjectId(projectUrl))
+      : null,
+    currentProjectUrl: isProjectNavigation ? targetUrl : null,
+    collectorNavigationTarget: targetUrl
+  };
+  collectorWindowState = {
+    ...collectorWindowState,
+    currentProjectId: navigationTrace.currentProjectId,
+    // The root page is the discovery page, not a Project target. Keep the
+    // state aligned with the normalized trace so a root transition cannot be
+    // mistaken for an in-progress Project navigation by later orchestration.
+    currentProjectUrl: navigationTrace.currentProjectUrl,
+    collectorNavigationTarget: targetUrl
+  };
   let updated = tab;
   if (currentUrl !== targetUrl && typeof chrome.tabs?.update === "function") {
-    collectorWindowLifecycle("NavigatingProject", { tabId: tab.id });
+    const navigationLifecycle = isProjectNavigation ? "NavigatingProject" : "NavigatingRoot";
+    const navigationStage = isProjectNavigation
+      ? "collector_project_url_navigation"
+      : "collector_root_url_navigation";
+    collectorWindowLifecycle(navigationLifecycle, { tabId: tab.id, ...navigationTrace });
+    diagnostic("collector navigation requested", {
+      ...navigationTrace,
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: tab.id,
+      collector_navigation_target: targetUrl,
+      status: "requested",
+      stage: navigationStage,
+      target_tab_id: tab.id
+    });
     contentScriptReadyTabs.delete(tab.id);
     try {
       updated = await chrome.tabs.update(tab.id, {
@@ -1920,7 +2231,7 @@ async function navigateCollectorTab(tab, url, trace = {}) {
       throw bridgeError("Collector TabのProjectページ移動に失敗しました。", 0, "collector_tab_navigation_failed");
     }
   }
-  updated = await enforceCollectorTab(updated, trace);
+  updated = await enforceCollectorTab(updated, navigationTrace);
   if (!(await waitForTabReady(updated.id, COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS))) {
     throw bridgeError("Collector TabのProjectページ読み込みがタイムアウトしました。", 0, "collector_tab_navigation_timeout");
   }
@@ -1952,7 +2263,10 @@ async function readCollectorViewport(tab, trace = {}) {
   return result;
 }
 
-async function ensureCollectorViewport(tab, trace = {}) {
+// Readiness only: this function may reconcile/resize/wait for the Collector
+// medium, but it must not scroll the Sidebar or collect Project rows. Project
+// discovery is deliberately owned by collectProjectsOnce().
+async function ensureCollectorReady(tab, trace = {}) {
   let currentTab = await reconcileCollectorWindowTabs(
     collectorWindowState.windowId,
     tab?.id,
@@ -2135,6 +2449,8 @@ async function releaseCollectorTab(tab) {
   collectorWindowLifecycle("Ready", {
     tabId: current.id,
     currentProjectId: null,
+    currentProjectUrl: null,
+    collectorNavigationTarget: null,
     projectIndex: -1
   });
   diagnostic("collector window retained", {
@@ -2392,12 +2708,17 @@ async function completeContextRequest(contentResult, pending) {
 }
 
 function collectorProjectTarget(project) {
-  const projectId = safeContextIdentifier(project?.project_id || project?.projectId)
-    || chatGptProjectId(project?.url);
+  const explicitProjectId = safeContextIdentifier(project?.project_id || project?.projectId);
+  const projectUrl = safeChatGptProjectUrl(project?.url);
+  const urlProjectId = chatGptProjectId(projectUrl);
+  const projectId = urlProjectId
+    || (explicitProjectId?.toLowerCase().startsWith("g-p-") ? explicitProjectId : null);
   if (!projectId) return null;
-  const projectUrl = safeChatGptProjectUrl(project?.url)
-    || `https://chatgpt.com/g/${encodeURIComponent(projectId)}/project`;
-  return { projectId, projectUrl };
+  if (urlProjectId && explicitProjectId && urlProjectId !== explicitProjectId) return null;
+  return {
+    projectId,
+    projectUrl: projectUrl || `https://chatgpt.com/g/${encodeURIComponent(projectId)}/project`
+  };
 }
 
 function mergeCollectorMetadata(destination, source, forcedProjectId = null) {
@@ -2510,13 +2831,185 @@ function validateCollectorRootResult(source, pending) {
       source.errorCode || source.error_code || "context_extraction_failed");
   }
   if (source.status !== "ok"
-    || !Array.isArray(source.projects)
-    || !Array.isArray(source.conversations)) {
+      || !Array.isArray(source.projects)
+      || !Array.isArray(source.conversations)) {
     throw bridgeError("ChatGPT Context responseが不正です。", 0, "context_response_invalid");
   }
-  return Number.isSafeInteger(source.unresolved_project_count)
+  const reportedUnresolved = Number.isSafeInteger(source.unresolved_project_count)
     ? Math.max(0, source.unresolved_project_count)
     : 0;
+  // The root scan is the only source of the Project catalog. A title-only row
+  // is useful for display diagnostics, but it is not a safe navigation target
+  // and must never make the final metadata snapshot look complete.
+  const unresolved = source.projects.reduce(
+    (count, project) => count + (collectorProjectTarget(project) ? 0 : 1),
+    0);
+  return Math.max(reportedUnresolved, unresolved);
+}
+
+function collectorProjectMetadataResolution(project) {
+  const rawTitle = typeof project?.title === "string" ? project.title.trim() : "";
+  const rawProjectIdValue = project?.project_id || project?.projectId;
+  const rawProjectId = typeof rawProjectIdValue === "string" ? rawProjectIdValue.trim() : "";
+  const rawProjectUrl = typeof project?.url === "string" ? project.url.trim() : "";
+  const explicitProjectId = safeContextIdentifier(rawProjectIdValue);
+  const projectUrl = safeChatGptProjectUrl(rawProjectUrl);
+  const urlProjectId = chatGptProjectId(projectUrl);
+  const resolved = collectorProjectTarget(project) !== null;
+  let unresolvedReason = null;
+
+  if (!resolved) {
+    if (rawProjectId && !explicitProjectId) unresolvedReason = "invalid_project_id";
+    else if (rawProjectUrl && !projectUrl) unresolvedReason = "invalid_project_url";
+    else if (explicitProjectId && urlProjectId && explicitProjectId !== urlProjectId) {
+      unresolvedReason = "project_id_url_mismatch";
+    } else if (explicitProjectId && !explicitProjectId.toLowerCase().startsWith("g-p-")) {
+      unresolvedReason = "invalid_project_id";
+    } else {
+      unresolvedReason = "missing_stable_identity";
+    }
+  }
+
+  return {
+    titlePresent: rawTitle.length > 0,
+    projectIdPresent: rawProjectId.length > 0,
+    urlPresent: rawProjectUrl.length > 0,
+    resolved,
+    unresolvedReason
+  };
+}
+
+function collectProjectMetadataResolution(source) {
+  const projects = Array.isArray(source?.projects) ? source.projects : [];
+  const items = projects.map((project, projectIndex) => ({
+    projectIndex,
+    ...collectorProjectMetadataResolution(project)
+  }));
+  const unresolvedReasonCounts = new Map();
+  for (const item of items) {
+    if (item.resolved) continue;
+    const reason = item.unresolvedReason || "missing_stable_identity";
+    unresolvedReasonCounts.set(reason, (unresolvedReasonCounts.get(reason) || 0) + 1);
+  }
+  const resolvedCount = items.filter((item) => item.resolved).length;
+  const reportedUnresolvedCount = Number.isSafeInteger(source?.unresolved_project_count)
+    ? Math.max(0, source.unresolved_project_count)
+    : 0;
+  return {
+    discoveredCount: items.length,
+    resolvedCount,
+    unresolvedCount: items.length - resolvedCount,
+    reportedUnresolvedCount,
+    items,
+    unresolvedReasonCounts
+  };
+}
+
+function recordCollectorProjectMetadataResolution(source, pending) {
+  const resolution = collectProjectMetadataResolution(source);
+  const base = {
+    request_id: pending?.requestId,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: pending?.tabId,
+    ...projectDiscoveryTraceFields(pending),
+    project_discovery_result_received: pending?.collectorProjectDiscoveryResultShape !== undefined,
+    background_projects_length: resolution.discoveredCount,
+    response_shape: pending?.collectorProjectDiscoveryResultShape?.responseShape
+  };
+  const contentDiscoveredProjectCount = pending?.collectorProjectDiscoveryResultShape
+    ?.contentDiscoveredProjectCount;
+  if (Number.isSafeInteger(contentDiscoveredProjectCount)) {
+    base.content_discovered_project_count = contentDiscoveredProjectCount;
+  }
+  diagnostic("Project metadata resolution", {
+    ...base,
+    discovered_project_count: resolution.discoveredCount,
+    resolved_project_count: resolution.resolvedCount,
+    unresolved_project_count: resolution.unresolvedCount,
+    reported_unresolved_project_count: resolution.reportedUnresolvedCount,
+    status: "observed",
+    stage: "collector_project_metadata_resolution",
+    target_tab_id: pending?.tabId
+  });
+  for (const item of resolution.items) {
+    diagnostic("collector project metadata item", {
+      ...base,
+      project_index: item.projectIndex,
+      title_present: item.titlePresent,
+      project_id_present: item.projectIdPresent,
+      url_present: item.urlPresent,
+      resolution_status: item.resolved ? "resolved" : "unresolved",
+      unresolved_reason: item.unresolvedReason || "none",
+      status: "observed",
+      stage: "collector_project_metadata_item",
+      target_tab_id: pending?.tabId
+    });
+  }
+  for (const [reason, count] of resolution.unresolvedReasonCounts) {
+    diagnostic("collector project metadata unresolved reason", {
+      ...base,
+      unresolved_reason: reason,
+      unresolved_reason_count: count,
+      status: "observed",
+      stage: "collector_project_metadata_unresolved_reason",
+      target_tab_id: pending?.tabId
+    });
+  }
+  if (resolution.reportedUnresolvedCount > 0 && resolution.unresolvedReasonCounts.size === 0) {
+    diagnostic("collector project metadata unresolved reason", {
+      ...base,
+      unresolved_reason: "reported_by_content_script",
+      unresolved_reason_count: resolution.reportedUnresolvedCount,
+      status: "observed",
+      stage: "collector_project_metadata_unresolved_reason",
+      target_tab_id: pending?.tabId
+    });
+  }
+  return resolution;
+}
+
+function recordCollectorProjectMetadataResolutionFailure(resolution, pending, errorCode) {
+  const base = {
+    request_id: pending?.requestId,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: pending?.tabId,
+    ...projectDiscoveryTraceFields(pending),
+    discovered_project_count: resolution.discoveredCount,
+    resolved_project_count: resolution.resolvedCount,
+    unresolved_project_count: resolution.unresolvedCount,
+    reported_unresolved_project_count: resolution.reportedUnresolvedCount,
+    status: "error",
+    error_code: errorCode || "context_projects_incomplete",
+    stage: "collector_project_metadata_resolution_failed",
+    target_tab_id: pending?.tabId
+  };
+  diagnostic("collector project metadata resolution failed", base);
+  for (const [reason, count] of resolution.unresolvedReasonCounts) {
+    diagnostic("collector project metadata unresolved reason", {
+      request_id: pending?.requestId,
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: pending?.tabId,
+      unresolved_reason: reason,
+      unresolved_reason_count: count,
+      status: "error",
+      error_code: errorCode || "context_projects_incomplete",
+      stage: "collector_project_metadata_unresolved_reason_failed",
+      target_tab_id: pending?.tabId
+    });
+  }
+  if (resolution.reportedUnresolvedCount > 0 && resolution.unresolvedReasonCounts.size === 0) {
+    diagnostic("collector project metadata unresolved reason", {
+      request_id: pending?.requestId,
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: pending?.tabId,
+      unresolved_reason: "reported_by_content_script",
+      unresolved_reason_count: resolution.reportedUnresolvedCount,
+      status: "error",
+      error_code: errorCode || "context_projects_incomplete",
+      stage: "collector_project_metadata_unresolved_reason_failed",
+      target_tab_id: pending?.tabId
+    });
+  }
 }
 
 function validateCollectorProjectResult(source, pending) {
@@ -2548,81 +3041,176 @@ function validateCollectorProjectResult(source, pending) {
     "context_projects_incomplete");
 }
 
-async function collectCollectorRootResult(tab, pending, request) {
-  let lastUnresolvedProjectCount = 0;
-  for (let attempt = 0; attempt < COLLECTOR_PROJECT_DISCOVERY_MAX_RETRIES; attempt += 1) {
-    throwIfCollectorRequestSuperseded(pending);
-    const rootResult = await dispatchToContentScript(tab.id, {
-      type: "GET_CHATGPT_CONTEXT",
-      requestId: pending.requestId,
-      mode: "list",
-      collection: "root",
-      maxScrolls: COLLECTOR_PROJECT_SCROLL_MAX,
-      maxMoreClicks: 12,
-      timeoutMs: COLLECTOR_ROOT_TIMEOUT_MS,
-      resolveProjectIds: true,
-      maxProjectResolutions: COLLECTOR_MAX_PROJECTS,
-      projectResolutionTimeoutMs: COLLECTOR_PROJECT_RESOLUTION_TIMEOUT_MS
-    }, request, {
-      timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
-      timeoutStage: "collector_content_script_timeout"
+async function collectProjectsOnce(tab, pending, request) {
+  throwIfCollectorRequestSuperseded(pending);
+  const rootResult = await dispatchToContentScript(tab.id, {
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: pending.requestId,
+    mode: "list",
+    collection: "root",
+    maxScrolls: COLLECTOR_PROJECT_SCROLL_MAX,
+    // Project discovery reuses the established metadata-only Sidebar scan.
+    // An explicitly labelled "さらに表示/もっと見る" control may be
+    // expanded so virtualized Project metadata can appear. It is not a
+    // Project candidate and is never used to infer an ID; generic Sidebar
+    // rows remain non-clickable.
+    maxMoreClicks: 12,
+    allowSidebarControls: true,
+    timeoutMs: COLLECTOR_ROOT_TIMEOUT_MS,
+    projectDiscoverySource: "existing_project_section_metadata"
+  }, request, {
+    timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
+    timeoutStage: "collector_content_script_timeout"
+  });
+  // A newer Refresh may supersede this request while the Content Script was
+  // scanning. Do not let that old response update Collector telemetry or
+  // become the input to metadata resolution even if the Chrome message call
+  // itself completed successfully.
+  throwIfCollectorRequestSuperseded(pending);
+  recordCollectorProjectDiscoveryResult(rootResult, pending);
+  // Validate only the response envelope and correlation here. Project
+  // identity resolution belongs to the orchestration layer, after this
+  // completed Sidebar scan has handed its immutable arrays to Background.
+  validateCollectorRootResult(rootResult, pending);
+  recordCollectorScrollTelemetry(rootResult, pending, {
+    project_index: -1,
+    stage: "collector_root_sidebar_scan"
+  });
+
+  if (rootResult.sidebar_scroll_complete === true
+    && rootResult.project_section_found === true) {
+    return rootResult;
+  }
+
+  diagnostic("collector root sidebar scan incomplete", {
+    request_id: pending.requestId,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: pending.tabId,
+    sidebar_scroll_top: rootResult.sidebar_scroll_top,
+    sidebar_scroll_height: rootResult.sidebar_scroll_height,
+    sidebar_client_height: rootResult.sidebar_client_height,
+    sidebar_can_scroll: rootResult.sidebar_can_scroll === true,
+    sidebar_at_bottom: rootResult.sidebar_at_bottom === true,
+    visible_project_rows: rootResult.visible_project_rows,
+    discovered_project_count: rootResult.projects.length,
+    content_discovered_project_count: rootResult.discovered_project_count,
+    project_section_found: rootResult.project_section_found === true,
+    no_growth_count: rootResult.no_growth_count,
+    sidebar_scroll_complete: rootResult.sidebar_scroll_complete === true,
+    status: "error",
+    error_code: "context_projects_incomplete",
+    stage: "collector_root_sidebar_scan_incomplete",
+    target_tab_id: pending.tabId
+  });
+  throw bridgeError("ChatGPT Projectを取得できませんでした。", 0, "context_projects_incomplete");
+}
+
+function collectCollectorRootResult(tab, pending, request, caller = "refresh_orchestration") {
+  const discovery = projectDiscoveryStateFor(pending);
+  if (discovery.completed && discovery.result) {
+    discovery.alreadyCompleted = true;
+    recordProjectDiscoveryTelemetry("collector project discovery duplicate suppressed", pending, {
+      project_discovery_caller: caller,
+      status: "suppressed",
+      stage: "collector_project_discovery_already_completed",
+      target_tab_id: pending.tabId
     });
-    lastUnresolvedProjectCount = validateCollectorRootResult(rootResult, pending);
-    recordCollectorScrollTelemetry(rootResult, pending, {
-      project_index: -1,
-      stage: "collector_root_sidebar_scan"
+    return Promise.resolve(discovery.result);
+  }
+  if (discovery.inFlight && discovery.promise) {
+    recordProjectDiscoveryTelemetry("collector project discovery in-flight duplicate suppressed", pending, {
+      project_discovery_caller: caller,
+      status: "suppressed",
+      stage: "collector_project_discovery_in_flight",
+      target_tab_id: pending.tabId
     });
-    if (rootResult.sidebar_scroll_complete === true
-      && rootResult.project_section_found === true
-      && rootResult.projects.length > 0
-      && lastUnresolvedProjectCount === 0) return rootResult;
-    if (rootResult.sidebar_scroll_complete !== true) {
-      diagnostic("collector root sidebar scan incomplete", {
-        request_id: pending.requestId,
-        collector_window_id: collectorWindowState.windowId,
-        collector_tab_id: pending.tabId,
-        sidebar_scroll_top: rootResult.sidebar_scroll_top,
-        sidebar_scroll_height: rootResult.sidebar_scroll_height,
-        sidebar_client_height: rootResult.sidebar_client_height,
-        sidebar_can_scroll: rootResult.sidebar_can_scroll === true,
-        sidebar_at_bottom: rootResult.sidebar_at_bottom === true,
-        visible_project_rows: rootResult.visible_project_rows,
-        discovered_project_count: rootResult.discovered_project_count,
-        project_section_found: rootResult.project_section_found === true,
-        no_growth_count: rootResult.no_growth_count,
-        sidebar_scroll_complete: false,
-        status: "retrying",
-        error_code: "context_projects_incomplete",
-        stage: "collector_root_sidebar_scan_incomplete",
+    return discovery.promise;
+  }
+
+  discovery.callCount += 1;
+  discovery.started = true;
+  discovery.caller = caller;
+  discovery.inFlight = true;
+  discovery.alreadyCompleted = false;
+  recordProjectDiscoveryTelemetry("collector project discovery started", pending, {
+    project_discovery_caller: caller,
+    status: "started",
+    stage: "collector_project_discovery_start",
+    target_tab_id: pending.tabId
+  });
+
+  const runPromise = (async () => {
+    try {
+      const rootResult = await collectProjectsOnce(tab, pending, request);
+      throwIfCollectorRequestSuperseded(pending);
+      const resultShape = pending.collectorProjectDiscoveryResultShape
+        || recordCollectorProjectDiscoveryResult(rootResult, pending);
+      const projectResolution = recordCollectorProjectMetadataResolution(rootResult, pending);
+      const unresolvedProjectCount = validateCollectorRootResult(rootResult, pending);
+      const projectDataLostBetweenLayers = resultShape.contentDiscoveredProjectCount !== null
+        && resultShape.contentDiscoveredProjectCount > resultShape.backgroundProjectsLength;
+      if (projectDataLostBetweenLayers || rootResult.projects.length === 0 || unresolvedProjectCount > 0) {
+        const errorCode = "context_projects_incomplete";
+        recordCollectorProjectMetadataResolutionFailure(
+          projectResolution,
+          pending,
+          errorCode);
+        diagnostic("collector project result handoff incomplete", {
+          request_id: pending.requestId,
+          refresh_generation: projectDiscoveryStateFor(pending).refreshGeneration,
+          project_discovery_run_id: projectDiscoveryStateFor(pending).runId,
+          project_discovery_call_count: projectDiscoveryStateFor(pending).callCount,
+          project_discovery_result_received: true,
+          discovered_project_count: rootResult.projects.length,
+          background_projects_length: resultShape.backgroundProjectsLength,
+          content_discovered_project_count: resultShape.contentDiscoveredProjectCount,
+          response_shape: resultShape.responseShape,
+          status: "error",
+          error_code: projectDataLostBetweenLayers
+            ? "collector_project_result_handoff_mismatch"
+            : errorCode,
+          stage: "collector_project_result_handoff_incomplete",
+          target_tab_id: pending.tabId
+        });
+        throw bridgeError(
+          unresolvedProjectCount > 0 || projectDataLostBetweenLayers
+            ? "ChatGPT Projectのmetadataを完全には取得できませんでした。"
+            : "ChatGPT Projectを取得できませんでした。",
+          0,
+          errorCode);
+      }
+      discovery.result = rootResult;
+      discovery.completed = true;
+      pending.projectDiscoveryResult = rootResult;
+      discovery.inFlight = false;
+      recordProjectDiscoveryTelemetry("collector project discovery completed", pending, {
+        project_discovery_caller: caller,
+        status: "completed",
+        stage: "collector_project_discovery_complete",
+        discovered_project_count: rootResult.projects.length,
+        discovered_chat_count: rootResult.conversations.length,
         target_tab_id: pending.tabId
       });
+      return rootResult;
+    } catch (error) {
+      discovery.result = null;
+      discovery.completed = false;
+      discovery.inFlight = false;
+      recordProjectDiscoveryTelemetry("collector project discovery failed", pending, {
+        project_discovery_caller: caller,
+        status: "error",
+        error_code: error?.code || "context_projects_incomplete",
+        stage: error?.stage || "collector_project_discovery_failed",
+        target_tab_id: pending.tabId
+      });
+      throw error;
+    } finally {
+      if (discovery.promise === runPromise) discovery.promise = null;
+      syncProjectDiscoveryTelemetry(pending, discovery);
     }
-
-    collectorWindowState = {
-      ...collectorWindowState,
-      projectDiscoveryRetryCount: attempt + 1
-    };
-    collectorWindowLifecycle("WaitingProjects", {
-      tabId: tab.id,
-      projectDiscoveryRetryCount: attempt + 1,
-      discoveredProjectCount: rootResult.projects.length,
-      discoveredChatCount: rootResult.conversations.length
-    });
-    if (attempt + 1 >= COLLECTOR_PROJECT_DISCOVERY_MAX_RETRIES) break;
-    await wait(COLLECTOR_PROJECT_DISCOVERY_RETRY_DELAY_MS);
-    // Re-check the DOM/layout before retrying a zero-growth root scan. This
-    // waits for ChatGPT hydration without ever changing the Execution Tab.
-    await ensureCollectorViewport(tab, {
-      request_id: pending.requestId,
-      stage: "collector_project_discovery_retry"
-    });
-  }
-  throw bridgeError(
-    lastUnresolvedProjectCount > 0
-      ? "ChatGPT ProjectのIDを完全には取得できませんでした。"
-      : "ChatGPT Projectを取得できませんでした。",
-    0,
-    "context_projects_incomplete");
+  })();
+  discovery.promise = runPromise;
+  return runPromise;
 }
 
 async function collectCompleteChatGptContext(tab, pending, request) {
@@ -2636,12 +3224,39 @@ async function collectCompleteChatGptContext(tab, pending, request) {
     conversations: [],
     current: null
   };
-  const rootResult = await collectCollectorRootResult(tab, pending, request);
+  // Project discovery is completed by the refresh orchestration before this
+  // function is entered. Chat retries resume from that immutable catalog and
+  // must never re-enter Project discovery merely because a later Project-page
+  // Chat scan or navigation failed.
+  const rootResult = pending.projectDiscoveryResult;
+  const discovery = projectDiscoveryStateFor(pending);
+  if (!rootResult || !discovery.completed || discovery.result !== rootResult) {
+    diagnostic("collector Project navigation blocked before discovery", {
+      request_id: pending.requestId,
+      refresh_generation: discovery.refreshGeneration,
+      project_discovery_run_id: discovery.runId,
+      project_discovery_call_count: discovery.callCount,
+      project_discovery_completed: discovery.completed,
+      project_discovery_result_received: Boolean(rootResult),
+      status: "error",
+      error_code: "collector_project_navigation_before_discovery",
+      stage: "collector_project_navigation_guard",
+      target_tab_id: pending.tabId
+    });
+    throw bridgeError(
+      "ChatGPT Project metadataが確定していません。",
+      0,
+      "context_projects_incomplete");
+  }
   mergeCollectorMetadata(aggregate, rootResult);
   throwIfCollectorRequestSuperseded(pending);
   collectorWindowLifecycle("CollectingProjects", {
     tabId: tab.id,
     currentProjectId: null,
+    currentProjectUrl: null,
+    collectorNavigationTarget: null,
+    projectDiscoverySource: rootResult.project_discovery_source
+      || collectorWindowState.projectDiscoverySource,
     projectIndex: -1,
     totalProjects: aggregate.projects.length,
     discoveredProjectCount: aggregate.projects.length,
@@ -2655,34 +3270,48 @@ async function collectCompleteChatGptContext(tab, pending, request) {
     collectorWindowLifecycle("CollectingProject", {
       tabId: tab.id,
       currentProjectId: target?.projectId || null,
+      currentProjectUrl: target?.projectUrl || null,
+      collectorNavigationTarget: target?.projectUrl || null,
       projectIndex: index,
       totalProjects: projects.length,
       discoveredProjectCount: aggregate.projects.length,
       discoveredChatCount: aggregate.conversations.length
     });
     if (!target) {
-      diagnostic("collector project skipped", {
+      diagnostic("collector project identity invalid", {
         request_id: pending.requestId,
         project_index: index,
         total_projects: projects.length,
-        status: "skipped",
+        status: "error",
+        error_code: "context_projects_incomplete",
         stage: "collector_project_identity_missing"
       });
-      continue;
+      throw bridgeError(
+        "ChatGPT ProjectのIDまたはURLを取得できませんでした。",
+        0,
+        "context_projects_incomplete");
     }
     tab = await navigateCollectorTab(
       await ensureCollectorWindow(COLLECTOR_TAB_URL, {
         request_id: pending.requestId,
         project_id: target.projectId,
         project_index: index,
-        total_projects: projects.length
+        total_projects: projects.length,
+        project_discovery_completed: true,
+        project_discovery_run_id: discovery.runId,
+        project_discovery_result_received: true,
+        stage: "collector_project_navigation"
       }),
       target.projectUrl,
       {
         request_id: pending.requestId,
         project_id: target.projectId,
         project_index: index,
-        total_projects: projects.length
+        total_projects: projects.length,
+        project_discovery_completed: true,
+        project_discovery_run_id: discovery.runId,
+        project_discovery_result_received: true,
+        stage: "collector_project_navigation"
       });
     tab = await reconcileCollectorWindowTabs(
       collectorWindowState.windowId,
@@ -2733,6 +3362,8 @@ async function collectCompleteChatGptContext(tab, pending, request) {
     collectorWindowLifecycle("CollectingProject", {
       tabId: tab.id,
       currentProjectId: target.projectId,
+      currentProjectUrl: target.projectUrl,
+      collectorNavigationTarget: target.projectUrl,
       projectIndex: index,
       totalProjects: projects.length,
       discoveredProjectCount: aggregate.projects.length,
@@ -2742,6 +3373,8 @@ async function collectCompleteChatGptContext(tab, pending, request) {
   collectorWindowLifecycle("Collected", {
     tabId: tab.id,
     currentProjectId: null,
+    currentProjectUrl: null,
+    collectorNavigationTarget: null,
     projectIndex: projects.length,
     totalProjects: projects.length,
     discoveredProjectCount: aggregate.projects.length,
@@ -2766,28 +3399,46 @@ async function collectContextWithRecovery(tab, pending, request) {
           retry_count: attempt
         });
         pending.tabId = tab.id;
+        pending.collectorWindowId = collectorWindowState.windowId;
+        pending.collectorMediumLost = false;
+        pending.collectorMediumLossReason = null;
       }
       tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
         request_id: pending.requestId,
-        retry_count: attempt
+        retry_count: attempt,
+        stage: "collector_root_navigation"
       });
       pending.tabId = tab.id;
-      tab = await ensureCollectorViewport(tab, {
+      tab = await ensureCollectorReady(tab, {
         request_id: pending.requestId,
         retry_count: attempt,
         stage: "collector_viewport_required"
       });
       pending.tabId = tab.id;
+      pending.collectorWindowId = collectorWindowState.windowId;
+      if (!pending.currentOnly && !pending.projectDiscoveryResult) {
+        // This is the single explicit Project discovery entry point for the
+        // current Refresh generation. Recovery after a completed root scan
+        // skips it and reuses pending.projectDiscoveryResult.
+        await collectCollectorRootResult(tab, pending, request, "refresh_orchestration");
+      }
       return await collectCompleteChatGptContext(tab, pending, request);
     } catch (error) {
       if (!isCurrentCollectorRequest(pending)) throw error;
       lastError = error;
-      if ([
+      const terminalError = [
         "context_projects_incomplete",
         "collector_viewport_too_narrow",
         "collector_sidebar_not_ready",
         "collector_viewport_resize_failed"
-      ].includes(error?.code)) {
+      ].includes(error?.code);
+      // A failed metadata scan is one-shot. The only permitted second Project
+      // scan is a genuine Collector medium loss reported by the Chrome
+      // lifecycle listeners while that scan was in flight. Ordinary DOM
+      // readiness/retry paths must surface the error instead of starting a
+      // second scan and moving the Sidebar back to the top.
+      const canRecover = pending.collectorMediumLost === true && attempt === 0;
+      if (!canRecover || (terminalError && pending.collectorMediumLost !== true)) {
         diagnostic("collector refresh terminal failure", {
           request_id: pending.requestId,
           retry_count: attempt,
@@ -2837,7 +3488,19 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
   // Managed Execution Tab or a user's foreground tab.
   await withCollectorWindowOperation(async () => {
     let tab = null;
-    const pending = { requestId, currentOnly, bridgeSocket, tabId: null, message: request, generation };
+    const pending = {
+      requestId,
+      currentOnly,
+      bridgeSocket,
+      tabId: null,
+      collectorWindowId: null,
+      collectorMediumLost: false,
+      collectorMediumLossReason: null,
+      projectDiscoveryResult: null,
+      message: request,
+      generation
+    };
+    const projectDiscovery = currentOnly ? null : projectDiscoveryStateFor(pending);
     try {
       throwIfCollectorRequestSuperseded(pending);
       if (bridgeSocket !== socket || bridgeSocket.readyState !== WebSocket.OPEN) {
@@ -2849,8 +3512,18 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
       collectorWindowState = {
         ...collectorWindowState,
         requestId,
+        refreshGeneration: generation,
         retryCount: 0,
         projectDiscoveryRetryCount: 0,
+        projectDiscoveryRunId: projectDiscovery?.runId || null,
+        projectDiscoveryCallCount: projectDiscovery?.callCount || 0,
+        projectDiscoveryStarted: projectDiscovery?.started === true,
+        projectDiscoveryCompleted: projectDiscovery?.completed === true,
+        projectDiscoveryCaller: projectDiscovery?.caller || null,
+        projectDiscoveryInFlight: projectDiscovery?.inFlight === true,
+        projectDiscoveryAlreadyCompleted: false,
+        projectDiscoveryScrollDirection: null,
+        projectDiscoveryRestoreCount: 0,
         viewportRetryCount: 0,
         windowWidth: null,
         windowHeight: null,
@@ -2870,6 +3543,9 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
         noGrowthCount: 0,
         currentProjectId: null,
         projectIndex: -1,
+        projectDiscoverySource: "existing_project_section_metadata",
+        currentProjectUrl: null,
+        collectorNavigationTarget: null,
         totalProjects: 0,
         discoveredProjectCount: 0,
         discoveredChatCount: 0
@@ -2878,11 +3554,19 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
         request_id: requestId,
         stage: currentOnly ? "context_current_requested" : "context_list_requested"
       });
-      tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
-        request_id: requestId,
-        stage: currentOnly ? "context_current_navigation" : "context_list_navigation"
-      });
+      // Full refreshes enter collectContextWithRecovery with the existing
+      // Collector Tab still on whatever page the previous scan used. That
+      // orchestration step is the single owner of the root navigation. Do
+      // not navigate here as well; doing so both duplicated the transition
+      // and made a root return look like Project navigation in telemetry.
+      if (currentOnly) {
+        tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
+          request_id: requestId,
+          stage: "context_current_navigation"
+        });
+      }
       pending.tabId = tab.id;
+      pending.collectorWindowId = collectorWindowState.windowId;
       contextRequests.set(requestId, pending);
       diagnostic("chatgpt.context request dispatched", {
         request_id: requestId,
@@ -2930,6 +3614,13 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
       }
     } finally {
       contextRequests.delete(requestId);
+      // The Collector Tab is reusable, but a medium-loss recovery can replace
+      // its ID while collectContextWithRecovery is running. Release the tab
+      // currently owned by the pending request rather than the stale local
+      // reference captured before recovery.
+      if (Number.isSafeInteger(pending.tabId)) {
+        try { tab = await chrome.tabs.get(pending.tabId); } catch (_) { tab = null; }
+      }
       if (!tab) tab = await getCollectorTab();
       await releaseCollectorTab(tab);
     }
@@ -5769,6 +6460,10 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
   }
   if (isCollectorWindowTab
     && (changeInfo?.discarded === true || changeInfo?.frozen === true)) {
+    markCollectorRequestMediumLost(
+      tabId,
+      tab?.windowId,
+      changeInfo.discarded === true ? "collector_tab_discarded" : "collector_tab_frozen");
     collectorWindowLifecycle("Recoverable", {
       windowId: collectorWindowState.windowId,
       tabId,
@@ -6042,6 +6737,9 @@ chrome.windows?.onFocusChanged?.addListener?.((windowId) => {
 
 chrome.tabs.onRemoved?.addListener?.((tabId, removeInfo) => {
   if (tabId === collectorWindowState.tabId) {
+    markCollectorRequestMediumLost(tabId, removeInfo?.windowId, "collector_tab_removed");
+  }
+  if (tabId === collectorWindowState.tabId) {
     collectorWindowState = {
       ...collectorWindowState,
       tabId: null,
@@ -6089,6 +6787,7 @@ chrome.tabs.onRemoved?.addListener?.((tabId, removeInfo) => {
 
 chrome.windows?.onRemoved?.addListener?.((windowId) => {
   if (windowId === collectorWindowState.windowId) {
+    markCollectorRequestMediumLost(null, windowId, "collector_window_removed");
     const collectorTabId = collectorWindowState.tabId;
     collectorWindowState = { ...defaultCollectorWindowState };
     void persistCollectorWindowState();

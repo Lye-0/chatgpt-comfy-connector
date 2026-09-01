@@ -398,17 +398,20 @@ fallback. Project routes are identified from stable `g-p-*` routes such as
 under `Projectなし`, and `＋ 新しいChat` represents a new-chat target whose
 conversation ID is not known until the first Handoff is accepted.
 
-The list request uses a locator-owned Collector discovery helper. It expands a
-bounded number of `さらに表示`/`もっと見る` controls, selects the visible
-sidebar shell with the complete Project catalog and its actual Project-owning
-scrollport, then scans incrementally for lazy/virtualized Project and
-Projectless Conversation rows. It reuses the same active Collector Tab to
-visit each resolved Project URL. The sidebar and Project-page scrollports are
-rebound after SPA DOM replacement and every independent Project-page list is
-scanned without jumping back to the first container.
-Button-only Project rows are opened one at a time in that Collector Tab so the
-resulting SPA Project URL supplies the real ID; a title is never used as an
-identity. Each resolved Project page is scanned with bounded incremental
+The list request uses a locator-owned Collector discovery helper. Project
+discovery reuses the previously successful metadata-only route exactly once
+per refresh generation: the first known ChatGPT history sidebar, its visible
+`[role="button"][data-sidebar-item="true"]` rows, Project-home anchors, and
+one bounded sidebar scroll container. It may expand only a dedicated
+`さらに表示`/`もっと見る` utility button; it never opens a generic row to infer
+an ID, so navigation items such as `/schedule` and `/plugins` cannot become
+Project targets. Readiness only checks the Window, active Tab, viewport, and
+Sidebar root; it does not scroll or collect rows. The root scan freezes its
+Sidebar and scroll container, moves only downward, restores once, and passes
+the resulting Project catalog to the same active Collector Tab for direct
+Project URL visits. The sidebar and Project-page scrollports are rebound
+after SPA DOM replacement only for the Project-page Chat scan, and every
+independent Project-page list is scanned without jumping back to the first container. Each resolved Project page is scanned with bounded incremental
 scrolling until no new Conversation IDs appear; duplicate
 Project/Conversation metadata is merged by ID and the original scroll
 positions are restored. If a Project row cannot be resolved within the

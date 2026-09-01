@@ -132,6 +132,57 @@ class FakeSidebar extends FakeMetadataNode {
   }
 }
 
+class NestedScrollableSidebar extends FakeMetadataNode {
+  constructor(document, projectNames) {
+    super(document, "NAV");
+    this.projectRows = projectNames.map((name, index) => {
+      const row = new FakeMetadataNode(document, "DIV", "", {
+        role: "button",
+        "data-sidebar-item": "true",
+        "aria-expanded": "false"
+      });
+      row.appendChild(new FakeMetadataNode(document, "SPAN", name, { "data-marquee-text": "true" }));
+      row.appendChild(new FakeMetadataNode(document, "A", name, {
+        href: `/g/g-p-${index}/project`
+      }));
+      return row;
+    });
+    this.scrollport = new FakeMetadataNode(document, "DIV", "", { class: "scrollport" });
+    this.scrollport._scrollTop = 0;
+    this.scrollport.clientHeight = 100;
+    this.scrollport.scrollHeight = 500;
+    Object.defineProperty(this.scrollport, "scrollTop", {
+      configurable: true,
+      get: () => this.scrollport._scrollTop,
+      set: (value) => { this.scrollport._scrollTop = Number(value) || 0; }
+    });
+    this.projectRows.forEach((row) => this.scrollport.appendChild(row));
+    this.appendChild(this.scrollport);
+  }
+
+  get currentProjectRows() {
+    const start = Math.min(
+      Math.max(0, this.projectRows.length - 2),
+      Math.floor(this.scrollport.scrollTop / 80));
+    return this.projectRows.slice(start, start + 2);
+  }
+
+  querySelectorAll(selector) {
+    if (selector.includes("scrollport") || selector.includes("data-sidebar-scroll-container")) {
+      return [this.scrollport];
+    }
+    if (selector.includes("data-sidebar-item")) return this.currentProjectRows;
+    if (selector.includes('role="button"')) return this.currentProjectRows;
+    if (selector.includes("data-marquee-text")) {
+      return this.currentProjectRows.flatMap((row) => row.querySelectorAll(selector));
+    }
+    if (selector === "a[href]") {
+      return this.currentProjectRows.flatMap((row) => row.querySelectorAll(selector));
+    }
+    return [];
+  }
+}
+
 class FakeMetadataDocument extends FakeMetadataNode {
   constructor(href, sidebar) {
     super(null, "DOCUMENT");
@@ -162,6 +213,31 @@ class FakeProjectDocument extends FakeMetadataNode {
 
   querySelectorAll(selector) {
     if (selector.startsWith("nav[")) return [this.sidebar];
+    return super.querySelectorAll(selector);
+  }
+}
+
+class MultiSidebarDocument extends FakeMetadataNode {
+  constructor(href, sidebars) {
+    super(null, "DOCUMENT");
+    this.ownerDocument = this;
+    this.location = { href };
+    this.title = "ChatGPT";
+    this.sidebars = sidebars;
+    sidebars.forEach((sidebar) => this.appendChild(sidebar));
+  }
+
+  querySelectorAll(selector) {
+    if (selector.startsWith("nav[")
+      || selector === "nav"
+      || selector.includes('role="navigation"')
+      || selector.includes("data-testid=\"sidebar\"")) {
+      return this.sidebars.filter((sidebar) => {
+        if (selector === "nav") return sidebar.tagName === "NAV";
+        if (selector.includes('role="navigation"')) return sidebar.getAttribute("role") === "navigation";
+        return sidebar.tagName === "NAV";
+      });
+    }
     return super.querySelectorAll(selector);
   }
 }
@@ -200,6 +276,9 @@ test("conversation and project identities are extracted from ChatGPT URLs", () =
   assert.equal(
     locators.projectIdFromUrl("https://chatgpt.com/g/g-custom/c/conversation-01"),
     null);
+  assert.equal(
+    locators.projectIdFromUrl("https://chatgpt.com/g/g-p-project-a"),
+    "g-p-project-a");
   assert.equal(
     locators.conversationIdFromUrl("https://example.invalid/c/not-chatgpt"),
     null);
@@ -264,6 +343,153 @@ test("missing sidebar DOM safely falls back to current URL and bounded document 
   });
 });
 
+test("Collector viewport reports the desktop sidebar breakpoint and readiness separately", () => {
+  const document = new FakeMetadataDocument("https://chatgpt.com/", null);
+  const sidebar = new FakeSidebar(document, ["Project A"], [], null);
+  document.sidebar = sidebar;
+  document.defaultView = {
+    innerWidth: 769,
+    innerHeight: 540,
+    getComputedStyle() { return { display: "", visibility: "" }; }
+  };
+  const locators = loadLocators(document);
+
+  const narrow = locators.getChatGptCollectorViewport(document);
+  assert.equal(narrow.content_inner_width, 769);
+  assert.equal(narrow.sidebar_expected_visible, false);
+  assert.equal(narrow.desktop_layout, false);
+  assert.equal(narrow.sidebar_ready, false);
+
+  document.defaultView.innerWidth = 770;
+  const desktop = locators.getChatGptCollectorViewport(document);
+  assert.equal(desktop.content_inner_width, 770);
+  assert.equal(desktop.sidebar_expected_visible, true);
+  assert.equal(desktop.desktop_layout, true);
+  assert.equal(desktop.sidebar_container_exists, true);
+  assert.equal(desktop.project_section_exists, true);
+  assert.equal(desktop.project_row_locator_ready, true);
+  assert.equal(desktop.sidebar_ready, true);
+});
+
+test("sidebar discovery prefers the visible shell containing the full Project catalog", () => {
+  const document = new MultiSidebarDocument("https://chatgpt.com/", []);
+  const expandedSidebar = new FakeMetadataNode(document, "NAV", "", {
+    role: "navigation",
+    class: "sidebar current-project"
+  });
+  const expandedProject = new FakeMetadataNode(document, "DIV", "", {
+    role: "button",
+    "data-sidebar-item": "true",
+    "aria-expanded": "true"
+  });
+  expandedProject.appendChild(new FakeMetadataNode(document, "SPAN", "ChatGPT-Comfy-Connector", {
+    "data-marquee-text": "true"
+  }));
+  expandedProject.appendChild(new FakeMetadataNode(document, "A", "追加実装", {
+    href: "/c/connector-chat"
+  }));
+  expandedSidebar.appendChild(expandedProject);
+
+  const fullSidebar = new FakeMetadataNode(document, "NAV", "", {
+    role: "navigation"
+  });
+  for (const name of ["Others", "Chess", "Git", "Python", "Web Atlas"]) {
+    const row = new FakeMetadataNode(document, "DIV", "", {
+      role: "button",
+      "data-sidebar-item": "true",
+      "aria-expanded": "false"
+    });
+    row.appendChild(new FakeMetadataNode(document, "SPAN", name, {
+      "data-marquee-text": "true"
+    }));
+    fullSidebar.appendChild(row);
+  }
+  fullSidebar.scrollTop = 0;
+  fullSidebar.clientHeight = 100;
+  fullSidebar.scrollHeight = 500;
+  expandedSidebar.scrollTop = 0;
+  expandedSidebar.clientHeight = 100;
+  expandedSidebar.scrollHeight = 100;
+  document.sidebars = [expandedSidebar, fullSidebar];
+
+  const locators = loadLocators(document);
+  assert.equal(locators.findSidebarRoot(document), fullSidebar);
+  assert.deepEqual(
+    Array.from(locators.findProjectRows(document), (row) => locators.visibleTitleFromElement(row)),
+    ["Others", "Chess", "Git", "Python", "Web Atlas"]);
+});
+
+test("Project row lookup keeps the selected outer Sidebar when it contains an expanded inner shell", () => {
+  const document = new MultiSidebarDocument("https://chatgpt.com/", []);
+  const outerSidebar = new FakeMetadataNode(document, "NAV", "", {
+    role: "navigation",
+    class: "sidebar desktop"
+  });
+  const innerSidebar = new FakeMetadataNode(document, "NAV", "", {
+    role: "navigation",
+    class: "sidebar current-project"
+  });
+  const currentProject = new FakeMetadataNode(document, "DIV", "", {
+    role: "button",
+    "data-sidebar-item": "true",
+    "aria-expanded": "true"
+  });
+  currentProject.appendChild(new FakeMetadataNode(document, "SPAN", "Current Project", {
+    "data-marquee-text": "true"
+  }));
+  currentProject.appendChild(new FakeMetadataNode(document, "A", "Current chat", {
+    href: "/c/current-chat"
+  }));
+  innerSidebar.appendChild(currentProject);
+  outerSidebar.appendChild(innerSidebar);
+  for (const name of ["Project A", "Project B", "Project C"]) {
+    const row = new FakeMetadataNode(document, "DIV", "", {
+      role: "button",
+      "data-sidebar-item": "true",
+      "aria-expanded": "false"
+    });
+    row.appendChild(new FakeMetadataNode(document, "SPAN", name, {
+      "data-marquee-text": "true"
+    }));
+    outerSidebar.appendChild(row);
+  }
+  document.sidebars = [outerSidebar, innerSidebar];
+
+  const locators = loadLocators(document);
+  assert.equal(locators.findSidebarRoot(document), outerSidebar);
+  assert.deepEqual(
+    Array.from(locators.findProjectRows(document), (row) => locators.visibleTitleFromElement(row)),
+    ["Current Project", "Project A", "Project B", "Project C"]);
+});
+
+test("root Project discovery does not select a deeper Chat-only scrollport", () => {
+  const document = new FakeMetadataDocument("https://chatgpt.com/", null);
+  const sidebar = new FakeMetadataNode(document, "NAV");
+  sidebar.scrollTop = 0;
+  sidebar.clientHeight = 100;
+  sidebar.scrollHeight = 500;
+  const projectRow = new FakeMetadataNode(document, "DIV", "", {
+    role: "button",
+    "data-sidebar-item": "true",
+    "aria-expanded": "true"
+  });
+  projectRow.appendChild(new FakeMetadataNode(document, "SPAN", "Current Project", {
+    "data-marquee-text": "true"
+  }));
+  const chatScrollport = new FakeMetadataNode(document, "DIV", "", { class: "scrollport" });
+  chatScrollport.scrollTop = 0;
+  chatScrollport.clientHeight = 100;
+  chatScrollport.scrollHeight = 400;
+  const chat = new FakeMetadataNode(document, "A", "Chat", { href: "/c/current-chat" });
+  chatScrollport.appendChild(chat);
+  projectRow.appendChild(chatScrollport);
+  sidebar.appendChild(projectRow);
+  document.sidebar = sidebar;
+
+  const locators = loadLocators(document);
+  assert.equal(locators.findSidebarScrollContainer(document), sidebar);
+});
+
 test("sidebar metadata uses visible title nodes and excludes aria descriptions", () => {
   const document = new FakeDocument("https://chatgpt.com/c/current");
   const anchorNode = new FakeMetadataNode(document, "A", "", {
@@ -322,6 +548,43 @@ test("async sidebar discovery expands more, scans virtualized rows, deduplicates
   assert.equal(sidebar.scrollTop, initialScrollTop);
 });
 
+test("sidebar discovery selects the real nested scroll container and reports completion telemetry", async () => {
+  const href = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new NestedScrollableSidebar(document, [
+    "Project 0",
+    "Project 1",
+    "Project 2",
+    "Project 3",
+    "Project 4",
+    "Project 5"
+  ]);
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+
+  assert.equal(locators.findSidebarScrollContainer(document), sidebar.scrollport);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 12,
+    initialSettleMs: 0
+  });
+
+  assert.deepEqual(Array.from(snapshot.projects, (project) => project.project_id), [
+    "g-p-0",
+    "g-p-1",
+    "g-p-2",
+    "g-p-3",
+    "g-p-4",
+    "g-p-5"
+  ]);
+  assert.equal(snapshot.sidebar_scroll_container_found, true);
+  assert.equal(snapshot.sidebar_can_scroll, true);
+  assert.equal(snapshot.sidebar_at_bottom, true);
+  assert.equal(snapshot.sidebar_scroll_complete, true);
+  assert.equal(snapshot.project_section_found, true);
+  assert.equal(snapshot.discovered_project_count, 6);
+  assert.equal(sidebar.scrollport.scrollTop, 0);
+});
+
 test("async sidebar discovery resolves title-only Project rows from their navigated IDs", async () => {
   const rootHref = "https://chatgpt.com/";
   const document = new FakeMetadataDocument(rootHref, null);
@@ -353,6 +616,53 @@ test("async sidebar discovery resolves title-only Project rows from their naviga
   assert.equal(snapshot.projects.every((project) => project.url.endsWith("/project")), true);
   assert.equal(snapshot.unresolved_project_count, 0);
   assert.equal(document.location.href, rootHref);
+});
+
+test("async Project discovery rebinds the Sidebar after each SPA navigation", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const projectIds = ["g-p-replaced-first", "g-p-replaced-second", "g-p-replaced-third"];
+  let navigationIndex = -1;
+
+  const createRootSidebar = () => {
+    const sidebar = new FakeSidebar(document, ["First", "Second", "Third"], [], null);
+    sidebar.itemWindow = 3;
+    sidebar.scrollTop = 0;
+    sidebar.clientHeight = 100;
+    sidebar.scrollHeight = 100;
+    sidebar.projectRows.forEach((row, index) => {
+      row.click = () => {
+        navigationIndex = index;
+        document.location.href = `https://chatgpt.com/g/${projectIds[index]}/project`;
+      };
+    });
+    return sidebar;
+  };
+  document.sidebar = createRootSidebar();
+  const history = {
+    back() {
+      document.location.href = rootHref;
+      // ChatGPT replaces the nav/scrollport after the Project route returns.
+      document.sidebar = createRootSidebar();
+    }
+  };
+
+  const locators = loadLocators(document, {
+    history,
+    setTimeout,
+    clearTimeout
+  });
+  const snapshot = await locators.collectChatGptContextAsync(document, rootHref, {
+    maxScrolls: 2,
+    maxMoreClicks: -1,
+    resolveProjectIds: true,
+    projectResolutionTimeoutMs: 500,
+    initialSettleMs: 0
+  });
+
+  assert.deepEqual(Array.from(snapshot.projects, (project) => project.project_id), projectIds);
+  assert.equal(navigationIndex, 2);
+  assert.equal(snapshot.unresolved_project_count, 0);
 });
 
 test("current expanded Project row receives the ID from the current route and classifies its chats", () => {
@@ -467,6 +777,50 @@ test("Project page collection follows lazy Project chat growth with bounded scro
     "conversation-lazy-second"
   ]);
   assert.equal(content.scrollTop, 0);
+});
+
+test("Project page collection keeps independent sidebar and main-list scrollports separate", async () => {
+  const href = "https://chatgpt.com/g/g-p-two-lists/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  sidebar.scrollTop = 0;
+  sidebar.clientHeight = 100;
+  sidebar.scrollHeight = 280;
+  const content = new FakeMetadataNode(null, "MAIN", "", { class: "scrollport" });
+  content.scrollTop = 0;
+  content.clientHeight = 100;
+  content.scrollHeight = 280;
+  const firstChat = new FakeMetadataNode(null, "A", "", { href: "/c/conversation-two-lists-first" });
+  firstChat.appendChild(new FakeMetadataNode(null, "SPAN", "First list chat", { "data-marquee-text": "true" }));
+  const secondChat = new FakeMetadataNode(null, "A", "", { href: "/c/conversation-two-lists-second" });
+  secondChat.appendChild(new FakeMetadataNode(null, "SPAN", "Second list chat", { "data-marquee-text": "true" }));
+  content.appendChild(firstChat);
+  let secondAttached = false;
+  Object.defineProperty(content, "scrollTop", {
+    configurable: true,
+    get() { return this._scrollTop || 0; },
+    set(value) {
+      this._scrollTop = value;
+      if (value > 0 && !secondAttached) {
+        secondAttached = true;
+        this.appendChild(secondChat);
+      }
+    }
+  });
+  const document = new FakeProjectDocument(href, sidebar, content, "Two Lists | ChatGPT");
+  for (const node of [sidebar, content, firstChat, secondChat]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, "g-p-two-lists", {
+    maxScrolls: 8,
+    timeoutMs: 5000
+  });
+
+  assert.deepEqual(Array.from(snapshot.conversations, (conversation) => conversation.conversation_id), [
+    "conversation-two-lists-first",
+    "conversation-two-lists-second"
+  ]);
+  assert.equal(content.scrollTop, 0);
+  assert.equal(sidebar.scrollTop, 0);
 });
 
 function assertProject(projects, projectId) {

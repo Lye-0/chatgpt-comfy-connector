@@ -2086,7 +2086,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return await FailReviewHandoffTransportAsync(payload, pending, failure, automatic);
         }
 
-        // The Extension now resolves one inactive Managed ChatGPT Tab from the
+        // The Extension now resolves one active Managed ChatGPT Tab inside the
         // bound conversation identity. The persisted tab fields are legacy
         // transport metadata only and must not gate Review recovery.
         var targetTabId = session.BrowserExtensionTargetTabId;

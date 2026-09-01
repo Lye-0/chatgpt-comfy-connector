@@ -7,6 +7,7 @@
   const statusEventName = "chatgpt-comfy-connector:bridge-status";
   const handoffMessageType = "HANDOFF_SEND";
   const contextRequestMessageType = "GET_CHATGPT_CONTEXT";
+  const collectorViewportRequestMessageType = "GET_COLLECTOR_VIEWPORT";
   const contextChangedMessageType = "CHATGPT_CONTEXT_CHANGED";
   const responseWatchMessageType = "WATCH_ASSISTANT_RESPONSE";
   const executionReadyMessageType = "CHATGPT_EXECUTION_READY";
@@ -295,7 +296,79 @@
     if (Number.isSafeInteger(data.unresolved_project_count)) {
       result.unresolved_project_count = data.unresolved_project_count;
     }
+    for (const key of [
+      "sidebar_scroll_top",
+      "sidebar_scroll_height",
+      "sidebar_client_height",
+      "visible_project_rows",
+      "discovered_project_count",
+      "no_growth_count"
+    ]) {
+      if (Number.isSafeInteger(data[key])) result[key] = data[key];
+    }
+    for (const key of [
+      "sidebar_can_scroll",
+      "sidebar_at_bottom",
+      "project_section_found",
+      "sidebar_scroll_complete",
+      "sidebar_scroll_container_found"
+    ]) {
+      if (typeof data[key] === "boolean") result[key] = data[key];
+    }
     return result;
+  }
+
+  function collectorViewportResultFor(message, status, errorCode, text, stage, data = {}) {
+    const result = {
+      type: "COLLECTOR_VIEWPORT_RESULT",
+      requestId: message?.requestId || message?.request_id || "",
+      status,
+      content_inner_width: Number.isSafeInteger(data.content_inner_width)
+        ? data.content_inner_width : 0,
+      content_inner_height: Number.isSafeInteger(data.content_inner_height)
+        ? data.content_inner_height : 0,
+      sidebar_container_exists: data.sidebar_container_exists === true,
+      project_section_exists: data.project_section_exists === true,
+      project_row_locator_ready: data.project_row_locator_ready === true,
+      desktop_layout: data.desktop_layout === true,
+      sidebar_expected_visible: data.sidebar_expected_visible === true,
+      sidebar_scroll_container_found: data.sidebar_scroll_container_found === true,
+      sidebar_ready: data.sidebar_ready === true
+    };
+    if (errorCode) result.errorCode = errorCode;
+    if (text) result.message = text;
+    if (stage) result.stage = stage;
+    return result;
+  }
+
+  async function handleGetCollectorViewport(message) {
+    if (!locators || !locators.isChatGptPage?.()) {
+      return collectorViewportResultFor(
+        message,
+        "error",
+        "active_tab_not_chatgpt",
+        "Collector TabはChatGPTではありません。",
+        "collector_viewport_page_check");
+    }
+    try {
+      const viewport = locators.getChatGptCollectorViewport?.(document);
+      if (!viewport) {
+        return collectorViewportResultFor(
+          message,
+          "error",
+          "collector_viewport_unavailable",
+          "Collector viewportを取得できませんでした。",
+          "collector_viewport_extraction");
+      }
+      return collectorViewportResultFor(message, "ok", null, null, "collector_viewport_observed", viewport);
+    } catch (_) {
+      return collectorViewportResultFor(
+        message,
+        "error",
+        "collector_viewport_unavailable",
+        "Collector viewportの取得に失敗しました。",
+        "collector_viewport_extraction");
+    }
   }
 
   async function handleGetChatGptContext(message) {
@@ -1870,6 +1943,18 @@
           "context_extraction_failed",
           "ChatGPTのContext取得に失敗しました。",
           "context_extraction")));
+      return true;
+    }
+    if (message?.type === collectorViewportRequestMessageType) {
+      if (sender?.id && sender.id !== chrome.runtime.id) return false;
+      handleGetCollectorViewport(message)
+        .then(sendResponse)
+        .catch(() => sendResponse(collectorViewportResultFor(
+          message,
+          "error",
+          "collector_viewport_unavailable",
+          "Collector viewportの取得に失敗しました。",
+          "collector_viewport_extraction")));
       return true;
     }
     if (message?.type === executionReadyMessageType) {

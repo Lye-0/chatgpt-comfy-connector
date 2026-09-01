@@ -35,15 +35,38 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         CancellationToken cancellationToken = default)
     {
         var snapshot = await LoadLiveSnapshotAsync(cancellationToken);
+        var cached = await LoadCachedSnapshotAsync(cancellationToken);
+        if (snapshot.IsSuccess && snapshot.Projects.Count == 0)
+        {
+            // A full Collector refresh must prove that the Project sidebar was
+            // discovered. An empty successful result would otherwise erase a
+            // known catalog and make an incomplete DOM scan look legitimate.
+            var incomplete = IncompleteProjectDiscoverySnapshot(snapshot);
+            if (cached is not null)
+            {
+                return await BuildCatalogAsync(
+                    CachedSnapshotWithError(cached, incomplete),
+                    existingBindings,
+                    cancellationToken);
+            }
+            return await BuildCatalogAsync(incomplete, existingBindings, cancellationToken);
+        }
+
         if (snapshot.IsSuccess)
         {
             await SaveCacheIfAvailableAsync(snapshot, cancellationToken);
         }
         else
         {
-            var cached = await LoadCachedSnapshotAsync(cancellationToken);
             if (cached is not null)
             {
+                if (string.Equals(snapshot.ErrorCode, "context_projects_incomplete", StringComparison.Ordinal))
+                {
+                    return await BuildCatalogAsync(
+                        CachedSnapshotWithError(cached, snapshot),
+                        existingBindings,
+                        cancellationToken);
+                }
                 // A stale metadata snapshot is still safe to display and is
                 // preferable to erasing the user's selections while the
                 // Extension is disconnected. The next successful refresh
@@ -141,6 +164,31 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
             cache.Conversations,
             Current: null,
             Stage: "context_cache_loaded");
+
+    private static BrowserExtensionChatGptContextSnapshot IncompleteProjectDiscoverySnapshot(
+        BrowserExtensionChatGptContextSnapshot live)
+        => new(
+            live.RequestId,
+            "error",
+            live.Projects,
+            live.Conversations,
+            live.Current,
+            ErrorCode: "context_projects_incomplete",
+            Message: "ChatGPT Projectの取得結果が空のため、完全なContextとして扱えません。",
+            Stage: "context_projects_validation");
+
+    private static BrowserExtensionChatGptContextSnapshot CachedSnapshotWithError(
+        BrowserExtensionChatGptContextCache cache,
+        BrowserExtensionChatGptContextSnapshot failure)
+        => new(
+            failure.RequestId,
+            "error",
+            cache.Projects,
+            cache.Conversations,
+            Current: failure.Current,
+            ErrorCode: failure.ErrorCode ?? "context_projects_incomplete",
+            Message: failure.Message ?? "ChatGPT Projectの取得結果が不完全なため、前回のContextを保持しています。",
+            Stage: failure.Stage ?? "context_projects_validation");
 
     private async Task<ProjectChatCatalog> BuildCatalogAsync(
         BrowserExtensionChatGptContextSnapshot snapshot,

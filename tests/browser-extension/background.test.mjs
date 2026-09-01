@@ -134,7 +134,7 @@ async function createHarness() {
         if (!tab) throw new Error(`No tab with id: ${tabId}`);
         return tab;
       },
-      async create({ url, windowId = 1, active = true }) {
+      async create({ url, windowId = 1, active = true, autoDiscardable = true }) {
         const window = ensureWindow(windowId);
         const tab = {
           id: 100 + createdTabs.length,
@@ -144,7 +144,7 @@ async function createHarness() {
           status: nextCreatedTabStatus,
           discarded: false,
           frozen: false,
-          autoDiscardable: true
+          autoDiscardable
         };
         createdTabs.push(tab);
         tabsById.set(tab.id, tab);
@@ -182,7 +182,42 @@ async function createHarness() {
       async sendMessage(tabId, message) {
         assert.ok(tabsById.has(tabId), `Message target ${tabId} should exist`);
         if (contentError) throw contentError;
-        return contentResponse?.(message) || {};
+        const result = await contentResponse?.(message) || {};
+        if (message?.type === "GET_COLLECTOR_VIEWPORT"
+          && result?.type !== "COLLECTOR_VIEWPORT_RESULT") {
+          return {
+            type: "COLLECTOR_VIEWPORT_RESULT",
+            requestId: message.requestId,
+            status: "ok",
+            content_inner_width: 1024,
+            content_inner_height: 540,
+            sidebar_container_exists: true,
+            project_section_exists: true,
+            project_row_locator_ready: true,
+            desktop_layout: true,
+            sidebar_expected_visible: true,
+            sidebar_ready: true
+          };
+        }
+        if (message?.type === "GET_CHATGPT_CONTEXT"
+          && result?.type === "CHATGPT_CONTEXT_RESULT"
+          && result.status === "ok") {
+          return {
+            ...result,
+            sidebar_scroll_top: result.sidebar_scroll_top ?? 0,
+            sidebar_scroll_height: result.sidebar_scroll_height ?? 0,
+            sidebar_client_height: result.sidebar_client_height ?? 0,
+            sidebar_can_scroll: result.sidebar_can_scroll ?? false,
+            sidebar_at_bottom: result.sidebar_at_bottom ?? true,
+            visible_project_rows: result.visible_project_rows ?? result.projects.length,
+            discovered_project_count: result.discovered_project_count ?? result.projects.length,
+            project_section_found: result.project_section_found ?? true,
+            no_growth_count: result.no_growth_count ?? 2,
+            sidebar_scroll_complete: result.sidebar_scroll_complete ?? true,
+            sidebar_scroll_container_found: result.sidebar_scroll_container_found ?? true
+          };
+        }
+        return result;
       },
       onUpdated: {
         addListener(listener) { tabUpdatedListeners.add(listener); },
@@ -400,6 +435,14 @@ async function createHarness() {
     setNextCreatedTabStatus(status) {
       nextCreatedTabStatus = status;
     },
+    addTabToWindow(options = {}) {
+      return chrome.tabs.create({
+        url: options.url || "https://chatgpt.com/",
+        windowId: options.windowId,
+        active: options.active === true,
+        autoDiscardable: options.autoDiscardable
+      });
+    },
     setTabStatus(tabId, status) {
       const tab = tabsById.get(tabId);
       assert.ok(tab, `Tab ${tabId} should exist before updating its status`);
@@ -444,6 +487,7 @@ async function createHarness() {
     get updatedTabs() { return updatedTabs; },
     get diagnostics() { return diagnostics; },
     getTab(tabId) { return tabsById.get(tabId); },
+    tabsInWindow(windowId) { return allTabs().filter((tab) => tab.windowId === windowId); },
     getWindow(windowId) { return windowStates.get(windowId); },
     closeExecutionWindow(windowId) { return chrome.windows.remove(windowId); },
     get managedTabId() { return context.managedTabState?.tabId ?? createdTabs.at(-1)?.id ?? null; },
@@ -515,7 +559,7 @@ async function createHarness() {
       return this.waitForSocketMessage(previousCount, (message) => message.type === "handoff.result");
     },
     async waitForSocketMessage(previousCount, predicate = () => true) {
-      for (let attempt = 0; attempt < 50; attempt += 1) {
+      for (let attempt = 0; attempt < 600; attempt += 1) {
         const message = lastSocket.sent.slice(previousCount).find(predicate);
         if (message) return message;
         await wait(5);
@@ -1724,10 +1768,11 @@ test("Background forwards a complete metadata snapshot through an active Collect
     previousCount,
     (message) => message.type === "chatgpt.context.list.response");
 
-  assert.equal(requestedMessages[0].type, "GET_CHATGPT_CONTEXT");
-  assert.equal(requestedMessages[0].mode, "list");
-  assert.equal(requestedMessages[0].collection, "root");
-  assert.equal(requestedMessages[1].collection, "project");
+  assert.equal(requestedMessages[0].type, "GET_COLLECTOR_VIEWPORT");
+  const contextMessages = requestedMessages.filter((message) => message.type === "GET_CHATGPT_CONTEXT");
+  assert.equal(contextMessages[0].mode, "list");
+  assert.equal(contextMessages[0].collection, "root");
+  assert.equal(contextMessages[1].collection, "project");
   assert.equal(harness.createdTabs.length, 1);
   assert.equal(harness.createdTabs[0].active, true);
   assert.equal(harness.createdTabs[0].autoDiscardable, false);
@@ -1736,8 +1781,8 @@ test("Background forwards a complete metadata snapshot through an active Collect
   assert.equal(harness.createdWindows.length, 1);
   assert.equal(harness.createdWindows[0].focused, false);
   assert.equal(harness.createdWindows[0].state, "normal");
-  assert.equal(harness.createdWindows[0].width, 640);
-  assert.equal(harness.createdWindows[0].height, 480);
+  assert.equal(harness.createdWindows[0].width, 960);
+  assert.equal(harness.createdWindows[0].height, 540);
   assert.equal(response.request_id, "context-request-fixture");
   assert.equal(response.status, "ok");
   assert.deepEqual(response.projects, [
@@ -1753,6 +1798,225 @@ test("Background forwards a complete metadata snapshot through an active Collect
   ]);
   assert.equal(response.conversations[0].title, "Visible Chat");
   assert.equal(response.current.project_id, "g-p-project-a");
+});
+
+test("Background reconciles duplicate Collector Tabs and keeps the canonical Tab active", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => ({
+    type: "CHATGPT_CONTEXT_RESULT",
+    requestId: message.requestId,
+    mode: "list",
+    status: "ok",
+    projects: [{
+      project_id: "g-p-topology",
+      title: "Topology Project",
+      url: "https://chatgpt.com/g/g-p-topology/project"
+    }],
+    conversations: [],
+    current: null
+  }));
+
+  const firstCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-topology-first"
+  }, harness.socket);
+  await harness.waitForSocketMessage(firstCount, (message) =>
+    message.type === "chatgpt.context.list.response" && message.request_id === "collector-topology-first");
+
+  const collectorWindowId = harness.createdWindows[0].id;
+  const canonicalTabId = harness.createdTabs[0].id;
+  await harness.addTabToWindow({
+    windowId: collectorWindowId,
+    url: "https://chatgpt.com/duplicate",
+    active: true
+  });
+
+  const secondCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-topology-second"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(secondCount, (message) =>
+    message.type === "chatgpt.context.list.response" && message.request_id === "collector-topology-second");
+
+  const tabs = harness.tabsInWindow(collectorWindowId);
+  assert.equal(response.status, "ok");
+  assert.equal(tabs.length, 1);
+  assert.equal(tabs[0].id, canonicalTabId);
+  assert.equal(tabs[0].active, true);
+  assert.equal(tabs[0].autoDiscardable, false);
+  const topology = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_tab_topology")
+    .at(-1);
+  assert.equal(topology.collector_tab_id, canonicalTabId);
+  assert.equal(topology.active_tab_id_in_collector_window, canonicalTabId);
+  assert.equal(topology.collector_tab_active, true);
+  assert.equal(topology.tab_count_in_collector_window, 1);
+});
+
+test("Background widens a Collector Window until the desktop sidebar viewport is ready", async () => {
+  const harness = await createHarness();
+  let viewportCalls = 0;
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") {
+      viewportCalls += 1;
+      const narrow = viewportCalls === 1;
+      return {
+        type: "COLLECTOR_VIEWPORT_RESULT",
+        requestId: message.requestId,
+        status: "ok",
+        content_inner_width: narrow ? 600 : 800,
+        content_inner_height: 540,
+        sidebar_container_exists: true,
+        project_section_exists: true,
+        project_row_locator_ready: true,
+        desktop_layout: !narrow,
+        sidebar_expected_visible: !narrow,
+        sidebar_ready: !narrow
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [{
+        project_id: "g-p-viewport",
+        title: "Viewport Project",
+        url: "https://chatgpt.com/g/g-p-viewport/project"
+      }],
+      conversations: [],
+      current: null
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-viewport-fixture"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(response.status, "ok");
+  assert.equal(viewportCalls, 2);
+  assert.ok(harness.createdWindows[0].width > 960);
+  assert.equal(harness.createdWindows[0].focused, false);
+  assert.equal(harness.createdWindows[0].state, "normal");
+  const viewportTelemetry = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_viewport_observed");
+  assert.equal(viewportTelemetry[0].collector_content_inner_width, 600);
+  assert.equal(viewportTelemetry[0].sidebar_expected_visible, false);
+  assert.equal(viewportTelemetry.at(-1).collector_content_inner_width, 800);
+  assert.equal(viewportTelemetry.at(-1).sidebar_expected_visible, true);
+  assert.equal(viewportTelemetry.at(-1).viewport_retry_count, 1);
+});
+
+test("Background does not mark a wide zero-Project Collector scan as Collected", async () => {
+  const harness = await createHarness();
+  let rootCalls = 0;
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") {
+      return {
+        type: "COLLECTOR_VIEWPORT_RESULT",
+        requestId: message.requestId,
+        status: "ok",
+        content_inner_width: 1024,
+        content_inner_height: 540,
+        sidebar_container_exists: true,
+        project_section_exists: true,
+        project_row_locator_ready: true,
+        desktop_layout: true,
+        sidebar_expected_visible: true,
+        sidebar_ready: true
+      };
+    }
+    rootCalls += 1;
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [],
+      conversations: [],
+      current: null
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-zero-project-fixture"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "context_projects_incomplete");
+  assert.equal(rootCalls, 3);
+  assert.equal(harness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_window_collected"), false);
+});
+
+test("Background does not complete a Collector scan before the Project section is found", async () => {
+  const harness = await createHarness();
+  let rootCalls = 0;
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") {
+      return {
+        type: "COLLECTOR_VIEWPORT_RESULT",
+        requestId: message.requestId,
+        status: "ok",
+        content_inner_width: 1024,
+        content_inner_height: 540,
+        sidebar_container_exists: true,
+        project_section_exists: false,
+        project_row_locator_ready: true,
+        desktop_layout: true,
+        sidebar_expected_visible: true,
+        sidebar_scroll_container_found: true,
+        sidebar_ready: true
+      };
+    }
+    rootCalls += 1;
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [{
+        project_id: "g-p-section-late",
+        title: "Section Late Project",
+        url: "https://chatgpt.com/g/g-p-section-late/project"
+      }],
+      conversations: [],
+      current: null,
+      sidebar_scroll_complete: true,
+      project_section_found: false,
+      sidebar_at_bottom: true,
+      sidebar_scroll_container_found: true
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-section-late-fixture"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "context_projects_incomplete");
+  assert.equal(rootCalls, 3);
+  assert.equal(harness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_window_collected"), false);
 });
 
 test("Background does not publish a Project catalog when a Collector row has no resolvable ID", async () => {
@@ -1808,7 +2072,11 @@ test("Background keeps the Collector Window separate from the Managed Execution 
       requestId: message.requestId,
       mode: "list",
       status: "ok",
-      projects: [],
+      projects: [{
+        project_id: "g-p-separation",
+        title: "Separation Project",
+        url: "https://chatgpt.com/g/g-p-separation/project"
+      }],
       conversations: [],
       current: null
     };
@@ -2060,7 +2328,11 @@ test("Background recovers a closed Collector Tab or Window without touching the 
     requestId: message.requestId,
     mode: "list",
     status: "ok",
-    projects: [],
+    projects: [{
+      project_id: "g-p-state",
+      title: "State Project",
+      url: "https://chatgpt.com/g/g-p-state/project"
+    }],
     conversations: [],
     current: null
   }));
@@ -2106,7 +2378,11 @@ test("Background replaces discarded or frozen Collector Tabs without creating du
     requestId: message.requestId,
     mode: "list",
     status: "ok",
-    projects: [],
+    projects: [{
+      project_id: "g-p-state",
+      title: "State Project",
+      url: "https://chatgpt.com/g/g-p-state/project"
+    }],
     conversations: [],
     current: null
   }));

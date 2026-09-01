@@ -315,7 +315,12 @@ is the durable target identity and the window/tab are only replaceable browser
 media. Project/Chat metadata discovery uses a separate non-focused Collector
 Window with one active Collector Tab. The Collector Window is created or
 reused only for metadata discovery, traverses the root sidebar and each Project
-page, and is never used to send a Handoff or observe an assistant response.
+page, and is never used to send a Handoff or observe an assistant response. It
+uses roughly half the reference window width and height, with an outer-width
+floor of about 820px, and probes the Content Script's `window.innerWidth` and
+sidebar readiness before discovery. A bounded zero-Project result is an
+`context_projects_incomplete` error rather than a successful empty catalog;
+the Desktop keeps a known cache visible while marking that refresh as Error.
 Before `handoff.send`, the
 Background requires Content Script, Conversation, Composer, and shared
 assistant-response watcher readiness. The watcher is pre-registered with the
@@ -380,22 +385,27 @@ The Desktop `CHATGPT CONTEXT` selectors use the authenticated Browser
 Extension as a metadata-only discovery provider when the default provider is
 used. The Content Script reads visible ChatGPT sidebar metadata and the
 current SPA URL; it does not copy conversation bodies and does not call an
-undocumented ChatGPT API. In the observed ChatGPT DOM, Projects are
-`role="button"[data-sidebar-item="true"]` rows rather than links, and their
-visible title is nested under `data-marquee-text`. Conversations remain
-navigation links, but their `aria-label` can contain Project/Pinned
-descriptions, so title extraction prefers the visible title child and only
-uses a bounded text fallback. Project routes are identified from the stable
-`/g/g-p-.../project` and `/g/g-p-.../c/...` URL shapes, while conversations
-are keyed by their `/c/{conversationId}` identity. A conversation outside a
-Project is grouped under `Projectなし`, and `＋ 新しいChat` represents a
-new-chat target whose conversation ID is not known until the first Handoff is
-accepted.
+undocumented ChatGPT API. Project entries can be route-bearing links or
+expandable/button rows (often with a nested `data-marquee-text` title), while
+conversation entries can be links or ID-bearing metadata nodes. The locator
+chooses the visible sidebar shell containing the complete Project catalog and
+does not let a nested Chat-only scrollport hide the Project list. A
+conversation `aria-label` can contain Project/Pinned descriptions, so title
+extraction prefers the visible title child and only uses a bounded text
+fallback. Project routes are identified from stable `g-p-*` routes such as
+`/g/g-p-...` and `/g/g-p-.../project`, while conversations are keyed by their
+`/c/{conversationId}` identity. A conversation outside a Project is grouped
+under `Projectなし`, and `＋ 新しいChat` represents a new-chat target whose
+conversation ID is not known until the first Handoff is accepted.
 
 The list request uses a locator-owned Collector discovery helper. It expands a
-bounded number of `さらに表示`/`もっと見る` controls, scans the root sidebar
-incrementally for lazy/virtualized Project and Projectless Conversation rows,
-then reuses the same active Collector Tab to visit each resolved Project URL.
+bounded number of `さらに表示`/`もっと見る` controls, selects the visible
+sidebar shell with the complete Project catalog and its actual Project-owning
+scrollport, then scans incrementally for lazy/virtualized Project and
+Projectless Conversation rows. It reuses the same active Collector Tab to
+visit each resolved Project URL. The sidebar and Project-page scrollports are
+rebound after SPA DOM replacement and every independent Project-page list is
+scanned without jumping back to the first container.
 Button-only Project rows are opened one at a time in that Collector Tab so the
 resulting SPA Project URL supplies the real ID; a title is never used as an
 identity. Each resolved Project page is scanned with bounded incremental

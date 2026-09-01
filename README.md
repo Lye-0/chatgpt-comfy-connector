@@ -2,7 +2,7 @@
 
 ChatGPTを制作判断・改善役として使い、ローカルのComfyUI Workflowを安全に反復実行するWindows Portable Connectorです。
 
-v0.2 Alphaでは、Browser Extensionとのlocalhost通信、Conversation identityに紐づく非アクティブなManaged ChatGPT TabへのHandoff送信、Connector Response受信、strict validation後の自動APPLY / GENERATE、生成したPrimary Outputの同じChatGPTチャットへの自動添付、およびReview Handoffからの次Iteration継続までを扱います。
+v0.2 Alphaでは、Browser Extensionとのlocalhost通信、Conversation identityに紐づく専用Execution Window内のManaged ChatGPT TabへのHandoff送信、Connector Response受信、strict validation後の自動APPLY / GENERATE、生成したPrimary Outputの同じChatGPTチャットへの自動添付、およびReview Handoffからの次Iteration継続までを扱います。
 
 ## v0.2 Alphaの範囲
 
@@ -52,7 +52,7 @@ Endpoint:         http://127.0.0.1:8188
 
 1. SessionとWorkflowを選択し、`YOUR IDEA` に制作意図を書く。
 2. Browser Extensionが `CONNECTED` なら `SEND TO CHATGPT` で、Conversation
-   identityに対応する非アクティブなManaged ChatGPT Tabを準備し、その
+   identityに対応するExecution Window内のactiveなManaged ChatGPT Tabを準備し、その
    `https://chatgpt.com/` チャットへHandoffを入力・送信する。Response watcherが
    readyになるまで送信しない。
 3. Extensionが未接続の場合は従来どおりClipboardへコピーし、ChatGPTへ手動で
@@ -68,7 +68,7 @@ Connector commandは高レベルの `generate` / `complete` だけを受け付�
 
 ## Browser Extension Bridge (v0.2 Phase 1–5.2)
 
-Desktop起動中だけ `http://127.0.0.1:43127` を開き、MV3 Extensionのbackground service workerと接続します。初回はDesktopに表示される短命のPairing codeをPopupへ入力します。以後はExtension側の保存済みpairing credentialからDesktop起動ごとのsession tokenをbootstrapし、`CONNECTED`、`PING → PONG`、`desktop.ready`を確認できます。Project / Chat discoveryは非アクティブの一時Collector Tab、Handoff・assistant回答・Media・Review・Resumeは非アクティブのManaged Background ChatGPT Tabへ分離します。ユーザーのforeground tabには依存せず、Content ScriptがDOM上のHandoff送信と同じHandoff以降に生成されたassistant回答の完了取得を行います。回答はDesktop側のstrict validationを通過した場合だけ `CHATGPT COMMAND` に反映されます。`generate` はその後Desktopの既存strict Apply/Generate経路へ自動接続され、`complete` は既存条件を満たす場合だけSessionを完了します。
+Desktop起動中だけ `http://127.0.0.1:43127` を開き、MV3 Extensionのbackground service workerと接続します。初回はDesktopに表示される短命のPairing codeをPopupへ入力します。以後はExtension側の保存済みpairing credentialからDesktop起動ごとのsession tokenをbootstrapし、`CONNECTED`、`PING → PONG`、`desktop.ready`を確認できます。Project / Chat discoveryは専用Collector Window内のactiveなCollector Tab、Handoff・assistant回答・Media・Review・Resumeは専用Execution Window内のactiveなManaged ChatGPT Tabへ分離します。ユーザーのforeground tabには依存せず、Content ScriptがDOM上のHandoff送信と同じHandoff以降に生成されたassistant回答の完了取得を行います。回答はDesktop側のstrict validationを通過した場合だけ `CHATGPT COMMAND` に反映されます。`generate` はその後Desktopの既存strict Apply/Generate経路へ自動接続され、`complete` は既存条件を満たす場合だけSessionを完了します。
 
 生成完了後はPrimary Outputを認証済みの媒体転送で同じManaged ChatGPT Tabへ添付し、添付が確認できた場合だけReview Handoffを送信します。動画処理中にChatGPTのSendが無効な場合は、Review経路が有効化を待ってから送信し、期限超過時は再試行可能な失敗として保持します。
 
@@ -108,7 +108,7 @@ ChatGPT-Comfy-Connector-v0.1.0-alpha-win-x64.zip.sha256
 
 ## Known limitations
 
-- ChatGPTの実Project/Chat一覧やConversation IDは取得しません。保存するのはlocal labelと将来拡張用metadataです。
-- Browser ExtensionはPhase 5.2でもConversation identityに紐づく1つの非アクティブなManaged `chatgpt.com` Tabだけを実行対象にします。Responseのstrict validation、Workflow変更、ComfyUI操作、生成物の登録、Iteration上限・キャンセル・完了判定はDesktop側が担当します。無制限の完全自律IterationやChat/Project一覧取得は行いません。
+- Project / Chat discoveryは専用Collector Windowでboundedなlazy-load巡回を行います。ChatGPTのDOM変更、認証状態、または上限・timeoutにより完全Snapshotを取得できない場合は、不完全な空Snapshotを成功扱いにせず、前回cacheを保持してError表示にします。
+- Browser ExtensionはConversation identityに紐づく1つのactiveなManaged `chatgpt.com` Tabを専用Execution Window内で実行対象にします。Responseのstrict validation、Workflow変更、ComfyUI操作、生成物の登録、Iteration上限・キャンセル・完了判定はDesktop側が担当します。
 - Windowsのcodecが対応しない動画はin-app previewできない場合がありますが、生成失敗とは扱わずOS既定アプリで開けます。
 - comfy-mcpの実ランタイムが参照するPythonやComfyUIの状態は外部依存です。Connectorはstderrと終了状態をログへ記録します。

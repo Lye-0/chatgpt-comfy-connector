@@ -58,8 +58,12 @@ const COLLECTOR_WINDOW_STORAGE_KEY = "chatGptCollectorWindow";
 const COLLECTOR_TAB_URL = "https://chatgpt.com/";
 const COLLECTOR_WINDOW_CREATE_TIMEOUT_MS = 15000;
 const COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS = 30000;
-const COLLECTOR_WINDOW_SIZE_FACTOR = 0.25;
-const COLLECTOR_WINDOW_MIN_WIDTH = 640;
+// Collector discovery needs ChatGPT's desktop sidebar. A quarter-width
+// window can fall below the sidebar breakpoint, so use the same half-width /
+// half-height area rule as Execution and enforce the content viewport below.
+const COLLECTOR_WINDOW_SIZE_FACTOR = 0.5;
+const COLLECTOR_CONTENT_MIN_WIDTH = 770;
+const COLLECTOR_WINDOW_MIN_WIDTH = 820;
 const COLLECTOR_WINDOW_MIN_HEIGHT = 480;
 const COLLECTOR_WINDOW_FALLBACK_WIDTH = 960;
 const COLLECTOR_WINDOW_FALLBACK_HEIGHT = 540;
@@ -70,6 +74,11 @@ const COLLECTOR_ROOT_TIMEOUT_MS = 120000;
 const COLLECTOR_CONTEXT_TIMEOUT_MS = 150000;
 const COLLECTOR_PROJECT_TIMEOUT_MS = 30000;
 const COLLECTOR_PROJECT_RESOLUTION_TIMEOUT_MS = 4000;
+const COLLECTOR_VIEWPORT_MAX_RETRIES = 4;
+const COLLECTOR_SIDEBAR_READY_MAX_RETRIES = 8;
+const COLLECTOR_VIEWPORT_RETRY_DELAY_MS = 250;
+const COLLECTOR_PROJECT_DISCOVERY_MAX_RETRIES = 3;
+const COLLECTOR_PROJECT_DISCOVERY_RETRY_DELAY_MS = 350;
 // A replacement Content Script can become ready before ChatGPT has hydrated
 // the newly opened conversation's message list. Keep checking the same
 // marker-bearing user message without ever issuing another Handoff send.
@@ -183,6 +192,24 @@ const defaultCollectorWindowState = {
   discoveredProjectCount: 0,
   discoveredChatCount: 0,
   retryCount: 0,
+  projectDiscoveryRetryCount: 0,
+  windowWidth: null,
+  windowHeight: null,
+  contentInnerWidth: null,
+  contentInnerHeight: null,
+  sidebarExpectedVisible: false,
+  viewportRetryCount: 0,
+  activeTabIdInWindow: null,
+  collectorTabActive: false,
+  tabCountInWindow: 0,
+  sidebarScrollTop: null,
+  sidebarScrollHeight: null,
+  sidebarClientHeight: null,
+  sidebarCanScroll: false,
+  sidebarAtBottom: false,
+  visibleProjectRows: 0,
+  projectSectionFound: false,
+  noGrowthCount: 0,
   requestId: null
 };
 let collectorWindowState = { ...defaultCollectorWindowState };
@@ -286,6 +313,31 @@ function diagnostic(eventName, fields = {}) {
     "discovered_project_count",
     "discovered_chat_count",
     "retry_count",
+    "project_discovery_retry_count",
+    "collector_window_width",
+    "collector_window_height",
+    "collector_content_inner_width",
+    "collector_content_inner_height",
+    "sidebar_expected_visible",
+    "viewport_retry_count",
+    "active_tab_id_in_collector_window",
+    "collector_tab_active",
+    "tab_count_in_collector_window",
+    "sidebar_container_exists",
+    "project_section_exists",
+    "project_row_locator_ready",
+    "desktop_layout",
+    "sidebar_ready",
+    "sidebar_scroll_container_found",
+    "sidebar_scroll_top",
+    "sidebar_scroll_height",
+    "sidebar_client_height",
+    "sidebar_can_scroll",
+    "sidebar_at_bottom",
+    "visible_project_rows",
+    "project_section_found",
+    "no_growth_count",
+    "sidebar_scroll_complete",
     "target_tab_id",
     "tab_id",
     "window_id",
@@ -1276,11 +1328,285 @@ function collectorWindowLifecycle(lifecycle, fields = {}) {
     discovered_project_count: collectorWindowState.discoveredProjectCount,
     discovered_chat_count: collectorWindowState.discoveredChatCount,
     retry_count: collectorWindowState.retryCount,
+    project_discovery_retry_count: collectorWindowState.projectDiscoveryRetryCount,
+    collector_window_width: collectorWindowState.windowWidth,
+    collector_window_height: collectorWindowState.windowHeight,
+    collector_content_inner_width: collectorWindowState.contentInnerWidth,
+    collector_content_inner_height: collectorWindowState.contentInnerHeight,
+    sidebar_expected_visible: collectorWindowState.sidebarExpectedVisible,
+    viewport_retry_count: collectorWindowState.viewportRetryCount,
+    active_tab_id_in_collector_window: collectorWindowState.activeTabIdInWindow,
+    collector_tab_active: collectorWindowState.collectorTabActive,
+    tab_count_in_collector_window: collectorWindowState.tabCountInWindow,
+    sidebar_scroll_top: collectorWindowState.sidebarScrollTop,
+    sidebar_scroll_height: collectorWindowState.sidebarScrollHeight,
+    sidebar_client_height: collectorWindowState.sidebarClientHeight,
+    sidebar_can_scroll: collectorWindowState.sidebarCanScroll,
+    sidebar_at_bottom: collectorWindowState.sidebarAtBottom,
+    visible_project_rows: collectorWindowState.visibleProjectRows,
+    project_section_found: collectorWindowState.projectSectionFound,
+    no_growth_count: collectorWindowState.noGrowthCount,
     status: lifecycle === "Failed" ? "error" : "pending",
     stage: `collector_window_${String(lifecycle || "unknown").toLowerCase()}`,
     target_tab_id: collectorWindowState.tabId,
     window_id: collectorWindowState.windowId
   });
+}
+
+function positiveDimension(value) {
+  const dimension = Number(value);
+  return Number.isSafeInteger(dimension) && dimension > 0 ? dimension : null;
+}
+
+function collectorTabTopology(tabs, collectorTab) {
+  const members = Array.isArray(tabs) ? tabs : [];
+  const activeTab = members.find((tab) => tab?.active === true) || null;
+  const activeTabId = Number.isSafeInteger(activeTab?.id) ? activeTab.id : null;
+  const collectorTabId = Number.isSafeInteger(collectorTab?.id) ? collectorTab.id : null;
+  return {
+    activeTabId,
+    collectorTabId,
+    collectorTabActive: collectorTabId !== null
+      && activeTabId === collectorTabId
+      && collectorTab?.active === true,
+    tabCount: members.length
+  };
+}
+
+function recordCollectorTabTopology(windowId, tabs, collectorTab, trace = {}) {
+  const topology = collectorTabTopology(tabs, collectorTab);
+  collectorWindowState = {
+    ...collectorWindowState,
+    windowId: Number.isSafeInteger(windowId) ? windowId : collectorWindowState.windowId,
+    tabId: topology.collectorTabId,
+    activeTabIdInWindow: topology.activeTabId,
+    collectorTabActive: topology.collectorTabActive,
+    tabCountInWindow: topology.tabCount
+  };
+  const valid = topology.tabCount === 1 && topology.collectorTabActive;
+  diagnostic("collector tab topology observed", {
+    ...trace,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: topology.collectorTabId,
+    active_tab_id_in_collector_window: topology.activeTabId,
+    collector_tab_active: topology.collectorTabActive,
+    tab_count_in_collector_window: topology.tabCount,
+    collector_window_exists: Number.isSafeInteger(collectorWindowState.windowId),
+    status: valid ? "observed" : "error",
+    error_code: valid ? undefined : "collector_tab_topology_invalid",
+    stage: "collector_tab_topology"
+  });
+  void persistCollectorWindowState();
+  return valid;
+}
+
+function chooseCollectorTab(tabs, preferredTabId = null) {
+  const members = Array.isArray(tabs) ? tabs : [];
+  return members.find((tab) => tab?.id === preferredTabId)
+    || members.find((tab) => tab?.active === true && isChatGptTab(tab))
+    || members.find((tab) => isChatGptTab(tab))
+    || members.find((tab) => tab?.active === true)
+    || members[0]
+    || null;
+}
+
+async function reconcileCollectorWindowTabs(windowId, preferredTabId = null, trace = {}) {
+  let tabs = await tabsInCollectorWindow(windowId);
+  let collectorTab = chooseCollectorTab(tabs, preferredTabId);
+  recordCollectorTabTopology(windowId, tabs, collectorTab, trace);
+
+  if (tabs.length > 1) {
+    diagnostic("collector tab count invalid", {
+      ...trace,
+      collector_window_id: windowId,
+      collector_tab_id: collectorTab?.id,
+      active_tab_id_in_collector_window: collectorTabTopology(tabs, collectorTab).activeTabId,
+      collector_tab_active: collectorTab?.active === true,
+      tab_count_in_collector_window: tabs.length,
+      status: "recovering",
+      error_code: "collector_tab_count_invalid",
+      stage: "collector_tab_reconcile"
+    });
+    if (typeof chrome.tabs?.remove !== "function") {
+      throw bridgeError(
+        "Collector Window内のTab数を1つに修復できません。",
+        0,
+        "collector_tab_count_invalid");
+    }
+    if (!collectorTab || !Number.isSafeInteger(collectorTab.id)) {
+      throw bridgeError(
+        "Collector Tabを決定できません。",
+        0,
+        "collector_tab_count_invalid");
+    }
+    collectorWindowState = {
+      ...collectorWindowState,
+      windowId,
+      tabId: collectorTab.id
+    };
+    for (const extra of tabs.filter((tab) => tab?.id !== collectorTab.id)) {
+      if (!Number.isSafeInteger(extra?.id)) continue;
+      try {
+        await chrome.tabs.remove(extra.id);
+      } catch (_) {
+        // A concurrent close is harmless; the post-reconcile query below is
+        // the authority for whether the Window is actually back to one Tab.
+      }
+    }
+    tabs = await tabsInCollectorWindow(windowId);
+    collectorTab = chooseCollectorTab(tabs, collectorTab.id);
+    recordCollectorTabTopology(windowId, tabs, collectorTab, {
+      ...trace,
+      stage: "collector_tab_reconciled"
+    });
+    if (tabs.length !== 1 || !collectorTab) {
+      throw bridgeError(
+        "Collector Window内のTab数を1つに修復できません。",
+        0,
+        "collector_tab_count_invalid");
+    }
+  }
+
+  collectorWindowState = {
+    ...collectorWindowState,
+    windowId,
+    tabId: collectorTab?.id ?? null
+  };
+  return collectorTab;
+}
+
+function queueCollectorTabTopologyRepair(trace = {}) {
+  if (!Number.isSafeInteger(collectorWindowState.windowId)) return Promise.resolve(null);
+  return withCollectorWindowOperation(async () => {
+    const window = await getCollectorWindow();
+    if (!window) return null;
+    const tab = await reconcileCollectorWindowTabs(
+      window.id,
+      collectorWindowState.tabId,
+      trace);
+    if (!tab) {
+      const tabs = await tabsInCollectorWindow(window.id);
+      if (tabs.length === 0) {
+        return await ensureCollectorWindow(COLLECTOR_TAB_URL, {
+          ...trace,
+          stage: "collector_tab_topology_recreate"
+        });
+      }
+      return null;
+    }
+    if (collectorTabNeedsRecovery(tab)) {
+      await replaceCollectorTab(tab, trace);
+      return await ensureCollectorWindow(COLLECTOR_TAB_URL, {
+        ...trace,
+        stage: "collector_tab_topology_recovery"
+      });
+    }
+    const enforced = await enforceCollectorTab(tab, trace);
+    recordCollectorTabTopology(
+      window.id,
+      await tabsInCollectorWindow(window.id),
+      enforced,
+      trace);
+    return enforced;
+  }).catch((error) => {
+    diagnostic("collector tab topology repair failed", {
+      ...trace,
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: collectorWindowState.tabId,
+      status: "error",
+      error_code: error?.code || "collector_tab_topology_repair_failed",
+      stage: error?.stage || "collector_tab_topology_repair"
+    });
+    return null;
+  });
+}
+
+function recordCollectorViewportTelemetry(window, viewport, viewportRetryCount, trace = {}) {
+  const windowWidth = positiveDimension(window?.width);
+  const windowHeight = positiveDimension(window?.height);
+  const contentInnerWidth = positiveDimension(viewport?.content_inner_width);
+  const contentInnerHeight = positiveDimension(viewport?.content_inner_height);
+  const sidebarExpectedVisible = viewport?.sidebar_expected_visible === true
+    && contentInnerWidth !== null
+    && contentInnerWidth >= COLLECTOR_CONTENT_MIN_WIDTH;
+  collectorWindowState = {
+    ...collectorWindowState,
+    windowWidth,
+    windowHeight,
+    contentInnerWidth,
+    contentInnerHeight,
+    sidebarExpectedVisible,
+    viewportRetryCount: Math.max(0, Number.isSafeInteger(viewportRetryCount) ? viewportRetryCount : 0)
+  };
+  diagnostic("collector viewport observed", {
+    ...trace,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: collectorWindowState.tabId,
+    collector_window_width: windowWidth,
+    collector_window_height: windowHeight,
+    collector_content_inner_width: contentInnerWidth,
+    collector_content_inner_height: contentInnerHeight,
+    sidebar_expected_visible: sidebarExpectedVisible,
+    viewport_retry_count: collectorWindowState.viewportRetryCount,
+    sidebar_container_exists: viewport?.sidebar_container_exists === true,
+    project_section_exists: viewport?.project_section_exists === true,
+    project_row_locator_ready: viewport?.project_row_locator_ready === true,
+    desktop_layout: viewport?.desktop_layout === true,
+    sidebar_ready: viewport?.sidebar_ready === true,
+    sidebar_scroll_container_found: viewport?.sidebar_scroll_container_found === true,
+    status: "observed",
+    stage: "collector_viewport_observed",
+    target_tab_id: collectorWindowState.tabId,
+    window_id: collectorWindowState.windowId
+  });
+  void persistCollectorWindowState();
+}
+
+function recordCollectorScrollTelemetry(source, pending = null, trace = {}) {
+  const integerOrNull = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const targetTabId = Number.isSafeInteger(pending?.tabId)
+    ? pending.tabId
+    : collectorWindowState.tabId;
+  const sidebarScrollTop = integerOrNull(source?.sidebar_scroll_top);
+  const sidebarScrollHeight = integerOrNull(source?.sidebar_scroll_height);
+  const sidebarClientHeight = integerOrNull(source?.sidebar_client_height);
+  const visibleProjectRows = integerOrNull(source?.visible_project_rows) || 0;
+  const discoveredProjectCount = integerOrNull(source?.discovered_project_count);
+  const noGrowthCount = integerOrNull(source?.no_growth_count) || 0;
+  collectorWindowState = {
+    ...collectorWindowState,
+    sidebarScrollTop,
+    sidebarScrollHeight,
+    sidebarClientHeight,
+    sidebarCanScroll: source?.sidebar_can_scroll === true,
+    sidebarAtBottom: source?.sidebar_at_bottom === true,
+    visibleProjectRows,
+    discoveredProjectCount: discoveredProjectCount === null
+      ? collectorWindowState.discoveredProjectCount
+      : discoveredProjectCount,
+    projectSectionFound: source?.project_section_found === true,
+    noGrowthCount
+  };
+  diagnostic("collector sidebar scroll observed", {
+    ...trace,
+    request_id: pending?.requestId || trace.request_id,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: targetTabId,
+    sidebar_scroll_top: sidebarScrollTop,
+    sidebar_scroll_height: sidebarScrollHeight,
+    sidebar_client_height: sidebarClientHeight,
+    sidebar_can_scroll: source?.sidebar_can_scroll === true,
+    sidebar_at_bottom: source?.sidebar_at_bottom === true,
+    visible_project_rows: visibleProjectRows,
+    discovered_project_count: collectorWindowState.discoveredProjectCount,
+    project_section_found: source?.project_section_found === true,
+    no_growth_count: noGrowthCount,
+    sidebar_scroll_complete: source?.sidebar_scroll_complete === true,
+    status: "observed",
+    stage: trace.stage || "collector_sidebar_scroll_observed",
+    target_tab_id: targetTabId
+  });
+  void persistCollectorWindowState();
 }
 
 async function getCollectorWindow(windowId = collectorWindowState.windowId) {
@@ -1334,7 +1660,9 @@ async function makeCollectorWindowUsable(window, trace = {}) {
   collectorWindowState = {
     ...collectorWindowState,
     windowId: window.id,
-    windowState: usable.state || "normal"
+    windowState: usable.state || "normal",
+    windowWidth: positiveDimension(usable.width),
+    windowHeight: positiveDimension(usable.height)
   };
   diagnostic("collector window usable", {
     ...trace,
@@ -1342,6 +1670,8 @@ async function makeCollectorWindowUsable(window, trace = {}) {
     collector_window_focused: usable.focused === true,
     collector_window_state: usable.state || "normal",
     collector_window_exists: true,
+    collector_window_width: collectorWindowState.windowWidth,
+    collector_window_height: collectorWindowState.windowHeight,
     status: "ready",
     stage: "collector_window_usable"
   });
@@ -1525,7 +1855,13 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
     window = await makeCollectorWindowUsable(window, trace);
   }
 
-  let tab = await findCollectorWindowTab(window.id);
+  // windows.create({ url }) already creates the first Tab. Reconcile the
+  // complete Window before considering tabs.create so that the initial Tab is
+  // reused and any stale duplicate is removed deterministically.
+  let tab = await reconcileCollectorWindowTabs(
+    window.id,
+    collectorWindowState.tabId,
+    trace);
   if (collectorTabNeedsRecovery(tab)) {
     await replaceCollectorTab(tab, trace);
     tab = null;
@@ -1536,6 +1872,19 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
     collectorWindowLifecycle("PreparingTab", { windowId: window.id, tabId: tab.id });
     tab = await enforceCollectorTab(tab, trace);
   }
+  tab = await reconcileCollectorWindowTabs(window.id, tab.id, trace);
+  if (!tab) {
+    throw bridgeError(
+      "Collector Window内のCollector Tabを確認できません。",
+      0,
+      "collector_tab_count_invalid");
+  }
+  tab = await enforceCollectorTab(tab, trace);
+  recordCollectorTabTopology(
+    window.id,
+    await tabsInCollectorWindow(window.id),
+    tab,
+    trace);
   if (!(await waitForTabReady(tab.id, COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS))) {
     collectorWindowLifecycle("Failed", { windowId: window.id, tabId: tab.id });
     throw bridgeError(
@@ -1578,6 +1927,172 @@ async function navigateCollectorTab(tab, url, trace = {}) {
   return updated;
 }
 
+async function readCollectorViewport(tab, trace = {}) {
+  const requestId = trace.request_id || collectorWindowState.requestId || "collector-viewport";
+  const result = await dispatchToContentScript(tab.id, {
+    type: "GET_COLLECTOR_VIEWPORT",
+    requestId
+  }, trace, {
+    timeoutMs: CONTENT_SCRIPT_TIMEOUT_MS,
+    timeoutStage: "collector_viewport_timeout"
+  });
+  const responseRequestId = result?.requestId || result?.request_id;
+  if (responseRequestId && requestId && responseRequestId !== requestId) {
+    throw bridgeError(
+      "Collector viewport responseの識別情報が一致しません。",
+      0,
+      "collector_viewport_response_correlation_failed");
+  }
+  if (!result || result.status !== "ok") {
+    throw bridgeError(
+      "Collector Tabのviewportを確認できませんでした。",
+      0,
+      result?.errorCode || result?.error_code || "collector_viewport_unavailable");
+  }
+  return result;
+}
+
+async function ensureCollectorViewport(tab, trace = {}) {
+  let currentTab = await reconcileCollectorWindowTabs(
+    collectorWindowState.windowId,
+    tab?.id,
+    trace);
+  if (!currentTab) {
+    throw bridgeError(
+      "Collector Window内にCollector Tabがありません。",
+      0,
+      "collector_tab_count_invalid");
+  }
+  currentTab = await enforceCollectorTab(currentTab, trace);
+  let viewportRetryCount = 0;
+  let sidebarRetryCount = 0;
+  while (true) {
+    const window = await getCollectorWindow();
+    if (!window) {
+      throw bridgeError(
+        "Collector Windowが存在しません。",
+        0,
+        "collector_window_unavailable");
+    }
+    const viewport = await readCollectorViewport(currentTab, trace);
+    const contentWidth = positiveDimension(viewport.content_inner_width) || 0;
+    const contentHeight = positiveDimension(viewport.content_inner_height);
+    recordCollectorViewportTelemetry(window, viewport, viewportRetryCount, trace);
+
+    const viewportReady = contentWidth >= COLLECTOR_CONTENT_MIN_WIDTH;
+    const sidebarReady = viewport.sidebar_ready === true;
+    if (viewportReady && sidebarReady) {
+      collectorWindowLifecycle("SidebarReady", {
+        windowId: window.id,
+        tabId: currentTab.id,
+        windowWidth: positiveDimension(window.width),
+        windowHeight: positiveDimension(window.height),
+        contentInnerWidth: contentWidth,
+        contentInnerHeight: contentHeight,
+        sidebarExpectedVisible: true,
+        viewportRetryCount
+      });
+      return currentTab;
+    }
+
+    const retryLimitReached = viewportReady
+      ? sidebarRetryCount >= COLLECTOR_SIDEBAR_READY_MAX_RETRIES
+      : viewportRetryCount >= COLLECTOR_VIEWPORT_MAX_RETRIES;
+    if (retryLimitReached) {
+      const errorCode = viewportReady
+        ? "collector_sidebar_not_ready"
+        : "collector_viewport_too_narrow";
+      const message = viewportReady
+        ? "ChatGPT Project sidebarの準備が完了しませんでした。"
+        : "Collector Windowのviewport幅が不足しています。";
+      collectorWindowLifecycle("Failed", {
+        windowId: window.id,
+        tabId: currentTab.id,
+        viewportRetryCount: viewportRetryCount
+      });
+      diagnostic("collector viewport readiness failed", {
+        ...trace,
+        collector_window_id: window.id,
+        collector_tab_id: currentTab.id,
+        collector_window_width: collectorWindowState.windowWidth,
+        collector_window_height: collectorWindowState.windowHeight,
+        collector_content_inner_width: collectorWindowState.contentInnerWidth,
+        collector_content_inner_height: collectorWindowState.contentInnerHeight,
+        sidebar_expected_visible: collectorWindowState.sidebarExpectedVisible,
+        viewport_retry_count: viewportRetryCount,
+        error_code: errorCode,
+        status: "error",
+        stage: "collector_viewport_readiness"
+      });
+      throw bridgeError(message, 0, errorCode);
+    }
+
+    if (!viewportReady) {
+      viewportRetryCount += 1;
+      const currentWidth = positiveDimension(window.width) || COLLECTOR_WINDOW_MIN_WIDTH;
+      const currentHeight = positiveDimension(window.height) || COLLECTOR_WINDOW_FALLBACK_HEIGHT;
+      const widthDeficit = Math.max(1, COLLECTOR_CONTENT_MIN_WIDTH - contentWidth);
+      const nextWidth = Math.max(
+        COLLECTOR_WINDOW_MIN_WIDTH,
+        currentWidth + widthDeficit + 48,
+        currentWidth + 1);
+      collectorWindowLifecycle("ResizingViewport", {
+        windowId: window.id,
+        tabId: currentTab.id,
+        viewportRetryCount
+      });
+      if (typeof chrome.windows?.update !== "function") {
+        throw bridgeError(
+          "Collector Windowのviewportを拡張できません。",
+          0,
+          "collector_viewport_resize_failed");
+      }
+      try {
+        const resized = await chrome.windows.update(window.id, {
+          width: nextWidth,
+          height: currentHeight,
+          state: "normal",
+          focused: false
+        });
+        const resizedWindow = resized || await getCollectorWindow(window.id);
+        if (!resizedWindow) {
+          throw bridgeError("Collector Windowがresize後に見つかりません。", 0, "collector_window_unavailable");
+        }
+        collectorWindowState = {
+          ...collectorWindowState,
+          windowWidth: positiveDimension(resizedWindow.width) || nextWidth,
+          windowHeight: positiveDimension(resizedWindow.height) || currentHeight
+        };
+      } catch (error) {
+        if (error?.code === "collector_window_unavailable") throw error;
+        throw bridgeError(
+          "Collector Windowのviewportを拡張できません。",
+          0,
+          "collector_viewport_resize_failed");
+      }
+    } else {
+      sidebarRetryCount += 1;
+      collectorWindowLifecycle("WaitingSidebar", {
+        windowId: window.id,
+        tabId: currentTab.id,
+        viewportRetryCount
+      });
+    }
+    await wait(COLLECTOR_VIEWPORT_RETRY_DELAY_MS);
+    currentTab = await reconcileCollectorWindowTabs(
+      collectorWindowState.windowId,
+      currentTab.id,
+      trace);
+    if (!currentTab) {
+      throw bridgeError(
+        "Collector Window内にCollector Tabがありません。",
+        0,
+        "collector_tab_count_invalid");
+    }
+    currentTab = await enforceCollectorTab(currentTab, trace);
+  }
+}
+
 async function getCollectorTab() {
   await collectorWindowStateReady;
   const window = await getCollectorWindow();
@@ -1586,7 +2101,10 @@ async function getCollectorTab() {
     void persistCollectorWindowState();
     return null;
   }
-  const tab = await findCollectorWindowTab(window.id);
+  const tab = await reconcileCollectorWindowTabs(
+    window.id,
+    collectorWindowState.tabId,
+    { stage: "collector_tab_lookup" });
   if (!tab) {
     collectorWindowState = { ...collectorWindowState, windowId: window.id, tabId: null };
     void persistCollectorWindowState();
@@ -1977,6 +2495,136 @@ function mergeCollectorMetadata(destination, source, forcedProjectId = null) {
   if (!destination.current && source.current) destination.current = source.current;
 }
 
+function validateCollectorRootResult(source, pending) {
+  if (!source || typeof source !== "object") {
+    throw bridgeError("ChatGPT CollectorからContextを取得できませんでした。", 0, "context_extraction_failed");
+  }
+  const requestId = source.requestId || source.request_id;
+  if (requestId !== pending.requestId || (source.mode || "list") !== "list") {
+    throw bridgeError("ChatGPT Context responseの識別情報が一致しません。", 0, "context_response_correlation_failed");
+  }
+  if (source.status === "error") {
+    throw bridgeError(
+      source.message || "ChatGPTのContext取得に失敗しました。",
+      0,
+      source.errorCode || source.error_code || "context_extraction_failed");
+  }
+  if (source.status !== "ok"
+    || !Array.isArray(source.projects)
+    || !Array.isArray(source.conversations)) {
+    throw bridgeError("ChatGPT Context responseが不正です。", 0, "context_response_invalid");
+  }
+  return Number.isSafeInteger(source.unresolved_project_count)
+    ? Math.max(0, source.unresolved_project_count)
+    : 0;
+}
+
+function validateCollectorProjectResult(source, pending) {
+  validateCollectorRootResult(source, pending);
+  if (source.sidebar_scroll_complete === true) return;
+  diagnostic("collector project sidebar scan incomplete", {
+    request_id: pending.requestId,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: pending.tabId,
+    current_project_id: pending.currentProjectId,
+    sidebar_scroll_top: source.sidebar_scroll_top,
+    sidebar_scroll_height: source.sidebar_scroll_height,
+    sidebar_client_height: source.sidebar_client_height,
+    sidebar_can_scroll: source.sidebar_can_scroll === true,
+    sidebar_at_bottom: source.sidebar_at_bottom === true,
+    visible_project_rows: source.visible_project_rows,
+    discovered_project_count: source.discovered_project_count,
+    project_section_found: source.project_section_found === true,
+    no_growth_count: source.no_growth_count,
+    sidebar_scroll_complete: false,
+    status: "error",
+    error_code: "context_projects_incomplete",
+    stage: "collector_project_sidebar_scan_incomplete",
+    target_tab_id: pending.tabId
+  });
+  throw bridgeError(
+    "ChatGPT Project内のChat一覧を完全には取得できませんでした。",
+    0,
+    "context_projects_incomplete");
+}
+
+async function collectCollectorRootResult(tab, pending, request) {
+  let lastUnresolvedProjectCount = 0;
+  for (let attempt = 0; attempt < COLLECTOR_PROJECT_DISCOVERY_MAX_RETRIES; attempt += 1) {
+    throwIfCollectorRequestSuperseded(pending);
+    const rootResult = await dispatchToContentScript(tab.id, {
+      type: "GET_CHATGPT_CONTEXT",
+      requestId: pending.requestId,
+      mode: "list",
+      collection: "root",
+      maxScrolls: COLLECTOR_PROJECT_SCROLL_MAX,
+      maxMoreClicks: 12,
+      timeoutMs: COLLECTOR_ROOT_TIMEOUT_MS,
+      resolveProjectIds: true,
+      maxProjectResolutions: COLLECTOR_MAX_PROJECTS,
+      projectResolutionTimeoutMs: COLLECTOR_PROJECT_RESOLUTION_TIMEOUT_MS
+    }, request, {
+      timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
+      timeoutStage: "collector_content_script_timeout"
+    });
+    lastUnresolvedProjectCount = validateCollectorRootResult(rootResult, pending);
+    recordCollectorScrollTelemetry(rootResult, pending, {
+      project_index: -1,
+      stage: "collector_root_sidebar_scan"
+    });
+    if (rootResult.sidebar_scroll_complete === true
+      && rootResult.project_section_found === true
+      && rootResult.projects.length > 0
+      && lastUnresolvedProjectCount === 0) return rootResult;
+    if (rootResult.sidebar_scroll_complete !== true) {
+      diagnostic("collector root sidebar scan incomplete", {
+        request_id: pending.requestId,
+        collector_window_id: collectorWindowState.windowId,
+        collector_tab_id: pending.tabId,
+        sidebar_scroll_top: rootResult.sidebar_scroll_top,
+        sidebar_scroll_height: rootResult.sidebar_scroll_height,
+        sidebar_client_height: rootResult.sidebar_client_height,
+        sidebar_can_scroll: rootResult.sidebar_can_scroll === true,
+        sidebar_at_bottom: rootResult.sidebar_at_bottom === true,
+        visible_project_rows: rootResult.visible_project_rows,
+        discovered_project_count: rootResult.discovered_project_count,
+        project_section_found: rootResult.project_section_found === true,
+        no_growth_count: rootResult.no_growth_count,
+        sidebar_scroll_complete: false,
+        status: "retrying",
+        error_code: "context_projects_incomplete",
+        stage: "collector_root_sidebar_scan_incomplete",
+        target_tab_id: pending.tabId
+      });
+    }
+
+    collectorWindowState = {
+      ...collectorWindowState,
+      projectDiscoveryRetryCount: attempt + 1
+    };
+    collectorWindowLifecycle("WaitingProjects", {
+      tabId: tab.id,
+      projectDiscoveryRetryCount: attempt + 1,
+      discoveredProjectCount: rootResult.projects.length,
+      discoveredChatCount: rootResult.conversations.length
+    });
+    if (attempt + 1 >= COLLECTOR_PROJECT_DISCOVERY_MAX_RETRIES) break;
+    await wait(COLLECTOR_PROJECT_DISCOVERY_RETRY_DELAY_MS);
+    // Re-check the DOM/layout before retrying a zero-growth root scan. This
+    // waits for ChatGPT hydration without ever changing the Execution Tab.
+    await ensureCollectorViewport(tab, {
+      request_id: pending.requestId,
+      stage: "collector_project_discovery_retry"
+    });
+  }
+  throw bridgeError(
+    lastUnresolvedProjectCount > 0
+      ? "ChatGPT ProjectのIDを完全には取得できませんでした。"
+      : "ChatGPT Projectを取得できませんでした。",
+    0,
+    "context_projects_incomplete");
+}
+
 async function collectCompleteChatGptContext(tab, pending, request) {
   throwIfCollectorRequestSuperseded(pending);
   const aggregate = {
@@ -1988,21 +2636,7 @@ async function collectCompleteChatGptContext(tab, pending, request) {
     conversations: [],
     current: null
   };
-  const rootResult = await dispatchToContentScript(tab.id, {
-    type: "GET_CHATGPT_CONTEXT",
-    requestId: pending.requestId,
-    mode: "list",
-    collection: "root",
-    maxScrolls: COLLECTOR_PROJECT_SCROLL_MAX,
-    maxMoreClicks: 12,
-    timeoutMs: COLLECTOR_ROOT_TIMEOUT_MS,
-    resolveProjectIds: true,
-    maxProjectResolutions: COLLECTOR_MAX_PROJECTS,
-    projectResolutionTimeoutMs: COLLECTOR_PROJECT_RESOLUTION_TIMEOUT_MS
-  }, request, {
-    timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
-    timeoutStage: "collector_content_script_timeout"
-  });
+  const rootResult = await collectCollectorRootResult(tab, pending, request);
   mergeCollectorMetadata(aggregate, rootResult);
   throwIfCollectorRequestSuperseded(pending);
   collectorWindowLifecycle("CollectingProjects", {
@@ -2050,6 +2684,29 @@ async function collectCompleteChatGptContext(tab, pending, request) {
         project_index: index,
         total_projects: projects.length
       });
+    tab = await reconcileCollectorWindowTabs(
+      collectorWindowState.windowId,
+      tab.id,
+      {
+        request_id: pending.requestId,
+        project_id: target.projectId,
+        project_index: index,
+        total_projects: projects.length,
+        stage: "collector_project_tab_reconciled"
+      });
+    if (!tab) {
+      throw bridgeError(
+        "Collector Window内のCollector Tabを確認できません。",
+        0,
+        "collector_tab_count_invalid");
+    }
+    tab = await enforceCollectorTab(tab, {
+      request_id: pending.requestId,
+      project_id: target.projectId,
+      project_index: index,
+      total_projects: projects.length,
+      stage: "collector_project_tab_enforced"
+    });
     pending.tabId = tab.id;
     throwIfCollectorRequestSuperseded(pending);
     const projectResult = await dispatchToContentScript(tab.id, {
@@ -2065,6 +2722,13 @@ async function collectCompleteChatGptContext(tab, pending, request) {
       timeoutStage: "collector_project_content_script_timeout"
     });
     throwIfCollectorRequestSuperseded(pending);
+    pending.currentProjectId = target.projectId;
+    validateCollectorProjectResult(projectResult, pending);
+    recordCollectorScrollTelemetry(projectResult, pending, {
+      project_id: target.projectId,
+      project_index: index,
+      stage: "collector_project_sidebar_scan"
+    });
     mergeCollectorMetadata(aggregate, projectResult, target.projectId);
     collectorWindowLifecycle("CollectingProject", {
       tabId: tab.id,
@@ -2108,10 +2772,32 @@ async function collectContextWithRecovery(tab, pending, request) {
         retry_count: attempt
       });
       pending.tabId = tab.id;
+      tab = await ensureCollectorViewport(tab, {
+        request_id: pending.requestId,
+        retry_count: attempt,
+        stage: "collector_viewport_required"
+      });
+      pending.tabId = tab.id;
       return await collectCompleteChatGptContext(tab, pending, request);
     } catch (error) {
       if (!isCurrentCollectorRequest(pending)) throw error;
       lastError = error;
+      if ([
+        "context_projects_incomplete",
+        "collector_viewport_too_narrow",
+        "collector_sidebar_not_ready",
+        "collector_viewport_resize_failed"
+      ].includes(error?.code)) {
+        diagnostic("collector refresh terminal failure", {
+          request_id: pending.requestId,
+          retry_count: attempt,
+          error_code: error.code,
+          status: "error",
+          stage: "collector_refresh_terminal_failure",
+          target_tab_id: pending.tabId
+        });
+        break;
+      }
       collectorWindowState = { ...collectorWindowState, retryCount: attempt + 1 };
       diagnostic("collector recovery requested", {
         request_id: pending.requestId,
@@ -2164,6 +2850,24 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
         ...collectorWindowState,
         requestId,
         retryCount: 0,
+        projectDiscoveryRetryCount: 0,
+        viewportRetryCount: 0,
+        windowWidth: null,
+        windowHeight: null,
+        contentInnerWidth: null,
+        contentInnerHeight: null,
+        sidebarExpectedVisible: false,
+        activeTabIdInWindow: null,
+        collectorTabActive: false,
+        tabCountInWindow: 0,
+        sidebarScrollTop: null,
+        sidebarScrollHeight: null,
+        sidebarClientHeight: null,
+        sidebarCanScroll: false,
+        sidebarAtBottom: false,
+        visibleProjectRows: 0,
+        projectSectionFound: false,
+        noGrowthCount: 0,
         currentProjectId: null,
         projectIndex: -1,
         totalProjects: 0,
@@ -5023,9 +5727,25 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
     && tabId === collectorWindowState.tabId
     && Number.isSafeInteger(collectorWindowState.windowId)
     && tab?.windowId === collectorWindowState.windowId;
+  const isCollectorWindowMember = Number.isSafeInteger(collectorWindowState.windowId)
+    && tab?.windowId === collectorWindowState.windowId;
+  const collectorTabLifecycleChanged = [
+    "status",
+    "active",
+    "discarded",
+    "frozen",
+    "autoDiscardable",
+    "url"
+  ].some((key) => Object.prototype.hasOwnProperty.call(changeInfo || {}, key));
+  if (isCollectorWindowMember && collectorTabLifecycleChanged) {
+    void queueCollectorTabTopologyRepair({
+      event_tab_id: tabId,
+      event_window_id: tab?.windowId,
+      stage: "collector_tabs_on_updated"
+    });
+  }
   if (isCollectorWindowTab
-    && ["status", "active", "discarded", "frozen", "autoDiscardable", "url"]
-      .some((key) => Object.prototype.hasOwnProperty.call(changeInfo || {}, key))) {
+    && collectorTabLifecycleChanged) {
     diagnostic("collector tab updated", {
       status: "observed",
       stage: "collector_tabs_on_updated",
@@ -5132,9 +5852,67 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
   }
 });
 
+chrome.tabs.onCreated?.addListener?.((tab) => {
+  if (!Number.isSafeInteger(collectorWindowState.windowId)
+    || tab?.windowId !== collectorWindowState.windowId) return;
+  diagnostic("collector tab created in managed window", {
+    status: "observed",
+    stage: "collector_tabs_on_created",
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: collectorWindowState.tabId,
+    event_tab_id: tab?.id,
+    event_window_id: tab?.windowId,
+    tab_active: tab?.active === true,
+    tab_discarded: tab?.discarded === true,
+    tab_frozen: tab?.frozen === true,
+    tab_auto_discardable: tab?.autoDiscardable,
+    tab_status: tab?.status
+  });
+  void queueCollectorTabTopologyRepair({
+    event_tab_id: tab?.id,
+    event_window_id: tab?.windowId,
+    stage: "collector_tabs_on_created"
+  });
+});
+
+chrome.tabs.onAttached?.addListener?.((tabId, attachInfo) => {
+  if (!Number.isSafeInteger(collectorWindowState.windowId)
+    || attachInfo?.newWindowId !== collectorWindowState.windowId) return;
+  diagnostic("collector tab attached to managed window", {
+    status: "observed",
+    stage: "collector_tabs_on_attached",
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: collectorWindowState.tabId,
+    event_tab_id: tabId,
+    event_window_id: attachInfo?.newWindowId
+  });
+  void queueCollectorTabTopologyRepair({
+    event_tab_id: tabId,
+    event_window_id: attachInfo?.newWindowId,
+    stage: "collector_tabs_on_attached"
+  });
+});
+
+chrome.tabs.onDetached?.addListener?.((tabId, detachInfo) => {
+  if (!Number.isSafeInteger(collectorWindowState.windowId)
+    || detachInfo?.oldWindowId !== collectorWindowState.windowId) return;
+  diagnostic("collector tab detached from managed window", {
+    status: "observed",
+    stage: "collector_tabs_on_detached",
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: collectorWindowState.tabId,
+    event_tab_id: tabId,
+    event_window_id: detachInfo?.oldWindowId
+  });
+  void queueCollectorTabTopologyRepair({
+    event_tab_id: tabId,
+    event_window_id: detachInfo?.oldWindowId,
+    stage: "collector_tabs_on_detached"
+  });
+});
+
 chrome.tabs.onActivated?.addListener?.((activeInfo) => {
-  const hasCollectorWindow = Number.isSafeInteger(collectorWindowState.windowId)
-    && Number.isSafeInteger(collectorWindowState.tabId);
+  const hasCollectorWindow = Number.isSafeInteger(collectorWindowState.windowId);
   if (hasCollectorWindow) {
     diagnostic("collector tab activated", {
       status: "observed",
@@ -5147,33 +5925,21 @@ chrome.tabs.onActivated?.addListener?.((activeInfo) => {
       tab_active: activeInfo?.windowId === collectorWindowState.windowId
         && activeInfo?.tabId === collectorWindowState.tabId
     });
-    if (activeInfo?.windowId === collectorWindowState.windowId
-      && activeInfo?.tabId !== collectorWindowState.tabId
-      && typeof chrome.tabs?.get === "function") {
+    if (activeInfo?.windowId === collectorWindowState.windowId) {
       diagnostic("collector tab activation restore requested", {
         collector_window_id: collectorWindowState.windowId,
         collector_tab_id: collectorWindowState.tabId,
-        target_tab_id: collectorWindowState.tabId,
+        target_tab_id: activeInfo?.tabId,
         event_tab_id: activeInfo?.tabId,
         event_window_id: activeInfo?.windowId,
         status: "requested",
         stage: "collector_tab_activation_restore"
       });
-      chrome.tabs.get(collectorWindowState.tabId)
-        .then((tab) => collectorTabNeedsRecovery(tab)
-          ? replaceCollectorTab(tab, { stage: "collector_tab_activation_restore" })
-            .then(() => ensureCollectorWindow(COLLECTOR_TAB_URL, { stage: "collector_tab_activation_restore" }))
-          : enforceCollectorTab(tab, { stage: "collector_tab_activation_restore" }))
-        .catch((error) => {
-          diagnostic("collector tab activation restore failed", {
-            collector_window_id: collectorWindowState.windowId,
-            collector_tab_id: collectorWindowState.tabId,
-            target_tab_id: collectorWindowState.tabId,
-            status: "error",
-            error_code: error?.code || "collector_tab_state_failed",
-            stage: "collector_tab_activation_restore"
-          });
-        });
+      void queueCollectorTabTopologyRepair({
+        event_tab_id: activeInfo?.tabId,
+        event_window_id: activeInfo?.windowId,
+        stage: "collector_tab_activation_restore"
+      });
     }
   }
   if (!Number.isSafeInteger(managedTabState.tabId)) return;
@@ -5225,6 +5991,10 @@ chrome.windows?.onFocusChanged?.addListener?.((windowId) => {
       && typeof chrome.windows?.get === "function") {
       void getCollectorWindow(windowId)
         .then((window) => makeCollectorWindowUsable(window, {
+          event_window_id: windowId,
+          stage: "collector_window_focus_restore"
+        }))
+        .then(() => queueCollectorTabTopologyRepair({
           event_window_id: windowId,
           stage: "collector_window_focus_restore"
         }))
@@ -5285,6 +6055,15 @@ chrome.tabs.onRemoved?.addListener?.((tabId, removeInfo) => {
       collector_window_id: collectorWindowState.windowId,
       collector_tab_id: tabId,
       collector_window_exists: true
+    });
+  }
+  if (Number.isSafeInteger(collectorWindowState.windowId)
+    && removeInfo?.windowId === collectorWindowState.windowId
+    && removeInfo?.isWindowClosing !== true) {
+    void queueCollectorTabTopologyRepair({
+      event_tab_id: tabId,
+      event_window_id: removeInfo.windowId,
+      stage: "collector_tab_removed"
     });
   }
   if (tabId !== managedTabState.tabId) return;

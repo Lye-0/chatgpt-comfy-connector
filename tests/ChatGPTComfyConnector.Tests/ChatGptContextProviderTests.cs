@@ -295,6 +295,43 @@ public sealed class ChatGptContextProviderTests
             item => item.ExternalId == "conversation-old");
     }
 
+    [Fact]
+    public async Task TreatsEmptyLiveProjectDiscoveryAsIncompleteAndKeepsKnownCache()
+    {
+        var store = new StubPortableStore
+        {
+            Cache = new BrowserExtensionChatGptContextCache(
+                [new BrowserExtensionChatGptProjectEntry(
+                    "g-p-known",
+                    "Known Project",
+                    "https://chatgpt.com/g/g-p-known/project")],
+                [new BrowserExtensionChatGptConversationEntry(
+                    "conversation-known",
+                    "Known Chat",
+                    "https://chatgpt.com/g/g-p-known/c/conversation-known",
+                    "g-p-known",
+                    "Known Project")],
+                DateTimeOffset.UtcNow)
+        };
+        var provider = new ChatGptProjectChatProvider(
+            new StubBridge(new BrowserExtensionChatGptContextSnapshot(
+                "empty-live",
+                "ok",
+                [],
+                [],
+                new BrowserExtensionChatGptCurrentContext(
+                    ProjectId: "g-p-known"))),
+            store);
+
+        var catalog = await provider.LoadAsync([]);
+
+        Assert.Equal(ProjectChatCatalogLoadState.Error, catalog.LoadState);
+        Assert.Equal("context_projects_incomplete", catalog.ErrorCode);
+        var project = Assert.Single(catalog.Projects, item => item.ExternalId == "g-p-known");
+        Assert.Single(project.Chats, item => item.ExternalId == "conversation-known");
+        Assert.Equal("g-p-known", store.Cache!.Projects.Single().ProjectId);
+    }
+
     private sealed class StubBridge(BrowserExtensionChatGptContextSnapshot snapshot) : IBrowserExtensionBridge
     {
         public BrowserExtensionBridgeStatus Status => new(

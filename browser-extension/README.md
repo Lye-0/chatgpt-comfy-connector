@@ -43,10 +43,22 @@ area); an internal fallback size is used if those bounds are unavailable.
 
 Project/Chat discovery uses a separate non-focused Collector Window with one
 active Collector Tab. The tab is reused for the root sidebar and every Project
-page, and is never used for Handoff, media, Review, Resume, or
+page. Project rows may be route-bearing links or expandable buttons, and a
+title is never used as identity. The tab is never used for Handoff, media, Review, Resume, or
 assistant-response observation. Button-only Project rows are opened in that
 Collector Tab to resolve their route IDs before Project-page traversal; a
 title is never used as identity. The Collector Window is independent from the
 Managed Execution Window and the user's foreground tabs. Its metadata-only
 snapshot is persisted by Desktop so the previous list can be shown while a
-new bounded refresh runs.
+new bounded refresh runs. It starts at about half the reference window width
+and height (with an outer-width floor near 820px), then verifies the Content
+Script viewport and desktop sidebar structure before collecting. The Project
+section may be below a virtualized viewport, so the locator selects the
+visible sidebar shell containing the Project catalog and the Project-owning
+element whose `scrollTop` actually moves, collects after each lazy-load settle,
+and requires bottom/no-growth plus a discovered Project section before
+completion. A bounded zero-Project result fails as
+`context_projects_incomplete` instead of being published as an empty
+successful snapshot. Window membership is reconciled before each scan so the
+initial `windows.create({ url })` Tab is reused and duplicate Collector Tabs
+are removed.

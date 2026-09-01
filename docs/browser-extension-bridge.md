@@ -58,6 +58,16 @@ demand, keeps its only Collector Tab active and non-discardable, scans the root
 sidebar, and reuses the same tab for every Project page. The Collector Window
 is never used for Handoff, media, Review, Resume, or assistant-response
 observation, and it does not replace the Managed Execution Tab's watcher state.
+The Collector Window starts at roughly half the reference window width and
+height, with an outer-width floor of about 820px. Before discovery, the
+Content Script reports `window.innerWidth` and sidebar structure readiness; the
+Background widens the non-focused Window and rechecks until the desktop
+sidebar viewport and an actual scroll container are available. The Project
+section itself may be virtualized below the initial view, so discovery performs
+the bounded scroll and lazy-load scan before declaring it ready. A bounded
+zero-Project result is reported as `context_projects_incomplete`, never as a
+successful empty snapshot. Each lifecycle reconciliation verifies one Window
+member, the active Collector Tab ID, and the non-discardable tab state.
 
 The Execution Window and tab are replaceable browser media, not the Conversation
 identity. Before
@@ -147,10 +157,10 @@ The Desktop context selectors use the authenticated Extension as a
 metadata-only provider. The Extension reads the visible ChatGPT sidebar and
 the current SPA URL; it does not read conversation message bodies, call a
 private ChatGPT API, or expose arbitrary browser automation. In the current
-ChatGPT DOM, Project entries are `role="button"` rows with a nested visible
-`data-marquee-text` title, while conversations are `a[href]` entries with the
-same kind of visible title child. The locator layer therefore never uses an
-accessible name as a Project/Conversation title. The request types are
+ChatGPT DOM, Project entries may be route-bearing links or `role="button"`
+rows with a nested visible `data-marquee-text` title, while conversations may
+be `a[href]` entries or ID-bearing metadata nodes. The locator layer therefore
+never uses an accessible name as a Project/Conversation title. The request types are
 `chatgpt.context.list.request` and
 `chatgpt.context.current.request`; responses are
 `chatgpt.context.list.response` and `chatgpt.context.current.response`.
@@ -195,15 +205,21 @@ sidebar changes can emit a current-context event, but that event never
 changes the active Desktop session or starts a Handoff by itself.
 
 List discovery first expands bounded `さらに表示`/`もっと見る` controls, then
-scans the root sidebar in small steps for all visible Project and Projectless
-Conversation metadata. Button-only Project rows are resolved one at a time by
+selects the visible sidebar shell with the largest Project evidence and its
+actual Project-owning scroll container before scanning in small steps for all
+visible Project and Projectless Conversation metadata. A scroll is accepted only when
+the element's `scrollTop` changes; rows are collected again after each bounded
+lazy-load settle, and completion requires the Project section, bottom or
+bounded no-growth, and ID-complete merge. Button-only Project rows are resolved one at a time by
 opening the row in the Collector Tab and reading the resulting SPA Project URL;
 the title is only a display label. The resolved entries are merged by
 `project_id`, and conversations are merged by `conversation_id`. For every
 resolved Project, the same Collector Tab navigates to its Project page and
-scans the page's lazy/virtualized Conversation region with bounded scrolling,
-timeout, and cancellation. The original scroll positions are restored in
-`finally` paths. The Collector result is therefore an ID-complete metadata
+scans every independent Project chat scrollport with the same actual-container
+selection, bounded scrolling, timeout, and cancellation. The active scrollport
+is rebound by logical container position after SPA replacement rather than
+silently switching to the first list. The original scroll positions are
+restored in `finally` paths. The Collector result is therefore an ID-complete metadata
 snapshot without selecting a Chat, changing the composer, or sending a
 Handoff.
 
@@ -212,7 +228,9 @@ closed Collector Window or Tab is recreated/reused for the next refresh, while
 the current refresh generation prevents an older result from replacing a newer
 snapshot. Desktop persists only Project/Conversation metadata in its portable
 cache; message bodies, prompts, attachments, credentials, and tokens are not
-cached or logged.
+cached or logged. If a refresh reports an incomplete empty Project discovery,
+the cached metadata remains visible but the catalog is marked `Error` until a
+complete refresh succeeds.
 
 When a session is bound to an existing Chat, Desktop persists its conversation
 ID and canonical URL in the session binding. Handoff, media attachment, and
@@ -657,8 +675,9 @@ attempt's `request_id` is new.
   supply an arbitrary URL;
 - no arbitrary command or MCP execution surface exposed to the Extension;
 - bounded HTTP/WebSocket message sizes and a five-second hello timeout.
-- Handoff, media, Review, and response delivery are limited to one inactive
-  Managed HTTPS `chatgpt.com` tab resolved from the bound Conversation
+- Handoff, media, Review, and response delivery are limited to one active
+  Managed HTTPS `chatgpt.com` tab inside the connector-owned Execution Window,
+  resolved from the bound Conversation
   identity; the Background cannot choose an arbitrary URL and the Content
   Script cannot access the Bridge.
 - Handoff bodies are not included in diagnostics or log messages.

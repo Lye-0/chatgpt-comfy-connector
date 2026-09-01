@@ -757,6 +757,12 @@
     const title = metadataTitle(item.title);
     const url = chatGptMetadataUrl(item.url);
     const discoveryKey = metadataIdentifier(item.discovery_key || item.discoveryKey);
+    const discoveryIndex = Number.isSafeInteger(item.discovery_index)
+      && item.discovery_index >= 0
+      ? item.discovery_index
+      : (Number.isSafeInteger(item.discoveryIndex) && item.discoveryIndex >= 0
+        ? item.discoveryIndex
+        : null);
     const titleKey = metadataTextKey(title);
     let existing = projectId
       ? projects.find((candidate) => candidate.project_id === projectId)
@@ -782,6 +788,9 @@
       if (title && (!existing.title || projectFallbackTitlePattern.test(existing.title))) existing.title = title;
       if (url && !existing.url) existing.url = url;
       if (discoveryKey && !existing.discovery_key) existing.discovery_key = discoveryKey;
+      if (discoveryIndex !== null && existing.discovery_index === undefined) {
+        existing.discovery_index = discoveryIndex;
+      }
       return existing;
     }
     if (!title || (!projectId && !discoveryKey)) return null;
@@ -789,7 +798,8 @@
       ...(projectId ? { project_id: projectId } : {}),
       title,
       ...(url ? { url } : {}),
-      ...(discoveryKey ? { discovery_key: discoveryKey } : {})
+      ...(discoveryKey ? { discovery_key: discoveryKey } : {}),
+      ...(discoveryIndex !== null ? { discovery_index: discoveryIndex } : {})
     };
     projects.push(entry);
     return entry;
@@ -830,12 +840,15 @@
     const projectRows = projectRowsInSidebar(sidebarRoot, documentHref(root));
     const currentProjectId = projectIdFromUrl(url);
 
-    const upsertProject = (projectId, title, projectUrl, discoveryKey) => {
+    const upsertProject = (projectId, title, projectUrl, discoveryKey, discoveryIndex = null) => {
       const entry = upsertContextProject(projects, {
         ...(projectId ? { project_id: projectId } : {}),
         title,
         ...(projectUrl ? { url: projectUrl } : {}),
-        ...(discoveryKey ? { discovery_key: discoveryKey } : {})
+        ...(discoveryKey ? { discovery_key: discoveryKey } : {}),
+        ...(Number.isSafeInteger(discoveryIndex) && discoveryIndex >= 0
+          ? { discovery_index: discoveryIndex }
+          : {})
       });
       if (entry?.project_id) projectById.set(entry.project_id, entry);
       return entry;
@@ -844,12 +857,17 @@
     // This is the old successful discovery route: read the visible Project
     // rows and anchors from the known history sidebar. Rows are never clicked
     // and no Project ID is inferred from a navigation side effect.
-    for (const row of projectRows) {
+    for (const [discoveryIndex, row] of projectRows.entries()) {
       const title = visibleTitleFromElement(row);
       if (!title) continue;
       const projectId = projectIdFromElement(row, url);
       const projectUrl = projectUrlFromElement(row, url);
-      upsertProject(projectId, title, projectUrl, projectId ? null : stableMetadataKey("project", title));
+      upsertProject(
+        projectId,
+        title,
+        projectUrl,
+        projectId ? null : stableMetadataKey("project", title),
+        discoveryIndex);
     }
 
     // Current ChatGPT Project rows are rendered as expandable buttons and do
@@ -915,6 +933,302 @@
     }
 
     return { projects, conversations };
+  }
+
+  function canonicalProjectUrl(projectId, value = null, baseUrl = globalThis.location?.href) {
+    const id = metadataIdentifier(projectId);
+    if (!id || !id.toLowerCase().startsWith("g-p-")) return null;
+    const supplied = chatGptMetadataUrl(value, baseUrl);
+    if (supplied && isProjectHomeUrl(supplied)) return supplied;
+    try {
+      const base = new URL(supplied || baseUrl || "https://chatgpt.com/");
+      if (base.protocol !== "https:" || base.hostname !== "chatgpt.com" || base.port !== "") return null;
+      return `${base.origin}/g/${encodeURIComponent(id)}/project`;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function projectIdentityFromUrlCandidate(value, baseUrl = globalThis.location?.href) {
+    const canonical = chatGptMetadataUrl(value, baseUrl);
+    if (!canonical || !isProjectRouteUrl(canonical)) return null;
+    const projectId = projectIdFromUrl(canonical);
+    const projectUrl = canonicalProjectUrl(projectId, canonical, baseUrl);
+    if (!projectId || !projectUrl) return null;
+    return { projectId, projectUrl };
+  }
+
+  function projectIdentityFromProjectMetadata(project, baseUrl = globalThis.location?.href) {
+    const rawProjectId = project?.project_id || project?.projectId;
+    const explicitProjectId = metadataIdentifier(rawProjectId);
+    if (rawProjectId !== undefined
+      && rawProjectId !== null
+      && String(rawProjectId).trim().length > 0
+      && (!explicitProjectId || !explicitProjectId.toLowerCase().startsWith("g-p-"))) {
+      return { reason: "invalid_project_id" };
+    }
+
+    const fromUrl = projectIdentityFromUrlCandidate(project?.url, baseUrl);
+    const rawUrl = typeof project?.url === "string" ? project.url.trim() : "";
+    if (rawUrl && !fromUrl) return { reason: "invalid_project_url" };
+    if (explicitProjectId && fromUrl && explicitProjectId !== fromUrl.projectId) {
+      return { reason: "project_id_url_mismatch" };
+    }
+    const projectId = explicitProjectId || fromUrl?.projectId || null;
+    if (!projectId) return { reason: "missing_stable_identity" };
+    const projectUrl = canonicalProjectUrl(projectId, fromUrl?.projectUrl || project?.url, baseUrl);
+    if (!projectUrl) return { reason: "invalid_project_url" };
+    return { projectId, projectUrl };
+  }
+
+  function projectIdentityCarrier(element, baseUrl = globalThis.location?.href) {
+    if (!element) return false;
+    const tagName = String(element.tagName || "").toLowerCase();
+    if (tagName === "a") return true;
+    for (const name of [
+      "data-project-id",
+      "data-project-id-value",
+      "data-project-url",
+      "data-href",
+      "data-url"
+    ]) {
+      const value = attributeValue(element, name);
+      if (!value) continue;
+      if (name.startsWith("data-project-") || projectIdentityFromUrlCandidate(value, baseUrl)) return true;
+    }
+    return false;
+  }
+
+  function projectIdentityElementsForRow(row, baseUrl = globalThis.location?.href) {
+    const elements = [];
+    const seen = new Set();
+    const add = (element) => {
+      if (!element || seen.has(element)) return;
+      seen.add(element);
+      elements.push(element);
+    };
+    add(row);
+    try {
+      for (const element of row?.querySelectorAll?.("*") || []) add(element);
+    } catch (_) { }
+    let ancestor = row?.parentElement;
+    for (let depth = 0; ancestor && depth < 5; depth += 1, ancestor = ancestor.parentElement) {
+      if (projectIdentityCarrier(ancestor, baseUrl)) add(ancestor);
+    }
+    return elements;
+  }
+
+  function projectIdentityFromElement(element, baseUrl = globalThis.location?.href) {
+    let invalidReason = null;
+    for (const candidate of projectIdentityElementsForRow(element, baseUrl)) {
+      const rawProjectId = attributeValue(candidate, "data-project-id")
+        || attributeValue(candidate, "data-project-id-value");
+      const explicitProjectId = metadataIdentifier(rawProjectId);
+      if (rawProjectId && (!explicitProjectId || !explicitProjectId.toLowerCase().startsWith("g-p-"))) {
+        invalidReason = invalidReason || "invalid_project_id";
+        continue;
+      }
+
+      let fromUrl = null;
+      for (const attribute of ["data-project-url", "href", "data-href", "data-url"]) {
+        const candidateUrl = attributeValue(candidate, attribute);
+        if (!candidateUrl) continue;
+        const identity = projectIdentityFromUrlCandidate(candidateUrl, baseUrl);
+        if (identity) {
+          fromUrl = identity;
+          break;
+        }
+      }
+      if (explicitProjectId && fromUrl && explicitProjectId !== fromUrl.projectId) {
+        return { reason: "project_id_url_mismatch" };
+      }
+      const projectId = explicitProjectId || fromUrl?.projectId || null;
+      if (!projectId) continue;
+      const projectUrl = canonicalProjectUrl(projectId, fromUrl?.projectUrl, baseUrl);
+      if (projectUrl) return { projectId, projectUrl };
+      invalidReason = invalidReason || "invalid_project_url";
+    }
+    return { reason: invalidReason || "missing_stable_identity" };
+  }
+
+  function projectRowForIdentityDescriptor(rows, descriptor, baseUrl = globalThis.location?.href) {
+    const projectIndex = Number.isSafeInteger(descriptor?.discovery_index)
+      && descriptor.discovery_index >= 0
+      ? descriptor.discovery_index
+      : (Number.isSafeInteger(descriptor?.project_index) && descriptor.project_index >= 0
+        ? descriptor.project_index
+        : null);
+    if (projectIndex === null) return null;
+    const row = rows?.[projectIndex];
+    if (!row) return null;
+    const expectedTitle = metadataTextKey(metadataTitle(descriptor?.title));
+    const actualTitle = metadataTextKey(visibleTitleFromElement(row, ""));
+    if (!expectedTitle || actualTitle !== expectedTitle) return null;
+    const expectedProjectId = metadataIdentifier(descriptor?.project_id || descriptor?.projectId);
+    if (expectedProjectId) {
+      const rowIdentity = projectIdentityFromElement(row, baseUrl);
+      if (rowIdentity.projectId && rowIdentity.projectId !== expectedProjectId) return null;
+    }
+    return row;
+  }
+
+  async function waitForProjectHomeNavigation(root, timeoutMs = 10000) {
+    const deadline = Date.now() + Math.max(250, Math.min(30000, Number(timeoutMs) || 10000));
+    while (Date.now() <= deadline) {
+      const currentUrl = documentHref(root, globalThis.location?.href);
+      const identity = projectIdentityFromUrlCandidate(currentUrl, currentUrl);
+      if (identity && isProjectHomeUrl(currentUrl)) return identity;
+      await waitForLocatorDelay(Math.min(100, Math.max(0, deadline - Date.now())));
+    }
+    return null;
+  }
+
+  function identityProjectResult(project, projectIndex, identity, method, reason, navigationVerified) {
+    const resolved = Boolean(
+      metadataTitle(project?.title, "")
+      && identity?.projectId
+      && identity?.projectUrl);
+    const effectiveReason = !metadataTitle(project?.title, "")
+      ? "missing_title"
+      : reason;
+    return {
+      ...(project && typeof project === "object" ? project : {}),
+      project_index: projectIndex,
+      ...(identity?.projectId ? { project_id: identity.projectId } : {}),
+      ...(identity?.projectUrl ? { url: identity.projectUrl } : {}),
+      resolution_method: method,
+      navigation_target_verified: navigationVerified === true,
+      project_url_pattern_valid: Boolean(identity?.projectId
+        && identity?.projectUrl
+        && isProjectHomeUrl(identity.projectUrl)),
+      project_id_url_match: Boolean(identity?.projectId
+        && identity?.projectUrl
+        && projectIdFromUrl(identity.projectUrl) === identity.projectId),
+      ...(resolved ? {} : { unresolved_reason: effectiveReason || "missing_stable_identity" })
+    };
+  }
+
+  async function resolveChatGptProjectIdentitiesAsync(
+    root = globalThis.document,
+    url = globalThis.location?.href,
+    projects = [],
+    options = {}) {
+    const descriptors = Array.isArray(projects) ? projects : [];
+    const mode = options.identityMode === "navigation" ? "navigation" : "dom";
+    const baseUrl = documentHref(root, url);
+    const output = descriptors.map((project, index) => ({
+      ...(project && typeof project === "object" ? project : {}),
+      project_index: Number.isSafeInteger(project?.project_index)
+        ? project.project_index
+        : index
+    }));
+    let nonNavigationResolvedCount = 0;
+    let navigationResolvedCount = 0;
+    let currentProjectIndex = -1;
+    let navigationTargetVerified = false;
+    let projectUrlPatternValid = false;
+    let projectIdUrlMatch = false;
+
+    // This resolver intentionally performs only bounded DOM reads in `dom`
+    // mode. It never selects a new scrollport, scrolls the Sidebar, or calls
+    // the Project discovery routine again.
+    if (mode === "dom") {
+      const sidebar = findSidebarRoot(root);
+      const rows = projectRowsInSidebar(sidebar, baseUrl);
+      for (let index = 0; index < output.length; index += 1) {
+        const descriptor = output[index];
+        const existing = projectIdentityFromProjectMetadata(descriptor, baseUrl);
+        let identity = existing.projectId ? existing : null;
+        let reason = existing.reason;
+        if (!identity) {
+          const row = projectRowForIdentityDescriptor(rows, descriptor, baseUrl);
+          const fromRow = row ? projectIdentityFromElement(row, baseUrl) : { reason: "project_row_not_found" };
+          identity = fromRow.projectId ? fromRow : null;
+          reason = fromRow.reason || reason;
+        }
+        output[index] = identityProjectResult(
+          descriptor,
+          Number.isSafeInteger(descriptor.project_index) ? descriptor.project_index : index,
+          identity,
+          "dom",
+          reason,
+          false);
+        if (identity) nonNavigationResolvedCount += 1;
+      }
+    } else if (output.length > 0) {
+      const descriptor = output[0];
+      currentProjectIndex = Number.isSafeInteger(descriptor.project_index)
+        ? descriptor.project_index
+        : 0;
+      const currentUrl = documentHref(root, globalThis.location?.href);
+      const currentIdentity = projectIdentityFromUrlCandidate(currentUrl, currentUrl);
+      const expectedProjectId = metadataIdentifier(descriptor.project_id || descriptor.projectId);
+      let identity = currentIdentity
+        && (!expectedProjectId || expectedProjectId === currentIdentity.projectId)
+        ? currentIdentity
+        : null;
+      let reason = currentIdentity && expectedProjectId !== currentIdentity.projectId
+        ? "project_id_url_mismatch"
+        : null;
+      if (!identity) {
+        const sidebar = findSidebarRoot(root);
+        const rows = projectRowsInSidebar(sidebar, baseUrl);
+        const row = projectRowForIdentityDescriptor(rows, descriptor, baseUrl);
+        if (!row) {
+          reason = reason || "project_row_not_found";
+        } else if (typeof row.click !== "function") {
+          reason = "project_row_not_clickable";
+        } else {
+          try {
+            // Only a row selected from the already discovered Project-row
+            // collection is allowed to navigate. Generic Sidebar controls are
+            // never queried or clicked here.
+            row.click();
+            identity = await waitForProjectHomeNavigation(root, options.navigationTimeoutMs);
+            if (!identity) reason = "navigation_target_not_project";
+            else if (expectedProjectId && expectedProjectId !== identity.projectId) {
+              identity = null;
+              reason = "project_id_url_mismatch";
+            }
+          } catch (_) {
+            reason = "project_navigation_failed";
+          }
+        }
+      }
+      output[0] = identityProjectResult(
+        descriptor,
+        currentProjectIndex,
+        identity,
+        "navigation",
+        reason,
+        Boolean(identity));
+      if (identity) {
+        navigationResolvedCount = 1;
+        navigationTargetVerified = true;
+        projectUrlPatternValid = isProjectHomeUrl(identity.projectUrl);
+        projectIdUrlMatch = projectIdFromUrl(identity.projectUrl) === identity.projectId;
+      }
+    }
+
+    const unresolvedCount = output.reduce((count, project) => {
+      const identity = projectIdentityFromProjectMetadata(project, baseUrl);
+      return count + (metadataTitle(project?.title, "") && identity.projectId ? 0 : 1);
+    }, 0);
+    return {
+      projects: output,
+      conversations: [],
+      current: null,
+      project_identity_resolution_started: true,
+      project_identity_resolution_completed: true,
+      non_navigation_resolved_count: nonNavigationResolvedCount,
+      navigation_resolved_count: navigationResolvedCount,
+      unresolved_count: unresolvedCount,
+      current_project_index: currentProjectIndex,
+      resolution_method: mode,
+      navigation_target_verified: navigationTargetVerified,
+      project_url_pattern_valid: projectUrlPatternValid,
+      project_id_url_match: projectIdUrlMatch
+    };
   }
 
   function documentHref(root, fallbackUrl = globalThis.location?.href) {
@@ -2361,6 +2675,7 @@
     projectIdFromUrl,
     collectChatGptContext,
     collectChatGptContextAsync,
+    resolveChatGptProjectIdentitiesAsync,
     collectChatGptProjectContextAsync,
     getCurrentChatGptContext,
     getChatGptCollectorViewport,

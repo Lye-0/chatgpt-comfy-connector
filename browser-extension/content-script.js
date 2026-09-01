@@ -301,6 +301,26 @@
       result.project_discovery_source = data.project_discovery_source;
     }
     for (const key of [
+      "non_navigation_resolved_count",
+      "navigation_resolved_count",
+      "unresolved_count",
+      "current_project_index"
+    ]) {
+      if (Number.isSafeInteger(data[key])) result[key] = data[key];
+    }
+    for (const key of [
+      "project_identity_resolution_started",
+      "project_identity_resolution_completed",
+      "navigation_target_verified",
+      "project_url_pattern_valid",
+      "project_id_url_match"
+    ]) {
+      if (typeof data[key] === "boolean") result[key] = data[key];
+    }
+    if (data.resolution_method === "dom" || data.resolution_method === "navigation") {
+      result.resolution_method = data.resolution_method;
+    }
+    for (const key of [
       "sidebar_scroll_top",
       "sidebar_scroll_height",
       "sidebar_client_height",
@@ -394,6 +414,16 @@
       let value;
       if (currentOnly) {
         value = locators.getCurrentChatGptContext?.(document, globalThis.location?.href);
+      } else if (message?.collection === "project_identity"
+        && typeof locators.resolveChatGptProjectIdentitiesAsync === "function") {
+        value = await locators.resolveChatGptProjectIdentitiesAsync(
+          document,
+          globalThis.location?.href,
+          Array.isArray(message.projects) ? message.projects : [],
+          {
+            identityMode: message.identityMode || message.identity_mode,
+            navigationTimeoutMs: message.navigationTimeoutMs
+          });
       } else if (message?.collection === "project"
         && typeof locators.collectChatGptProjectContextAsync === "function") {
         value = await locators.collectChatGptProjectContextAsync(

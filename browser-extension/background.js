@@ -217,11 +217,22 @@ const defaultCollectorWindowState = {
   projectDiscoveryCallCount: 0,
   projectDiscoveryStarted: false,
   projectDiscoveryCompleted: false,
+  projectDiscoveryScanCompleted: false,
   projectDiscoveryCaller: null,
   projectDiscoveryInFlight: false,
   projectDiscoveryAlreadyCompleted: false,
   projectDiscoveryScrollDirection: null,
   projectDiscoveryRestoreCount: 0,
+  projectIdentityResolutionStarted: false,
+  projectIdentityResolutionCompleted: false,
+  nonNavigationResolvedCount: 0,
+  navigationResolvedCount: 0,
+  identityUnresolvedCount: 0,
+  currentProjectIndex: -1,
+  identityResolutionMethod: null,
+  navigationTargetVerified: false,
+  projectUrlPatternValid: false,
+  projectIdUrlMatch: false,
   requestId: null
 };
 let collectorWindowState = { ...defaultCollectorWindowState };
@@ -336,6 +347,7 @@ function diagnostic(eventName, fields = {}) {
     "project_discovery_call_count",
     "project_discovery_started",
     "project_discovery_completed",
+    "project_discovery_scan_completed",
     "project_discovery_result_received",
     "project_discovery_caller",
     "project_discovery_in_flight",
@@ -348,6 +360,16 @@ function diagnostic(eventName, fields = {}) {
     "resolved_project_count",
     "unresolved_project_count",
     "reported_unresolved_project_count",
+    "project_identity_resolution_started",
+    "project_identity_resolution_completed",
+    "non_navigation_resolved_count",
+    "navigation_resolved_count",
+    "unresolved_count",
+    "current_project_index",
+    "resolution_method",
+    "navigation_target_verified",
+    "project_url_pattern_valid",
+    "project_id_url_match",
     "unresolved_reason_count",
     "title_present",
     "project_id_present",
@@ -705,6 +727,7 @@ function createProjectDiscoveryState(pending) {
     callCount: 0,
     started: false,
     completed: false,
+    scanCompleted: false,
     caller: null,
     inFlight: false,
     alreadyCompleted: false,
@@ -730,6 +753,7 @@ function syncProjectDiscoveryTelemetry(pending, discovery) {
     projectDiscoveryCallCount: discovery.callCount,
     projectDiscoveryStarted: discovery.started,
     projectDiscoveryCompleted: discovery.completed,
+    projectDiscoveryScanCompleted: discovery.scanCompleted,
     projectDiscoveryCaller: discovery.caller,
     projectDiscoveryInFlight: discovery.inFlight,
     projectDiscoveryAlreadyCompleted: discovery.alreadyCompleted,
@@ -748,6 +772,7 @@ function recordProjectDiscoveryTelemetry(eventName, pending, fields = {}) {
     project_discovery_call_count: discovery.callCount,
     project_discovery_started: discovery.started,
     project_discovery_completed: discovery.completed,
+    project_discovery_scan_completed: discovery.scanCompleted,
     project_discovery_caller: discovery.caller,
     project_discovery_in_flight: discovery.inFlight,
     project_discovery_already_completed: discovery.alreadyCompleted,
@@ -766,6 +791,7 @@ function projectDiscoveryTraceFields(pending) {
     project_discovery_call_count: discovery.callCount,
     project_discovery_started: discovery.started === true,
     project_discovery_completed: discovery.completed === true,
+    project_discovery_scan_completed: discovery.scanCompleted === true,
     project_discovery_caller: discovery.caller,
     project_discovery_in_flight: discovery.inFlight === true,
     project_discovery_already_completed: discovery.alreadyCompleted === true,
@@ -1476,11 +1502,22 @@ function collectorWindowLifecycle(lifecycle, fields = {}) {
     project_discovery_call_count: collectorWindowState.projectDiscoveryCallCount,
     project_discovery_started: collectorWindowState.projectDiscoveryStarted,
     project_discovery_completed: collectorWindowState.projectDiscoveryCompleted,
+    project_discovery_scan_completed: collectorWindowState.projectDiscoveryScanCompleted,
     project_discovery_caller: collectorWindowState.projectDiscoveryCaller,
     project_discovery_in_flight: collectorWindowState.projectDiscoveryInFlight,
     project_discovery_already_completed: collectorWindowState.projectDiscoveryAlreadyCompleted,
     project_discovery_scroll_direction: collectorWindowState.projectDiscoveryScrollDirection,
     project_discovery_restore_count: collectorWindowState.projectDiscoveryRestoreCount,
+    project_identity_resolution_started: collectorWindowState.projectIdentityResolutionStarted,
+    project_identity_resolution_completed: collectorWindowState.projectIdentityResolutionCompleted,
+    non_navigation_resolved_count: collectorWindowState.nonNavigationResolvedCount,
+    navigation_resolved_count: collectorWindowState.navigationResolvedCount,
+    unresolved_count: collectorWindowState.identityUnresolvedCount,
+    current_project_index: collectorWindowState.currentProjectIndex,
+    resolution_method: collectorWindowState.identityResolutionMethod,
+    navigation_target_verified: collectorWindowState.navigationTargetVerified,
+    project_url_pattern_valid: collectorWindowState.projectUrlPatternValid,
+    project_id_url_match: collectorWindowState.projectIdUrlMatch,
     collector_window_width: collectorWindowState.windowWidth,
     collector_window_height: collectorWindowState.windowHeight,
     collector_content_inner_width: collectorWindowState.contentInnerWidth,
@@ -2480,7 +2517,7 @@ async function dispatchToContentScript(tabId, message, trace, options = {}) {
     // locator/DOM modules through the MV3 scripting API, then retry the
     // message. The injected code is still content-script.js; the background
     // does not inspect or mutate the ChatGPT DOM itself.
-    if (!isMissingContentScriptError(error)) throw error;
+    if (!isMissingContentScriptError(error) || options.retryMissingContentScript === false) throw error;
 
     const ready = await waitForTabReady(tabId, Math.min(timeoutMs, CONTENT_SCRIPT_READY_TIMEOUT_MS));
     if (!ready) {
@@ -2711,13 +2748,12 @@ function collectorProjectTarget(project) {
   const explicitProjectId = safeContextIdentifier(project?.project_id || project?.projectId);
   const projectUrl = safeChatGptProjectUrl(project?.url);
   const urlProjectId = chatGptProjectId(projectUrl);
-  const projectId = urlProjectId
-    || (explicitProjectId?.toLowerCase().startsWith("g-p-") ? explicitProjectId : null);
-  if (!projectId) return null;
+  if (!projectUrl || !urlProjectId) return null;
+  const projectId = urlProjectId;
   if (urlProjectId && explicitProjectId && urlProjectId !== explicitProjectId) return null;
   return {
     projectId,
-    projectUrl: projectUrl || `https://chatgpt.com/g/${encodeURIComponent(projectId)}/project`
+    projectUrl
   };
 }
 
@@ -2841,10 +2877,8 @@ function validateCollectorRootResult(source, pending) {
   // The root scan is the only source of the Project catalog. A title-only row
   // is useful for display diagnostics, but it is not a safe navigation target
   // and must never make the final metadata snapshot look complete.
-  const unresolved = source.projects.reduce(
-    (count, project) => count + (collectorProjectTarget(project) ? 0 : 1),
-    0);
-  return Math.max(reportedUnresolved, unresolved);
+  const resolution = collectProjectMetadataResolution(source);
+  return Math.max(reportedUnresolved, resolution.unresolvedCount);
 }
 
 function collectorProjectMetadataResolution(project) {
@@ -2855,11 +2889,16 @@ function collectorProjectMetadataResolution(project) {
   const explicitProjectId = safeContextIdentifier(rawProjectIdValue);
   const projectUrl = safeChatGptProjectUrl(rawProjectUrl);
   const urlProjectId = chatGptProjectId(projectUrl);
-  const resolved = collectorProjectTarget(project) !== null;
+  // A Project is complete only when its display metadata and stable
+  // navigation identity are both present. The navigation helper intentionally
+  // does not require a title because it is also used while checking a target,
+  // but the final catalog must not publish a title-less Project.
+  const resolved = rawTitle.length > 0 && collectorProjectTarget(project) !== null;
   let unresolvedReason = null;
 
   if (!resolved) {
-    if (rawProjectId && !explicitProjectId) unresolvedReason = "invalid_project_id";
+    if (!rawTitle) unresolvedReason = "missing_title";
+    else if (rawProjectId && !explicitProjectId) unresolvedReason = "invalid_project_id";
     else if (rawProjectUrl && !projectUrl) unresolvedReason = "invalid_project_url";
     else if (explicitProjectId && urlProjectId && explicitProjectId !== urlProjectId) {
       unresolvedReason = "project_id_url_mismatch";
@@ -3012,6 +3051,509 @@ function recordCollectorProjectMetadataResolutionFailure(resolution, pending, er
   }
 }
 
+function collectorProjectIdentityDescriptor(project, projectIndex) {
+  const descriptor = {
+    project_index: projectIndex,
+    discovery_index: Number.isSafeInteger(project?.discovery_index)
+      && project.discovery_index >= 0
+      ? project.discovery_index
+      : projectIndex
+  };
+  if (typeof project?.title === "string" && project.title.trim().length > 0) {
+    descriptor.title = project.title.trim().slice(0, 512);
+  }
+  const projectId = safeContextIdentifier(project?.project_id || project?.projectId);
+  if (projectId) descriptor.project_id = projectId;
+  const projectUrl = safeChatGptContextUrl(project?.url);
+  if (projectUrl) descriptor.url = projectUrl;
+  const discoveryKey = safeContextIdentifier(project?.discovery_key || project?.discoveryKey);
+  if (discoveryKey) descriptor.discovery_key = discoveryKey;
+  return descriptor;
+}
+
+function validateCollectorProjectIdentityResponse(source, pending) {
+  if (!source || typeof source !== "object") {
+    throw bridgeError(
+      "ChatGPT Project identity responseを取得できませんでした。",
+      0,
+      "context_projects_incomplete");
+  }
+  const requestId = source.requestId || source.request_id;
+  if (requestId !== pending.requestId || (source.mode || "list") !== "list") {
+    throw bridgeError(
+      "ChatGPT Project identity responseの識別情報が一致しません。",
+      0,
+      "context_response_correlation_failed");
+  }
+  if (source.status === "error") {
+    throw bridgeError(
+      source.message || "ChatGPT Project identity取得に失敗しました。",
+      0,
+      source.errorCode || source.error_code || "context_projects_incomplete");
+  }
+  if (source.status !== "ok"
+    || !Array.isArray(source.projects)
+    || !Array.isArray(source.conversations)) {
+    throw bridgeError(
+      "ChatGPT Project identity responseが不正です。",
+      0,
+      "context_response_invalid");
+  }
+}
+
+function collectorProjectIdentityResponseItem(sourceProjects, projectIndex, expectedLength) {
+  const indexed = sourceProjects.find((project) =>
+    Number.isSafeInteger(project?.project_index) && project.project_index === projectIndex);
+  if (indexed) return indexed;
+  if (sourceProjects.length === expectedLength) return sourceProjects[projectIndex] || null;
+  if (sourceProjects.length === 1 && expectedLength === 1) return sourceProjects[0];
+  return null;
+}
+
+function mergeCollectorProjectIdentity(project, identityProject, projectIndex) {
+  const merged = {
+    ...(project && typeof project === "object" ? project : {}),
+    project_index: projectIndex
+  };
+  if (typeof identityProject?.title === "string" && identityProject.title.trim().length > 0
+    && (!merged.title || typeof merged.title !== "string")) {
+    merged.title = identityProject.title.trim().slice(0, 512);
+  }
+  const projectId = safeContextIdentifier(identityProject?.project_id || identityProject?.projectId);
+  if (projectId) merged.project_id = projectId;
+  const projectUrl = safeChatGptContextUrl(identityProject?.url);
+  if (projectUrl) merged.url = projectUrl;
+  const discoveryKey = safeContextIdentifier(identityProject?.discovery_key || identityProject?.discoveryKey);
+  if (discoveryKey && !merged.discovery_key) merged.discovery_key = discoveryKey;
+  const discoveryIndex = Number.isSafeInteger(identityProject?.discovery_index)
+    && identityProject.discovery_index >= 0
+    ? identityProject.discovery_index
+    : (Number.isSafeInteger(merged.discovery_index) && merged.discovery_index >= 0
+      ? merged.discovery_index
+      : projectIndex);
+  merged.discovery_index = discoveryIndex;
+  return merged;
+}
+
+function mergeCollectorProjectIdentityResponse(projects, source) {
+  return projects.map((project, projectIndex) => {
+    const item = collectorProjectIdentityResponseItem(source.projects, projectIndex, projects.length);
+    return item ? mergeCollectorProjectIdentity(project, item, projectIndex) : project;
+  });
+}
+
+function collectorProjectIdentityState(pending, projects, fields = {}) {
+  const resolution = collectProjectMetadataResolution({ projects });
+  const stateFields = {
+    projectIdentityResolutionStarted: fields.project_identity_resolution_started
+      ?? collectorWindowState.projectIdentityResolutionStarted,
+    projectIdentityResolutionCompleted: fields.project_identity_resolution_completed
+      ?? collectorWindowState.projectIdentityResolutionCompleted,
+    nonNavigationResolvedCount: Number.isSafeInteger(fields.non_navigation_resolved_count)
+      ? fields.non_navigation_resolved_count
+      : collectorWindowState.nonNavigationResolvedCount,
+    navigationResolvedCount: Number.isSafeInteger(fields.navigation_resolved_count)
+      ? fields.navigation_resolved_count
+      : collectorWindowState.navigationResolvedCount,
+    identityUnresolvedCount: resolution.unresolvedCount,
+    currentProjectIndex: Number.isSafeInteger(fields.current_project_index)
+      ? fields.current_project_index
+      : collectorWindowState.currentProjectIndex,
+    identityResolutionMethod: fields.resolution_method || collectorWindowState.identityResolutionMethod,
+    navigationTargetVerified: typeof fields.navigation_target_verified === "boolean"
+      ? fields.navigation_target_verified
+      : collectorWindowState.navigationTargetVerified,
+    projectUrlPatternValid: typeof fields.project_url_pattern_valid === "boolean"
+      ? fields.project_url_pattern_valid
+      : collectorWindowState.projectUrlPatternValid,
+    projectIdUrlMatch: typeof fields.project_id_url_match === "boolean"
+      ? fields.project_id_url_match
+      : collectorWindowState.projectIdUrlMatch
+  };
+  collectorWindowState = { ...collectorWindowState, ...stateFields };
+  return resolution;
+}
+
+function recordCollectorProjectIdentityResolution(
+  eventName,
+  pending,
+  projects,
+  fields = {}) {
+  const resolution = collectorProjectIdentityState(pending, projects, fields);
+  const base = {
+    request_id: pending?.requestId,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: pending?.tabId,
+    ...projectDiscoveryTraceFields(pending),
+    project_identity_resolution_started: collectorWindowState.projectIdentityResolutionStarted,
+    project_identity_resolution_completed: collectorWindowState.projectIdentityResolutionCompleted,
+    non_navigation_resolved_count: collectorWindowState.nonNavigationResolvedCount,
+    navigation_resolved_count: collectorWindowState.navigationResolvedCount,
+    unresolved_count: resolution.unresolvedCount,
+    discovered_project_count: resolution.discoveredCount,
+    resolved_project_count: resolution.resolvedCount,
+    unresolved_project_count: resolution.unresolvedCount,
+    current_project_index: collectorWindowState.currentProjectIndex,
+    resolution_method: collectorWindowState.identityResolutionMethod,
+    navigation_target_verified: collectorWindowState.navigationTargetVerified,
+    project_url_pattern_valid: collectorWindowState.projectUrlPatternValid,
+    project_id_url_match: collectorWindowState.projectIdUrlMatch,
+    status: fields.status || "observed",
+    stage: fields.stage || "collector_project_identity_resolution",
+    target_tab_id: pending?.tabId
+  };
+  diagnostic(eventName, { ...base, ...fields });
+  return resolution;
+}
+
+function collectorProjectIdentityFromTab(tab) {
+  const projectUrl = safeChatGptProjectUrl(tab?.url);
+  const projectId = chatGptProjectId(projectUrl);
+  if (!projectUrl || !projectId) return null;
+  return { projectId, projectUrl };
+}
+
+async function waitForCollectorProjectIdentityTab(tabId, timeoutMs = COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS) {
+  const deadline = Date.now() + Math.max(250, Math.min(30000, Number(timeoutMs) || 10000));
+  while (Date.now() <= deadline) {
+    let tab = null;
+    try { tab = await chrome.tabs.get(tabId); } catch (_) { return null; }
+    const identity = collectorProjectIdentityFromTab(tab);
+    const loading = typeof tab?.status === "string" && tab.status !== "complete";
+    if (identity && !loading) return identity;
+    await wait(Math.min(100, Math.max(0, deadline - Date.now())));
+  }
+  return null;
+}
+
+async function resolveCollectorProjectIdentities(tab, pending, request, rootResult) {
+  throwIfCollectorRequestSuperseded(pending);
+  const discovery = projectDiscoveryStateFor(pending);
+  const sourceProjects = Array.isArray(pending.projectIdentityResult?.projects)
+    ? pending.projectIdentityResult.projects
+    : rootResult.projects;
+  let projects = sourceProjects.map((project, index) =>
+    collectorProjectIdentityDescriptor(project, index));
+  const initialResolution = collectProjectMetadataResolution({ projects });
+  const initialUnresolvedIndexes = initialResolution.items
+    .filter((item) => !item.resolved)
+    .map((item) => item.projectIndex);
+
+  recordCollectorProjectIdentityResolution(
+    "collector project identity resolution started",
+    pending,
+    projects,
+    {
+      project_identity_resolution_started: true,
+      project_identity_resolution_completed: false,
+      current_project_index: -1,
+      resolution_method: "dom",
+      navigation_target_verified: false,
+      project_url_pattern_valid: false,
+      project_id_url_match: false,
+      status: "started",
+      stage: "collector_project_identity_resolution_start"
+    });
+
+  // Projects that already carry a verified ID + canonical URL are resolved
+  // by the metadata received from the discovery pass. Count them as the
+  // non-navigation portion of identity resolution even when no DOM resolver
+  // message is needed for this refresh.
+  let nonNavigationResolvedCount = initialResolution.resolvedCount;
+  let navigationResolvedCount = 0;
+  let domChecked = initialResolution.resolvedCount > 0;
+  if (initialUnresolvedIndexes.length > 0) {
+    const domResult = await dispatchToContentScript(tab.id, {
+      type: "GET_CHATGPT_CONTEXT",
+      requestId: pending.requestId,
+      mode: "list",
+      collection: "project_identity",
+      identityMode: "dom",
+      projects,
+      navigationTimeoutMs: 10000
+    }, request, {
+      timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
+      timeoutStage: "collector_project_identity_dom_timeout"
+    });
+    throwIfCollectorRequestSuperseded(pending);
+    validateCollectorProjectIdentityResponse(domResult, pending);
+    const beforeDom = projects;
+    projects = mergeCollectorProjectIdentityResponse(projects, domResult);
+    nonNavigationResolvedCount += projects.reduce((count, project, index) =>
+      count + (!collectorProjectTarget(beforeDom[index]) && collectorProjectTarget(project) ? 1 : 0), 0);
+    domChecked = true;
+    pending.projectIdentityResult = {
+      ...rootResult,
+      projects,
+      unresolved_project_count: collectProjectMetadataResolution({ projects }).unresolvedCount
+    };
+    recordCollectorProjectIdentityResolution(
+      "collector project identity DOM resolution observed",
+      pending,
+      projects,
+      {
+        project_identity_resolution_started: true,
+        project_identity_resolution_completed: false,
+        non_navigation_resolved_count: nonNavigationResolvedCount,
+        navigation_resolved_count: 0,
+        current_project_index: -1,
+        resolution_method: "dom",
+        navigation_target_verified: false,
+        project_url_pattern_valid: false,
+        project_id_url_match: false,
+        status: "observed",
+        stage: "collector_project_identity_dom"
+      });
+  }
+
+  let unresolvedIndexes = collectProjectMetadataResolution({ projects }).items
+    .filter((item) => !item.resolved)
+    .map((item) => item.projectIndex);
+  for (const projectIndex of unresolvedIndexes) {
+    throwIfCollectorRequestSuperseded(pending);
+    const descriptor = collectorProjectIdentityDescriptor(projects[projectIndex], projectIndex);
+    tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
+      request_id: pending.requestId,
+      project_index: projectIndex,
+      total_projects: projects.length,
+      project_discovery_completed: false,
+      project_discovery_scan_completed: true,
+      project_discovery_run_id: discovery.runId,
+      project_discovery_result_received: true,
+      stage: "collector_project_identity_root_navigation"
+    });
+    tab = await ensureCollectorReady(tab, {
+      request_id: pending.requestId,
+      project_index: projectIndex,
+      total_projects: projects.length,
+      stage: "collector_project_identity_root_ready"
+    });
+    pending.tabId = tab.id;
+    collectorWindowState = {
+      ...collectorWindowState,
+      currentProjectIndex: projectIndex,
+      identityResolutionMethod: "navigation",
+      navigationTargetVerified: false,
+      projectUrlPatternValid: false,
+      projectIdUrlMatch: false
+    };
+    diagnostic("collector project identity navigation started", {
+      request_id: pending.requestId,
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: tab.id,
+      project_index: projectIndex,
+      total_projects: projects.length,
+      resolution_method: "navigation",
+      status: "started",
+      stage: "collector_project_identity_navigation_start",
+      target_tab_id: tab.id
+    });
+
+    let identityResult;
+    try {
+      identityResult = await dispatchToContentScript(tab.id, {
+        type: "GET_CHATGPT_CONTEXT",
+        requestId: pending.requestId,
+        mode: "list",
+        collection: "project_identity",
+        identityMode: "navigation",
+        projects: [descriptor],
+        navigationTimeoutMs: 10000
+      }, request, {
+        timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
+        timeoutStage: "collector_project_identity_navigation_timeout",
+        // A full page navigation can close the message port after the row
+        // click. Do not blindly replay the click; inspect the resulting tab
+        // URL below and let the Content Script's route check be idempotent.
+        retryMissingContentScript: false
+      });
+    } catch (error) {
+      // A full navigation can close the Content Script message port before
+      // tabs.update/onUpdated has exposed the final URL to this turn. Poll
+      // the exact Collector Tab until navigation is complete before deciding
+      // whether the click succeeded. This avoids replaying a click that was
+      // already accepted by ChatGPT.
+      const fromTab = await waitForCollectorProjectIdentityTab(
+        tab.id,
+        COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS);
+      identityResult = fromTab
+        ? {
+          type: CHATGPT_CONTEXT_RESULT_MESSAGE_TYPE,
+          requestId: pending.requestId,
+          mode: "list",
+          status: "ok",
+          projects: [{ ...descriptor, project_id: fromTab.projectId, url: fromTab.projectUrl }],
+          conversations: [],
+          current: null,
+          navigation_target_verified: true,
+          project_url_pattern_valid: true,
+          project_id_url_match: true
+        }
+        : {
+          // Keep the normal identity-validation path for a navigation that
+          // landed on a non-Project route (or disappeared). It records the
+          // unresolved metadata and returns context_projects_incomplete,
+          // without replaying the click or inventing an ID.
+          type: CHATGPT_CONTEXT_RESULT_MESSAGE_TYPE,
+          requestId: pending.requestId,
+          mode: "list",
+          status: "ok",
+          projects: [descriptor],
+          conversations: [],
+          current: null,
+          navigation_target_verified: false,
+          project_url_pattern_valid: false,
+          project_id_url_match: false
+        };
+    }
+    throwIfCollectorRequestSuperseded(pending);
+    validateCollectorProjectIdentityResponse(identityResult, pending);
+    const beforeNavigation = projects;
+    projects = mergeCollectorProjectIdentityResponse(projects, identityResult);
+    const target = collectorProjectTarget(projects[projectIndex]);
+    const navigationResolved = !collectorProjectTarget(beforeNavigation[projectIndex]) && Boolean(target);
+    if (!target) {
+      const failedResolution = collectProjectMetadataResolution({ projects });
+      recordCollectorProjectMetadataResolution({ projects }, pending);
+      recordCollectorProjectMetadataResolutionFailure(
+        failedResolution,
+        pending,
+        "context_projects_incomplete");
+      recordCollectorProjectIdentityResolution(
+        "collector project identity navigation failed",
+        pending,
+        projects,
+        {
+          project_identity_resolution_started: true,
+          project_identity_resolution_completed: false,
+          non_navigation_resolved_count: nonNavigationResolvedCount,
+          navigation_resolved_count: navigationResolvedCount,
+          current_project_index: projectIndex,
+          resolution_method: "navigation",
+          navigation_target_verified: identityResult.navigation_target_verified === true,
+          project_url_pattern_valid: identityResult.project_url_pattern_valid === true,
+          project_id_url_match: identityResult.project_id_url_match === true,
+          status: "error",
+          error_code: "context_projects_incomplete",
+          stage: "collector_project_identity_navigation_failed"
+        });
+      throw bridgeError(
+        "ChatGPT ProjectのStable ID / URLを取得できませんでした。",
+        0,
+        "context_projects_incomplete");
+    }
+    if (navigationResolved) navigationResolvedCount += 1;
+    pending.projectIdentityResult = {
+      ...rootResult,
+      projects,
+      unresolved_project_count: collectProjectMetadataResolution({ projects }).unresolvedCount
+    };
+    recordCollectorProjectIdentityResolution(
+      "collector project identity navigation resolved",
+      pending,
+      projects,
+      {
+        project_identity_resolution_started: true,
+        project_identity_resolution_completed: false,
+        non_navigation_resolved_count: nonNavigationResolvedCount,
+        navigation_resolved_count: navigationResolvedCount,
+        current_project_index: projectIndex,
+        resolution_method: "navigation",
+        navigation_target_verified: identityResult.navigation_target_verified !== false,
+        project_url_pattern_valid: identityResult.project_url_pattern_valid !== false,
+        project_id_url_match: identityResult.project_id_url_match !== false,
+        status: "resolved",
+        stage: "collector_project_identity_navigation_resolved"
+      });
+    // Always return to the discovery/root page before attempting the next
+    // confirmed Project row. This is identity resolution only; Project
+    // discovery itself is not re-entered.
+    tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
+      request_id: pending.requestId,
+      project_index: projectIndex,
+      total_projects: projects.length,
+      project_discovery_completed: false,
+      project_discovery_scan_completed: true,
+      project_discovery_run_id: discovery.runId,
+      stage: "collector_project_identity_root_restore"
+    });
+    pending.tabId = tab.id;
+    unresolvedIndexes = collectProjectMetadataResolution({ projects }).items
+      .filter((item) => !item.resolved)
+      .map((item) => item.projectIndex);
+  }
+
+  const finalResolution = collectProjectMetadataResolution({ projects });
+  if (finalResolution.unresolvedCount > 0) {
+    recordCollectorProjectIdentityResolution(
+      "collector project identity resolution failed",
+      pending,
+      projects,
+      {
+        project_identity_resolution_started: true,
+        project_identity_resolution_completed: false,
+        non_navigation_resolved_count: nonNavigationResolvedCount,
+        navigation_resolved_count: navigationResolvedCount,
+        current_project_index: collectorWindowState.currentProjectIndex,
+        resolution_method: domChecked && navigationResolvedCount > 0 ? "navigation" : "dom",
+        status: "error",
+        error_code: "context_projects_incomplete",
+        stage: "collector_project_identity_resolution_failed"
+      });
+    throw bridgeError(
+      "ChatGPT ProjectのStable ID / URLを完全には取得できませんでした。",
+      0,
+      "context_projects_incomplete");
+  }
+
+  collectorWindowState = {
+    ...collectorWindowState,
+    currentProjectIndex: -1,
+    identityResolutionMethod: domChecked && navigationResolvedCount > 0 ? "navigation" : "dom",
+    navigationTargetVerified: navigationResolvedCount > 0
+      ? collectorWindowState.navigationTargetVerified
+      : false,
+    projectUrlPatternValid: finalResolution.items.every((item) => item.resolved),
+    projectIdUrlMatch: finalResolution.items.every((item) => item.resolved)
+  };
+  recordCollectorProjectIdentityResolution(
+    "collector project identity resolution completed",
+    pending,
+    projects,
+    {
+      project_identity_resolution_started: true,
+      project_identity_resolution_completed: true,
+      non_navigation_resolved_count: nonNavigationResolvedCount,
+      navigation_resolved_count: navigationResolvedCount,
+      unresolved_count: 0,
+      current_project_index: -1,
+      resolution_method: domChecked && navigationResolvedCount > 0 ? "navigation" : "dom",
+      navigation_target_verified: navigationResolvedCount > 0
+        ? collectorWindowState.navigationTargetVerified
+        : false,
+      project_url_pattern_valid: true,
+      project_id_url_match: true,
+      status: "completed",
+      stage: "collector_project_identity_resolution_complete"
+    });
+  return {
+    ...rootResult,
+    projects,
+    unresolved_project_count: 0,
+    project_identity_resolution_started: true,
+    project_identity_resolution_completed: true,
+    non_navigation_resolved_count: nonNavigationResolvedCount,
+    navigation_resolved_count: navigationResolvedCount,
+    unresolved_count: 0,
+    resolution_method: domChecked && navigationResolvedCount > 0 ? "navigation" : "dom",
+    navigation_target_verified: navigationResolvedCount > 0
+      ? collectorWindowState.navigationTargetVerified
+      : false,
+    project_url_pattern_valid: true,
+    project_id_url_match: true
+  };
+}
+
 function validateCollectorProjectResult(source, pending) {
   validateCollectorRootResult(source, pending);
   if (source.sidebar_scroll_complete === true) return;
@@ -3127,34 +3669,46 @@ function collectCollectorRootResult(tab, pending, request, caller = "refresh_orc
     return discovery.promise;
   }
 
-  discovery.callCount += 1;
-  discovery.started = true;
-  discovery.caller = caller;
-  discovery.inFlight = true;
-  discovery.alreadyCompleted = false;
-  recordProjectDiscoveryTelemetry("collector project discovery started", pending, {
-    project_discovery_caller: caller,
-    status: "started",
-    stage: "collector_project_discovery_start",
-    target_tab_id: pending.tabId
-  });
+  const scanAlreadyCompleted = discovery.scanCompleted === true
+    && pending.projectDiscoveryScanResult
+    && Array.isArray(pending.projectDiscoveryScanResult.projects);
+  if (!scanAlreadyCompleted) {
+    discovery.callCount += 1;
+    discovery.started = true;
+    discovery.caller = caller;
+    discovery.inFlight = true;
+    discovery.alreadyCompleted = false;
+    recordProjectDiscoveryTelemetry("collector project discovery started", pending, {
+      project_discovery_caller: caller,
+      status: "started",
+      stage: "collector_project_discovery_start",
+      target_tab_id: pending.tabId
+    });
+  } else {
+    discovery.inFlight = true;
+    discovery.caller = caller;
+    recordProjectDiscoveryTelemetry("collector project identity resolution resumed", pending, {
+      project_discovery_caller: caller,
+      status: "resumed",
+      stage: "collector_project_identity_resolution_resumed",
+      target_tab_id: pending.tabId
+    });
+  }
 
   const runPromise = (async () => {
     try {
-      const rootResult = await collectProjectsOnce(tab, pending, request);
+      const rootResult = scanAlreadyCompleted
+        ? pending.projectDiscoveryScanResult
+        : await collectProjectsOnce(tab, pending, request);
       throwIfCollectorRequestSuperseded(pending);
       const resultShape = pending.collectorProjectDiscoveryResultShape
         || recordCollectorProjectDiscoveryResult(rootResult, pending);
-      const projectResolution = recordCollectorProjectMetadataResolution(rootResult, pending);
-      const unresolvedProjectCount = validateCollectorRootResult(rootResult, pending);
       const projectDataLostBetweenLayers = resultShape.contentDiscoveredProjectCount !== null
         && resultShape.contentDiscoveredProjectCount > resultShape.backgroundProjectsLength;
-      if (projectDataLostBetweenLayers || rootResult.projects.length === 0 || unresolvedProjectCount > 0) {
+      if (projectDataLostBetweenLayers || rootResult.projects.length === 0) {
         const errorCode = "context_projects_incomplete";
-        recordCollectorProjectMetadataResolutionFailure(
-          projectResolution,
-          pending,
-          errorCode);
+        const projectResolution = collectProjectMetadataResolution(rootResult);
+        recordCollectorProjectMetadataResolutionFailure(projectResolution, pending, errorCode);
         diagnostic("collector project result handoff incomplete", {
           request_id: pending.requestId,
           refresh_generation: projectDiscoveryStateFor(pending).refreshGeneration,
@@ -3173,15 +3727,48 @@ function collectCollectorRootResult(tab, pending, request, caller = "refresh_orc
           target_tab_id: pending.tabId
         });
         throw bridgeError(
-          unresolvedProjectCount > 0 || projectDataLostBetweenLayers
+          projectDataLostBetweenLayers
             ? "ChatGPT Projectのmetadataを完全には取得できませんでした。"
             : "ChatGPT Projectを取得できませんでした。",
           0,
           errorCode);
       }
-      discovery.result = rootResult;
+      if (!scanAlreadyCompleted) {
+        discovery.scanCompleted = true;
+        pending.projectDiscoveryScanResult = rootResult;
+        pending.projectIdentityResult = null;
+        recordProjectDiscoveryTelemetry("collector project discovery scan completed", pending, {
+          project_discovery_caller: caller,
+          project_discovery_scan_completed: true,
+          status: "completed",
+          stage: "collector_project_discovery_scan_complete",
+          discovered_project_count: rootResult.projects.length,
+          discovered_chat_count: rootResult.conversations.length,
+          target_tab_id: pending.tabId
+        });
+      }
+      const resolvedRootResult = await resolveCollectorProjectIdentities(
+        tab,
+        pending,
+        request,
+        rootResult);
+      throwIfCollectorRequestSuperseded(pending);
+      const projectResolution = recordCollectorProjectMetadataResolution(resolvedRootResult, pending);
+      const unresolvedProjectCount = validateCollectorRootResult(resolvedRootResult, pending);
+      if (unresolvedProjectCount > 0) {
+        recordCollectorProjectMetadataResolutionFailure(
+          projectResolution,
+          pending,
+          "context_projects_incomplete");
+        throw bridgeError(
+          "ChatGPT Projectのmetadataを完全には取得できませんでした。",
+          0,
+          "context_projects_incomplete");
+      }
+      discovery.result = resolvedRootResult;
       discovery.completed = true;
-      pending.projectDiscoveryResult = rootResult;
+      pending.projectDiscoveryResult = resolvedRootResult;
+      pending.projectIdentityResult = resolvedRootResult;
       discovery.inFlight = false;
       recordProjectDiscoveryTelemetry("collector project discovery completed", pending, {
         project_discovery_caller: caller,
@@ -3191,7 +3778,7 @@ function collectCollectorRootResult(tab, pending, request, caller = "refresh_orc
         discovered_chat_count: rootResult.conversations.length,
         target_tab_id: pending.tabId
       });
-      return rootResult;
+      return resolvedRootResult;
     } catch (error) {
       discovery.result = null;
       discovery.completed = false;
@@ -3416,7 +4003,8 @@ async function collectContextWithRecovery(tab, pending, request) {
       });
       pending.tabId = tab.id;
       pending.collectorWindowId = collectorWindowState.windowId;
-      if (!pending.currentOnly && !pending.projectDiscoveryResult) {
+      if (!pending.currentOnly
+        && (!pending.projectDiscoveryResult || !projectDiscoveryStateFor(pending).completed)) {
         // This is the single explicit Project discovery entry point for the
         // current Refresh generation. Recovery after a completed root scan
         // skips it and reuses pending.projectDiscoveryResult.
@@ -3497,6 +4085,8 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
       collectorMediumLost: false,
       collectorMediumLossReason: null,
       projectDiscoveryResult: null,
+      projectDiscoveryScanResult: null,
+      projectIdentityResult: null,
       message: request,
       generation
     };
@@ -3519,6 +4109,7 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
         projectDiscoveryCallCount: projectDiscovery?.callCount || 0,
         projectDiscoveryStarted: projectDiscovery?.started === true,
         projectDiscoveryCompleted: projectDiscovery?.completed === true,
+        projectDiscoveryScanCompleted: projectDiscovery?.scanCompleted === true,
         projectDiscoveryCaller: projectDiscovery?.caller || null,
         projectDiscoveryInFlight: projectDiscovery?.inFlight === true,
         projectDiscoveryAlreadyCompleted: false,
@@ -3548,7 +4139,17 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
         collectorNavigationTarget: null,
         totalProjects: 0,
         discoveredProjectCount: 0,
-        discoveredChatCount: 0
+        discoveredChatCount: 0,
+        projectIdentityResolutionStarted: false,
+        projectIdentityResolutionCompleted: false,
+        nonNavigationResolvedCount: 0,
+        navigationResolvedCount: 0,
+        identityUnresolvedCount: 0,
+        currentProjectIndex: -1,
+        identityResolutionMethod: null,
+        navigationTargetVerified: false,
+        projectUrlPatternValid: false,
+        projectIdUrlMatch: false
       };
       tab = await ensureCollectorWindow(COLLECTOR_TAB_URL, {
         request_id: requestId,

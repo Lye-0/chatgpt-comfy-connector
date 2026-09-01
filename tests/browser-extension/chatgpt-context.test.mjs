@@ -700,6 +700,126 @@ test("metadata-only Project discovery follows Project anchors without SPA probin
   assert.equal(document.location.href, rootHref);
 });
 
+test("Project identity resolution reads row, descendant, and ancestor metadata without navigation", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeMetadataNode(document, "NAV");
+  const ownRow = new FakeMetadataNode(document, "DIV", "Own identity", {
+    role: "button",
+    "data-sidebar-item": "true",
+    "data-project-id": "g-p-own",
+    "data-project-url": "/g/g-p-own/project"
+  });
+  const ownTitle = new FakeMetadataNode(document, "SPAN", "Own identity", {
+    "data-marquee-text": "true"
+  });
+  ownRow.appendChild(ownTitle);
+
+  const descendantRow = new FakeMetadataNode(document, "DIV", "Descendant identity", {
+    role: "button",
+    "data-sidebar-item": "true"
+  });
+  descendantRow.appendChild(new FakeMetadataNode(document, "SPAN", "Descendant identity", {
+    "data-marquee-text": "true"
+  }));
+  descendantRow.appendChild(new FakeMetadataNode(document, "A", "Descendant identity", {
+    href: "/g/g-p-descendant/project"
+  }));
+
+  const ancestorAnchor = new FakeMetadataNode(document, "A", "Ancestor identity", {
+    href: "/g/g-p-ancestor/project"
+  });
+  const ancestorRow = new FakeMetadataNode(document, "DIV", "Ancestor identity", {
+    role: "button",
+    "data-sidebar-item": "true"
+  });
+  ancestorRow.appendChild(new FakeMetadataNode(document, "SPAN", "Ancestor identity", {
+    "data-marquee-text": "true"
+  }));
+  ancestorAnchor.appendChild(ancestorRow);
+  sidebar.appendChild(ownRow);
+  sidebar.appendChild(descendantRow);
+  sidebar.appendChild(ancestorAnchor);
+  document.sidebar = sidebar;
+  let clickCount = 0;
+  for (const row of [ownRow, descendantRow, ancestorRow]) row.click = () => { clickCount += 1; };
+
+  const locators = loadLocators(document);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [
+      { project_index: 0, discovery_index: 0, title: "Own identity" },
+      { project_index: 1, discovery_index: 1, title: "Descendant identity" },
+      { project_index: 2, discovery_index: 2, title: "Ancestor identity" }
+    ],
+    { identityMode: "dom" });
+
+  assert.deepEqual(result.projects.map((project) => project.project_id), [
+    "g-p-own",
+    "g-p-descendant",
+    "g-p-ancestor"
+  ]);
+  assert.equal(result.projects.every((project) => project.resolution_method === "dom"), true);
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(result.non_navigation_resolved_count, 3);
+  assert.equal(clickCount, 0);
+  assert.equal(document.location.href, rootHref);
+});
+
+test("Project identity navigation fallback clicks only the confirmed row and verifies the Project URL", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["Other", "Target Project"], [], null, null, []);
+  document.sidebar = sidebar;
+  let clickedIndex = -1;
+  sidebar.projectRows.forEach((row, index) => {
+    row.click = () => {
+      clickedIndex = index;
+      document.location.href = "https://chatgpt.com/g/g-p-target/project";
+    };
+  });
+
+  const locators = loadLocators(document);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 1, discovery_index: 1, title: "Target Project" }],
+    { identityMode: "navigation", navigationTimeoutMs: 500 });
+
+  assert.equal(clickedIndex, 1);
+  assert.equal(result.projects[0].project_id, "g-p-target");
+  assert.equal(result.projects[0].url, "https://chatgpt.com/g/g-p-target/project");
+  assert.equal(result.projects[0].resolution_method, "navigation");
+  assert.equal(result.projects[0].navigation_target_verified, true);
+  assert.equal(result.project_url_pattern_valid, true);
+  assert.equal(result.project_id_url_match, true);
+  assert.equal(result.unresolved_count, 0);
+});
+
+test("Project identity navigation rejects a confirmed row that lands on a non-Project URL", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["Unsafe Project"], [], null, null, []);
+  document.sidebar = sidebar;
+  sidebar.projectRows[0].click = () => {
+    document.location.href = "https://chatgpt.com/schedule";
+  };
+
+  const locators = loadLocators(document);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "Unsafe Project" }],
+    { identityMode: "navigation", navigationTimeoutMs: 250 });
+
+  assert.equal(result.projects[0].project_id, undefined);
+  assert.equal(result.projects[0].unresolved_reason, "navigation_target_not_project");
+  assert.equal(result.navigation_resolved_count, 0);
+  assert.equal(result.unresolved_count, 1);
+  assert.equal(document.location.href, "https://chatgpt.com/schedule");
+});
+
 test("current expanded Project row receives the ID from the current route and classifies its chats", () => {
   const href = "https://chatgpt.com/g/g-p-current/c/conversation-current";
   const document = new FakeMetadataDocument(href, null);

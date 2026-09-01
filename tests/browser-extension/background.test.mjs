@@ -31,9 +31,43 @@ async function createHarness() {
   const tabRemovedListeners = new Set();
   const tabActivatedListeners = new Set();
   const windowFocusChangedListeners = new Set();
-  const windowStates = new Map([[1, { id: 1, focused: true }]]);
+  const windowRemovedListeners = new Set();
+  const windowStates = new Map([[1, {
+    id: 1,
+    focused: true,
+    state: "normal",
+    type: "normal",
+    width: 1920,
+    height: 1080
+  }]]);
   const diagnostics = [];
+  const createdWindows = [];
   let nextCreatedTabStatus;
+  let nextWindowId = 200;
+
+  function allTabs() {
+    return [...tabsById.values()];
+  }
+
+  function ensureWindow(windowId, defaults = {}) {
+    if (!windowStates.has(windowId)) {
+      windowStates.set(windowId, {
+        id: windowId,
+        focused: false,
+        state: "normal",
+        type: "normal",
+        ...defaults
+      });
+    }
+    return windowStates.get(windowId);
+  }
+
+  function setActiveTabInWindow(tabId, windowId) {
+    for (const tab of tabsById.values()) {
+      if (tab.windowId === windowId) tab.active = tab.id === tabId;
+    }
+    activeTabs = allTabs();
+  }
 
   function conversationIdFromUrl(url) {
     const match = String(url || "").match(/\/c\/([^/?#]+)/i);
@@ -89,16 +123,22 @@ async function createHarness() {
       }
     },
     tabs: {
-      async query() { return activeTabs; },
+      async query(query = {}) {
+        const tabs = allTabs();
+        if (Number.isSafeInteger(query?.windowId)) return tabs.filter((tab) => tab.windowId === query.windowId);
+        if (query?.active === true) return tabs.filter((tab) => tab.active === true);
+        return tabs;
+      },
       async get(tabId) {
         const tab = tabsById.get(tabId);
         if (!tab) throw new Error(`No tab with id: ${tabId}`);
         return tab;
       },
-      async create({ url, active = true }) {
+      async create({ url, windowId = 1, active = true }) {
+        const window = ensureWindow(windowId);
         const tab = {
           id: 100 + createdTabs.length,
-          windowId: 1,
+          windowId,
           url,
           active,
           status: nextCreatedTabStatus,
@@ -108,13 +148,11 @@ async function createHarness() {
         };
         createdTabs.push(tab);
         tabsById.set(tab.id, tab);
-        if (!windowStates.has(tab.windowId)) windowStates.set(tab.windowId, { id: tab.windowId, focused: false });
-        activeTabs = active
-          ? [tab, ...activeTabs.map((item) => ({ ...item, active: false }))]
-          : [...activeTabs, tab];
+        window.tabs = [...(window.tabs || []), tab];
         if (active) {
+          setActiveTabInWindow(tab.id, windowId);
           for (const listener of tabActivatedListeners) listener({ tabId: tab.id, windowId: tab.windowId });
-        }
+        } else activeTabs = allTabs();
         return tab;
       },
       async update(tabId, changes = {}) {
@@ -124,13 +162,13 @@ async function createHarness() {
         Object.assign(tab, changes);
         updatedTabs.push({ tabId, changes: { ...changes } });
         if (changes.active === true) {
-          activeTabs = activeTabs.map((item) => ({ ...item, active: item.id === tabId }));
-          tab.active = true;
+          setActiveTabInWindow(tabId, tab.windowId);
           if (!wasActive) {
             for (const listener of tabActivatedListeners) listener({ tabId, windowId: tab.windowId });
           }
         }
         if (changes.active === false) tab.active = false;
+        activeTabs = allTabs();
         for (const listener of tabUpdatedListeners) listener(tabId, { status: tab.status || "complete", ...changes }, tab);
         return tab;
       },
@@ -138,8 +176,8 @@ async function createHarness() {
         const tab = tabsById.get(tabId);
         if (!tab) throw new Error(`No tab with id: ${tabId}`);
         tabsById.delete(tabId);
-        activeTabs = activeTabs.filter((item) => item.id !== tabId);
-        for (const listener of tabRemovedListeners) listener(tabId, { windowId: 1, isWindowClosing: false });
+        activeTabs = allTabs();
+        for (const listener of tabRemovedListeners) listener(tabId, { windowId: tab.windowId, isWindowClosing: false });
       },
       async sendMessage(tabId, message) {
         assert.ok(tabsById.has(tabId), `Message target ${tabId} should exist`);
@@ -165,9 +203,80 @@ async function createHarness() {
         if (!window) throw new Error(`No window with id: ${windowId}`);
         return window;
       },
+      async getLastFocused() {
+        return [...windowStates.values()].find((window) => window.focused === true)
+          || [...windowStates.values()].at(-1);
+      },
+      async create(createData = {}) {
+        assert.equal(
+          Object.prototype.hasOwnProperty.call(createData, "populate"),
+          false,
+          "windows.create must not receive the windows.get populate query option"
+        );
+        const {
+          url,
+          focused = true,
+          state = "normal",
+          type = "normal",
+          width,
+          height
+        } = createData;
+        const id = nextWindowId++;
+        const window = ensureWindow(id, {
+          focused: focused === true,
+          state,
+          type,
+          width,
+          height,
+          tabs: []
+        });
+        if (focused === true) {
+          for (const candidate of windowStates.values()) candidate.focused = candidate.id === id;
+        }
+        const tab = {
+          id: 100 + createdTabs.length,
+          windowId: id,
+          url,
+          active: true,
+          status: nextCreatedTabStatus,
+          discarded: false,
+          frozen: false,
+          autoDiscardable: true
+        };
+        createdTabs.push(tab);
+        tabsById.set(tab.id, tab);
+        window.tabs = [tab];
+        activeTabs = allTabs();
+        createdWindows.push(window);
+        return window;
+      },
+      async update(windowId, changes = {}) {
+        const window = ensureWindow(windowId);
+        Object.assign(window, changes);
+        if (changes.focused === true) {
+          for (const candidate of windowStates.values()) candidate.focused = candidate.id === windowId;
+        }
+        return window;
+      },
+      async remove(windowId) {
+        const window = windowStates.get(windowId);
+        if (!window) throw new Error(`No window with id: ${windowId}`);
+        const removedTabs = allTabs().filter((tab) => tab.windowId === windowId);
+        for (const tab of removedTabs) tabsById.delete(tab.id);
+        activeTabs = allTabs();
+        for (const tab of removedTabs) {
+          for (const listener of tabRemovedListeners) listener(tab.id, { windowId, isWindowClosing: true });
+        }
+        windowStates.delete(windowId);
+        for (const listener of windowRemovedListeners) listener(windowId);
+      },
       onFocusChanged: {
         addListener(listener) { windowFocusChangedListeners.add(listener); },
         removeListener(listener) { windowFocusChangedListeners.delete(listener); }
+      },
+      onRemoved: {
+        addListener(listener) { windowRemovedListeners.add(listener); },
+        removeListener(listener) { windowRemovedListeners.delete(listener); }
       }
     },
     scripting: {
@@ -257,10 +366,11 @@ async function createHarness() {
       activeTabs = value.map((tab) => {
         if (tab?.id === undefined) return tab;
         if (!Number.isSafeInteger(tab.windowId)) tab.windowId = 1;
-        if (!windowStates.has(tab.windowId)) windowStates.set(tab.windowId, { id: tab.windowId, focused: false });
+        ensureWindow(tab.windowId);
         tabsById.set(tab.id, tab);
         return tab;
       });
+      activeTabs = allTabs();
     },
     setContentHandler(handler) {
       contentError = null;
@@ -306,14 +416,12 @@ async function createHarness() {
       const tab = tabsById.get(tabId);
       assert.ok(tab, `Tab ${tabId} should exist before activation`);
       if (Number.isSafeInteger(windowId)) tab.windowId = windowId;
-      activeTabs = activeTabs.map((item) => item.windowId === tab.windowId
-        ? { ...item, active: item.id === tabId }
-        : item);
-      tab.active = true;
+      ensureWindow(tab.windowId);
+      setActiveTabInWindow(tabId, tab.windowId);
       for (const listener of tabActivatedListeners) listener({ tabId, windowId: tab.windowId });
     },
     focusWindow(windowId) {
-      if (!windowStates.has(windowId)) windowStates.set(windowId, { id: windowId, focused: false });
+      ensureWindow(windowId);
       for (const window of windowStates.values()) window.focused = window.id === windowId;
       for (const listener of windowFocusChangedListeners) listener(windowId);
     },
@@ -321,16 +429,23 @@ async function createHarness() {
       const tab = tabsById.get(tabId);
       assert.ok(tab, `Tab ${tabId} should exist before lifecycle update`);
       Object.assign(tab, changes);
+      activeTabs = allTabs();
       for (const listener of tabUpdatedListeners) listener(tabId, { ...changes }, tab);
     },
     removeTab(tabId) {
+      const tab = tabsById.get(tabId);
+      assert.ok(tab, `Tab ${tabId} should exist before removal`);
       tabsById.delete(tabId);
-      activeTabs = activeTabs.filter((tab) => tab.id !== tabId);
-      for (const listener of tabRemovedListeners) listener(tabId, { windowId: 1, isWindowClosing: false });
+      activeTabs = allTabs();
+      for (const listener of tabRemovedListeners) listener(tabId, { windowId: tab.windowId, isWindowClosing: false });
     },
     get createdTabs() { return createdTabs; },
+    get createdWindows() { return createdWindows; },
     get updatedTabs() { return updatedTabs; },
     get diagnostics() { return diagnostics; },
+    getTab(tabId) { return tabsById.get(tabId); },
+    getWindow(windowId) { return windowStates.get(windowId); },
+    closeExecutionWindow(windowId) { return chrome.windows.remove(windowId); },
     get managedTabId() { return context.managedTabState?.tabId ?? createdTabs.at(-1)?.id ?? null; },
     async openAuthenticatedSocket(token = "session-reconnected") {
       const socketPromise = context.openSocket(token);
@@ -462,7 +577,7 @@ test("Background keeps an MV3 WebSocket alive below the service-worker idle limi
   assert.match(keepalive.id, /^keepalive-/);
 });
 
-test("Background uses one inactive Managed ChatGPT Tab instead of the foreground tab", async () => {
+test("Background uses one active Managed ChatGPT Tab in an isolated Execution Window", async () => {
   const harness = await createHarness();
   harness.setActiveTabs([{ id: 17, url: "https://example.invalid/", active: true }]);
   const relayedMessages = [];
@@ -494,8 +609,16 @@ test("Background uses one inactive Managed ChatGPT Tab instead of the foreground
   assert.equal(result.handoff_id, request.handoff_id);
   assert.equal(result.status, "sent");
   const managedTab = harness.createdTabs[0];
-  assert.equal(managedTab.active, false);
+  assert.equal(managedTab.active, true);
+  assert.equal(managedTab.autoDiscardable, false);
   assert.equal(managedTab.url, "https://chatgpt.com/");
+  assert.notEqual(managedTab.windowId, 1);
+  assert.equal(harness.getTab(17).active, true);
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.createdWindows[0].focused, false);
+  assert.equal(harness.createdWindows[0].state, "normal");
+  assert.equal(harness.createdWindows[0].width, 960);
+  assert.equal(harness.createdWindows[0].height, 540);
   assert.equal(harness.managedTabId, managedTab.id);
   assert.equal(harness.createdTabs.length, 1);
   const watchMessage = relayedMessages.find((message) => message.type === "WATCH_ASSISTANT_RESPONSE");
@@ -505,6 +628,41 @@ test("Background uses one inactive Managed ChatGPT Tab instead of the foreground
   assert.equal(watchMessage.targetTabId, managedTab.id);
   assert.equal(watchMessage.prepare, true);
   assert.equal(handoffMessage.targetTabId, undefined);
+});
+
+test("Background restores a focused Execution Window without focusing the user's window", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://example.invalid/", active: true }]);
+  const sentMessages = [];
+  harness.setContentHandler((message) => {
+    sentMessages.push(message);
+    return message.type === "WATCH_ASSISTANT_RESPONSE"
+      ? {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching"
+      }
+      : {
+        request_id: request.request_id,
+        handoff_id: request.handoff_id,
+        status: "sent"
+      };
+  });
+
+  const firstCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  assert.equal((await harness.waitForResult(firstCount)).status, "sent");
+  const executionWindowId = harness.createdTabs[0].windowId;
+  harness.focusWindow(executionWindowId);
+
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await wait(50);
+  assert.equal(harness.getWindow(executionWindowId).focused, false);
+  assert.equal(harness.getTab(17).active, true);
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(sentMessages.filter((message) => message.type === "HANDOFF_SEND").length, 1);
 });
 
 test("Background records Managed Tab activation, focus, and discard lifecycle state without changing routing", async () => {
@@ -551,6 +709,8 @@ test("Background records Managed Tab activation, focus, and discard lifecycle st
     status: "complete"
   });
   await wait(10);
+  assert.equal(harness.getTab(managedTabId).active, true);
+  assert.equal(harness.getTab(managedTabId).autoDiscardable, false);
 
   const entries = harness.diagnostics
     .map(([, fields]) => fields)
@@ -559,13 +719,17 @@ test("Background records Managed Tab activation, focus, and discard lifecycle st
     fields.stage === "managed_tab_created" && fields.managed_tab_exists === true);
   assert.equal(created.managed_tab_exists, true);
   assert.equal(created.tab_id, managedTabId);
-  assert.equal(created.tab_active, false);
+  assert.equal(created.tab_active, true);
   assert.equal(created.tab_discarded, false);
   assert.equal(created.tab_frozen, false);
-  assert.equal(created.tab_auto_discardable, true);
-  assert.equal(created.window_focused, true);
+  assert.equal(created.tab_auto_discardable, false);
+  assert.equal(created.window_focused, false);
+  assert.equal(created.execution_window_id, managedTabId === null ? null : harness.createdTabs[0].windowId);
+  assert.equal(created.execution_window_focused, false);
+  assert.equal(created.execution_window_state, "normal");
+  assert.equal(created.execution_window_exists, true);
   assert.equal(created.tab_status, "complete");
-  assert.ok(entries.some((fields) => fields.stage === "tabs_on_activated" && fields.tab_active === false));
+  assert.ok(entries.some((fields) => fields.stage === "tabs_on_activated" && fields.tab_active === true));
   assert.ok(entries.some((fields) => fields.stage === "windows_on_focus_changed" && fields.window_focused === false));
   assert.ok(entries.some((fields) => fields.stage === "managed_tab_state_changed"
     && fields.changed_state.includes("tab_discarded")
@@ -1208,7 +1372,7 @@ test("Background sends a Review Handoff through the Managed Tab and preserves it
   assert.equal(result.status, "sent");
   assert.equal(result.target_tab_id, harness.managedTabId);
   assert.equal(result.target_tab_url, reviewHandoffRequest.target_tab_url);
-  assert.equal(harness.createdTabs[0].active, false);
+  assert.equal(harness.createdTabs[0].active, true);
   const handoffMessage = relayedMessages.find((message) => message.type === "HANDOFF_SEND");
   assert.equal(handoffMessage.type, "HANDOFF_SEND");
   assert.equal(handoffMessage.requestId, reviewHandoffRequest.request_id);
@@ -1634,7 +1798,7 @@ test("Background keeps the Collector Tab separate from the Managed Execution Tab
   assert.equal(harness.createdTabs.length, 2);
   assert.notEqual(harness.createdTabs[0].id, harness.createdTabs[1].id);
   assert.equal(harness.createdTabs[0].id, managedTabId);
-  assert.equal(harness.createdTabs[0].active, false);
+  assert.equal(harness.createdTabs[0].active, true);
   assert.equal(harness.createdTabs[1].active, false);
   assert.equal(relayedMessages.some((message) => message.type === "GET_CHATGPT_CONTEXT"), true);
   assert.equal(relayedMessages.find((message) => message.type === "GET_CHATGPT_CONTEXT")?.targetTabId, undefined);
@@ -1683,7 +1847,7 @@ test("Background ignores a non-ChatGPT foreground tab", async () => {
 
   assert.equal(result.status, "sent");
   assert.equal(harness.createdTabs.length, 1);
-  assert.equal(harness.createdTabs[0].active, false);
+  assert.equal(harness.createdTabs[0].active, true);
   assert.equal(harness.createdTabs[0].url, "https://chatgpt.com/");
   assert.equal(relayedMessages.every((message) => message.targetTabId !== 18), true);
 });
@@ -1777,10 +1941,13 @@ test("Background recreates the Managed Tab after it is closed while watching", a
   assert.equal(result.status, "sent");
   assert.equal(harness.createdTabs.length, 1);
   const removedTabId = harness.managedTabId;
+  const executionWindowId = harness.createdTabs[0].windowId;
   harness.removeTab(removedTabId);
   for (let attempt = 0; attempt < 50 && harness.createdTabs.length < 2; attempt += 1) await wait(5);
   assert.equal(harness.createdTabs.length, 2);
-  assert.equal(harness.createdTabs[1].active, false);
+  assert.equal(harness.createdTabs[1].active, true);
+  assert.equal(harness.createdTabs[1].autoDiscardable, false);
+  assert.equal(harness.createdTabs[1].windowId, executionWindowId);
   assert.equal(harness.createdTabs[1].url, boundRequest.target_conversation_url);
   assert.ok(watcherCalls >= 2);
 
@@ -1799,7 +1966,155 @@ test("Background recreates the Managed Tab after it is closed while watching", a
   assert.equal(response.handoff_id, boundRequest.handoff_id);
 });
 
-test("Background fetches media with the session token and attaches it through the inactive Managed Tab", async () => {
+test("Background recreates the Execution Window and rebinds the same Conversation after window close", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 23, url: "https://example.invalid/", active: true }]);
+  const boundRequest = {
+    ...request,
+    request_id: "window-close-recovery-request-fixture",
+    handoff_id: "window-close-recovery-handoff-fixture",
+    boundary_id: "window-close-recovery-boundary-fixture",
+    target_conversation_id: "conversation-window-recovery",
+    target_conversation_url: "https://chatgpt.com/c/conversation-window-recovery"
+  };
+  const relayedMessages = [];
+  let watcherCalls = 0;
+  harness.setContentHandler((message) => {
+    relayedMessages.push(message);
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") watcherCalls += 1;
+    return message.type === "WATCH_ASSISTANT_RESPONSE"
+      ? { status: "watching" }
+      : {
+          request_id: boundRequest.request_id,
+          handoff_id: boundRequest.handoff_id,
+          status: "sent"
+        };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(boundRequest, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+  const originalWindowId = harness.createdTabs[0].windowId;
+  const originalUserTab = harness.getTab(23);
+
+  await harness.closeExecutionWindow(originalWindowId);
+  for (let attempt = 0; attempt < 50 && harness.createdWindows.length < 2; attempt += 1) await wait(5);
+
+  assert.equal(harness.createdWindows.length, 2);
+  assert.equal(harness.getWindow(originalWindowId), undefined);
+  const recoveredTab = harness.createdTabs.at(-1);
+  assert.notEqual(recoveredTab.windowId, originalWindowId);
+  assert.equal(recoveredTab.active, true);
+  assert.equal(recoveredTab.autoDiscardable, false);
+  assert.equal(harness.getWindow(recoveredTab.windowId).focused, false);
+  assert.equal(originalUserTab.active, true);
+  assert.equal(relayedMessages.filter((message) => message.type === "HANDOFF_SEND").length, 1);
+  assert.ok(watcherCalls >= 2);
+});
+
+test("Background keeps one active Execution Window across Initial, Media, Review, and next-iteration handoffs", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 23, url: "https://example.invalid/", active: true }]);
+  const reviewResponse = {
+    request_id: "review-next-request-fixture",
+    session_id: "session-fixture",
+    handoff_id: "review-next-handoff-fixture",
+    boundary_id: "review-next-boundary-fixture",
+    targetConversationId: "fixture",
+    targetConversationUrl: "https://chatgpt.com/c/fixture"
+  };
+  const nextReviewRequest = {
+    ...reviewHandoffRequest,
+    request_id: reviewResponse.request_id,
+    handoff_id: reviewResponse.handoff_id,
+    boundary_id: reviewResponse.boundary_id,
+    review_iteration: 3,
+    payload: "## Review Handoff\nhandoff_id: review-next-handoff-fixture\n"
+  };
+  const relayedMessages = [];
+  harness.setContentHandler((message) => {
+    relayedMessages.push(message);
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      return { status: "watching" };
+    }
+    if (message.type === "HANDOFF_SEND") {
+      return {
+        request_id: message.requestId,
+        session_id: message.sessionId,
+        handoff_id: message.handoffId,
+        boundary_id: message.boundaryId,
+        status: "sent",
+        stage: "user_message_correlated",
+        current_context: {
+          conversation_id: "fixture",
+          url: "https://chatgpt.com/c/fixture"
+        }
+      };
+    }
+    if (message.type === "REVIEW_MEDIA_ATTACH_BEGIN") return { status: "receiving" };
+    if (message.type === "REVIEW_MEDIA_ATTACH_CHUNK") return { status: "receiving" };
+    if (message.type === "REVIEW_MEDIA_ATTACH_END") return { status: "attached" };
+    return {};
+  });
+  harness.setMediaResponse({ bytes: new Uint8Array(reviewMediaRequest.size) });
+
+  const initialCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  assert.equal((await harness.waitForResult(initialCount)).status, "sent");
+  const managedTabId = harness.managedTabId;
+  const executionWindowId = harness.createdTabs[0].windowId;
+
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: request.request_id,
+    sessionId: request.session_id,
+    handoffId: request.handoff_id,
+    boundaryId: request.boundary_id,
+    status: "received",
+    payload: "initial response",
+    stage: "assistant_response_complete"
+  }, { tab: { id: managedTabId } });
+  assert.equal((await harness.waitForSocketMessage(initialCount, (message) => message.type === "assistant.response")).status, "received");
+
+  const mediaCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(reviewMediaRequest, harness.socket);
+  const mediaResult = await harness.waitForSocketMessage(mediaCount, (message) => message.type === "review.media.result");
+  assert.equal(mediaResult.status, "attached");
+
+  const reviewCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(reviewHandoffRequest, harness.socket);
+  assert.equal((await harness.waitForResult(reviewCount)).status, "sent");
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: reviewHandoffRequest.request_id,
+    sessionId: reviewHandoffRequest.session_id,
+    handoffId: reviewHandoffRequest.handoff_id,
+    boundaryId: reviewHandoffRequest.boundary_id,
+    status: "received",
+    payload: "review response",
+    targetConversationId: "fixture",
+    targetConversationUrl: "https://chatgpt.com/c/fixture",
+    stage: "assistant_response_complete"
+  }, { tab: { id: managedTabId } });
+  assert.equal((await harness.waitForSocketMessage(reviewCount, (message) => message.type === "assistant.response"
+    && message.request_id === reviewHandoffRequest.request_id)).status, "received");
+
+  const nextCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(nextReviewRequest, harness.socket);
+  assert.equal((await harness.waitForResult(nextCount)).status, "sent");
+
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.createdTabs.length, 1);
+  assert.equal(harness.createdTabs[0].windowId, executionWindowId);
+  assert.equal(harness.createdTabs[0].active, true);
+  assert.equal(harness.createdTabs[0].autoDiscardable, false);
+  assert.equal(harness.getTab(23).active, true);
+  assert.equal(relayedMessages.filter((message) => message.type === "HANDOFF_SEND").length, 3);
+  assert.equal(relayedMessages.filter((message) => message.type === "WATCH_ASSISTANT_RESPONSE").length, 3);
+});
+
+test("Background fetches media with the session token and attaches it through the active Managed Tab", async () => {
   const harness = await createHarness();
   // The first tab is active and unrelated.  The target tab is deliberately
   // second to prove Phase 5.1 does not switch to the current active tab.
@@ -1833,7 +2148,7 @@ test("Background fetches media with the session token and attaches it through th
   const mediaMessages = relayedMessages.filter((message) => message.type.startsWith("REVIEW_MEDIA_ATTACH_"));
   assert.ok(mediaMessages.length >= 4, "Media should include begin, bounded chunks, and end messages");
   assert.ok(mediaMessages.every((message) => message.targetTabId === undefined), "Media messages must not receive local tab metadata");
-  assert.equal(harness.createdTabs[0].active, false);
+  assert.equal(harness.createdTabs[0].active, true);
   assert.equal(harness.createdTabs[0].url, reviewMediaRequest.target_conversation_url);
   assert.equal(harness.fetchCalls.length, 1);
   assert.match(harness.fetchCalls[0].url, /\/api\/v1\/media\/media-fixture\?/);

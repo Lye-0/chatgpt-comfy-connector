@@ -26,11 +26,21 @@ const CONTENT_SCRIPT_TIMEOUT_MS = 75000;
 // manifest Content Script as a permanent dispatch failure.
 const CONTENT_SCRIPT_READY_TIMEOUT_MS = 20000;
 const CONTENT_SCRIPT_READY_POLL_INTERVAL_MS = 100;
-// Execution is intentionally isolated from the user's foreground ChatGPT
-// tab. One inactive managed tab is the only tab that may receive a Handoff,
-// media attachment, or response watch.
+// Execution is intentionally isolated from the user's foreground Chrome
+// window. One active Managed ChatGPT Tab in a connector-owned Execution
+// Window is the only tab that may receive a Handoff, media attachment, or
+// response watch.
 const MANAGED_TAB_STORAGE_KEY = "managedChatGptTab";
-const MANAGED_TAB_CREATE_TIMEOUT_MS = 15000;
+const MANAGED_EXECUTION_WINDOW_CREATE_TIMEOUT_MS = 15000;
+// A half-width by half-height window occupies roughly one quarter of the
+// available screen area while remaining large enough for ChatGPT's composer
+// and response DOM.  Use the last-focused user window as a permission-free
+// display-size approximation and keep a conservative fallback for startup.
+const MANAGED_EXECUTION_WINDOW_SIZE_FACTOR = 0.5;
+const MANAGED_EXECUTION_WINDOW_MIN_WIDTH = 640;
+const MANAGED_EXECUTION_WINDOW_MIN_HEIGHT = 480;
+const MANAGED_EXECUTION_WINDOW_FALLBACK_WIDTH = 960;
+const MANAGED_EXECUTION_WINDOW_FALLBACK_HEIGHT = 540;
 const MANAGED_TAB_NAVIGATION_TIMEOUT_MS = 30000;
 const MANAGED_CONVERSATION_READY_TIMEOUT_MS = 30000;
 const MANAGED_WATCHER_READY_TIMEOUT_MS = 20000;
@@ -123,6 +133,8 @@ let socketKeepaliveTimer = null;
 let socketKeepaliveSocket = null;
 const defaultManagedTabState = {
   tabId: null,
+  executionWindowId: null,
+  executionWindowState: "Idle",
   conversationId: null,
   conversationUrl: null,
   projectId: null,
@@ -214,6 +226,11 @@ function diagnostic(eventName, fields = {}) {
     "error_code",
     "stage",
     "lifecycle",
+    "execution_window_id",
+    "execution_window_focused",
+    "execution_window_state",
+    "execution_window_exists",
+    "execution_window_minimized",
     "target_tab_id",
     "tab_id",
     "window_id",
@@ -268,6 +285,12 @@ function managedTabStorage() {
 function managedTabTrace(fields = {}) {
   return {
     ...(managedTabState.tabId !== null ? { target_tab_id: managedTabState.tabId } : {}),
+    ...(Number.isSafeInteger(managedTabState.executionWindowId)
+      ? { execution_window_id: managedTabState.executionWindowId }
+      : {}),
+    ...(typeof managedTabState.executionWindowState === "string"
+      ? { execution_window_state: managedTabState.executionWindowState }
+      : {}),
     ...(managedTabState.conversationId ? { conversation_id: managedTabState.conversationId } : {}),
     ...(managedTabState.conversationUrl ? { conversation_url: managedTabState.conversationUrl } : {}),
     ...fields
@@ -319,20 +342,31 @@ async function readManagedTabLifecycleSnapshot(tabId, tabHint = null, fallbackWi
       tab = null;
     }
   }
-  if (!tab) return { ...snapshot, managed_tab_exists: false };
 
-  snapshot.managed_tab_exists = true;
-  if (Number.isSafeInteger(tab.id)) {
-    snapshot.tab_id = tab.id;
-    snapshot.target_tab_id = tab.id;
+  snapshot.managed_tab_exists = Boolean(tab);
+  if (tab) {
+    if (Number.isSafeInteger(tab.id)) {
+      snapshot.tab_id = tab.id;
+      snapshot.target_tab_id = tab.id;
+    }
+    if (Number.isSafeInteger(tab.windowId)) snapshot.window_id = tab.windowId;
+    else if (Number.isSafeInteger(fallbackWindowId)) snapshot.window_id = fallbackWindowId;
+    if (typeof tab.active === "boolean") snapshot.tab_active = tab.active;
+    if (typeof tab.discarded === "boolean") snapshot.tab_discarded = tab.discarded;
+    if (typeof tab.frozen === "boolean") snapshot.tab_frozen = tab.frozen;
+    if (typeof tab.autoDiscardable === "boolean") snapshot.tab_auto_discardable = tab.autoDiscardable;
+    if (typeof tab.status === "string") snapshot.tab_status = tab.status;
+  } else if (Number.isSafeInteger(fallbackWindowId)) {
+    snapshot.window_id = fallbackWindowId;
   }
-  if (Number.isSafeInteger(tab.windowId)) snapshot.window_id = tab.windowId;
-  else if (Number.isSafeInteger(fallbackWindowId)) snapshot.window_id = fallbackWindowId;
-  if (typeof tab.active === "boolean") snapshot.tab_active = tab.active;
-  if (typeof tab.discarded === "boolean") snapshot.tab_discarded = tab.discarded;
-  if (typeof tab.frozen === "boolean") snapshot.tab_frozen = tab.frozen;
-  if (typeof tab.autoDiscardable === "boolean") snapshot.tab_auto_discardable = tab.autoDiscardable;
-  if (typeof tab.status === "string") snapshot.tab_status = tab.status;
+
+  const isManagedTelemetryTarget = tabId === null || tabId === managedTabState.tabId;
+  const executionWindowId = isManagedTelemetryTarget && Number.isSafeInteger(managedTabState.executionWindowId)
+    ? managedTabState.executionWindowId
+    : (isManagedTelemetryTarget && Number.isSafeInteger(tab?.windowId) ? tab.windowId : null);
+  if (Number.isSafeInteger(executionWindowId)) {
+    snapshot.execution_window_id = executionWindowId;
+  }
 
   if (Number.isSafeInteger(snapshot.window_id) && typeof chrome.windows?.get === "function") {
     try {
@@ -341,6 +375,27 @@ async function readManagedTabLifecycleSnapshot(tabId, tabHint = null, fallbackWi
     } catch (_) {
       // Lifecycle telemetry must never affect the managed-tab transport.
     }
+  }
+  if (Number.isSafeInteger(executionWindowId) && typeof chrome.windows?.get === "function") {
+    try {
+      const executionWindow = await chrome.windows.get(executionWindowId);
+      snapshot.execution_window_exists = true;
+      if (typeof executionWindow?.focused === "boolean") {
+        snapshot.execution_window_focused = executionWindow.focused;
+      }
+      if (typeof executionWindow?.state === "string") {
+        snapshot.execution_window_state = executionWindow.state;
+        snapshot.execution_window_minimized = executionWindow.state === "minimized";
+      }
+    } catch (_) {
+      snapshot.execution_window_exists = false;
+      snapshot.execution_window_state = "missing";
+      snapshot.execution_window_minimized = false;
+    }
+  }
+  if (Number.isSafeInteger(executionWindowId) && snapshot.execution_window_exists === undefined) {
+    snapshot.execution_window_exists = false;
+    snapshot.execution_window_state = "unknown";
   }
   return snapshot;
 }
@@ -369,10 +424,18 @@ function recordManagedTabLifecycleTelemetry(stage, fields = {}, tabId = managedT
       ? null
       : managedTabTelemetrySnapshots.get(resolvedTabId);
     const changedStates = [];
-    for (const key of ["tab_discarded", "tab_frozen", "tab_active", "window_focused"]) {
+    for (const key of [
+      "tab_discarded",
+      "tab_frozen",
+      "tab_active",
+      "window_focused",
+      "execution_window_focused",
+      "execution_window_state",
+      "execution_window_exists"
+    ]) {
       if (previous
-        && typeof previous[key] === "boolean"
-        && typeof telemetry[key] === "boolean"
+        && previous[key] !== undefined
+        && telemetry[key] !== undefined
         && previous[key] !== telemetry[key]) {
         changedStates.push(key);
       }
@@ -412,6 +475,8 @@ function managedTabLifecycle(lifecycle, fields = {}) {
   void managedTabStorage().set({
     [MANAGED_TAB_STORAGE_KEY]: {
       tabId: managedTabState.tabId,
+      executionWindowId: managedTabState.executionWindowId,
+      executionWindowState: managedTabState.executionWindowState,
       conversationId: managedTabState.conversationId,
       conversationUrl: managedTabState.conversationUrl,
       projectId: managedTabState.projectId,
@@ -437,15 +502,18 @@ function managedTabLifecycle(lifecycle, fields = {}) {
   }));
 }
 
-function clearManagedTabState(lifecycle = "Failed") {
+function clearManagedTabState(lifecycle = "Failed", options = {}) {
   // The tab is only an execution medium. Preserve the bound Conversation so
-  // a later operation can recreate an inactive tab at the same destination.
+  // a later operation can recreate the active tab at the same destination.
   managedTabLifecycle(lifecycle, {
     tabId: null,
     contentReady: false,
     conversationReady: false,
     composerReady: false,
-    watcherReady: false
+    watcherReady: false,
+    ...(options.clearExecutionWindow === true
+      ? { executionWindowId: null, executionWindowState: "Idle" }
+      : {})
   });
 }
 
@@ -1991,12 +2059,38 @@ async function rearmResponseWatchesForTab(tabId) {
   }
 }
 
-async function recoverManagedTabAfterRemoval(removedTabId) {
+let managedMediumRecoveryOperation = null;
+
+function scheduleManagedMediumRecovery(removedTabId = null, removedWindowId = null, reason = "managed_tab_removed") {
+  if (managedMediumRecoveryOperation) {
+    diagnostic("managed execution recovery duplicate suppressed", {
+      target_tab_id: removedTabId,
+      event_window_id: removedWindowId,
+      status: "pending",
+      stage: "managed_execution_recovery_duplicate_suppressed"
+    });
+    return managedMediumRecoveryOperation;
+  }
+  const operation = recoverManagedTabAfterRemoval(removedTabId, removedWindowId, reason);
+  managedMediumRecoveryOperation = operation;
+  void operation.finally(() => {
+    if (managedMediumRecoveryOperation === operation) managedMediumRecoveryOperation = null;
+  }).catch(() => {});
+  return operation;
+}
+
+async function recoverManagedTabAfterRemoval(removedTabId = null, removedWindowId = null, reason = "managed_tab_removed") {
   await managedTabStateReady;
+  const previousTabId = managedTabState.tabId;
+  const previousExecutionWindowId = managedTabState.executionWindowId;
+  const executionWindowRemoved = reason === "execution_window_removed";
+  const affectedTabIds = new Set(
+    [removedTabId, previousTabId].filter((value) => Number.isSafeInteger(value) && value >= 0));
   const pendingWatches = [...responseWatches.values()]
-    .filter((pending) => pending.tabId === removedTabId);
+    .filter((pending) => affectedTabIds.has(pending.tabId)
+      || affectedTabIds.has(pending.targetTabId));
   const pendingSends = [...pendingHandoffSends.values()]
-    .filter((pending) => pending.targetTabId === removedTabId);
+    .filter((pending) => affectedTabIds.has(pending.targetTabId));
   const recoverySource = pendingWatches[0] || pendingSends[0];
   const conversationId = recoverySource?.targetConversationId || managedTabState.conversationId;
   const conversationUrl = recoverySource?.targetConversationUrl
@@ -2011,12 +2105,29 @@ async function recoverManagedTabAfterRemoval(removedTabId) {
   }
   for (const pending of pendingSends) pending.targetTabId = null;
 
+  if (executionWindowRemoved
+    && Number.isSafeInteger(previousExecutionWindowId)
+    && previousExecutionWindowId >= 0) {
+    managedTabLifecycle("PreparingTab", {
+      tabId: null,
+      executionWindowId: null,
+      executionWindowState: "Idle",
+      contentReady: false,
+      conversationReady: false,
+      composerReady: false,
+      watcherReady: false
+    });
+  } else if (managedTabState.tabId === removedTabId) {
+    clearManagedTabState("PreparingTab");
+  }
+
   if (!conversationId && !conversationUrl) {
     diagnostic("managed tab recovery deferred", {
       status: "pending",
       error_code: "target_conversation_not_found",
       stage: "managed_tab_recovery_identity_missing",
-      target_tab_id: removedTabId
+      target_tab_id: removedTabId,
+      event_window_id: removedWindowId
     });
     return;
   }
@@ -2038,6 +2149,7 @@ async function recoverManagedTabAfterRemoval(removedTabId) {
     ...traceForMessage(recoveryMessage, { target_tab_id: removedTabId }),
     conversation_id: conversationId,
     conversation_url: conversationUrl,
+    event_window_id: removedWindowId,
     status: "requested",
     stage: "managed_tab_recovery_requested"
   });
@@ -2080,6 +2192,8 @@ async function recoverManagedTabAfterRemoval(removedTabId) {
         ...traceForMessage(recoveryMessage, { target_tab_id: newTabId }),
         conversation_id: newConversationId,
         conversation_url: newConversationUrl,
+        execution_window_id: managedTabState.executionWindowId,
+        execution_window_state: managedTabState.executionWindowState,
         status: "ready",
         stage: "managed_tab_recovered"
       });
@@ -2089,6 +2203,7 @@ async function recoverManagedTabAfterRemoval(removedTabId) {
   } catch (error) {
     diagnostic("managed tab recovery failed", {
       ...traceForMessage(recoveryMessage, { target_tab_id: removedTabId }),
+      event_window_id: removedWindowId,
       status: "error",
       error_code: error?.code || "managed_tab_recovery_failed",
       stage: error?.stage || "managed_tab_recovery"
@@ -2348,9 +2463,242 @@ function managedTabMatchesTarget(tab, target) {
     && (!target.projectUrl || safeChatGptContextUrl(tab.url) === target.projectUrl);
 }
 
+function executionWindowState(window) {
+  return typeof window?.state === "string" && window.state.length > 0
+    ? window.state
+    : "normal";
+}
+
+async function getManagedExecutionWindow(windowId) {
+  if (!Number.isSafeInteger(windowId) || windowId < 0 || typeof chrome.windows?.get !== "function") return null;
+  try {
+    return await chrome.windows.get(windowId);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function tabsInManagedExecutionWindow(windowId) {
+  if (!Number.isSafeInteger(windowId) || typeof chrome.tabs?.query !== "function") return [];
+  try {
+    const tabs = await chrome.tabs.query({ windowId });
+    return Array.isArray(tabs) ? tabs : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+async function findManagedExecutionWindowTab(windowId) {
+  const tabs = await tabsInManagedExecutionWindow(windowId);
+  return tabs.find((tab) => tab?.id === managedTabState.tabId)
+    || tabs.find((tab) => isChatGptTab(tab))
+    || tabs[0]
+    || null;
+}
+
+async function makeManagedExecutionWindowUsable(window, trace = {}) {
+  if (!window || !Number.isSafeInteger(window.id)) return null;
+  let usable = window;
+  const windowChanges = {};
+  if (executionWindowState(window) === "minimized") windowChanges.state = "normal";
+  if (window.focused === true) windowChanges.focused = false;
+  if (Object.keys(windowChanges).length > 0 && typeof chrome.windows?.update === "function") {
+    try {
+      usable = await chrome.windows.update(window.id, windowChanges) || {
+        ...window,
+        ...windowChanges
+      };
+      diagnostic("managed execution window restored", {
+        ...trace,
+        execution_window_id: window.id,
+        execution_window_focused: usable.focused,
+        execution_window_state: executionWindowState(usable),
+        status: "restored",
+        stage: "execution_window_restored"
+      });
+    } catch (error) {
+      diagnostic("managed execution window restore failed", {
+        ...trace,
+        execution_window_id: window.id,
+        error_code: error?.code || "execution_window_restore_failed",
+        status: "error",
+        stage: "execution_window_restore"
+      });
+    }
+  }
+  managedTabState = {
+    ...managedTabState,
+    executionWindowId: window.id,
+    executionWindowState: executionWindowState(usable)
+  };
+  return usable;
+}
+
+async function managedExecutionWindowCreateData(url) {
+  let referenceWindow = null;
+  if (typeof chrome.windows?.getLastFocused === "function") {
+    try {
+      referenceWindow = await chrome.windows.getLastFocused({ populate: false });
+    } catch (_) {
+      referenceWindow = null;
+    }
+  }
+  const referenceWidth = Number.isSafeInteger(referenceWindow?.width) && referenceWindow.width > 0
+    ? referenceWindow.width
+    : MANAGED_EXECUTION_WINDOW_FALLBACK_WIDTH;
+  const referenceHeight = Number.isSafeInteger(referenceWindow?.height) && referenceWindow.height > 0
+    ? referenceWindow.height
+    : MANAGED_EXECUTION_WINDOW_FALLBACK_HEIGHT;
+  return {
+    url,
+    focused: false,
+    state: "normal",
+    type: "normal",
+    width: Math.max(
+      MANAGED_EXECUTION_WINDOW_MIN_WIDTH,
+      Math.floor(referenceWidth * MANAGED_EXECUTION_WINDOW_SIZE_FACTOR)),
+    height: Math.max(
+      MANAGED_EXECUTION_WINDOW_MIN_HEIGHT,
+      Math.floor(referenceHeight * MANAGED_EXECUTION_WINDOW_SIZE_FACTOR))
+  };
+}
+
+async function ensureManagedExecutionWindow(url, trace = {}) {
+  await managedTabStateReady;
+  const existingWindowId = managedTabState.executionWindowId;
+  if (Number.isSafeInteger(existingWindowId) && existingWindowId >= 0) {
+    const existing = await getManagedExecutionWindow(existingWindowId);
+    if (existing) {
+      return makeManagedExecutionWindowUsable(existing, trace);
+    }
+    diagnostic("managed execution window unavailable", {
+      ...trace,
+      execution_window_id: existingWindowId,
+      error_code: "execution_window_closed",
+      status: "error",
+      stage: "execution_window_lookup"
+    });
+    clearManagedTabState("PreparingTab", { clearExecutionWindow: true });
+  }
+
+  if (typeof chrome.windows?.create !== "function") {
+    throw managedTabError(
+      "managed_execution_window_create_failed",
+      "execution_window_create",
+      "Managed ChatGPT Execution Windowを作成できません。");
+  }
+
+  diagnostic("managed execution window create requested", {
+    ...trace,
+    status: "requested",
+    stage: "execution_window_create"
+  });
+  let created;
+  let createTimeout = null;
+  try {
+    const createData = await managedExecutionWindowCreateData(url);
+    created = await Promise.race([
+      chrome.windows.create(createData),
+      new Promise((_, reject) => {
+        createTimeout = setTimeout(() => reject(managedTabError(
+          "managed_execution_window_create_timeout",
+          "execution_window_create_timeout",
+          "Managed ChatGPT Execution Windowの作成がタイムアウトしました。")), MANAGED_EXECUTION_WINDOW_CREATE_TIMEOUT_MS);
+      })
+    ]);
+  } catch (error) {
+    throw error?.code
+      ? error
+      : managedTabError(
+        "managed_execution_window_create_failed",
+        "execution_window_create",
+        "Managed ChatGPT Execution Windowを作成できません。");
+  } finally {
+    if (createTimeout !== null) clearTimeout(createTimeout);
+  }
+  if (!created || !Number.isSafeInteger(created.id) || created.id < 0) {
+    throw managedTabError(
+      "managed_execution_window_create_failed",
+      "execution_window_create",
+      "Managed ChatGPT Execution Windowを作成できません。"
+    );
+  }
+  const usable = await makeManagedExecutionWindowUsable({
+    ...created,
+    state: executionWindowState(created),
+    focused: created.focused === true
+  }, trace);
+  diagnostic("managed execution window created", {
+    ...trace,
+    execution_window_id: usable.id,
+    execution_window_focused: usable.focused,
+    execution_window_state: executionWindowState(usable),
+    status: "created",
+    stage: "execution_window_created"
+  });
+  recordManagedTabLifecycleTelemetry("execution_window_created", {
+    ...trace,
+    execution_window_id: usable.id,
+    execution_window_focused: usable.focused,
+    execution_window_state: executionWindowState(usable),
+    execution_window_exists: true,
+    status: "created",
+    stage: "execution_window_created"
+  }, null, null, usable.id);
+  return usable;
+}
+
+async function enforceManagedExecutionTab(tab, trace = {}) {
+  if (!tab || !Number.isSafeInteger(tab.id) || typeof chrome.tabs?.update !== "function") return tab;
+  if (!Number.isSafeInteger(managedTabState.executionWindowId)
+    || tab.windowId !== managedTabState.executionWindowId) return tab;
+  const changes = {};
+  if (tab.active !== true) changes.active = true;
+  if (tab.autoDiscardable !== false) changes.autoDiscardable = false;
+  if (Object.keys(changes).length === 0) return tab;
+  try {
+    const updated = await chrome.tabs.update(tab.id, changes);
+    const normalized = updated && updated.id !== undefined
+      ? updated
+      : { ...tab, ...changes };
+    diagnostic("managed execution tab state enforced", {
+      ...trace,
+      target_tab_id: normalized.id,
+      execution_window_id: normalized.windowId,
+      tab_active: normalized.active,
+      tab_auto_discardable: normalized.autoDiscardable,
+      status: "enforced",
+      stage: "managed_execution_tab_state_enforced"
+    });
+    recordManagedTabLifecycleTelemetry("managed_execution_tab_state_enforced", {
+      ...trace,
+      target_tab_id: normalized.id,
+      status: "enforced",
+      stage: "managed_execution_tab_state_enforced"
+    }, normalized.id, normalized);
+    return normalized;
+  } catch (error) {
+    throw managedTabError(
+      error?.code || "managed_execution_tab_state_failed",
+      "managed_execution_tab_state",
+      "Managed ChatGPTタブの実行状態を設定できません。");
+  }
+}
+
 async function getManagedExecutionTab(trace) {
   await managedTabStateReady;
   if (!Number.isSafeInteger(managedTabState.tabId) || managedTabState.tabId < 0) return null;
+  if (!Number.isSafeInteger(managedTabState.executionWindowId)
+    || managedTabState.executionWindowId < 0) {
+    diagnostic("legacy managed tab rejected", {
+      ...managedTabTrace(trace),
+      status: "error",
+      error_code: "managed_execution_window_required",
+      stage: "managed_tab_lookup"
+    });
+    clearManagedTabState("PreparingTab");
+    return null;
+  }
   try {
     const tab = await chrome.tabs.get(managedTabState.tabId);
     if (!tab || tab.id === undefined || !isChatGptTab(tab)) {
@@ -2363,23 +2711,90 @@ async function getManagedExecutionTab(trace) {
       clearManagedTabState("Failed");
       return null;
     }
-    return tab;
-  } catch (_) {
+    if (tab.windowId !== managedTabState.executionWindowId) {
+      diagnostic("managed tab outside execution window", {
+        ...managedTabTrace(trace),
+        target_tab_id: tab.id,
+        window_id: tab.windowId,
+        error_code: "managed_tab_wrong_window",
+        status: "error",
+        stage: "managed_tab_lookup"
+      });
+      clearManagedTabState("PreparingTab");
+      return null;
+    }
+    const window = await getManagedExecutionWindow(managedTabState.executionWindowId);
+    if (!window) {
+      diagnostic("managed execution window unavailable", {
+        ...managedTabTrace(trace),
+        error_code: "execution_window_closed",
+        status: "error",
+        stage: "execution_window_lookup"
+      });
+      clearManagedTabState("PreparingTab", { clearExecutionWindow: true });
+      return null;
+    }
+    await makeManagedExecutionWindowUsable(window, trace);
+    return await enforceManagedExecutionTab(tab, trace);
+  } catch (error) {
     diagnostic("managed tab unavailable", {
       ...managedTabTrace(trace),
       status: "error",
-      error_code: "managed_tab_closed",
-      stage: "managed_tab_lookup"
+      error_code: error?.code || "managed_tab_closed",
+      stage: error?.stage || "managed_tab_lookup"
     });
     clearManagedTabState("Failed");
     return null;
   }
 }
 
-async function createManagedExecutionTab(url, trace) {
-  if (typeof chrome.tabs.create !== "function") {
+async function createManagedTabInExecutionWindow(url, windowId, trace) {
+  if (typeof chrome.tabs?.create !== "function") {
     throw managedTabError("managed_tab_create_failed", "managed_tab_create", "Managed ChatGPTタブを作成できません。");
   }
+  let created;
+  try {
+    created = await chrome.tabs.create({ url, windowId, active: true });
+  } catch (_) {
+    throw managedTabError("managed_tab_create_failed", "managed_tab_create", "Managed ChatGPTタブを作成できません。");
+  }
+  if (!created || !Number.isSafeInteger(created.id) || created.id < 0) {
+    throw managedTabError("managed_tab_create_failed", "managed_tab_create", "Managed ChatGPTタブを作成できません。");
+  }
+  managedTabState = {
+    ...managedTabState,
+    tabId: created.id,
+    executionWindowId: windowId,
+    executionWindowState: managedTabState.executionWindowState || "normal"
+  };
+  managedTabLifecycle("PreparingTab", {
+    tabId: created.id,
+    executionWindowId: windowId,
+    contentReady: false,
+    conversationReady: false,
+    composerReady: false,
+    watcherReady: false
+  });
+  const normalized = await enforceManagedExecutionTab(created, trace);
+  diagnostic("managed tab created", {
+    ...trace,
+    status: "created",
+    stage: "managed_tab_created",
+    target_tab_id: normalized.id,
+    execution_window_id: windowId
+  });
+  recordManagedTabLifecycleTelemetry("managed_tab_created", {
+    ...trace,
+    status: "created",
+    stage: "managed_tab_created",
+    target_tab_id: normalized.id,
+    execution_window_id: windowId
+  }, normalized.id, normalized, windowId);
+  return normalized;
+}
+
+async function createManagedExecutionTab(url, trace) {
+  const previousExecutionWindowId = managedTabState.executionWindowId;
   managedTabLifecycle("PreparingTab", {
     tabId: null,
     contentReady: false,
@@ -2387,55 +2802,44 @@ async function createManagedExecutionTab(url, trace) {
     composerReady: false,
     watcherReady: false
   });
-  diagnostic("managed tab create requested", {
-    ...trace,
-    status: "requested",
-    stage: "managed_tab_create"
-  });
-  let created;
-  let createTimeout = null;
-  try {
-    created = await Promise.race([
-      chrome.tabs.create({ url, active: false }),
-      new Promise((_, reject) => {
-        createTimeout = setTimeout(() => reject(managedTabError(
-          "managed_tab_create_timeout",
-          "managed_tab_create_timeout",
-          "Managed ChatGPTタブの作成がタイムアウトしました.")), MANAGED_TAB_CREATE_TIMEOUT_MS);
-      })
-    ]);
-  } catch (error) {
-    throw error?.code ? error : managedTabError("managed_tab_create_failed", "managed_tab_create", "Managed ChatGPTタブを作成できません。");
-  } finally {
-    if (createTimeout !== null) clearTimeout(createTimeout);
+  const window = await ensureManagedExecutionWindow(url, trace);
+  let created = await findManagedExecutionWindowTab(window.id);
+  if (!created) created = await createManagedTabInExecutionWindow(url, window.id, trace);
+  else {
+    managedTabState = {
+      ...managedTabState,
+      tabId: created.id,
+      executionWindowId: window.id,
+      executionWindowState: executionWindowState(window)
+    };
+    managedTabLifecycle("PreparingTab", { tabId: created.id });
+    created = await enforceManagedExecutionTab(created, trace);
   }
-  if (!created || !Number.isSafeInteger(created.id) || created.id < 0) {
-    throw managedTabError("managed_tab_create_failed", "managed_tab_create", "Managed ChatGPTタブを作成できません。");
+  if (previousExecutionWindowId !== window.id) {
+    diagnostic("managed tab created", {
+      ...trace,
+      status: "created",
+      stage: "managed_tab_created",
+      target_tab_id: created.id,
+      execution_window_id: window.id
+    });
+    recordManagedTabLifecycleTelemetry("managed_tab_created", {
+      ...trace,
+      status: "created",
+      stage: "managed_tab_created",
+      target_tab_id: created.id,
+      execution_window_id: window.id
+    }, created.id, created, window.id);
   }
-  managedTabState = {
-    ...defaultManagedTabState,
-    tabId: created.id,
-    lifecycle: "PreparingTab"
-  };
-  managedTabLifecycle("PreparingTab", { tabId: created.id });
-  diagnostic("managed tab created", {
-    ...trace,
-    status: "created",
-    stage: "managed_tab_created",
-    target_tab_id: created.id
-  });
-  recordManagedTabLifecycleTelemetry("managed_tab_created", {
-    ...trace,
-    status: "created",
-    stage: "managed_tab_created",
-    target_tab_id: created.id
-  }, created.id, created);
   return created;
 }
 
 async function navigateManagedExecutionTab(tab, url, trace) {
-  if (!tab || tab.id === undefined || typeof chrome.tabs.update !== "function") {
+  if (!tab || tab.id === undefined || typeof chrome.tabs?.update !== "function") {
     throw managedTabError("managed_tab_navigation_failed", "managed_tab_navigation", "Managed ChatGPTタブを移動できません。");
+  }
+  if (tab.windowId !== managedTabState.executionWindowId) {
+    throw managedTabError("managed_tab_wrong_window", "managed_tab_navigation", "Managed ChatGPTタブがExecution Windowにありません。");
   }
   managedTabLifecycle("PreparingTab", {
     contentReady: false,
@@ -2448,11 +2852,14 @@ async function navigateManagedExecutionTab(tab, url, trace) {
     ...trace,
     status: "requested",
     stage: "managed_tab_navigation",
-    target_tab_id: tab.id
+    target_tab_id: tab.id,
+    execution_window_id: managedTabState.executionWindowId
   });
   try {
-    const updated = await chrome.tabs.update(tab.id, { url, active: false });
-    return updated && updated.id !== undefined ? updated : { ...tab, url };
+    const updated = await chrome.tabs.update(tab.id, { url, active: true, autoDiscardable: false });
+    return await enforceManagedExecutionTab(
+      updated && updated.id !== undefined ? updated : { ...tab, url, active: true, autoDiscardable: false },
+      trace);
   } catch (_) {
     throw managedTabError("managed_tab_navigation_failed", "managed_tab_navigation", "Managed ChatGPTタブを移動できません。");
   }
@@ -2528,26 +2935,19 @@ async function ensureManagedExecutionTab(message, trace = traceForMessage(messag
     && chatGptProjectId(requestedProjectUrl) !== requestedProjectId) {
     throw managedTabError("target_project_invalid", "target_project_check", "ChatGPT Project IDとURLが一致しません。");
   }
+  const destination = target.newConversation
+    ? target.projectUrl || "https://chatgpt.com/"
+    : target.conversationUrl || (target.conversationId
+      ? `https://chatgpt.com/c/${encodeURIComponent(target.conversationId)}`
+      : null);
+  if (!destination) {
+    throw managedTabError("target_conversation_not_found", "target_conversation_check", "保存済みのChatGPT Conversation URLがありません。");
+  }
   let tab = await getManagedExecutionTab(trace);
   if (!tab) {
-    const startUrl = target.newConversation
-      ? target.projectUrl || "https://chatgpt.com/"
-      : target.conversationUrl || (target.conversationId
-        ? `https://chatgpt.com/c/${encodeURIComponent(target.conversationId)}`
-        : null);
-    if (!startUrl) {
-      throw managedTabError("target_conversation_not_found", "target_conversation_check", "保存済みのChatGPT Conversation URLがありません。");
-    }
-    tab = await createManagedExecutionTab(startUrl, trace);
-  } else if (!managedTabMatchesTarget(tab, target)) {
-    const destination = target.newConversation
-      ? target.projectUrl || "https://chatgpt.com/"
-      : target.conversationUrl || (target.conversationId
-        ? `https://chatgpt.com/c/${encodeURIComponent(target.conversationId)}`
-        : null);
-    if (!destination) {
-      throw managedTabError("target_conversation_not_found", "target_conversation_check", "保存済みのChatGPT Conversation URLがありません。");
-    }
+    tab = await createManagedExecutionTab(destination, trace);
+  }
+  if (!managedTabMatchesTarget(tab, target)) {
     tab = await navigateManagedExecutionTab(tab, destination, trace);
   } else {
     diagnostic("managed tab reused", {
@@ -2557,10 +2957,14 @@ async function ensureManagedExecutionTab(message, trace = traceForMessage(messag
       target_tab_id: tab.id
     });
   }
+  tab = await enforceManagedExecutionTab(tab, trace);
 
   managedTabState = {
     ...managedTabState,
     tabId: tab.id,
+    executionWindowId: Number.isSafeInteger(tab.windowId)
+      ? tab.windowId
+      : managedTabState.executionWindowId,
     projectId: target.projectId || managedTabState.projectId || null,
     projectUrl: target.projectUrl || managedTabState.projectUrl || null,
     conversationId: target.conversationId || (target.newConversation ? null : managedTabState.conversationId),
@@ -3699,9 +4103,10 @@ function handleBridgeMessage(message, bridgeSocket) {
   }
 
   if (message.type === "handoff.send") {
-    // The Background owns one inactive Managed Execution Tab. All DOM
-    // discovery and mutation remains in the ChatGPT Content Script; the
-    // user's foreground tab is never selected as an execution target.
+    // The Background owns one active Managed ChatGPT Tab inside its
+    // connector-created Execution Window. All DOM discovery and mutation
+    // remains in the ChatGPT Content Script; the user's foreground tab is
+    // never selected as an execution target.
     diagnostic("background received", traceForMessage(message, {
       stage: message.handoff_kind === "review" ? "review_handoff_received" : "handoff_received"
     }));
@@ -3981,7 +4386,11 @@ chrome.runtime.onStartup.addListener(() => {
 // the owner of the correlation identity, so the new script can safely locate
 // the same marker-bearing user message and continue from there.
 chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
-  if (Number.isSafeInteger(managedTabState.tabId) && tabId === managedTabState.tabId
+  const isManagedExecutionTab = Number.isSafeInteger(managedTabState.tabId)
+    && tabId === managedTabState.tabId
+    && Number.isSafeInteger(managedTabState.executionWindowId)
+    && tab?.windowId === managedTabState.executionWindowId;
+  if (isManagedExecutionTab
     && ["status", "active", "discarded", "frozen", "autoDiscardable", "url"]
       .some((key) => Object.prototype.hasOwnProperty.call(changeInfo || {}, key))) {
     recordManagedTabLifecycleTelemetry("tabs_on_updated", {
@@ -3989,7 +4398,19 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
       stage: "tabs_on_updated"
     }, tabId, tab);
   }
-  if (Number.isSafeInteger(managedTabState.tabId) && tabId === managedTabState.tabId
+  if (isManagedExecutionTab
+    && (changeInfo?.discarded === true || changeInfo?.frozen === true)) {
+    diagnostic("managed execution tab recovery requested", {
+      ...managedTabTrace({ target_tab_id: tabId }),
+      status: "requested",
+      error_code: changeInfo.discarded === true ? "managed_tab_discarded" : "managed_tab_frozen",
+      stage: "managed_execution_tab_state_changed"
+    });
+    clearManagedTabState("PreparingTab");
+    void scheduleManagedMediumRecovery(tabId, tab.windowId, "managed_tab_state_changed");
+    return;
+  }
+  if (isManagedExecutionTab
     && changeInfo?.status === "loading") {
     contentScriptReadyTabs.delete(tabId);
     managedTabLifecycle("WaitingContentScript", {
@@ -4006,7 +4427,7 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
     });
   }
   if (changeInfo?.status === "complete") {
-    if (Number.isSafeInteger(managedTabState.tabId) && tabId === managedTabState.tabId) {
+    if (isManagedExecutionTab) {
       managedTabLifecycle("WaitingContentScript", {
         tabId,
         contentReady: false,
@@ -4018,6 +4439,19 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
     void recoverPendingHandoffSendsForTab(tabId);
     void rearmResponseWatchesForTab(tabId);
   }
+  if (isManagedExecutionTab) {
+    void enforceManagedExecutionTab(tab, {
+      status: "observed",
+      stage: "tabs_on_updated_enforce"
+    }).catch((error) => {
+      diagnostic("managed execution tab state enforcement failed", {
+        ...managedTabTrace({ target_tab_id: tabId }),
+        error_code: error?.code || "managed_execution_tab_state_failed",
+        status: "error",
+        stage: error?.stage || "tabs_on_updated_enforce"
+      });
+    });
+  }
 });
 
 chrome.tabs.onActivated?.addListener?.((activeInfo) => {
@@ -4028,15 +4462,62 @@ chrome.tabs.onActivated?.addListener?.((activeInfo) => {
     event_tab_id: activeInfo?.tabId,
     event_window_id: activeInfo?.windowId
   }, managedTabState.tabId, null, activeInfo?.windowId);
+  if (activeInfo?.windowId === managedTabState.executionWindowId
+    && activeInfo?.tabId !== managedTabState.tabId
+    && typeof chrome.tabs?.get === "function") {
+    diagnostic("managed execution tab activation restored", {
+      ...managedTabTrace({
+        event_tab_id: activeInfo?.tabId,
+        event_window_id: activeInfo?.windowId
+      }),
+      status: "requested",
+      stage: "managed_execution_tab_activation_restore"
+    });
+    chrome.tabs.get(managedTabState.tabId)
+      .then((tab) => enforceManagedExecutionTab(tab, {
+        status: "restored",
+        stage: "managed_execution_tab_activation_restore"
+      }))
+      .catch((error) => {
+        diagnostic("managed execution tab activation restore failed", {
+          ...managedTabTrace({ target_tab_id: managedTabState.tabId }),
+          error_code: error?.code || "managed_execution_tab_state_failed",
+          status: "error",
+          stage: "managed_execution_tab_activation_restore"
+        });
+      });
+  }
 });
 
 chrome.windows?.onFocusChanged?.addListener?.((windowId) => {
-  if (!Number.isSafeInteger(managedTabState.tabId)) return;
+  if (!Number.isSafeInteger(managedTabState.tabId)
+    && !Number.isSafeInteger(managedTabState.executionWindowId)) return;
   recordManagedTabLifecycleTelemetry("windows_on_focus_changed", {
     status: "observed",
     stage: "windows_on_focus_changed",
     event_window_id: windowId
   }, managedTabState.tabId, null, windowId);
+  if (windowId === managedTabState.executionWindowId
+    && typeof chrome.windows?.get === "function") {
+    diagnostic("managed execution window focus restoration requested", {
+      ...managedTabTrace({ event_window_id: windowId }),
+      status: "requested",
+      stage: "execution_window_focus_restore"
+    });
+    void getManagedExecutionWindow(windowId)
+      .then((window) => makeManagedExecutionWindowUsable(window, {
+        event_window_id: windowId,
+        stage: "execution_window_focus_restore"
+      }))
+      .catch((error) => {
+        diagnostic("managed execution window focus restoration failed", {
+          ...managedTabTrace({ event_window_id: windowId }),
+          status: "error",
+          error_code: error?.code || "execution_window_focus_restore_failed",
+          stage: "execution_window_focus_restore"
+        });
+      });
+  }
 });
 
 chrome.tabs.onRemoved?.addListener?.((tabId, removeInfo) => {
@@ -4063,7 +4544,32 @@ chrome.tabs.onRemoved?.addListener?.((tabId, removeInfo) => {
     stage: "managed_tab_removed"
   });
   clearManagedTabState("Failed");
-  void recoverManagedTabAfterRemoval(tabId);
+  void scheduleManagedMediumRecovery(
+    tabId,
+    removeInfo?.windowId,
+    removeInfo?.isWindowClosing === true ? "execution_window_removed" : "managed_tab_removed");
+});
+
+chrome.windows?.onRemoved?.addListener?.((windowId) => {
+  if (windowId !== managedTabState.executionWindowId) return;
+  const managedTabId = managedTabState.tabId;
+  recordManagedTabLifecycleTelemetry("windows_on_removed", {
+    status: "error",
+    error_code: "execution_window_closed",
+    stage: "windows_on_removed",
+    event_window_id: windowId,
+    managed_tab_exists: false
+  }, managedTabId, null, windowId);
+  diagnostic("managed execution window removed", {
+    ...managedTabTrace({
+      target_tab_id: managedTabId,
+      event_window_id: windowId
+    }),
+    status: "error",
+    error_code: "execution_window_closed",
+    stage: "execution_window_removed"
+  });
+  void scheduleManagedMediumRecovery(managedTabId, windowId, "execution_window_removed");
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

@@ -4,9 +4,8 @@
 
 Phase 1 connects the Chromium Browser Extension to the running Desktop
 Connector. Phase 2 adds one narrow action: Desktop can deliver the already
-generated Bootstrap Handoff to one inactive Managed `chatgpt.com` tab owned by
-the Background service worker, where the Content Script fills the composer and
-submits it. Phase 3.1–3.3 observes
+generated Bootstrap Handoff to one connector-owned Managed `chatgpt.com` tab,
+where the Content Script fills the composer and submits it. Phase 3.1–3.3 observes
 the completed assistant response, validates it on Desktop as a Connector
 Response, and places it into `CHATGPT COMMAND`. Phase 4 connects a strictly
 validated `generate` Response to the existing Desktop APPLY → ComfyUI READY
@@ -36,13 +35,22 @@ The Content Script owns ChatGPT DOM access only. All localhost access is owned
 by `browser-extension/background.js`; the Content Script never opens a local
 HTTP or WebSocket connection.
 
-## Managed Background ChatGPT Tab lifecycle
+## Managed Execution Window lifecycle
 
-The Background service worker owns exactly one inactive Managed ChatGPT Tab for
-execution. It creates or reuses that tab and navigates it only from the bound
-Conversation ID/URL (or a project-matched new-chat target). The user's
-foreground tab is never selected as an execution target and its active state
-does not affect Handoff, media, Review, or response delivery.
+The Background service worker owns exactly one connector-created Execution
+Window and exactly one active Managed ChatGPT Tab inside it for execution. The
+Execution Window is created with `focused: false` and `state: "normal"`; the
+Managed Tab is kept `active: true` within that window and
+`autoDiscardable: false`. On creation its width and height are each about half
+of the last-focused browser window (roughly one quarter of its area), with a
+safe fixed fallback when the size cannot be read. Reused windows keep their
+existing size. The user's Chrome Window and its foreground tab are never
+selected as execution targets or focused by the connector.
+
+The Background creates or reuses the Execution Window and navigates its Managed
+Tab only from the bound Conversation ID/URL (or a project-matched new-chat
+target). The user's foreground tab and its active/focus state do not affect
+Handoff, media, Review, or response delivery.
 
 Project/Chat discovery is isolated in a separate inactive Collector Tab. The
 Background creates it on demand, waits for its Content Script, performs the
@@ -51,7 +59,8 @@ foreground by the user. The Collector Tab is never used for Handoff, media,
 Review, Resume, or assistant-response observation, and it does not replace the
 Managed Execution Tab's watcher state.
 
-The tab is a replaceable browser medium, not the Conversation identity. Before
+The Execution Window and tab are replaceable browser media, not the Conversation
+identity. Before
 each Handoff, the Background requires these ordered handshakes from the
 Content Script: Content Script ready, target Conversation ready, composer
 ready, and shared assistant-response watcher ready. Only then does it send the
@@ -65,9 +74,14 @@ retains only bounded correlation metadata and the durable Conversation
 identity, re-injects or waits for the replacement Content Script, and re-arms
 the same watcher. It may recover an accepted user message, but it never posts
 the same Handoff again merely because an acknowledgement or message channel
-was lost. A closed tab is recreated inactive at the same Conversation URL when
-the operation still has enough identity to do so; otherwise the operation
-stops with an explicit target-identity error.
+was lost. A closed Managed Tab is recreated active in the existing Execution
+Window at the same Conversation URL when the operation still has enough
+identity to do so. If the Execution Window is closed, the Background recreates
+the Window and its Managed Tab before rebinding the same Conversation.
+Discarded/frozen execution media and a lost Content Script go through the same
+bounded recovery/re-arm path. Recovery never posts an already accepted Handoff
+again; the Conversation identity is durable and the tab/window IDs are
+disposable.
 
 ### Managed Tab lifecycle telemetry
 
@@ -78,7 +92,10 @@ completion/error, periodic response waiting, Content Script readiness, and the
 `windows.onFocusChanged` events. The snapshot includes `tab_id`, `window_id`,
 `tab_active`, `tab_discarded`, `tab_frozen`, `tab_auto_discardable`,
 `window_focused`, `tab_status`, `managed_tab_exists`, `content_script_alive`,
-the bounded correlation IDs, and `watcher_state`. A
+the bounded correlation IDs, and `watcher_state`. Execution Window entries also
+include `execution_window_id`, `execution_window_focused`,
+`execution_window_state`, `execution_window_exists`, and
+`execution_window_minimized`. A
 `managed tab lifecycle state changed` entry identifies changes to active,
 focused, discarded, frozen, or existence state.
 
@@ -89,8 +106,10 @@ changed`, and `response lifecycle telemetry` entries. These include
 `streaming`, `stable_wait`, or `completed`). Periodic watcher diagnostics are
 throttled to one entry per ten seconds, in addition to state transitions.
 Neither side logs Handoff/Response bodies, credentials, tokens, media content,
-or local filesystem paths. Telemetry only reads state; it does not activate,
-disable discard, reload, or recreate a tab.
+or local filesystem paths. Lifecycle telemetry is metadata-only; the execution
+policy itself keeps the connector tab active, disables automatic discarding,
+and recovers the connector-owned Window/Tab when its lifecycle is lost. It
+never activates or focuses a user-owned Chrome Window.
 
 ## Desktop placement and lifecycle
 
@@ -324,10 +343,11 @@ over the authenticated socket:
 }
 ```
 
-The Background service worker resolves the request to its one inactive Managed
-ChatGPT Tab using Conversation ID/URL as the durable identity. It contains no
-DOM locator code. When the tab is new or was navigated, `tabs.create` or
-`tabs.update` can resolve while the document is still loading, so a missing
+The Background service worker resolves the request to its one active Managed
+ChatGPT Tab in the connector-owned Execution Window using Conversation ID/URL
+as the durable identity. It contains no DOM locator code. When the tab is new
+or was navigated, `windows.create`, `tabs.create`, or `tabs.update` can resolve
+while the document is still loading, so a missing
 Content Script is retried after the tab reaches `complete`, before the MV3
 injection fallback is attempted. The Background then requires the explicit
 Content Script, Conversation, Composer, and response-watcher readiness
@@ -663,29 +683,31 @@ browser-extension/
    **Load unpacked**, and select the repository's `browser-extension` folder.
 3. Edge: open `edge://extensions`, enable **Developer mode**, choose **Load
    unpacked**, and select the same folder.
- 4. After changing the unpacked Extension files, press **Reload** on the
-    Extension. The Background creates or reuses the inactive Managed ChatGPT
-    Tab and can inject the Content Script after its document is ready. Reloading
-    the tab gives the cleanest development check. Open the Extension popup, enter
-    the Desktop `PAIRING CODE`, and choose
+4. After changing the unpacked Extension files, press **Reload** on the
+   Extension. The Background creates or reuses the connector-owned Execution
+   Window and its active Managed ChatGPT Tab, and can inject the Content Script
+   after its document is ready. Reloading the tab gives the cleanest development
+   check. Open the Extension popup, enter the Desktop `PAIRING CODE`, and choose
    **PAIR DESKTOP**. It should move through `CONNECTING` to `CONNECTED`, show
    `desktop.ready`, and enable `PING`.
- 5. Select the desired Project/Chat in Desktop and press `SEND TO CHATGPT`.
-    The inactive Managed ChatGPT Tab should open or navigate to the bound
-    Conversation, pass its readiness handshakes, and receive the exact Bootstrap
-    Handoff; the Desktop timeline should show `SENT`. After ChatGPT finishes, its assistant response should
-   be delivered through the Bridge, pass the Desktop strict Connector Response
-   validation, appear in `CHATGPT COMMAND`, and create a `RECEIVED` timeline
-   item. A `generate` response then automatically applies the validated slots,
-   starts/waits for ComfyUI when needed, runs one Connector-owned Job, and
-   updates OUTPUT/HISTORY. A `complete` response completes only after the
-   existing review/output guard passes. The manual Command buttons remain
-   available for recovery or deliberate inspection.
- 6. Switch the user's foreground tab to a non-ChatGPT page and press
-    `SEND TO CHATGPT` again. The send must still use only the inactive Managed
-    ChatGPT Tab; the foreground tab must not change the target or cause a
-    duplicate Handoff. If the Managed Tab is closed, it should be recreated at
-    the bound Conversation URL and resume the pending correlated operation.
+5. Select the desired Project/Chat in Desktop and press `SEND TO CHATGPT`.
+   The active Managed ChatGPT Tab in the Execution Window should open or
+   navigate to the bound Conversation, pass its readiness handshakes, and
+   receive the exact Bootstrap Handoff; the Desktop timeline should show `SENT`.
+   After ChatGPT finishes, its assistant response should be delivered through
+   the Bridge, pass the Desktop strict Connector Response validation, appear in
+   `CHATGPT COMMAND`, and create a `RECEIVED` timeline item. A `generate`
+   response then automatically applies the validated slots, starts/waits for
+   ComfyUI when needed, runs one Connector-owned Job, and updates OUTPUT/HISTORY.
+   A `complete` response completes only after the existing review/output guard
+   passes. The manual Command buttons remain available for recovery or
+   deliberate inspection.
+6. Switch the user's foreground tab to a non-ChatGPT page and press
+   `SEND TO CHATGPT` again. The send must still use only the active Managed
+   ChatGPT Tab in the connector-owned Execution Window; the foreground tab
+   must not change the target or cause a duplicate Handoff. If the Managed Tab
+   or its Execution Window is closed, it should be recreated at the bound
+   Conversation URL and resume the pending correlated operation.
 7. Stop the Desktop Connector. The popup should become `DISCONNECTED`; start
    it again and the Service Worker should bootstrap a new session token and
    reconnect automatically or after the next retry/alarm.
@@ -730,8 +752,9 @@ handling, delayed Review Send readiness after media processing, and the
 no-message/unrelated-message failure paths.
 
 `tests/browser-extension/background.test.mjs` uses a mock WebSocket and
-`chrome.tabs` boundary to exercise inactive Managed-Tab routing independent of
-the foreground tab, Content Script result relay, navigation/tab-disappearance
+`chrome.tabs`/`chrome.windows` boundary to exercise active Managed-Tab routing
+inside an isolated Execution Window independent of the foreground tab,
+Content Script result relay, navigation/tab-disappearance and window-close
 recovery, unavailable-Content-Script errors, assistant response
 relay/correlation, MV3 WebSocket keepalive, idempotent Handoff delivery, and
 safe diagnostic fields.

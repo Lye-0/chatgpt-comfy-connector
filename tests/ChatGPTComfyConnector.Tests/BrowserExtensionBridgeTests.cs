@@ -756,7 +756,12 @@ public sealed class BrowserExtensionBridgeTests
         var background = File.ReadAllText(Path.Combine(extensionRoot, "background.js"));
         Assert.Contains("message.type === \"handoff.send\"", background, StringComparison.Ordinal);
         Assert.Contains("MANAGED_TAB_STORAGE_KEY", background, StringComparison.Ordinal);
-        Assert.Contains("chrome.tabs.create({ url, active: false })", background, StringComparison.Ordinal);
+        Assert.Contains("chrome.windows.create(createData)", background, StringComparison.Ordinal);
+        Assert.Contains("focused: false", background, StringComparison.Ordinal);
+        Assert.Contains("active: true", background, StringComparison.Ordinal);
+        Assert.Contains("autoDiscardable: false", background, StringComparison.Ordinal);
+        Assert.Contains("MANAGED_EXECUTION_WINDOW_SIZE_FACTOR", background, StringComparison.Ordinal);
+        Assert.DoesNotContain("populate: true", background, StringComparison.Ordinal);
         Assert.Contains("function ensureManagedExecutionTab", background, StringComparison.Ordinal);
         Assert.Contains("conversation is the durable identity", background, StringComparison.Ordinal);
         Assert.Contains("prepare: true", background, StringComparison.Ordinal);

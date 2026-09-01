@@ -304,12 +304,17 @@ endpoint. `App.xaml.cs` is the manual composition root and injects one Bridge
 instance into `MainWindow` / `MainViewModel`, so the listener starts with the
 Desktop initialization and stops on the close/exit path.
 
-The Background service worker owns one inactive Managed ChatGPT Tab for all
-execution operations. Conversation ID/URL is the durable target identity and
-the tab is only a replaceable browser medium. Project/Chat metadata discovery
-uses a separate inactive Collector Tab, which is created only for the bounded
-sidebar scan and is never used to send a Handoff or observe an assistant
-response. Before `handoff.send`, the
+The Background service worker owns one connector-created Managed Execution
+Window with one active Managed ChatGPT Tab for all execution operations. The
+Execution Window is created non-focused and non-minimized; its tab is active
+within that window and has automatic discarding disabled. At first creation,
+the Window uses approximately half the last-focused browser window's width and
+height (roughly one quarter of its area), with a bounded fallback size.
+Conversation ID/URL
+is the durable target identity and the window/tab are only replaceable browser
+media. Project/Chat metadata discovery uses a separate inactive Collector Tab,
+which is created only for the bounded sidebar scan and is never used to send a
+Handoff or observe an assistant response. Before `handoff.send`, the
 Background requires Content Script, Conversation, Composer, and shared
 assistant-response watcher readiness. The watcher is pre-registered with the
 current Handoff IDs, records the existing assistant-message baseline, and
@@ -318,10 +323,11 @@ attachment, Review Handoff, and resumed/next-iteration work reuse this same
 managed route; a foreground tab is never selected as a fallback.
 
 When navigation or tab closure replaces the Content Script, the Background
-retains bounded correlation metadata, recreates/rebinds an inactive tab from
-the same Conversation identity, and re-arms the watcher. It may recover an
-accepted send after a lost message-channel response, but it never resends the
-same Handoff solely because the tab or Bridge connection changed. Authenticated
+retains bounded correlation metadata, recreates/rebinds the active tab in the
+Execution Window from the same Conversation identity, and re-arms the watcher.
+It may recover an accepted send after a lost message-channel response, but it
+never resends the same Handoff solely because the tab or Bridge connection
+changed. Authenticated
 Handoff and assistant-response envelopes remain queued until Desktop receipt is
 acknowledged.
 
@@ -336,9 +342,10 @@ used for the WebSocket hello. The Desktop sends `hello.ack` and one
 `desktop.ready` event; the Extension sends `ping` and receives `pong`. Phase 2
 adds an authenticated `handoff.send` message carrying the exact Bootstrap
 Handoff text and a correlated `handoff.result` response. The Background owns
-one inactive Managed `https://chatgpt.com/*` tab and resolves it from the
-bound Conversation ID/URL; it never uses the user's foreground tab as an
-execution target. DOM discovery and mutation remain outside the Background.
+one active Managed `https://chatgpt.com/*` tab inside its non-focused Execution
+Window and resolves it from the bound Conversation ID/URL; it never uses the
+user's foreground tab as an execution target. DOM discovery and mutation
+remain outside the Background.
 The Content Script uses separate textarea/contenteditable editor paths, waits
 for the Send control to become enabled, and confirms a new user message
 containing the current Handoff identifiers before returning `sent`.
@@ -404,8 +411,9 @@ Conversation URLs/IDs are copied into the `CreationSession` binding at start.
 
 After a Session starts, selector changes affect only the next draft and never
 retarget its Handoff, media attachment, Review, or Resume. The Background
-routes an existing bound conversation by conversation ID/URL through its one
-inactive Managed ChatGPT Tab. If that tab must be recovered, it opens only the
+routes an existing bound conversation by conversation ID/URL through the active
+Managed ChatGPT Tab in its Execution Window. If the tab or window must be
+recovered, it recreates the connector-owned execution media and opens only the
 exact saved conversation URL; it never searches for or borrows the user's
 foreground tab. A new-chat target uses the managed project/root URL until
 ChatGPT creates its conversation URL, which is then returned in the sent

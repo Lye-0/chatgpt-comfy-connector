@@ -314,11 +314,13 @@ Conversation ID/URL
 is the durable target identity and the window/tab are only replaceable browser
 media. Project/Chat metadata discovery uses a separate non-focused Collector
 Window with one active Collector Tab. The Collector Window is created or
-reused only for metadata discovery, traverses the root sidebar and each Project
-page, and is never used to send a Handoff or observe an assistant response. It
-uses roughly half the reference window width and height, with an outer-width
-floor of about 820px, and probes the Content Script's `window.innerWidth` and
-sidebar readiness before discovery. A bounded zero-Project result is an
+reused only for metadata discovery: a root refresh scans the root sidebar for
+the complete Project catalog and Projectless Chats, while a selected Project
+request visits only that Project page to load its Chats. It is never used to
+send a Handoff or observe an assistant response. It uses roughly half the
+reference window width and height, with an outer-width floor of about 820px,
+and probes the Content Script's `window.innerWidth` and sidebar readiness
+before discovery. A bounded zero-Project result is an
 `context_projects_incomplete` error rather than a successful empty catalog;
 the Desktop keeps a known cache visible while marking that refresh as Error.
 Before `handoff.send`, the
@@ -415,29 +417,28 @@ the resulting Project catalog to stable-identity resolution. For current
 ChatGPT disclosure rows, resolution reads the `aria-controls` region and its
 Project-scoped `/g/g-p-.../c/...` metadata, expanding that already-discovered
 Project row at most once when the region is not yet rendered; it does not
-interpret the row click as Project navigation. Only after every Project has a
-verified `g-p-*` ID and canonical URL does the same active Collector Tab make
-direct Project URL visits. The Root Project catalog-completeness state ends at
-that point. Project-page collection verifies only the current Project route,
-its Chat container, and its own bounded scroll completion; it does not apply
-Root `sidebar_scroll_complete` or Project-section validation to a Project
-page. The sidebar and Project-page scrollports are rebound after SPA DOM
-replacement only for the Project-page Chat scan, and every independent
-Project-page list is scanned without jumping back to the first container. Each
-resolved Project page is scanned with bounded incremental scrolling until no
-new Conversation IDs appear; duplicate Project/Conversation metadata is merged
-by ID and the original scroll positions are restored. A Project catalog
-failure remains `context_projects_incomplete`, while a Project-page Chat scan
-failure is reported separately as `context_project_chats_incomplete` so the
-failure stage is not misclassified.
+interpret the row click as Project navigation. Root refresh completes after all
+Project identities and Projectless Chats are validated; it does not visit
+Project pages or require Project-page Chat collection. When a Project is
+selected, the same active Collector Tab visits only its canonical Project URL,
+verifies that route, and scans that page's Chat container with bounded
+incremental scrolling until no new Conversation IDs appear. Project-page
+collection does not apply Root `sidebar_scroll_complete` or Project-section
+validation, and its failure remains local to the selected Project as
+`context_project_chats_incomplete`. Project and Conversation metadata are
+merged by ID; a stale result from an earlier Project selection cannot replace a
+later selection.
 
 `chatgpt.context.list.request` and
 `chatgpt.context.current.request` travel over the existing authenticated
-WebSocket and return only bounded Project/Conversation metadata. The complete
-list result is persisted as a metadata-only local cache; Desktop can show that
-snapshot immediately at startup and replace it only when the newest Collector
-refresh completes. Collector refresh generations discard stale results, while
-the Execution Window and its Managed Tab remain untouched. The
+WebSocket and return only bounded Project/Conversation metadata. A list refresh
+returns the Project catalog and Projectless Chats; a list request carrying a
+validated `collection: "project"` target returns Chats for that one Project.
+The complete root result is persisted as a metadata-only local cache; Desktop
+can show that snapshot immediately at startup and replace it only when the
+newest Collector refresh completes. Collector refresh and Project-selection
+generations discard stale results, while the Execution Window and its Managed
+Tab remain untouched. The
 Content Script also emits a deduplicated `chatgpt.context.changed` event for
 SPA navigation and visible link changes. Desktop keeps Loading, Loaded,
 Empty, Disconnected, and Error states distinct; refresh preserves stable

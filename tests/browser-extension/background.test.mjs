@@ -1796,12 +1796,12 @@ test("Background forwards a complete metadata snapshot through an active Collect
   const contextMessages = requestedMessages.filter((message) => message.type === "GET_CHATGPT_CONTEXT");
   assert.equal(contextMessages[0].mode, "list");
   assert.equal(contextMessages[0].collection, "root");
-  assert.equal(contextMessages[1].collection, "project");
+  assert.equal(contextMessages.length, 1);
   assert.equal(harness.createdTabs.length, 1);
   assert.equal(harness.createdTabs[0].active, true);
   assert.equal(harness.createdTabs[0].autoDiscardable, false);
   assert.notEqual(harness.createdTabs[0].windowId, 1);
-  assert.equal(harness.createdTabs[0].url, "https://chatgpt.com/g/g-p-project-visible/project");
+  assert.equal(harness.createdTabs[0].url, "https://chatgpt.com/");
   assert.equal(harness.createdWindows.length, 1);
   assert.equal(harness.createdWindows[0].focused, false);
   assert.equal(harness.createdWindows[0].state, "normal");
@@ -1821,7 +1821,7 @@ test("Background forwards a complete metadata snapshot through an active Collect
       url: "https://chatgpt.com/g/g-p-project-visible/project"
     }
   ]);
-  assert.equal(response.conversations[0].title, "Visible Chat");
+  assert.equal(response.conversations.length, 0);
   assert.equal(response.current.project_id, "g-p-project-a");
 });
 
@@ -1881,7 +1881,10 @@ test("Background separates Project chat completeness from Root Project catalog c
   const previousCount = harness.socket.sent.length;
   harness.context.handleBridgeMessage({
     type: "chatgpt.context.list.request",
-    request_id: "collector-project-chat-completeness"
+    request_id: "collector-project-chat-completeness",
+    collection: "project",
+    project_id: project.project_id,
+    project_url: project.url
   }, harness.socket);
   const response = await harness.waitForSocketMessage(
     previousCount,
@@ -1954,7 +1957,10 @@ test("Background rejects an incomplete Project chat scan without relabeling it a
   const previousCount = harness.socket.sent.length;
   harness.context.handleBridgeMessage({
     type: "chatgpt.context.list.request",
-    request_id: "collector-project-chat-incomplete"
+    request_id: "collector-project-chat-incomplete",
+    collection: "project",
+    project_id: project.project_id,
+    project_url: project.url
   }, harness.socket);
   const response = await harness.waitForSocketMessage(
     previousCount,
@@ -2013,7 +2019,10 @@ test("Background preserves the Content Script Project Chat failure classificatio
   const previousCount = harness.socket.sent.length;
   harness.context.handleBridgeMessage({
     type: "chatgpt.context.list.request",
-    request_id: "collector-project-chat-error"
+    request_id: "collector-project-chat-error",
+    collection: "project",
+    project_id: project.project_id,
+    project_url: project.url
   }, harness.socket);
   const response = await harness.waitForSocketMessage(
     previousCount,
@@ -2246,17 +2255,6 @@ test("Background waits for Root Sidebar hydration before starting Project discov
     }
     if (message.type !== "GET_CHATGPT_CONTEXT") return {};
     events.push(`context:${message.collection}`);
-    if (message.collection === "project") {
-      return {
-        type: "CHATGPT_CONTEXT_RESULT",
-        requestId: message.requestId,
-        mode: "list",
-        status: "ok",
-        projects: [project],
-        conversations: [],
-        current: null
-      };
-    }
     return {
       type: "CHATGPT_CONTEXT_RESULT",
       requestId: message.requestId,
@@ -2282,7 +2280,7 @@ test("Background waits for Root Sidebar hydration before starting Project discov
       && message.request_id === "collector-hydration-order");
 
   assert.equal(response.status, "ok");
-  assert.deepEqual(events, ["root-hydration", "context:root", "context:project"]);
+  assert.deepEqual(events, ["root-hydration", "context:root"]);
   const diagnosticEntries = harness.diagnostics.map(([eventName, fields]) => ({ eventName, fields }));
   const hydrationCompleteIndex = diagnosticEntries.findIndex((entry) =>
     entry.fields?.stage === "collector_root_hydration_complete");
@@ -2608,7 +2606,7 @@ test("Background rejects a Project array lost between Content Script telemetry a
     && fields.error_code === "collector_project_result_handoff_mismatch"), true);
 });
 
-test("Background passes the discovered Project array through DOM identity resolution before Chat discovery", async () => {
+test("Background passes the discovered Project array through DOM identity resolution without Project Chat discovery", async () => {
   const harness = await createHarness();
   const collectionMessages = [];
   const discoveredProjects = [
@@ -2680,18 +2678,16 @@ test("Background passes the discovered Project array through DOM identity resolu
   assert.equal(response.status, "ok");
   assert.deepEqual(collectionMessages, [
     { collection: "root", identityMode: undefined },
-    { collection: "project_identity", identityMode: "dom" },
-    { collection: "project", identityMode: undefined },
-    { collection: "project", identityMode: undefined }
+    { collection: "project_identity", identityMode: "dom" }
   ]);
   assert.deepEqual(response.projects.map((project) => project.project_id), ["g-p-0", "g-p-1"]);
 
   const identityCompleteIndex = harness.diagnostics.findIndex(([, fields]) =>
     fields?.stage === "collector_project_identity_resolution_complete");
-  const projectNavigationIndex = harness.diagnostics.findIndex(([, fields]) =>
-    fields?.stage === "collector_project_url_navigation");
+  const projectChatCollectionIndex = harness.diagnostics.findIndex(([, fields]) =>
+    fields?.stage === "collector_project_chat_collection_start");
   assert.ok(identityCompleteIndex >= 0);
-  assert.ok(projectNavigationIndex > identityCompleteIndex);
+  assert.equal(projectChatCollectionIndex, -1);
   const identitySummary = harness.diagnostics
     .map(([, fields]) => fields)
     .find((fields) => fields?.stage === "collector_project_identity_resolution_complete");
@@ -2705,7 +2701,6 @@ test("Background passes the discovered Project array through DOM identity resolu
 test("Background resolves only the discovered Projects with navigation fallback, then navigates to their URLs", async () => {
   const harness = await createHarness();
   const identityMessages = [];
-  const navigationTargets = [];
   harness.setContentHandler((message) => {
     if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
     if (message.type !== "GET_CHATGPT_CONTEXT") return {};
@@ -2761,7 +2756,6 @@ test("Background resolves only the discovered Projects with navigation fallback,
         project_id_url_match: true
       };
     }
-    navigationTargets.push(message.projectId);
     return {
       type: "CHATGPT_CONTEXT_RESULT",
       requestId: message.requestId,
@@ -2810,7 +2804,6 @@ test("Background resolves only the discovered Projects with navigation fallback,
       collectorTabId: 100
     }
   ]);
-  assert.deepEqual(navigationTargets, ["g-p-nav-0", "g-p-nav-1"]);
   assert.deepEqual(response.projects.map((project) => project.project_id), [
     "g-p-nav-0",
     "g-p-nav-1"
@@ -2818,8 +2811,6 @@ test("Background resolves only the discovered Projects with navigation fallback,
   assert.equal(harness.createdTabs.length, 1);
   const identityCompleteIndex = harness.diagnostics.findIndex(([, fields]) =>
     fields?.stage === "collector_project_identity_resolution_complete");
-  const firstProjectNavigationIndex = harness.diagnostics.findIndex(([, fields]) =>
-    fields?.stage === "collector_project_url_navigation");
   const navigationDispatchIndex = harness.diagnostics.findIndex(([, fields]) =>
     fields?.stage === "collector_project_identity_navigation_dispatch");
   const navigationResponseIndex = harness.diagnostics.findIndex(([, fields]) =>
@@ -2839,7 +2830,6 @@ test("Background resolves only the discovered Projects with navigation fallback,
     .map(([, fields]) => fields)
     .filter((fields) => fields?.stage === "collector_project_identity_navigation_exit");
   assert.ok(identityCompleteIndex >= 0);
-  assert.ok(firstProjectNavigationIndex > identityCompleteIndex);
   assert.ok(navigationDispatchIndex >= 0);
   assert.ok(navigationResponseIndex > navigationDispatchIndex);
   assert.ok(metadataResolutionIndex > navigationResponseIndex);
@@ -3302,7 +3292,7 @@ test("Background keeps the Collector Window separate from the Managed Execution 
   assert.equal(relayedMessages.find((message) => message.type === "GET_CHATGPT_CONTEXT")?.targetTabId, undefined);
 });
 
-test("Background visits every Project with one reusable Collector Tab and merges Projectless chats", async () => {
+test("Background returns the Root Project catalog and Projectless chats without pre-scanning Projects", async () => {
   const harness = await createHarness();
   const collectionMessages = [];
   let rootCollectionMessage = null;
@@ -3387,10 +3377,9 @@ test("Background visits every Project with one reusable Collector Tab and merges
     previousCount,
     (message) => message.type === "chatgpt.context.list.response");
 
+  assert.equal(response.status, "ok");
   assert.deepEqual(collectionMessages, [
-    { collection: "root", projectId: undefined },
-    { collection: "project", projectId: "g-p-project-a" },
-    { collection: "project", projectId: "g-p-project-b" }
+    { collection: "root", projectId: undefined }
   ]);
   assert.equal(rootCollectionMessage.projectDiscoverySource, "existing_project_section_metadata");
   assert.equal(rootCollectionMessage.allowSidebarControls, true);
@@ -3400,10 +3389,7 @@ test("Background visits every Project with one reusable Collector Tab and merges
     harness.updatedTabs
       .filter((entry) => typeof entry.changes?.url === "string")
       .map((entry) => ({ tabId: entry.tabId, url: entry.changes.url })),
-    [
-      { tabId: harness.createdTabs[0].id, url: "https://chatgpt.com/g/g-p-project-a/project" },
-      { tabId: harness.createdTabs[0].id, url: "https://chatgpt.com/g/g-p-project-b/project" }
-    ]);
+    []);
   assert.equal(harness.createdWindows.length, 1);
   assert.equal(harness.createdTabs.length, 1);
   assert.equal(harness.createdTabs[0].active, true);
@@ -3441,25 +3427,22 @@ test("Background visits every Project with one reusable Collector Tab and merges
   assert.ok(resultReceivedIndex >= 0);
   assert.ok(resolutionIndex > resultReceivedIndex);
   assert.ok(discoveryCompleteIndex > resolutionIndex);
-  assert.ok(projectNavigationIndexes.length > 0);
-  assert.ok(projectNavigationIndexes.every((index) => index > discoveryCompleteIndex));
+  assert.equal(projectNavigationIndexes.length, 0);
   assert.equal(resolution.background_projects_length, resolution.discovered_project_count);
   assert.deepEqual(response.conversations.map((conversation) => conversation.conversation_id), [
-    "conversation-free",
-    "conversation-a",
-    "conversation-b"
+    "conversation-free"
   ]);
+  assert.equal(harness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_project_chat_collection_start"), false);
 });
 
-test("Background does not restart Project discovery after a Project Chat scan failure", async () => {
+test("Background keeps Project Chat scan failure local to the selected Project", async () => {
   const harness = await createHarness();
   const collectionMessages = [];
-  let rootCalls = 0;
   harness.setContentHandler((message) => {
     if (message.type !== "GET_CHATGPT_CONTEXT") return {};
     collectionMessages.push(message.collection);
     if (message.collection === "root") {
-      rootCalls += 1;
       return {
         type: "CHATGPT_CONTEXT_RESULT",
         requestId: message.requestId,
@@ -3491,7 +3474,10 @@ test("Background does not restart Project discovery after a Project Chat scan fa
   const previousCount = harness.socket.sent.length;
   harness.context.handleBridgeMessage({
     type: "chatgpt.context.list.request",
-    request_id: "collector-project-chat-scan-failure"
+    request_id: "collector-project-chat-scan-failure",
+    collection: "project",
+    project_id: "g-p-chat-scan-failure",
+    project_url: "https://chatgpt.com/g/g-p-chat-scan-failure/project"
   }, harness.socket);
   const response = await harness.waitForSocketMessage(
     previousCount,
@@ -3499,12 +3485,11 @@ test("Background does not restart Project discovery after a Project Chat scan fa
 
   assert.equal(response.status, "error");
   assert.equal(response.error_code, "collector_project_chat_scan_failed");
-  assert.equal(rootCalls, 1);
-  assert.deepEqual(collectionMessages, ["root", "project"]);
+  assert.deepEqual(collectionMessages, ["project"]);
   const discoveryEvents = harness.diagnostics
     .map(([, fields]) => fields)
     .filter((fields) => fields?.stage?.startsWith("collector_project_discovery_"));
-  assert.equal(discoveryEvents.filter((fields) => fields.stage === "collector_project_discovery_start").length, 1);
+  assert.equal(discoveryEvents.filter((fields) => fields.stage === "collector_project_discovery_start").length, 0);
   assert.equal(discoveryEvents.some((fields) => fields.stage === "collector_project_discovery_already_completed"), false);
 });
 
@@ -3514,22 +3499,6 @@ test("Background returns the Collector Tab to the root before a later full refre
   harness.setContentHandler((message) => {
     if (message.type !== "GET_CHATGPT_CONTEXT") return {};
     collectionMessages.push({ requestId: message.requestId, collection: message.collection });
-    if (message.collection === "project") {
-      return {
-        type: "CHATGPT_CONTEXT_RESULT",
-        requestId: message.requestId,
-        mode: "list",
-        status: "ok",
-        projects: [{ project_id: "g-p-refresh", title: "Refresh Project", url: "https://chatgpt.com/g/g-p-refresh/project" }],
-        conversations: [{
-          conversation_id: "conversation-refresh",
-          title: "Refresh Chat",
-          url: "https://chatgpt.com/g/g-p-refresh/c/conversation-refresh",
-          project_id: "g-p-refresh"
-        }],
-        current: null
-      };
-    }
     return {
       type: "CHATGPT_CONTEXT_RESULT",
       requestId: message.requestId,
@@ -3559,18 +3528,15 @@ test("Background returns the Collector Tab to the root before a later full refre
 
   assert.equal(harness.createdWindows.length, 1);
   assert.equal(harness.createdTabs.length, 1);
-  assert.ok(harness.updatedTabs.some((entry) => entry.changes.url === "https://chatgpt.com/"));
   assert.deepEqual(collectionMessages.map((entry) => entry.collection), [
-    "root", "project", "root", "project"
+    "root", "root"
   ]);
   const navigationStages = harness.diagnostics
     .map(([, fields]) => fields)
     .filter((fields) => fields?.stage === "collector_root_url_navigation"
       || fields?.stage === "collector_project_url_navigation");
-  assert.equal(navigationStages.filter((fields) => fields.stage === "collector_root_url_navigation").length, 1);
-  assert.equal(navigationStages.filter((fields) => fields.stage === "collector_project_url_navigation").length, 2);
-  assert.equal(navigationStages.find((fields) => fields.stage === "collector_root_url_navigation")
-    .collector_navigation_target, "https://chatgpt.com/");
+  assert.equal(navigationStages.filter((fields) => fields.stage === "collector_root_url_navigation").length, 0);
+  assert.equal(navigationStages.filter((fields) => fields.stage === "collector_project_url_navigation").length, 0);
 });
 
 test("Background discards a stale Collector refresh result when a newer refresh starts", async () => {

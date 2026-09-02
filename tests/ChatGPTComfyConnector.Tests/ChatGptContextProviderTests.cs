@@ -53,12 +53,9 @@ public sealed class ChatGptContextProviderTests
         var noProject = Assert.Single(catalog.Projects, item => item.IsNoProject);
         Assert.Equal("https://chatgpt.com/g/g-p-project-a/project", projectA.Url);
 
-        var chatA = Assert.Single(projectA.Chats, item => !item.IsNewConversation);
-        var chatB = Assert.Single(projectB.Chats, item => !item.IsNewConversation);
         var freeChat = Assert.Single(noProject.Chats, item => !item.IsNewConversation);
-        Assert.NotEqual(chatA.Key, chatB.Key);
-        Assert.Equal("conversation-a", chatA.ExternalId);
-        Assert.Equal("conversation-b", chatB.ExternalId);
+        Assert.DoesNotContain(projectA.Chats, item => !item.IsNewConversation);
+        Assert.DoesNotContain(projectB.Chats, item => !item.IsNewConversation);
         Assert.Equal("conversation-free", freeChat.ExternalId);
         Assert.Equal("https://chatgpt.com/c/conversation-free", freeChat.Url);
         Assert.All(catalog.Projects, project => Assert.Single(project.Chats, item => item.IsNewConversation));
@@ -110,7 +107,7 @@ public sealed class ChatGptContextProviderTests
     }
 
     [Fact]
-    public async Task MergesProjectsAndConversationsByExternalIdAndReparentsProjectlessDuplicate()
+    public async Task RootRefreshDoesNotMixProjectChatsIntoTheProjectCatalog()
     {
         var snapshot = new BrowserExtensionChatGptContextSnapshot(
             "context-request",
@@ -160,11 +157,71 @@ public sealed class ChatGptContextProviderTests
         var projectA = Assert.Single(catalog.Projects, item => item.ExternalId == "g-p-project-a");
         Assert.Equal("Project A", projectA.DisplayName);
         Assert.DoesNotContain(catalog.Projects, item => item.DisplayName.StartsWith("Project (", StringComparison.Ordinal));
-        Assert.Equal(2, projectA.Chats.Count(item => !item.IsNewConversation));
-        Assert.Single(projectA.Chats, item => item.ExternalId == "conversation-a");
-        Assert.Single(projectA.Chats, item => item.ExternalId == "conversation-free-first");
+        Assert.DoesNotContain(projectA.Chats, item => !item.IsNewConversation);
         var noProject = Assert.Single(catalog.Projects, item => item.IsNoProject);
         Assert.DoesNotContain(noProject.Chats, item => item.ExternalId == "conversation-free-first");
+    }
+
+    [Fact]
+    public async Task LoadsOnlyTheSelectedProjectChatsOnDemandAndKeepsSameNamedProjectsSeparate()
+    {
+        var rootSnapshot = new BrowserExtensionChatGptContextSnapshot(
+            "root-request",
+            "ok",
+            [
+                new BrowserExtensionChatGptProjectEntry(
+                    "g-p-project-a",
+                    "同名Project",
+                    "https://chatgpt.com/g/g-p-project-a/project"),
+                new BrowserExtensionChatGptProjectEntry(
+                    "g-p-project-b",
+                    "同名Project",
+                    "https://chatgpt.com/g/g-p-project-b/project"),
+            ],
+            [new BrowserExtensionChatGptConversationEntry(
+                "conversation-free",
+                "Projectless Chat",
+                "https://chatgpt.com/c/conversation-free")]);
+        var selectedProjectSnapshot = new BrowserExtensionChatGptContextSnapshot(
+            "project-request",
+            "ok",
+            [new BrowserExtensionChatGptProjectEntry(
+                "g-p-project-a",
+                "同名Project",
+                "https://chatgpt.com/g/g-p-project-a/project")],
+            [
+                new BrowserExtensionChatGptConversationEntry(
+                    "conversation-a",
+                    "同名Chat",
+                    "https://chatgpt.com/g/g-p-project-a/c/conversation-a",
+                    "g-p-project-a"),
+                new BrowserExtensionChatGptConversationEntry(
+                    "conversation-b",
+                    "同名Chat",
+                    "https://chatgpt.com/g/g-p-project-b/c/conversation-b",
+                    "g-p-project-b"),
+                new BrowserExtensionChatGptConversationEntry(
+                    "conversation-free",
+                    "Projectless Chat",
+                    "https://chatgpt.com/c/conversation-free"),
+            ]);
+        var provider = new ChatGptProjectChatProvider(
+            new StubBridge(rootSnapshot, selectedProjectSnapshot),
+            new StubPortableStore());
+
+        var catalog = await provider.LoadAsync([]);
+        var projectA = Assert.Single(catalog.Projects, item => item.ExternalId == "g-p-project-a");
+        var projectB = Assert.Single(catalog.Projects, item => item.ExternalId == "g-p-project-b");
+        Assert.DoesNotContain(projectA.Chats, item => !item.IsNewConversation);
+        Assert.DoesNotContain(projectB.Chats, item => !item.IsNewConversation);
+
+        var chats = await provider.LoadProjectChatsAsync(projectA);
+
+        var selectedChat = Assert.Single(chats, item => !item.IsNewConversation);
+        Assert.Equal("conversation-a", selectedChat.ExternalId);
+        Assert.DoesNotContain(chats, item => item.ExternalId == "conversation-b");
+        Assert.DoesNotContain(chats, item => item.ExternalId == "conversation-free");
+        Assert.Contains(chats, item => item.IsNewConversation);
     }
 
     [Fact]
@@ -239,9 +296,7 @@ public sealed class ChatGptContextProviderTests
             [new BrowserExtensionChatGptConversationEntry(
                 "conversation-cached",
                 "Cached Chat",
-                "https://chatgpt.com/g/g-p-cached/c/conversation-cached",
-                "g-p-cached",
-                "Cached Project")]);
+                "https://chatgpt.com/c/conversation-cached")]);
 
         var liveProvider = new ChatGptProjectChatProvider(new StubBridge(liveSnapshot), store);
         await liveProvider.LoadAsync([]);
@@ -262,8 +317,8 @@ public sealed class ChatGptContextProviderTests
         var restored = await offlineProvider.LoadAsync([]);
 
         Assert.Equal(ProjectChatCatalogLoadState.Loaded, restored.LoadState);
-        var project = Assert.Single(restored.Projects, item => item.ExternalId == "g-p-cached");
-        Assert.Single(project.Chats, item => item.ExternalId == "conversation-cached");
+        var noProject = Assert.Single(restored.Projects, item => item.IsNoProject);
+        Assert.Single(noProject.Chats, item => item.ExternalId == "conversation-cached");
     }
 
     [Fact]
@@ -279,9 +334,7 @@ public sealed class ChatGptContextProviderTests
                 [new BrowserExtensionChatGptConversationEntry(
                     "conversation-old",
                     "Old Chat",
-                    "https://chatgpt.com/g/g-p-old/c/conversation-old",
-                    "g-p-old",
-                    "Old Project")],
+                    "https://chatgpt.com/c/conversation-old")],
                 DateTimeOffset.UtcNow)
         };
         var provider = new ChatGptProjectChatProvider(
@@ -291,7 +344,7 @@ public sealed class ChatGptContextProviderTests
 
         Assert.NotNull(cached);
         Assert.Single(cached!.Projects, item => item.ExternalId == "g-p-old");
-        Assert.Single(cached.Projects.Single(item => item.ExternalId == "g-p-old").Chats,
+        Assert.Single(cached.Projects.Single(item => item.IsNoProject).Chats,
             item => item.ExternalId == "conversation-old");
     }
 
@@ -308,9 +361,7 @@ public sealed class ChatGptContextProviderTests
                 [new BrowserExtensionChatGptConversationEntry(
                     "conversation-known",
                     "Known Chat",
-                    "https://chatgpt.com/g/g-p-known/c/conversation-known",
-                    "g-p-known",
-                    "Known Project")],
+                    "https://chatgpt.com/c/conversation-known")],
                 DateTimeOffset.UtcNow)
         };
         var provider = new ChatGptProjectChatProvider(
@@ -327,12 +378,14 @@ public sealed class ChatGptContextProviderTests
 
         Assert.Equal(ProjectChatCatalogLoadState.Error, catalog.LoadState);
         Assert.Equal("context_projects_incomplete", catalog.ErrorCode);
-        var project = Assert.Single(catalog.Projects, item => item.ExternalId == "g-p-known");
-        Assert.Single(project.Chats, item => item.ExternalId == "conversation-known");
+        var noProject = Assert.Single(catalog.Projects, item => item.IsNoProject);
+        Assert.Single(noProject.Chats, item => item.ExternalId == "conversation-known");
         Assert.Equal("g-p-known", store.Cache!.Projects.Single().ProjectId);
     }
 
-    private sealed class StubBridge(BrowserExtensionChatGptContextSnapshot snapshot) : IBrowserExtensionBridge
+    private sealed class StubBridge(
+        BrowserExtensionChatGptContextSnapshot snapshot,
+        BrowserExtensionChatGptContextSnapshot? projectSnapshot = null) : IBrowserExtensionBridge
     {
         public BrowserExtensionBridgeStatus Status => new(
             false,
@@ -362,6 +415,11 @@ public sealed class ChatGptContextProviderTests
             => Task.FromException<BrowserExtensionMediaAttachResult>(new NotSupportedException());
         public Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextAsync(bool currentOnly = false, CancellationToken cancellationToken = default)
             => Task.FromResult(snapshot);
+        public Task<BrowserExtensionChatGptContextSnapshot> GetChatGptProjectChatsAsync(
+            string projectId,
+            string projectUrl,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(projectSnapshot ?? snapshot);
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 

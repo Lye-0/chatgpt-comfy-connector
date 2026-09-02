@@ -180,6 +180,19 @@
       "matching_project_chat_count",
       "rejected_projectless_chat_count",
       "rejected_other_project_chat_count",
+      "project_more_control_count",
+      "project_more_control_click_count",
+      "project_more_control_found",
+      "project_more_control_has_href",
+      "project_more_control_aria_controls_present",
+      "project_virtualized_candidate",
+      "main_candidate_with_project_id_count",
+      "main_candidate_without_project_id_count",
+      "main_current_project_match_count",
+      "main_project_mismatch_count",
+      "main_projectless_count",
+      "main_custom_gpt_count",
+      "main_candidate_from_verified_project_region_count",
       "chat_scroll_container_count",
       "main_found",
       "main_region_found",
@@ -349,6 +362,15 @@
     "matching_project_chat_count",
     "rejected_projectless_chat_count",
     "rejected_other_project_chat_count",
+    "project_more_control_count",
+    "project_more_control_click_count",
+    "main_candidate_with_project_id_count",
+    "main_candidate_without_project_id_count",
+    "main_current_project_match_count",
+    "main_project_mismatch_count",
+    "main_projectless_count",
+    "main_custom_gpt_count",
+    "main_candidate_from_verified_project_region_count",
     "chat_scroll_container_count",
     "main_found",
     "main_region_found",
@@ -686,6 +708,15 @@
       "matching_project_chat_count",
       "rejected_projectless_chat_count",
       "rejected_other_project_chat_count",
+      "project_more_control_count",
+      "project_more_control_click_count",
+      "main_candidate_with_project_id_count",
+      "main_candidate_without_project_id_count",
+      "main_current_project_match_count",
+      "main_project_mismatch_count",
+      "main_projectless_count",
+      "main_custom_gpt_count",
+      "main_candidate_from_verified_project_region_count",
       "chat_scroll_container_count",
       "main_descendant_count",
       "chat_list_candidate_count",
@@ -730,6 +761,20 @@
       "project_chat_hydration_timeout"
     ]) {
       if (typeof data[key] === "boolean") result[key] = data[key];
+    }
+    for (const key of [
+      "project_more_control_found",
+      "project_more_control_has_href",
+      "project_more_control_aria_controls_present",
+      "project_virtualized_candidate"
+    ]) {
+      if (typeof data[key] === "boolean") result[key] = data[key];
+    }
+    for (const key of [
+      "project_more_control_role",
+      "project_more_control_aria_expanded"
+    ]) {
+      if (typeof data[key] === "string" && data[key].length <= 128) result[key] = data[key];
     }
     if (data.sidebar_scroll_direction === "down" || data.sidebar_scroll_direction === "none") {
       result.sidebar_scroll_direction = data.sidebar_scroll_direction;

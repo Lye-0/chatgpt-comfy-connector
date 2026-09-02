@@ -67,6 +67,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // observable catalog; a slower Collector response must not restore an
     // older Project/Chat snapshot after a newer refresh has started.
     private long _contextLoadVersion;
+    // Project Chat lists are loaded on demand. A later Project selection must
+    // own the result so a slower Collector response cannot overwrite it.
+    private long _projectChatLoadVersion;
     private readonly ProjectContextOption _createProjectOption = new() { Key = "__create_project__", DisplayName = "＋ 新しいProjectを作成", IsCreateAction = true };
     private readonly ChatContextOption _createChatOption = new() { Key = "__create_chat__", DisplayName = "＋ 新しいChatを作成", IsCreateAction = true };
     private ProjectContextOption? _selectedProject;
@@ -171,6 +174,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (value?.IsCreateAction == true)
             {
+                Interlocked.Increment(ref _projectChatLoadVersion);
                 _selectedProject = null;
                 IsProjectCreateVisible = true;
                 NewProjectName = string.Empty;
@@ -185,6 +189,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 return;
             }
             if (ReferenceEquals(_selectedProject, value)) return;
+            Interlocked.Increment(ref _projectChatLoadVersion);
             _selectedProject = value;
             IsProjectCreateVisible = false;
             ProjectValidationMessage = string.Empty;
@@ -195,6 +200,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(CanCreateChat));
             OnPropertyChanged(nameof(CanStartNewCreation));
             NotifyContextSelectionChanged();
+            if (value is not null
+                && string.Equals(value.ProviderId, ContextProviderIds.ChatGptExtension, StringComparison.OrdinalIgnoreCase)
+                && !value.IsNoProject
+                && _contextProvider is IProjectChatSelectionProvider)
+            {
+                StatusMessage = "選択したChatGPT ProjectのChatを読み込んでいます。";
+                _ = LoadSelectedProjectChatsAsync(value);
+            }
         }
     }
     public ChatContextOption? SelectedChat
@@ -3199,7 +3212,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ProjectOptions.Clear();
         foreach (var project in _contextCatalog.Projects
                      .Where(item => string.Equals(item.ProviderId, _contextProvider.ProviderId, StringComparison.OrdinalIgnoreCase))
-                     .OrderBy(item => item.CreatedAt)) ProjectOptions.Add(project);
+                     .OrderBy(item => item.IsNoProject ? 0 : 1)
+                     .ThenBy(item => item.CreatedAt)) ProjectOptions.Add(project);
         if (string.Equals(_contextProvider.ProviderId, ContextProviderIds.LocalJson, StringComparison.OrdinalIgnoreCase))
             ProjectOptions.Add(_createProjectOption);
         _selectedProject = ProjectOptions.FirstOrDefault(item => !item.IsCreateAction
@@ -3214,6 +3228,57 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CanStartNewCreation));
         RefreshChatOptions(_selectedProject?.Key, preferredChatKey);
         NotifyContextSelectionChanged();
+    }
+
+    private async Task LoadSelectedProjectChatsAsync(ProjectContextOption project)
+    {
+        if (_contextProvider is not IProjectChatSelectionProvider selectionProvider) return;
+        var loadVersion = Interlocked.Increment(ref _projectChatLoadVersion);
+        IReadOnlyList<ChatContextOption> chats;
+        try
+        {
+            chats = await selectionProvider.LoadProjectChatsAsync(project);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            void ApplyError()
+            {
+                if (Volatile.Read(ref _projectChatLoadVersion) != loadVersion
+                    || !ReferenceEquals(_selectedProject, project)) return;
+                ChatValidationMessage = ex.Message;
+            }
+
+            PostNotification(ApplyError);
+            return;
+        }
+
+        void Apply()
+        {
+            if (Volatile.Read(ref _projectChatLoadVersion) != loadVersion
+                || !ReferenceEquals(_selectedProject, project)) return;
+            project.Chats = chats.ToList();
+            RefreshChatOptions(project.Key);
+            ChatValidationMessage = string.Empty;
+            StatusMessage = "選択したChatGPT ProjectのChatを更新しました。";
+        }
+
+        PostNotification(Apply);
+    }
+
+    private void PostNotification(Action action)
+    {
+        if (_notificationContext is null)
+        {
+            action();
+            return;
+        }
+
+        try { _notificationContext.Post(static state => ((Action)state!).Invoke(), action); }
+        catch (InvalidOperationException) { }
     }
 
     private void RefreshChatOptions(string? preferredProjectKey = null, string? preferredChatKey = null)

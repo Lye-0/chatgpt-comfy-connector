@@ -408,6 +408,59 @@ public sealed class BrowserExtensionBridgeTests
     }
 
     [Fact]
+    public async Task WebSocketRequestsOnlyTheSelectedProjectChatMetadata()
+    {
+        var store = new InMemoryPairingStore();
+        await using var bridge = new BrowserExtensionBridge(0, store);
+        await bridge.StartAsync();
+        using var client = CreateHttpClient();
+        var credential = await PairAsync(client, bridge);
+        var sessionToken = await BootstrapAsync(client, bridge, credential);
+        using var socket = await ConnectSocketAsync(bridge, sessionToken);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var hello = await ReceiveJsonAsync(socket, timeout.Token);
+        using var ready = await ReceiveJsonAsync(socket, timeout.Token);
+
+        var contextTask = bridge.GetChatGptProjectChatsAsync(
+            "g-p-selected",
+            "https://chatgpt.com/g/g-p-selected/project",
+            timeout.Token);
+        using var request = await ReceiveJsonAsync(socket, timeout.Token);
+        Assert.Equal("chatgpt.context.list.request", request.RootElement.GetProperty("type").GetString());
+        Assert.Equal("project", request.RootElement.GetProperty("collection").GetString());
+        Assert.Equal("g-p-selected", request.RootElement.GetProperty("project_id").GetString());
+        Assert.Equal("https://chatgpt.com/g/g-p-selected/project", request.RootElement.GetProperty("project_url").GetString());
+        Assert.False(request.RootElement.TryGetProperty("payload", out _));
+
+        await SendTextAsync(socket, JsonSerializer.Serialize(new
+        {
+            type = "chatgpt.context.list.response",
+            request_id = request.RootElement.GetProperty("request_id").GetString(),
+            status = "ok",
+            projects = Array.Empty<object>(),
+            conversations = new[]
+            {
+                new
+                {
+                    conversation_id = "selected-conversation",
+                    title = "Selected Chat",
+                    url = "https://chatgpt.com/g/g-p-selected/c/selected-conversation",
+                    project_id = "g-p-selected",
+                    project_title = "Selected Project",
+                }
+            },
+            current = (object?)null,
+        }), timeout.Token);
+
+        var snapshot = await contextTask;
+        Assert.True(snapshot.IsSuccess);
+        Assert.Single(snapshot.Conversations);
+        Assert.Equal("selected-conversation", snapshot.Conversations[0].ConversationId);
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test complete", timeout.Token);
+    }
+
+    [Fact]
     public async Task WebSocketPublishesAuthenticatedAssistantResponseWithoutParsingPayload()
     {
         var store = new InMemoryPairingStore();

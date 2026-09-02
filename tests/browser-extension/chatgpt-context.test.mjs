@@ -201,6 +201,76 @@ class FakeSidebar extends FakeMetadataNode {
   }
 }
 
+class BottomMoreSidebar extends FakeMetadataNode {
+  constructor(document, projectCount) {
+    super(document, "NAV");
+    this.projectRows = Array.from({ length: projectCount }, (_, index) => {
+      const row = new FakeMetadataNode(document, "DIV", "", {
+        role: "button",
+        "data-sidebar-item": "true",
+        "aria-expanded": "false"
+      });
+      row.appendChild(new FakeMetadataNode(document, "SPAN", `Project ${index}`, {
+        "data-marquee-text": "true"
+      }));
+      row.appendChild(new FakeMetadataNode(document, "A", `Project ${index}`, {
+        href: `/g/g-p-bottom-${index}/project`
+      }));
+      return row;
+    });
+    this.expanded = false;
+    this.clientHeight = 100;
+    this.scrollHeight = 300;
+    this.scrollHistory = [];
+    let currentScrollTop = 0;
+    Object.defineProperty(this, "scrollTop", {
+      configurable: true,
+      get: () => currentScrollTop,
+      set: (value) => {
+        currentScrollTop = Number(value) || 0;
+        this.scrollHistory.push(currentScrollTop);
+      }
+    });
+    this.moreButton = new FakeMetadataNode(document, "BUTTON", "さらに表示", {
+      role: "button",
+      "data-sidebar-item": "true",
+      "aria-controls": "project-list"
+    });
+    this.moreButton.click = () => {
+      this.expanded = true;
+      this.scrollHeight = 600;
+    };
+  }
+
+  get currentProjectRows() {
+    const start = Math.min(
+      Math.max(0, this.projectRows.length - 2),
+      Math.floor(this.scrollTop / 100) * 2);
+    return this.projectRows.slice(start, start + 2);
+  }
+
+  get moreVisible() {
+    return !this.expanded && this.scrollTop >= this.scrollHeight - this.clientHeight;
+  }
+
+  querySelectorAll(selector) {
+    if (selector.includes("data-sidebar-item")) {
+      return [...this.currentProjectRows, ...(this.moreVisible ? [this.moreButton] : [])];
+    }
+    if (selector === "button") return this.moreVisible ? [this.moreButton] : [];
+    if (selector.includes('role="button"')) {
+      return [...this.currentProjectRows, ...(this.moreVisible ? [this.moreButton] : [])];
+    }
+    if (selector.includes("data-marquee-text")) {
+      return this.currentProjectRows.flatMap((row) => row.querySelectorAll(selector));
+    }
+    if (selector === "a[href]") {
+      return this.currentProjectRows.flatMap((row) => row.querySelectorAll(selector));
+    }
+    return [];
+  }
+}
+
 class NestedScrollableSidebar extends FakeMetadataNode {
   constructor(document, projectNames) {
     super(document, "NAV");
@@ -761,6 +831,33 @@ test("sidebar discovery selects the real nested scroll container and reports com
   assert.equal(snapshot.sidebar_scroll_direction, "down");
   assert.equal(snapshot.sidebar_restore_count, 1);
   assert.equal(sidebar.scrollport.scrollTop, 0);
+});
+
+test("async sidebar discovery expands a bottom Project disclosure and continues past the initial window", async () => {
+  const href = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new BottomMoreSidebar(document, 12);
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 16,
+    maxMoreClicks: 4,
+    initialSettleMs: 0
+  });
+
+  assert.equal(snapshot.projects.length, 12);
+  assert.deepEqual(
+    Array.from(snapshot.projects, (project) => project.project_id),
+    Array.from({ length: 12 }, (_, index) => `g-p-bottom-${index}`));
+  assert.equal(snapshot.project_more_control_found, true);
+  assert.equal(snapshot.project_more_control_click_count, 1);
+  assert.equal(snapshot.project_virtualized_candidate, true);
+  assert.equal(snapshot.sidebar_scroll_complete, true);
+  assert.equal(sidebar.scrollTop, 0);
+  const scanWrites = sidebar.scrollHistory.slice(0, -1);
+  assert.ok(scanWrites.length > 0);
+  assert.deepEqual(scanWrites, [...scanWrites].sort((left, right) => left - right));
 });
 
 test("metadata-only Project discovery never clicks generic Sidebar rows", async () => {
@@ -1624,7 +1721,11 @@ test("merges an ID-bearing Project link into a fallback row without a ghost entr
 test("Project page collection scans conversation metadata outside the sidebar and scopes it by Project ID", async () => {
   const href = "https://chatgpt.com/g/g-p-alpha/project";
   const sidebar = new FakeMetadataNode(null, "NAV");
-  const content = new FakeMetadataNode(null, "MAIN");
+  const content = new FakeMetadataNode(null, "MAIN", "", {
+    // A broad Project-region wrapper may carry an unrelated page-level
+    // metadata attribute. It must not classify every nested /c link by it.
+    "data-project-id": "g-p-other"
+  });
   const alphaChat = new FakeMetadataNode(null, "A", "", {
     href: "/g/g-p-alpha/c/conversation-alpha"
   });
@@ -1775,10 +1876,14 @@ test("Project page collection prioritizes the central current-Project list over 
     event.stage === "collector_project_chat_collection_complete"), true);
 });
 
-test("Project page collection rejects a plain Projectless main link while accepting data-backed rows", async () => {
+test("Project page collection scopes plain main links to a verified current Project region", async () => {
   const href = "https://chatgpt.com/g/g-p-data/project";
   const sidebar = new FakeMetadataNode(null, "NAV");
-  const content = new FakeMetadataNode(null, "MAIN");
+  const content = new FakeMetadataNode(null, "MAIN", "", {
+    // A broad Project-region wrapper may carry unrelated metadata. It is not
+    // a membership boundary for every nested conversation link.
+    "data-project-id": "g-p-other"
+  });
   const projectless = new FakeMetadataNode(null, "A", "Unscoped", {
     href: "/c/unscoped-main"
   });
@@ -1803,10 +1908,41 @@ test("Project page collection rejects a plain Projectless main link while accept
 
   assert.deepEqual(
     Array.from(snapshot.conversations, (conversation) => conversation.conversation_id),
-    ["data-backed"]);
-  assert.equal(snapshot.rejected_projectless_chat_count, 1);
-  assert.equal(snapshot.matching_project_chat_count, 1);
+    ["unscoped-main", "data-backed"]);
+  assert.equal(snapshot.rejected_projectless_chat_count, 0);
+  assert.equal(snapshot.matching_project_chat_count, 2);
+  assert.equal(snapshot.current_project_id_verified, true);
+  assert.equal(snapshot.main_candidate_without_project_id_count, 1);
+  assert.equal(snapshot.main_current_project_match_count, 2);
+  assert.equal(snapshot.main_candidate_from_verified_project_region_count, 2);
   assert.equal(snapshot.project_chat_collection_complete, true);
+});
+
+test("Project page rejects plain main links when the current Project route is not verified", () => {
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const content = new FakeMetadataNode(null, "MAIN");
+  const plainChat = new FakeMetadataNode(null, "A", "Unverified", {
+    href: "/c/unverified-main"
+  });
+  content.appendChild(plainChat);
+  const document = new FakeProjectDocument(
+    "https://chatgpt.com/c/unverified-page",
+    sidebar,
+    content,
+    "Unverified | ChatGPT");
+  for (const node of [sidebar, content, plainChat]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const snapshot = locators.collectProjectContextEntries(
+    document,
+    document.location.href,
+    "g-p-data");
+
+  assert.equal(snapshot.conversations.length, 0);
+  assert.equal(snapshot.current_project_id_verified, false);
+  assert.equal(snapshot.main_candidate_without_project_id_count, 1);
+  assert.equal(snapshot.main_projectless_count, 1);
+  assert.equal(snapshot.rejected_projectless_chat_count, 1);
 });
 
 test("Project page collection finds a marked central list without a semantic main and supports nested data-backed rows", async () => {

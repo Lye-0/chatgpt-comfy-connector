@@ -54,9 +54,10 @@ Handoff, media, Review, or response delivery.
 
 Project/Chat discovery is isolated in a separate non-focused Collector Window
 with one active Collector Tab. The Background creates or reuses that Window on
-demand, keeps its only Collector Tab active and non-discardable, scans the root
-sidebar, and reuses the same tab for every Project page. The Collector Window
-is never used for Handoff, media, Review, Resume, or assistant-response
+demand, keeps its only Collector Tab active and non-discardable, and uses it for
+root Project/Projectless metadata discovery. A validated Project-selection
+request reuses that same tab for only the selected Project page. The Collector
+Window is never used for Handoff, media, Review, Resume, or assistant-response
 observation, and it does not replace the Managed Execution Tab's watcher state.
 The Collector Window starts at roughly half the reference window width and
 height, with an outer-width floor of about 820px. Before discovery, the
@@ -69,10 +70,12 @@ downward through the virtualized Project section, restores the saved position
 once. Before that scan, the root URL, document readiness, Sidebar shell, and
 scroll container must remain structurally stable through a bounded quiet DOM
 interval; a hydration timeout prevents discovery from starting. It then freezes
-the resulting Project metadata while the Collector Tab
-visits Project URLs for Chat discovery. A bounded zero-Project result is
-reported as `context_projects_incomplete`, never as a successful empty
-snapshot. Each lifecycle reconciliation verifies one Window member, the active
+the resulting Project metadata without visiting any Project page. A bounded
+zero-Project result is reported as `context_projects_incomplete`, never as a
+successful empty snapshot. Project Chat discovery starts only after Desktop
+selects a validated Project ID/URL and is scoped to that Project; a failure is
+returned as `context_project_chats_incomplete` without invalidating the root
+catalog. Each lifecycle reconciliation verifies one Window member, the active
 Collector Tab ID, and the non-discardable tab state; lifecycle events do not
 restart a completed Project discovery.
 
@@ -184,18 +187,28 @@ The list response contains bounded entries of the following shape:
     { "project_id": "g-p-example-2", "title": "表示されたProject", "url": "https://chatgpt.com/g/g-p-example-2/project" }
   ],
   "conversations": [
-    { "conversation_id": "<conversation-id>", "title": "新しい制作", "url": "https://chatgpt.com/g/g-p-example/c/<conversation-id>", "project_id": "g-p-example", "project_title": "制作" },
     { "conversation_id": "<conversation-id-2>", "title": "個人メモ", "url": "https://chatgpt.com/c/<conversation-id-2>" }
   ],
-  "current": {
-    "conversation_id": "<conversation-id>",
-    "title": "新しい制作",
-    "url": "https://chatgpt.com/g/g-p-example/c/<conversation-id>",
-    "project_id": "g-p-example",
-    "project_title": "制作"
-  }
+  "current": null
 }
 ```
+
+The root list request returns the Project catalog and Projectless
+conversations only. Desktop requests a selected Project separately by sending
+the same list-request type with the following metadata-only fields:
+
+```json
+{
+  "type": "chatgpt.context.list.request",
+  "request_id": "<request-id>",
+  "collection": "project",
+  "project_id": "g-p-example",
+  "project_url": "https://chatgpt.com/g/g-p-example/project"
+}
+```
+
+That request returns only conversations belonging to the validated Project;
+the Collector does not visit Project pages during a root refresh.
 
 Projectless conversations have no `project_id` and are shown under
 `Projectなし`. Project discovery reuses the previously successful
@@ -232,20 +245,18 @@ known Sidebar scroll container in small steps for visible Project and
 Projectless Conversation metadata. A scroll is accepted only when the
 element's `scrollTop` changes; rows are collected again after each bounded
 lazy-load settle, and completion requires the bounded scan to finish and an
-ID-complete merge. No Project row is opened during this
-phase, so `/schedule`, `/plugins`, search controls, and other generic Sidebar
-navigation cannot become discovery targets. The resolved Project entries are
-merged by `project_id`, and conversations are merged by `conversation_id`. For
-every resolved Project, the same Collector Tab navigates directly to its Project URL and
-scans only the current Project's Chat containers with the same actual-container
-selection, bounded scrolling, timeout, and cancellation. Project-page Chat
-collection has its own page/Chat-container/scroll completion state; it never
-re-validates Root Project-sidebar completeness. The active scrollport is
-rebound by logical container position after SPA replacement rather than
-silently switching to the first list. The original scroll positions are
-restored in `finally` paths. The Collector result is therefore an ID-complete
-metadata snapshot without selecting a Chat, changing the composer, or sending
-a Handoff.
+ID-complete merge. No Project row is opened during this phase, so `/schedule`,
+`/plugins`, search controls, and other generic Sidebar navigation cannot
+become discovery targets. The resolved Project entries are merged by
+`project_id`, and root conversations are limited to Projectless entries and
+merged by `conversation_id`. A subsequent `collection: "project"` request
+contains one validated Project ID/URL; only then does the same Collector Tab
+navigate directly to that Project URL and scan its Chat containers with the
+same actual-container selection, bounded scrolling, timeout, and cancellation.
+Project-page Chat collection has its own page/Chat-container/scroll completion
+state and never re-validates Root Project-sidebar completeness. The Collector
+returns an ID-complete root metadata snapshot without selecting a Chat,
+changing the composer, or sending a Handoff.
 
 The Collector Window is independent from the Managed Execution Window. A
 closed Collector Window or Tab is recreated/reused for the next refresh, while

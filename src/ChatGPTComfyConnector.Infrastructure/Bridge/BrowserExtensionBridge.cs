@@ -288,9 +288,34 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         }
     }
 
-    public async Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextAsync(
+    public Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextAsync(
         bool currentOnly = false,
         CancellationToken cancellationToken = default)
+        => GetChatGptContextCoreAsync(currentOnly, null, null, cancellationToken);
+
+    public Task<BrowserExtensionChatGptContextSnapshot> GetChatGptProjectChatsAsync(
+        string projectId,
+        string projectUrl,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsSafeIdentifier(projectId)
+            || !IsChatGptProjectUrl(projectId, projectUrl))
+        {
+            return Task.FromResult(ContextError(
+                Guid.NewGuid().ToString("N"),
+                "context_project_target_invalid",
+                "ChatGPT Projectの識別情報が不正です。",
+                "context_project_target_validation"));
+        }
+
+        return GetChatGptContextCoreAsync(false, projectId, projectUrl, cancellationToken);
+    }
+
+    private async Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextCoreAsync(
+        bool currentOnly,
+        string? projectId,
+        string? projectUrl,
+        CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         var requestId = Guid.NewGuid().ToString("N");
@@ -315,23 +340,36 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             return ContextError(requestId, "context_request_id_collision", "ChatGPT Context request IDが重複しました。", "context_request");
         }
 
+        var isProjectCollection = projectId is not null;
         PublishDiagnostic(
-            currentOnly ? "chatgpt.context.current requested" : "chatgpt.context.list requested",
+            isProjectCollection
+                ? "chatgpt.context.project requested"
+                : currentOnly ? "chatgpt.context.current requested" : "chatgpt.context.list requested",
             requestId: requestId,
             status: "requested",
-            stage: "context_request");
+            stage: isProjectCollection ? "context_project_request" : "context_request");
         try
         {
-            await SendJsonAsync(socket, new
+            var envelope = new Dictionary<string, object?>
             {
-                type = currentOnly ? "chatgpt.context.current.request" : "chatgpt.context.list.request",
-                request_id = requestId,
-            }, cancellationToken);
+                ["type"] = currentOnly ? "chatgpt.context.current.request" : "chatgpt.context.list.request",
+                ["request_id"] = requestId,
+            };
+            if (isProjectCollection)
+            {
+                envelope["collection"] = "project";
+                envelope["project_id"] = projectId;
+                envelope["project_url"] = projectUrl;
+            }
+
+            await SendJsonAsync(socket, envelope, cancellationToken);
             PublishDiagnostic(
                 "websocket send",
                 requestId: requestId,
                 status: "sending",
-                stage: currentOnly ? "chatgpt_context_current" : "chatgpt_context_list");
+                stage: isProjectCollection
+                    ? "chatgpt_context_project"
+                    : currentOnly ? "chatgpt_context_current" : "chatgpt_context_list");
             return await pending.Completion.Task.WaitAsync(ChatGptContextResponseTimeout, cancellationToken);
         }
         catch (TimeoutException)
@@ -2196,6 +2234,25 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             // made every normal https://chatgpt.com conversation URL fail the
             // Phase 5.1 target validation.
             && uri.IsDefaultPort;
+    }
+
+    private static bool IsChatGptProjectUrl(string projectId, string? value)
+    {
+        if (!IsSafeIdentifier(projectId)
+            || !IsChatGptUrl(value)
+            || !Uri.TryCreate(value, UriKind.Absolute, out var uri)) return false;
+
+        var segments = uri.AbsolutePath
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var index = 0; index + 2 < segments.Length; index++)
+        {
+            if (!string.Equals(segments[index], "g", StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(segments[index + 1], projectId, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(segments[index + 2], "project", StringComparison.OrdinalIgnoreCase)) continue;
+            return true;
+        }
+
+        return false;
     }
 
     private static string? ConversationIdFromUrl(string value)

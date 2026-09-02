@@ -9,7 +9,7 @@ namespace ChatGPTComfyConnector.Infrastructure.Contexts;
 /// for this feature, so the provider deliberately delegates discovery to the
 /// Content Script and keeps the Desktop side free of DOM knowledge.
 /// </summary>
-public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectChatCacheProvider
+public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectChatCacheProvider, IProjectChatSelectionProvider
 {
     public const string NoProjectKey = "__chatgpt_no_project__";
     public const string NewConversationKey = "__chatgpt_new_conversation__";
@@ -34,18 +34,19 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         IReadOnlyCollection<ProjectChatBindingSnapshot> existingBindings,
         CancellationToken cancellationToken = default)
     {
-        var snapshot = await LoadLiveSnapshotAsync(cancellationToken);
+        var snapshot = NormalizeRootSnapshot(await LoadLiveSnapshotAsync(cancellationToken));
         var cached = await LoadCachedSnapshotAsync(cancellationToken);
+        var normalizedCached = cached is null ? null : NormalizeCache(cached);
         if (snapshot.IsSuccess && snapshot.Projects.Count == 0)
         {
             // A full Collector refresh must prove that the Project sidebar was
             // discovered. An empty successful result would otherwise erase a
             // known catalog and make an incomplete DOM scan look legitimate.
             var incomplete = IncompleteProjectDiscoverySnapshot(snapshot);
-            if (cached is not null)
+            if (normalizedCached is not null)
             {
                 return await BuildCatalogAsync(
-                    CachedSnapshotWithError(cached, incomplete),
+                    CachedSnapshotWithError(normalizedCached, incomplete),
                     existingBindings,
                     cancellationToken);
             }
@@ -58,12 +59,12 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         }
         else
         {
-            if (cached is not null)
+            if (normalizedCached is not null)
             {
                 if (string.Equals(snapshot.ErrorCode, "context_projects_incomplete", StringComparison.Ordinal))
                 {
                     return await BuildCatalogAsync(
-                        CachedSnapshotWithError(cached, snapshot),
+                        CachedSnapshotWithError(normalizedCached, snapshot),
                         existingBindings,
                         cancellationToken);
                 }
@@ -71,7 +72,7 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
                 // preferable to erasing the user's selections while the
                 // Extension is disconnected. The next successful refresh
                 // replaces it with the complete Collector result.
-                return await BuildCatalogAsync(ToSnapshot(cached), existingBindings, cancellationToken);
+                return await BuildCatalogAsync(ToSnapshot(normalizedCached), existingBindings, cancellationToken);
             }
         }
 
@@ -85,7 +86,7 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         var cached = await LoadCachedSnapshotAsync(cancellationToken);
         return cached is null
             ? null
-            : await BuildCatalogAsync(ToSnapshot(cached), existingBindings, cancellationToken);
+            : await BuildCatalogAsync(ToSnapshot(NormalizeCache(cached)), existingBindings, cancellationToken);
     }
 
     private async Task<BrowserExtensionChatGptContextSnapshot> LoadLiveSnapshotAsync(
@@ -164,6 +165,63 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
             cache.Conversations,
             Current: null,
             Stage: "context_cache_loaded");
+
+    private static BrowserExtensionChatGptContextCache NormalizeCache(
+        BrowserExtensionChatGptContextCache cache)
+        => cache with
+        {
+            Conversations = cache.Conversations.Where(IsProjectlessConversation).ToArray(),
+        };
+
+    private static BrowserExtensionChatGptContextSnapshot NormalizeRootSnapshot(
+        BrowserExtensionChatGptContextSnapshot snapshot)
+        => !snapshot.IsSuccess
+            ? snapshot
+            : snapshot with
+            {
+                // Root discovery owns the Project catalog and Projectless Chat
+                // list. Project Chats are fetched only by the selection
+                // capability below, so they must not leak into the root UI.
+                Conversations = snapshot.Conversations.Where(IsProjectlessConversation).ToArray(),
+            };
+
+    private static bool IsProjectlessConversation(
+        BrowserExtensionChatGptConversationEntry conversation)
+        => string.IsNullOrWhiteSpace(conversation.ProjectId)
+            && !TryGetProjectIdFromUrl(conversation.Url, out _);
+
+    private static bool ConversationBelongsToProject(
+        BrowserExtensionChatGptConversationEntry conversation,
+        string projectId)
+    {
+        if (!string.IsNullOrWhiteSpace(conversation.ProjectId)
+            && !string.Equals(conversation.ProjectId, projectId, StringComparison.OrdinalIgnoreCase)) return false;
+
+        return string.Equals(conversation.ProjectId, projectId, StringComparison.OrdinalIgnoreCase)
+            || TryGetProjectIdFromUrl(conversation.Url, out var urlProjectId)
+                && string.Equals(urlProjectId, projectId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryGetProjectIdFromUrl(string? value, out string projectId)
+    {
+        projectId = string.Empty;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(uri.Host, "chatgpt.com", StringComparison.OrdinalIgnoreCase)) return false;
+
+        var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries)
+            .Select(Uri.UnescapeDataString)
+            .ToArray();
+        for (var index = 0; index + 1 < segments.Length; index++)
+        {
+            if (!string.Equals(segments[index], "g", StringComparison.OrdinalIgnoreCase)
+                || !segments[index + 1].StartsWith("g-p-", StringComparison.OrdinalIgnoreCase)) continue;
+            projectId = segments[index + 1];
+            return true;
+        }
+
+        return false;
+    }
 
     private static BrowserExtensionChatGptContextSnapshot IncompleteProjectDiscoverySnapshot(
         BrowserExtensionChatGptContextSnapshot live)
@@ -345,6 +403,60 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         string displayName,
         CancellationToken cancellationToken = default)
         => throw new InvalidOperationException("ChatGPT Chatの作成はDesktopの範囲外です。「新しいChat」を選択して制作を開始してください。");
+
+    /// <summary>
+    /// Loads Chats for exactly one user-selected Project. Root discovery never
+    /// calls this method; the selected Project's canonical ID/URL is sent to
+    /// the Extension so the Collector can visit only that Project page.
+    /// </summary>
+    public async Task<IReadOnlyList<ChatContextOption>> LoadProjectChatsAsync(
+        ProjectContextOption project,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        if (!string.Equals(project.ProviderId, ProviderId, StringComparison.OrdinalIgnoreCase)
+            || project.IsNoProject
+            || string.IsNullOrWhiteSpace(project.ExternalId)
+            || string.IsNullOrWhiteSpace(project.Url)
+            || !TryGetProjectIdFromUrl(project.Url, out var urlProjectId)
+            || !string.Equals(project.ExternalId, urlProjectId, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("選択したChatGPT Projectの識別情報を取得できません。");
+        }
+
+        var snapshot = await _bridge.GetChatGptProjectChatsAsync(
+            project.ExternalId,
+            project.Url,
+            cancellationToken);
+        if (!snapshot.IsSuccess)
+        {
+            throw new InvalidOperationException(
+                snapshot.Message ?? "ChatGPT Project内のChat一覧を取得できませんでした。");
+        }
+
+        var chats = new List<ChatContextOption>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var conversation in snapshot.Conversations)
+        {
+            if (!ConversationBelongsToProject(conversation, project.ExternalId)
+                || string.IsNullOrWhiteSpace(conversation.ConversationId)
+                || !seen.Add(conversation.ConversationId)) continue;
+            chats.Add(ToChatOption(project, conversation, chats.Count));
+        }
+
+        // Preserve a previously bound chat until a later Project refresh can
+        // rediscover it, while allowing the selected Project response to
+        // replace stale/partial root data.
+        foreach (var existing in project.Chats.Where(item =>
+                     !item.IsNewConversation
+                     && !string.IsNullOrWhiteSpace(item.ExternalId)
+                     && seen.Add(item.ExternalId!)))
+            chats.Add(existing);
+
+        if (project.IsNewConversationTargetResolvable)
+            chats.Add(CreateNewConversationOption(project));
+        return chats;
+    }
 
     private async Task MergeLegacyBindingsAsync(
         ProjectChatCatalog catalog,

@@ -262,7 +262,7 @@
     'button',
     '[role="button"]'
   ];
-  const moreButtonTextPattern = /(?:さらに表示|もっと見る|\b(?:show|see|load)\s+more\b|\bmore\s+(?:chats?|projects?|conversations?)\b)/i;
+  const moreButtonTextPattern = /(?:さらに表示|もっと見る|すべて表示|全て表示|すべてのプロジェクト|全てのプロジェクト|\b(?:show|see|load|view)\s+more\b|\b(?:all)\s+projects?\b|\bmore\s+(?:chats?|projects?|conversations?)\b)/i;
   const projectFallbackTitlePattern = /^Project\s*\([^)]*\)$/i;
   const projectFallbackIdPattern = /^Project\s*\(\s*([A-Za-z0-9][A-Za-z0-9._-]{0,127})\s*\)$/i;
 
@@ -571,7 +571,7 @@
   function projectRowsInSidebar(sidebar, baseUrl = globalThis.location?.href) {
     if (!sidebar?.querySelectorAll) return [];
     return sortInDocumentOrder(uniqueElements(projectRowSelectors, sidebar)
-      .filter((element) => isVisible(element)));
+      .filter((element) => isVisible(element) && !isMoreButton(element)));
   }
 
   function expandedProjectRowsInSidebar(sidebar) {
@@ -1015,23 +1015,47 @@
     return candidates.find((candidate) => containsProjectRow(candidate) && hasScrollMetrics(candidate)) || sidebar;
   }
 
+  function sidebarMoreControlKey(element) {
+    if (!element) return null;
+    for (const attribute of [
+      "data-sidebar-more",
+      "aria-controls",
+      "id",
+      "data-testid",
+      "data-sidebar-section"
+    ]) {
+      const value = attributeValue(element, attribute).trim();
+      if (value) return attribute + ":" + value;
+    }
+    return null;
+  }
+
   function isMoreButton(element) {
     if (!element || !isVisible(element)) return false;
     const explicitlyMarked = attributeValue(element, "data-sidebar-more") === "true";
-    // ChatGPT uses the same role/button primitives for Project rows, Chat
-    // rows, and utility controls. Only a dedicated More marker may override
-    // the identity guard; a generic sidebar item must never be clicked just
-    // because its title happens to contain "more"/"さらに表示".
-    if (!explicitlyMarked && attributeValue(element, "data-sidebar-item") === "true") return false;
     if (!explicitlyMarked && conversationIdFromElement(element)) return false;
-    if (explicitlyMarked) return true;
     const visible = visibleElementText(element);
-    const label = `${visible} ${attributeValue(element, "aria-label")}`.trim();
-    // A role=button is also used by Project and conversation rows. The old
-    // discovery route only expands an actual utility button unless ChatGPT
-    // marks it explicitly, so a generic row named "さらに表示" cannot be
-    // navigated or treated as a discovery control.
-    return element.tagName === "BUTTON" && moreButtonTextPattern.test(label);
+    const label = visible + " " + attributeValue(element, "aria-label");
+    if (!moreButtonTextPattern.test(label)) return false;
+    if (explicitlyMarked) return true;
+
+    // ChatGPT may reuse data-sidebar-item for the native disclosure control.
+    // Permit that safe shape, while keeping generic DIV role=button rows out
+    // of the control path unless they carry an explicit disclosure marker.
+    const tagName = String(element.tagName || "").toUpperCase();
+    if (tagName === "BUTTON") return true;
+    const role = attributeValue(element, "role").toLowerCase();
+    if (role !== "button") return false;
+    const hasDisclosureAttribute = Boolean(
+      attributeValue(element, "aria-controls")
+      || attributeValue(element, "aria-expanded")
+      || attributeValue(element, "data-state"));
+    const semanticMarker = [
+      attributeValue(element, "data-testid"),
+      attributeValue(element, "class"),
+      attributeValue(element, "data-state")
+    ].join(" ").toLowerCase();
+    return hasDisclosureAttribute || /(?:more|load-more|show-more|see-more|all-project|project-list)/i.test(semanticMarker);
   }
 
   function findMoreButtons(root = globalThis.document, sidebarOverride = null) {
@@ -1069,18 +1093,51 @@
 
   async function expandSidebarMoreButtons(root, options = {}, sidebarOverride = null) {
     const maxClicks = Math.max(0, Math.min(12, Number(options.maxMoreClicks) || 8));
-    const clicked = new Set();
+    const clicked = options.clickedMoreControls instanceof Set
+      ? options.clickedMoreControls
+      : new Set();
     let clicks = 0;
     while (clicks < maxClicks) {
       const button = findMoreButtons(root, sidebarOverride)
-        .find((candidate) => !clicked.has(candidate));
+        .find((candidate) => {
+          const key = sidebarMoreControlKey(candidate);
+          return !clicked.has(candidate) && (!key || !clicked.has(key));
+        });
       if (!button) break;
       clicked.add(button);
+      const key = sidebarMoreControlKey(button);
+      if (key) clicked.add(key);
       try { button.click?.(); } catch (_) { break; }
       clicks += 1;
       await waitForSidebarMutation(root, options.settleMs);
     }
     return clicks;
+  }
+
+  function projectMoreControlTelemetry(
+    root,
+    sidebar,
+    observedControl = null,
+    clickCount = 0,
+    discoveredProjectCount = 0) {
+    const controls = findMoreButtons(root, sidebar);
+    const control = controls[0] || observedControl;
+    const role = control
+      ? attributeValue(control, "role").trim()
+        || String(control.tagName || "").toLowerCase()
+      : "";
+    const visibleProjectCount = projectRowsInSidebar(sidebar).length;
+    return {
+      project_more_control_found: controls.length > 0 || Boolean(observedControl),
+      project_more_control_count: controls.length,
+      project_more_control_click_count: clickCount,
+      project_more_control_role: role,
+      project_more_control_has_href: Boolean(metadataHrefFromElement(control)),
+      project_more_control_aria_expanded: attributeValue(control, "aria-expanded"),
+      project_more_control_aria_controls_present: Boolean(
+        attributeValue(control, "aria-controls")),
+      project_virtualized_candidate: discoveredProjectCount > visibleProjectCount
+    };
   }
 
   function upsertContextProject(projects, item) {
@@ -2962,6 +3019,7 @@
       && typeof scrollContainer.clientHeight === "number";
     const originalScrollTop = canScroll ? scrollContainer.scrollTop : null;
     const maxScrolls = Math.max(1, Math.min(64, Number(options.maxScrolls) || 32));
+    const maxMoreClicks = Math.max(0, Math.min(12, Number(options.maxMoreClicks) || 8));
     const deadline = Date.now() + Math.max(1000, Math.min(120000, Number(options.timeoutMs) || 30000));
     const initialSettleMs = options.initialSettleMs === undefined
       ? 250
@@ -2983,6 +3041,23 @@
     let sidebarScrollComplete = !canScroll;
     const scrollDirection = canScroll ? "down" : "none";
     let sidebarRestoreCount = 0;
+    const clickedMoreControls = new Set();
+    let moreControlClicks = 0;
+    let observedMoreControl = null;
+    const expandAvailableMoreButtons = async () => {
+      if (!allowSidebarControls || moreControlClicks >= maxMoreClicks) return 0;
+      const controlsBefore = findMoreButtons(root, sidebar);
+      if (controlsBefore[0]) observedMoreControl = controlsBefore[0];
+      const clicks = await expandSidebarMoreButtons(root, {
+        ...options,
+        maxMoreClicks: maxMoreClicks - moreControlClicks,
+        clickedMoreControls
+      }, sidebar);
+      moreControlClicks += clicks;
+      const controlsAfter = findMoreButtons(root, sidebar);
+      if (controlsAfter[0]) observedMoreControl = controlsAfter[0];
+      return clicks;
+    };
     let result = null;
     try {
       ensureCollectionActive();
@@ -2991,9 +3066,10 @@
       const initial = collectContextEntries(root, url, sidebar);
       mergeContextProjectCatalog(merged, initial);
       mergeContextConversationCatalog(merged, initial);
-      if (allowSidebarControls) await expandSidebarMoreButtons(root, options, sidebar);
+      await expandAvailableMoreButtons();
       for (let pass = 0; pass < maxScrolls; pass += 1) {
         if (!ensureCollectionActive()) break;
+        const expandedBeforeScan = await expandAvailableMoreButtons();
         const beforeCount = merged.projects.length + merged.conversations.length;
         const beforeTop = canScroll ? Number(scrollContainer.scrollTop) || 0 : 0;
         const beforeHeight = canScroll ? Number(scrollContainer.scrollHeight) || 0 : 0;
@@ -3015,9 +3091,14 @@
         try { scrollContainer.scrollTop = nextTop; } catch (_) { break; }
         await waitForSidebarMutation(root, options.settleMs);
         if (!ensureCollectionActive()) break;
+        const expandedAfterScroll = await expandAvailableMoreButtons();
         const afterTop = Number(scrollContainer.scrollTop) || 0;
         const afterHeight = Number(scrollContainer.scrollHeight) || 0;
-        if (added === 0 && afterTop === beforeTop && afterHeight === beforeHeight) {
+        if (added === 0
+          && expandedBeforeScan === 0
+          && expandedAfterScroll === 0
+          && afterTop === beforeTop
+          && afterHeight === beforeHeight) {
           stagnantPasses += 1;
         } else {
           stagnantPasses = 0;
@@ -3050,7 +3131,13 @@
           sidebarScrollComplete,
           sidebar,
           scrollDirection,
-          0)
+          0),
+        ...projectMoreControlTelemetry(
+          root,
+          sidebar,
+          observedMoreControl,
+          moreControlClicks,
+          merged.projects.length)
       };
     } finally {
       if (scrollContainer && originalScrollTop !== null) {
@@ -3800,6 +3887,8 @@
       : projectUrlFromConversationUrl(baseUrl, normalizedProjectId)
         || `https://chatgpt.com/g/${encodeURIComponent(normalizedProjectId)}/project`;
     const projectTitle = projectTitleFromPage(root, normalizedProjectId, baseUrl);
+    const currentProjectIdVerified = isProjectHomeUrl(baseUrl)
+      && projectIdFromUrl(baseUrl) === normalizedProjectId;
     const projects = [{
       project_id: normalizedProjectId,
       title: projectTitle,
@@ -3819,6 +3908,14 @@
       matching_project_chat_link_count: 0,
       rejected_projectless_chat_count: 0,
       rejected_other_project_chat_count: 0,
+      current_project_id_verified: currentProjectIdVerified,
+      main_candidate_with_project_id_count: 0,
+      main_candidate_without_project_id_count: 0,
+      main_current_project_match_count: 0,
+      main_project_mismatch_count: 0,
+      main_projectless_count: 0,
+      main_custom_gpt_count: 0,
+      main_candidate_from_verified_project_region_count: 0,
       main_found: structure.mainFound,
       main_region_found: structure.mainRegionFound,
       main_descendant_count: structure.mainDescendantCount,
@@ -3840,12 +3937,15 @@
       selected_scroll_distance_from_chat_list: structure.selectedScrollInfo?.distanceFromChatList
     };
 
-    const projectIdFromAncestorChain = (element, stopAt) => {
+    const projectIdFromLocalAncestorChain = (element, stopAt) => {
       let current = element;
       for (let depth = 0; current && depth < 32; depth += 1, current = current.parentElement) {
+        // The selected main region is a broad container, not a Project
+        // membership boundary. Do not let metadata on that container classify
+        // every plain /c link as belonging to another Project.
+        if (stopAt && current === stopAt) break;
         const projectIdFromMetadata = projectIdFromElement(current, baseUrl);
         if (projectIdFromMetadata) return projectIdFromMetadata;
-        if (stopAt && current === stopAt) break;
       }
       return null;
     };
@@ -3853,15 +3953,32 @@
     for (const candidate of candidateElements) {
       const { element, href, conversationId, explicitProjectId, sourceRegion } = candidate;
       if (nonProjectGptIdFromUrl(href)) {
+        if (sourceRegion === "main") collectionTelemetry.main_custom_gpt_count += 1;
         collectionTelemetry.rejected_other_project_chat_count += 1;
         continue;
       }
       const isInSidebar = sourceRegion === "sidebar";
       const relationProjectId = sourceRegion === "main" || sourceRegion === "sidebar"
-        ? projectIdFromAncestorChain(
+        ? projectIdFromLocalAncestorChain(
           element,
           sourceRegion === "main" ? structure.mainRegion : sidebar)
         : null;
+      const candidateProjectId = explicitProjectId || relationProjectId;
+      if (sourceRegion === "main") {
+        if (candidateProjectId) {
+          collectionTelemetry.main_candidate_with_project_id_count += 1;
+          if (candidateProjectId === normalizedProjectId) {
+            collectionTelemetry.main_current_project_match_count += 1;
+          } else {
+            collectionTelemetry.main_project_mismatch_count += 1;
+          }
+        } else {
+          collectionTelemetry.main_candidate_without_project_id_count += 1;
+        }
+        if (currentProjectIdVerified) {
+          collectionTelemetry.main_candidate_from_verified_project_region_count += 1;
+        }
+      }
       const scopedSidebarMatch = isInSidebar
         && !explicitProjectId
         && sidebarConversationBelongsToProject(
@@ -3871,29 +3988,29 @@
           projectTitle,
           projectRowsInSidebar(sidebar, baseUrl),
           baseUrl);
-      const matchedProjectId = explicitProjectId || relationProjectId
+      const matchedProjectId = candidateProjectId
         || (scopedSidebarMatch ? normalizedProjectId : null);
       if (matchedProjectId && matchedProjectId !== normalizedProjectId) {
         collectionTelemetry.rejected_other_project_chat_count += 1;
         continue;
       }
-      // A Project page can render a row as a button/div with only a stable
-      // conversation id and no URL. Once the central Project region has been
-      // selected and the current Project route is verified, that explicit
-      // conversation metadata is scoped by the page itself. Do not apply this
-      // fallback to href-bearing /c links: without a Project relation those
-      // remain Projectless, even when they happen to be rendered in <main>.
+      // A Project page can render a row as a button/div or a plain /c link
+      // without an explicit Project id. Once the central Project region and
+      // current Project route are verified, that region is the ownership
+      // boundary for both forms. The fallback is deliberately unavailable
+      // when the current route is not verified.
       const currentProjectMainMetadataMatch = sourceRegion === "main"
-        && !href
-        && Boolean(conversationIdFromElement(element))
-        && isProjectHomeUrl(baseUrl)
-        && projectIdFromUrl(baseUrl) === normalizedProjectId;
+        && currentProjectIdVerified
+        && !candidateProjectId;
+      if (currentProjectMainMetadataMatch) {
+        collectionTelemetry.main_current_project_match_count += 1;
+      }
       const effectiveMatchedProjectId = matchedProjectId || (
         currentProjectMainMetadataMatch ? normalizedProjectId : null);
-      // A plain /c/<id> is Projectless unless its containing Project row/list
-      // supplies an explicit Project identity. The Project route alone is
-      // deliberately not used as ownership evidence.
       if (effectiveMatchedProjectId !== normalizedProjectId) {
+        if (sourceRegion === "main" && !candidateProjectId) {
+          collectionTelemetry.main_projectless_count += 1;
+        }
         collectionTelemetry.rejected_projectless_chat_count += 1;
         continue;
       }
@@ -4001,6 +4118,15 @@
       matching_project_chat_count: hydrationSnapshot.matching_project_chat_count,
       rejected_projectless_chat_count: hydrationSnapshot.rejected_projectless_chat_count,
       rejected_other_project_chat_count: hydrationSnapshot.rejected_other_project_chat_count,
+      current_project_id_verified: hydrationSnapshot.current_project_id_verified,
+      main_candidate_with_project_id_count: hydrationSnapshot.main_candidate_with_project_id_count,
+      main_candidate_without_project_id_count: hydrationSnapshot.main_candidate_without_project_id_count,
+      main_current_project_match_count: hydrationSnapshot.main_current_project_match_count,
+      main_project_mismatch_count: hydrationSnapshot.main_project_mismatch_count,
+      main_projectless_count: hydrationSnapshot.main_projectless_count,
+      main_custom_gpt_count: hydrationSnapshot.main_custom_gpt_count,
+      main_candidate_from_verified_project_region_count:
+        hydrationSnapshot.main_candidate_from_verified_project_region_count,
       main_found: hydrationSnapshot.main_found,
       main_descendant_count: hydrationSnapshot.main_descendant_count,
       chat_tab_found: hydrationSnapshot.chat_tab_found,
@@ -4034,6 +4160,15 @@
       matching_project_chat_count: hydrationSnapshot.matching_project_chat_count,
       rejected_other_project_chat_count: hydrationSnapshot.rejected_other_project_chat_count,
       rejected_projectless_chat_count: hydrationSnapshot.rejected_projectless_chat_count,
+      current_project_id_verified: hydrationSnapshot.current_project_id_verified,
+      main_candidate_with_project_id_count: hydrationSnapshot.main_candidate_with_project_id_count,
+      main_candidate_without_project_id_count: hydrationSnapshot.main_candidate_without_project_id_count,
+      main_current_project_match_count: hydrationSnapshot.main_current_project_match_count,
+      main_project_mismatch_count: hydrationSnapshot.main_project_mismatch_count,
+      main_projectless_count: hydrationSnapshot.main_projectless_count,
+      main_custom_gpt_count: hydrationSnapshot.main_custom_gpt_count,
+      main_candidate_from_verified_project_region_count:
+        hydrationSnapshot.main_candidate_from_verified_project_region_count,
       stage: "collector_project_chat_source_classification"
     });
     emitTelemetry({
@@ -4082,6 +4217,17 @@
         matching_project_chat_count: hydrationSnapshot.matching_project_chat_count || 0,
         rejected_projectless_chat_count: hydrationSnapshot.rejected_projectless_chat_count || 0,
         rejected_other_project_chat_count: hydrationSnapshot.rejected_other_project_chat_count || 0,
+        main_candidate_with_project_id_count:
+          hydrationSnapshot.main_candidate_with_project_id_count || 0,
+        main_candidate_without_project_id_count:
+          hydrationSnapshot.main_candidate_without_project_id_count || 0,
+        main_current_project_match_count:
+          hydrationSnapshot.main_current_project_match_count || 0,
+        main_project_mismatch_count: hydrationSnapshot.main_project_mismatch_count || 0,
+        main_projectless_count: hydrationSnapshot.main_projectless_count || 0,
+        main_custom_gpt_count: hydrationSnapshot.main_custom_gpt_count || 0,
+        main_candidate_from_verified_project_region_count:
+          hydrationSnapshot.main_candidate_from_verified_project_region_count || 0,
         main_found: hydrationSnapshot.main_found === true,
         main_region_found: hydrationSnapshot.main_region_found === true,
         main_descendant_count: hydrationSnapshot.main_descendant_count || 0,
@@ -4280,6 +4426,17 @@
         matching_project_chat_count: latestSnapshot.matching_project_chat_count || 0,
         rejected_other_project_chat_count: latestSnapshot.rejected_other_project_chat_count || 0,
         rejected_projectless_chat_count: latestSnapshot.rejected_projectless_chat_count || 0,
+        main_candidate_with_project_id_count:
+          latestSnapshot.main_candidate_with_project_id_count || 0,
+        main_candidate_without_project_id_count:
+          latestSnapshot.main_candidate_without_project_id_count || 0,
+        main_current_project_match_count:
+          latestSnapshot.main_current_project_match_count || 0,
+        main_project_mismatch_count: latestSnapshot.main_project_mismatch_count || 0,
+        main_projectless_count: latestSnapshot.main_projectless_count || 0,
+        main_custom_gpt_count: latestSnapshot.main_custom_gpt_count || 0,
+        main_candidate_from_verified_project_region_count:
+          latestSnapshot.main_candidate_from_verified_project_region_count || 0,
         selected_scroll_container_found: Boolean(latestSnapshot.selected_scroll_container_found),
         scroll_iteration: scrollIteration,
         scroll_top: finalMetrics ? Math.round(finalMetrics.scrollTop) : 0,
@@ -4320,6 +4477,17 @@
       matching_project_chat_count: latestSnapshot.matching_project_chat_count || 0,
       rejected_projectless_chat_count: latestSnapshot.rejected_projectless_chat_count || 0,
       rejected_other_project_chat_count: latestSnapshot.rejected_other_project_chat_count || 0,
+      main_candidate_with_project_id_count:
+        latestSnapshot.main_candidate_with_project_id_count || 0,
+      main_candidate_without_project_id_count:
+        latestSnapshot.main_candidate_without_project_id_count || 0,
+      main_current_project_match_count:
+        latestSnapshot.main_current_project_match_count || 0,
+      main_project_mismatch_count: latestSnapshot.main_project_mismatch_count || 0,
+      main_projectless_count: latestSnapshot.main_projectless_count || 0,
+      main_custom_gpt_count: latestSnapshot.main_custom_gpt_count || 0,
+      main_candidate_from_verified_project_region_count:
+        latestSnapshot.main_candidate_from_verified_project_region_count || 0,
       chat_scroll_container_count: containers.length,
       relevant_region_present: finalRelevantRegion,
       main_found: latestSnapshot.main_found === true,
@@ -5292,6 +5460,7 @@
     projectIdFromUrl,
     collectChatGptContext,
     collectChatGptContextAsync,
+    collectProjectContextEntries,
     resolveChatGptProjectIdentitiesAsync,
     collectChatGptProjectContextAsync,
     getCurrentChatGptContext,

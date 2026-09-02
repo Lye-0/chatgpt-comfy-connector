@@ -62,6 +62,19 @@ public interface IProjectChatProvider
     Task<ChatContextOption> CreateChatAsync(ProjectContextOption project, string displayName, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Optional capability for providers whose root catalog contains Project
+/// metadata and Projectless Chats, while Project Chats are collected only
+/// after the user selects one Project. Keeping this separate from
+/// <see cref="IProjectChatProvider"/> leaves local/offline providers unchanged.
+/// </summary>
+public interface IProjectChatSelectionProvider
+{
+    Task<IReadOnlyList<ChatContextOption>> LoadProjectChatsAsync(
+        ProjectContextOption project,
+        CancellationToken cancellationToken = default);
+}
+
 public interface IComfyMcpClient : IAsyncDisposable
 {
     bool IsConnected { get; }
@@ -107,6 +120,10 @@ public interface IBrowserExtensionBridge : IAsyncDisposable
         CancellationToken cancellationToken = default);
     Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextAsync(
         bool currentOnly = false,
+        CancellationToken cancellationToken = default);
+    Task<BrowserExtensionChatGptContextSnapshot> GetChatGptProjectChatsAsync(
+        string projectId,
+        string projectUrl,
         CancellationToken cancellationToken = default);
 }
 

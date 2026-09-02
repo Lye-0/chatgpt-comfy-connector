@@ -194,6 +194,70 @@
     '[data-conversation-title]',
     '[data-project-title]'
   ];
+  const projectPageMainSelectors = [
+    "main",
+    '[role="main"]',
+    '[data-project-page]'
+  ];
+  const projectPageFallbackRegionSelectors = [
+    '[data-project-content]',
+    '[data-project-main]',
+    '[data-project-id]',
+    '[data-project-chat-list]',
+    '[data-chat-list]',
+    '[data-testid*="project-page" i]',
+    '[data-testid*="project-content" i]',
+    '[data-testid*="project-chat-list" i]',
+    '[data-testid*="conversation-list" i]',
+    '[role="tabpanel"]',
+    '[role="region"]'
+  ];
+  const projectChatListSelectors = [
+    '[data-project-chat-list]',
+    '[data-chat-list]',
+    '[data-testid*="project-chat" i]',
+    '[data-testid*="conversation-list" i]',
+    '[data-testid*="chat-list" i]',
+    '[aria-label*="chat" i]',
+    '[aria-label*="チャット"]',
+    '[role="list"]',
+    "ul",
+    "ol"
+  ];
+  const projectChatTabSelectors = [
+    '[role="tab"]',
+    '[data-testid*="chat-tab" i]',
+    '[data-testid*="conversation-tab" i]',
+    '[aria-label*="chat" i]',
+    '[aria-label*="チャット"]'
+  ];
+  const projectChatIdentityAttributes = [
+    "href",
+    "data-href",
+    "data-url",
+    "data-conversation-url",
+    "data-conversation-href",
+    "data-chat-url",
+    "data-chat-href",
+    "data-conversation-id",
+    "data-conversation-id-value",
+    "data-conversation",
+    "data-conversation-key",
+    "data-thread-id",
+    "data-thread",
+    "data-thread-key",
+    "data-chat-id",
+    "data-chat-id-value",
+    "data-chat",
+    "data-chat-key",
+    "data-id",
+    "data-item-id",
+    "data-entity-id",
+    "data-uuid",
+    "data-project-id",
+    "data-project-id-value",
+    "data-project-url"
+  ];
   const moreButtonSelectors = [
     'button',
     '[role="button"]'
@@ -279,6 +343,19 @@
       if (projectId?.toLowerCase().startsWith("g-p-")) return projectId;
     }
 
+    return null;
+  }
+
+  function nonProjectGptIdFromUrl(value) {
+    const segments = decodedPathSegments(value);
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      if (segments[index].toLowerCase() !== "g") continue;
+      const candidate = metadataIdentifier(segments[index + 1]);
+      if (candidate && candidate.toLowerCase().startsWith("g-")
+        && !candidate.toLowerCase().startsWith("g-p-")) {
+        return candidate;
+      }
+    }
     return null;
   }
 
@@ -520,10 +597,50 @@
       "data-href",
       "data-url",
       "data-conversation-url",
+      "data-conversation-href",
+      "data-chat-url",
+      "data-chat-href",
       "data-project-url"
     ]) {
       const value = chatGptMetadataUrl(attributeValue(element, attribute), baseUrl);
       if (value) return value;
+    }
+    return null;
+  }
+
+  function projectChatHrefFromElement(element, baseUrl = globalThis.location?.href, boundary = null) {
+    const direct = metadataHrefFromElement(element, baseUrl);
+    if (direct && conversationIdFromUrl(direct)) return direct;
+
+    // A Chat row can be a DIV/BUTTON wrapped by an anchor. Resolve only an
+    // unambiguous conversation anchor and keep the search inside the selected
+    // Project-page region. This is deliberately separate from the root
+    // Project discovery path, where generic ancestors must never become
+    // Project candidates.
+    const descendantHrefs = [];
+    try {
+      for (const candidate of uniqueElements([
+        "a[href]",
+        '[role="link"][href]',
+        "[data-href]",
+        "[data-url]",
+        "[data-conversation-url]",
+        "[data-conversation-href]",
+        "[data-chat-url]",
+        "[data-chat-href]"
+      ], element)) {
+        const href = metadataHrefFromElement(candidate, baseUrl);
+        if (href && conversationIdFromUrl(href)) descendantHrefs.push(href);
+      }
+    } catch (_) { }
+    const uniqueDescendantHrefs = [...new Set(descendantHrefs)];
+    if (uniqueDescendantHrefs.length === 1) return uniqueDescendantHrefs[0];
+
+    let ancestor = element?.parentElement || null;
+    for (let depth = 0; ancestor && depth < 8; depth += 1, ancestor = ancestor.parentElement) {
+      if (boundary && !isDescendantOf(ancestor, boundary)) break;
+      const href = metadataHrefFromElement(ancestor, baseUrl);
+      if (href && conversationIdFromUrl(href)) return href;
     }
     return null;
   }
@@ -2953,10 +3070,35 @@
     const explicit = [
       attributeValue(element, "data-conversation-id"),
       attributeValue(element, "data-conversation-id-value"),
-      attributeValue(element, "data-thread-id")
+      attributeValue(element, "data-conversation"),
+      attributeValue(element, "data-conversation-key"),
+      attributeValue(element, "data-thread-id"),
+      attributeValue(element, "data-thread"),
+      attributeValue(element, "data-thread-key"),
+      attributeValue(element, "data-chat-id"),
+      attributeValue(element, "data-chat-id-value"),
+      attributeValue(element, "data-chat"),
+      attributeValue(element, "data-chat-key")
     ].map((value) => metadataIdentifier(value)).find(Boolean);
     if (explicit) return explicit;
-    for (const attribute of ["href", "data-href", "data-url", "data-conversation-url"]) {
+    if (projectChatGenericIdentityAllowed(element)) {
+      const generic = [
+        attributeValue(element, "data-id"),
+        attributeValue(element, "data-item-id"),
+        attributeValue(element, "data-entity-id"),
+        attributeValue(element, "data-uuid")
+      ].map((value) => metadataIdentifier(value)).find(Boolean);
+      if (generic) return generic;
+    }
+    for (const attribute of [
+      "href",
+      "data-href",
+      "data-url",
+      "data-conversation-url",
+      "data-conversation-href",
+      "data-chat-url",
+      "data-chat-href"
+    ]) {
       const conversationId = conversationIdFromUrl(attributeValue(element, attribute));
       if (conversationId) return conversationId;
     }
@@ -2999,6 +3141,23 @@
     return metadataTitle(documentTitle, `Project (${projectId})`);
   }
 
+  function projectChatSemanticMarker(element) {
+    return [
+      attributeValue(element, "data-testid"),
+      attributeValue(element, "data-item-type"),
+      attributeValue(element, "data-entity-type"),
+      attributeValue(element, "aria-label"),
+      attributeValue(element, "class"),
+      attributeValue(element, "role")
+    ].join(" ").toLowerCase();
+  }
+
+  function projectChatGenericIdentityAllowed(element) {
+    const marker = projectChatSemanticMarker(element);
+    return /(?:chat|conversation|thread|会話|チャット)/i.test(marker)
+      && !/(?:message|turn|assistant|user|prompt)/i.test(marker);
+  }
+
   function projectPageConversationElements(root) {
     return uniqueElements([
       "a[href]",
@@ -3007,10 +3166,423 @@
       '[data-href]',
       '[data-url]',
       '[data-conversation-url]',
+      '[data-conversation-href]',
+      '[data-chat-url]',
+      '[data-chat-href]',
       "[data-conversation-id]",
       "[data-conversation-id-value]",
-      "[data-thread-id]"
+      "[data-conversation]",
+      "[data-conversation-key]",
+      "[data-thread-id]",
+      "[data-thread]",
+      "[data-thread-key]",
+      "[data-chat-id]",
+      "[data-chat-id-value]",
+      "[data-chat]",
+      "[data-chat-key]",
+      '[data-entity-type="conversation"]',
+      '[data-entity-type="chat"]',
+      '[data-entity-type="thread"]',
+      "[data-id]",
+      "[data-item-id]",
+      "[data-entity-id]",
+      "[data-uuid]"
     ], root);
+  }
+
+  function projectPageMainRegionInfo(root, sidebar, projectId = null, url = globalThis.location?.href) {
+    const sidebarElement = sidebar && sidebar !== root ? sidebar : null;
+    const normalizedProjectId = metadataIdentifier(projectId);
+    const baseUrl = documentHref(root, url);
+    const isDocumentRoot = (element) => element === root
+      || element === root?.body
+      || element === root?.documentElement;
+    const isOutsideSidebar = (element) => !sidebarElement
+      || (!isDescendantOf(element, sidebarElement)
+        && !isDescendantOf(sidebarElement, element));
+    const isRegionCandidate = (element) => Boolean(element)
+      && !isDocumentRoot(element)
+      && isVisible(element)
+      && isOutsideSidebar(element);
+    const conversationMetadataFor = (element) => {
+      const href = metadataHrefFromElement(element, baseUrl);
+      return {
+        conversationId: conversationIdFromElement(element) || conversationIdFromUrl(href),
+        projectId: projectIdFromUrl(href)
+      };
+    };
+    const pageMetadataCandidates = projectPageConversationElements(root)
+      .filter((element) => isRegionCandidate(element))
+      .filter((element) => Boolean(conversationMetadataFor(element).conversationId));
+    const regionScore = (element) => {
+      const marker = [
+        attributeValue(element, "role"),
+        attributeValue(element, "data-testid"),
+        attributeValue(element, "data-project-page"),
+        attributeValue(element, "data-project-content"),
+        attributeValue(element, "data-project-chat-list"),
+        attributeValue(element, "data-chat-list"),
+        attributeValue(element, "class")
+      ].join(" ").toLowerCase();
+      const containedMetadata = pageMetadataCandidates.filter((candidate) =>
+        candidate === element || isDescendantOf(candidate, element));
+      const metadata = containedMetadata.map(conversationMetadataFor);
+      const conversationCount = metadata.filter((item) => item.conversationId).length;
+      const currentProjectCount = normalizedProjectId
+        ? metadata.filter((item) => item.projectId === normalizedProjectId).length
+        : 0;
+      const metrics = scrollMetricsFor(element);
+      const listMarked = /(?:chat|conversation|thread|list|scroll|overflow|会話|チャット)/i.test(marker);
+      const semanticMain = element?.tagName?.toUpperCase() === "MAIN"
+        || attributeValue(element, "role").toLowerCase() === "main";
+      let score = currentProjectCount * 1000 + conversationCount * 100;
+      if (currentProjectCount > 0) score += 250;
+      if (listMarked) score += 100;
+      if (metrics?.canScroll) score += 40;
+      if (semanticMain) score += 80;
+      if (metrics?.clientHeight > 64) score += 10;
+      return {
+        element,
+        score,
+        conversationCount,
+        currentProjectCount,
+        listMarked,
+        semanticMain,
+        metrics
+      };
+    };
+    const compareRegions = (left, right) => {
+      if (left.score !== right.score) return right.score - left.score;
+      if (left.currentProjectCount !== right.currentProjectCount) {
+        return right.currentProjectCount - left.currentProjectCount;
+      }
+      if (left.conversationCount !== right.conversationCount) {
+        return right.conversationCount - left.conversationCount;
+      }
+      if (left.listMarked !== right.listMarked) return left.listMarked ? -1 : 1;
+      if (left.semanticMain !== right.semanticMain) return left.semanticMain ? -1 : 1;
+      // When a marked list is nested inside a broad main shell, the narrowest
+      // region is a better source for row and scrollport classification.
+      if (isDescendantOf(left.element, right.element)) return -1;
+      if (isDescendantOf(right.element, left.element)) return 1;
+      return 0;
+    };
+    const strongCandidates = uniqueElements(projectPageMainSelectors, root)
+      .filter((element) => isRegionCandidate(element));
+    const fallbackCandidates = uniqueElements(projectPageFallbackRegionSelectors, root)
+      .filter((element) => isRegionCandidate(element));
+    const mainElements = strongCandidates.filter((element) =>
+      element?.tagName?.toUpperCase() === "MAIN"
+      || attributeValue(element, "role").toLowerCase() === "main");
+    const markedRegions = [...new Set([...strongCandidates, ...fallbackCandidates])]
+      .map(regionScore)
+      .sort(compareRegions);
+    const selectedMarkedRegion = markedRegions[0]?.element || null;
+    if (selectedMarkedRegion) {
+      return {
+        candidates: [selectedMarkedRegion],
+        mainElements,
+        region: selectedMarkedRegion,
+        mainFound: mainElements.length > 0
+      };
+    }
+
+    // Some ChatGPT layouts omit a semantic <main>. If the page still exposes
+    // conversation metadata outside the Sidebar, derive a bounded ancestor
+    // from those candidates. This fallback never promotes the document or a
+    // Sidebar to the Project Chat region.
+    const pageCandidates = pageMetadataCandidates
+      .filter((element) => Boolean(conversationMetadataFor(element).conversationId));
+    const derivedCandidates = [];
+    for (const seed of pageCandidates) {
+      let ancestor = seed?.parentElement || null;
+      for (let depth = 0; ancestor && depth < 12; depth += 1, ancestor = ancestor.parentElement) {
+        if (isDocumentRoot(ancestor)) break;
+        if (!isRegionCandidate(ancestor)) break;
+        if (!derivedCandidates.includes(ancestor)) derivedCandidates.push(ancestor);
+      }
+    }
+    const derivedRegion = derivedCandidates
+      .map(regionScore)
+      .sort(compareRegions)[0]?.element || null;
+    return {
+      candidates: derivedRegion ? [derivedRegion] : [],
+      mainElements,
+      region: derivedRegion,
+      mainFound: false
+    };
+  }
+
+  function descendantElementsOf(element) {
+    if (!element?.querySelectorAll) return [];
+    try { return Array.from(element.querySelectorAll("*")); } catch (_) { return []; }
+  }
+
+  function ancestorDistance(element, ancestor) {
+    if (!element || !ancestor) return Number.POSITIVE_INFINITY;
+    if (element === ancestor) return 0;
+    let current = element?.parentElement;
+    for (let distance = 1; current && distance <= 64; distance += 1, current = current.parentElement) {
+      if (current === ancestor) return distance;
+    }
+    return Number.POSITIVE_INFINITY;
+  }
+
+  function boundedAncestorElements(element, root, maximumDepth = 4) {
+    const ancestors = [];
+    let current = element?.parentElement || null;
+    for (let depth = 0; current && depth < maximumDepth; depth += 1, current = current.parentElement) {
+      if (current === root || current === root?.body || current === root?.documentElement) break;
+      ancestors.push(current);
+    }
+    return ancestors;
+  }
+
+  function projectPageChatRowCandidates(mainRegion) {
+    if (!mainRegion) return [];
+    const candidates = uniqueElements([
+      "a[href]",
+      "[href]",
+      "[data-href]",
+      "[data-url]",
+      "[data-conversation-url]",
+      "[data-conversation-href]",
+      "[data-chat-url]",
+      "[data-chat-href]",
+      "button",
+      '[role="button"]',
+      '[role="link"]',
+      '[role="listitem"]',
+      '[data-testid*="conversation" i]',
+      '[data-testid*="chat" i]',
+      '[data-testid*="thread" i]',
+      '[data-item-type="conversation"]',
+      '[data-item-type="chat"]',
+      '[data-item-type="thread"]',
+      "[data-conversation-id]",
+      "[data-conversation-id-value]",
+      "[data-conversation]",
+      "[data-conversation-key]",
+      "[data-thread-id]",
+      "[data-thread]",
+      "[data-thread-key]",
+      "[data-chat-id]",
+      "[data-chat-id-value]",
+      "[data-chat]",
+      "[data-chat-key]",
+      '[data-testid*="conversation" i]',
+      '[data-testid*="chat" i]',
+      '[data-testid*="thread" i]',
+      '[data-item-type="conversation"]',
+      '[data-item-type="chat"]',
+      '[data-item-type="thread"]',
+      '[data-entity-type="conversation"]',
+      '[data-entity-type="chat"]',
+      '[data-entity-type="thread"]',
+      "[data-id]",
+      "[data-item-id]",
+      "[data-entity-id]",
+      "[data-uuid]"
+    ], mainRegion)
+      .filter((element) => isVisible(element));
+    return candidates.filter((element) => {
+      const role = attributeValue(element, "role").toLowerCase();
+      const testId = attributeValue(element, "data-testid").toLowerCase();
+      if (role === "tab" || testId.includes("-tab") || testId.endsWith("tab")) return false;
+      const hasIdentity = Boolean(
+        conversationIdFromElement(element)
+        || conversationIdFromUrl(metadataHrefFromElement(element)));
+      if (hasIdentity) return true;
+      const semantic = [
+        attributeValue(element, "aria-label"),
+        attributeValue(element, "data-testid"),
+        attributeValue(element, "class"),
+        attributeValue(element, "data-testid")
+      ].join(" ");
+      return /(?:chat|conversation|thread|会話|チャット)/i.test(semantic);
+    });
+  }
+
+  function projectPageListCandidates(mainRegion) {
+    if (!mainRegion) return [];
+    return uniqueElements(projectChatListSelectors, mainRegion)
+      .filter((element) => isVisible(element));
+  }
+
+  function projectPageChatTabFound(mainRegion) {
+    if (!mainRegion) return false;
+    return uniqueElements(projectChatTabSelectors, mainRegion)
+      .some((element) => isVisible(element));
+  }
+
+  function projectPageStructureFor(
+    root = globalThis.document,
+    projectId = null,
+    url = globalThis.location?.href,
+    sidebarOverride = null) {
+    const normalizedProjectId = metadataIdentifier(projectId);
+    const baseUrl = documentHref(root, url);
+    const sidebarRoot = sidebarOverride || findSidebarRoot(root);
+    const sidebar = sidebarRoot && sidebarRoot !== root ? sidebarRoot : null;
+    const mainInfo = projectPageMainRegionInfo(root, sidebar, normalizedProjectId, baseUrl);
+    const mainRegion = mainInfo.region;
+    const allCandidates = projectPageConversationElements(root)
+      .filter((element) => isVisible(element));
+    const mainCandidates = mainRegion
+      ? allCandidates.filter((element) =>
+        isDescendantOf(element, mainRegion)
+        && (!sidebar || !isDescendantOf(element, sidebar)))
+      : [];
+    const sidebarCandidates = sidebar
+      ? allCandidates.filter((element) => isDescendantOf(element, sidebar))
+      : [];
+    const otherCandidates = allCandidates.filter((element) =>
+      !mainCandidates.includes(element) && !sidebarCandidates.includes(element));
+    const mainRows = projectPageChatRowCandidates(mainRegion);
+    const listCandidates = projectPageListCandidates(mainRegion);
+    const descendants = descendantElementsOf(mainRegion);
+    const hasProjectPage = isProjectRouteUrl(baseUrl)
+      && (!normalizedProjectId || projectIdFromUrl(baseUrl) === normalizedProjectId);
+    const metricCandidates = mainRegion
+      ? [
+        ...boundedAncestorElements(mainRegion, root),
+        mainRegion,
+        ...discoveredScrollContainerCandidates(mainRegion)
+      ]
+        .filter((candidate, index, all) => all.indexOf(candidate) === index)
+        .filter((candidate) => isVisible(candidate))
+      .filter((candidate) => !sidebar
+        || (!isDescendantOf(candidate, sidebar) && !isDescendantOf(sidebar, candidate)))
+        .map((candidate) => ({ candidate, metrics: scrollMetricsFor(candidate) }))
+        .filter((item) => item.metrics)
+      : [];
+    const scrollCandidateInfos = metricCandidates.map(({ candidate, metrics }) => {
+      // A row (or an element inside a row) is not a scrollport. The old
+      // root-wide heuristic treated every element with numeric scroll metrics
+      // as a possible container, which made tiny row/header boxes win over
+      // the actual Project Chat list.
+      const containsRows = mainRows.some((row) =>
+        candidate !== row
+        && !isDescendantOf(candidate, row)
+        && isDescendantOf(row, candidate));
+      const rowCount = mainRows.filter((row) =>
+        candidate !== row
+        && !isDescendantOf(candidate, row)
+        && isDescendantOf(row, candidate)).length;
+      const containsMetadata = mainCandidates.some((element) =>
+        candidate === element || isDescendantOf(element, candidate));
+      const containsList = listCandidates.some((list) =>
+        candidate === list || isDescendantOf(list, candidate));
+      const distances = [
+        ...mainRows.map((row) => ancestorDistance(row, candidate)),
+        ...listCandidates.map((list) => ancestorDistance(list, candidate))
+      ].filter(Number.isFinite);
+      const semantic = [
+        attributeValue(candidate, "data-testid"),
+        attributeValue(candidate, "aria-label"),
+        attributeValue(candidate, "class"),
+        attributeValue(candidate, "role")
+      ].join(" ").toLowerCase();
+      const markedAsList = /(?:chat|conversation|thread|list|scroll|overflow|会話|チャット)/i.test(semantic);
+      const isMainRegion = candidate === mainRegion;
+      const tooSmallToBeList = !isMainRegion
+        && !containsList
+        && rowCount <= 1
+        && metrics.clientHeight > 0
+        && (metrics.clientHeight <= 64 || metrics.scrollHeight <= 96);
+      return {
+        candidate,
+        metrics,
+        containsRows,
+        rowCount,
+        containsMetadata,
+        containsList,
+        distanceFromChatList: distances.length > 0 ? Math.min(...distances) : null,
+        isMainRegion,
+        markedAsList,
+        tooSmallToBeList,
+        selected: false
+      };
+    });
+    const rowBearingScrollCandidates = scrollCandidateInfos.filter((item) => item.containsRows);
+    const listBearingScrollCandidates = scrollCandidateInfos.filter((item) => item.containsList);
+    const relevantScrollCandidates = rowBearingScrollCandidates.length > 0
+      ? rowBearingScrollCandidates
+      : listBearingScrollCandidates;
+    const scrollableRelevantCandidates = relevantScrollCandidates
+      .filter((item) => item.metrics.canScroll && !item.tooSmallToBeList)
+      .sort((left, right) => {
+        if (left.rowCount !== right.rowCount) return right.rowCount - left.rowCount;
+        if (left.containsList !== right.containsList) return left.containsList ? -1 : 1;
+        if (left.markedAsList !== right.markedAsList) return left.markedAsList ? -1 : 1;
+        const leftDistance = left.distanceFromChatList ?? Number.POSITIVE_INFINITY;
+        const rightDistance = right.distanceFromChatList ?? Number.POSITIVE_INFINITY;
+        if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+        if (left.isMainRegion !== right.isMainRegion) return left.isMainRegion ? -1 : 1;
+        return right.metrics.clientHeight - left.metrics.clientHeight;
+      });
+    const selectedScroll = scrollableRelevantCandidates[0] || null;
+    if (selectedScroll) selectedScroll.selected = true;
+    const currentProjectId = normalizedProjectId || projectIdFromUrl(baseUrl);
+    const sourceFor = (element) => {
+      if (mainRegion && isDescendantOf(element, mainRegion)
+        && (!sidebar || !isDescendantOf(element, sidebar))) return "main";
+      if (sidebar && isDescendantOf(element, sidebar)) return "sidebar";
+      return "other";
+    };
+    const projectChatCandidateInfoFor = (element) => {
+      const href = projectChatHrefFromElement(element, baseUrl, mainRegion);
+      const conversationId = conversationIdFromElement(element)
+        || conversationIdFromUrl(href);
+      const explicitProjectId = projectIdFromUrl(href);
+      return {
+        element,
+        href,
+        conversationId,
+        explicitProjectId,
+        sourceRegion: sourceFor(element)
+      };
+    };
+    const candidateElements = [...new Set([...allCandidates, ...mainRows])];
+    const candidateInfos = candidateElements
+      .map(projectChatCandidateInfoFor)
+      .filter((item) => item.conversationId);
+    const countBySource = candidateInfos.reduce((counts, item) => {
+      counts[item.sourceRegion] = (counts[item.sourceRegion] || 0) + 1;
+      return counts;
+    }, { main: 0, sidebar: 0, other: 0 });
+    const countElements = (selector) => uniqueElements([selector], mainRegion).length;
+    const dataAttributeCandidateCount = mainCandidates.filter((element) =>
+      projectChatIdentityAttributes.some((attribute) => hasAttribute(element, attribute))).length;
+    return {
+      sidebar,
+      mainRegion,
+      mainFound: mainInfo.mainFound,
+      mainRegionFound: Boolean(mainRegion),
+      mainDescendantCount: descendants.length,
+      mainCandidates,
+      sidebarCandidates,
+      otherCandidates,
+      mainRows,
+      listCandidates,
+      chatTabFound: projectPageChatTabFound(mainRegion),
+      chatListFound: Boolean(mainRegion && (hasProjectPage || listCandidates.length > 0 || mainRows.length > 0)),
+      metricCandidates,
+      scrollCandidateInfos,
+      scrollCandidateCount: scrollCandidateInfos.length,
+      scrollableCandidateCount: scrollableRelevantCandidates.length,
+      selectedScrollCandidate: selectedScroll?.candidate || null,
+      selectedScrollInfo: selectedScroll,
+      currentProjectId,
+      candidateInfos,
+      candidateCountBySource: countBySource,
+      mainAnchorCount: countElements("a[href]"),
+      mainButtonCount: countElements("button"),
+      mainRoleButtonCount: countElements('[role="button"]'),
+      mainRoleLinkCount: countElements('[role="link"]'),
+      mainHrefElementCount: countElements("[href]"),
+      mainDataAttributeCandidateCount: dataAttributeCandidateCount
+    };
   }
 
   function documentReadyStateFor(root) {
@@ -3022,18 +3594,6 @@
     }
   }
 
-  function projectPageRelevantRegionElements(root, sidebar) {
-    const hasSidebar = Boolean(sidebar && sidebar !== root);
-    return uniqueElements([
-      "main",
-      '[role="main"]',
-      '[data-project-id]',
-      '[data-project-page]'
-    ], root)
-      .filter((element) => isVisible(element))
-      .filter((element) => !hasSidebar || !isDescendantOf(element, sidebar));
-  }
-
   function projectPageHydrationState(root, projectId, sidebarOverride = null) {
     const currentUrl = documentHref(root);
     const normalizedProjectId = metadataIdentifier(projectId);
@@ -3041,24 +3601,29 @@
     const projectPageReady = isProjectHomeUrl(currentUrl)
       && currentProjectId === normalizedProjectId;
     const sidebar = sidebarOverride || findSidebarRoot(root);
-    const candidates = projectPageConversationElements(root);
-    const relevantRegions = projectPageRelevantRegionElements(root, sidebar);
-    const hasSidebar = Boolean(sidebar && sidebar !== root);
-    const pageCandidates = candidates.filter((element) =>
-      !hasSidebar || !isDescendantOf(element, sidebar));
-    const containers = findProjectPageScrollContainers(root, sidebar, normalizedProjectId);
+    const structure = projectPageStructureFor(root, normalizedProjectId, currentUrl, sidebar);
     return {
       project_page_ready: projectPageReady,
       document_ready_state: documentReadyStateFor(root),
       sidebar_root_present: Boolean(sidebar && sidebar !== root),
       sidebar_scroll_container_present: Boolean(findSidebarScrollContainer(root, sidebar)),
-      candidate_chat_link_count: pageCandidates.filter((element) =>
-        Boolean(conversationIdFromElement(element)
-          || conversationIdFromUrl(metadataHrefFromElement(element, currentUrl)))).length,
-      chat_scroll_container_count: containers.length,
-      relevant_region_present: relevantRegions.length > 0
-        || containers.length > 0
-        || pageCandidates.length > 0
+      candidate_chat_link_count: structure.candidateCountBySource.main,
+      chat_scroll_container_count: structure.selectedScrollCandidate ? 1 : 0,
+      relevant_region_present: structure.mainRegionFound || structure.chatListFound,
+      main_found: structure.mainFound,
+      chat_tab_found: structure.chatTabFound,
+      chat_list_found: structure.chatListFound,
+      chat_list_candidate_count: structure.listCandidates.length,
+      chat_row_candidate_count: structure.mainRows.length,
+      candidate_from_main_count: structure.candidateCountBySource.main,
+      candidate_from_sidebar_count: structure.candidateCountBySource.sidebar,
+      candidate_from_other_count: structure.candidateCountBySource.other,
+      selected_scroll_container_found: Boolean(structure.selectedScrollCandidate),
+      selected_scroll_client_height: structure.selectedScrollInfo?.metrics.clientHeight,
+      selected_scroll_height: structure.selectedScrollInfo?.metrics.scrollHeight,
+      selected_scroll_distance_from_chat_list: structure.selectedScrollInfo?.distanceFromChatList,
+      scroll_candidate_count: structure.scrollCandidateCount,
+      scrollable_chat_candidate_count: structure.scrollableCandidateCount
     };
   }
 
@@ -3229,11 +3794,12 @@
     if (!normalizedProjectId) return { projects: [], conversations: [] };
 
     const sidebar = findSidebarRoot(root);
-    const projectUrl = isProjectHomeUrl(url)
-      ? chatGptMetadataUrl(url, url)
-      : projectUrlFromConversationUrl(url, normalizedProjectId)
+    const baseUrl = documentHref(root, url);
+    const projectUrl = isProjectHomeUrl(baseUrl)
+      ? chatGptMetadataUrl(baseUrl, baseUrl)
+      : projectUrlFromConversationUrl(baseUrl, normalizedProjectId)
         || `https://chatgpt.com/g/${encodeURIComponent(normalizedProjectId)}/project`;
-    const projectTitle = projectTitleFromPage(root, normalizedProjectId, url);
+    const projectTitle = projectTitleFromPage(root, normalizedProjectId, baseUrl);
     const projects = [{
       project_id: normalizedProjectId,
       title: projectTitle,
@@ -3241,44 +3807,101 @@
     }];
     const conversations = [];
     const conversationById = new Map();
-    const candidateElements = projectPageConversationElements(root);
-    const conversationCandidates = candidateElements.filter((element) =>
-      Boolean(conversationIdFromElement(element)
-        || conversationIdFromUrl(metadataHrefFromElement(element, url))));
+    const structure = projectPageStructureFor(root, normalizedProjectId, baseUrl, sidebar);
+    const candidateElements = structure.candidateInfos;
     const collectionTelemetry = {
-      candidate_chat_link_count: conversationCandidates.length,
+      candidate_chat_link_count: candidateElements.length,
+      candidate_chat_count: candidateElements.length,
+      candidate_from_main_count: structure.candidateCountBySource.main,
+      candidate_from_sidebar_count: structure.candidateCountBySource.sidebar,
+      candidate_from_other_count: structure.candidateCountBySource.other,
+      matching_project_chat_count: 0,
       matching_project_chat_link_count: 0,
       rejected_projectless_chat_count: 0,
-      rejected_other_project_chat_count: 0
+      rejected_other_project_chat_count: 0,
+      main_found: structure.mainFound,
+      main_region_found: structure.mainRegionFound,
+      main_descendant_count: structure.mainDescendantCount,
+      chat_tab_found: structure.chatTabFound,
+      chat_list_found: structure.chatListFound,
+      chat_list_candidate_count: structure.listCandidates.length,
+      chat_row_candidate_count: structure.mainRows.length,
+      anchor_count: structure.mainAnchorCount,
+      button_count: structure.mainButtonCount,
+      role_button_count: structure.mainRoleButtonCount,
+      role_link_count: structure.mainRoleLinkCount,
+      href_element_count: structure.mainHrefElementCount,
+      data_attribute_candidate_count: structure.mainDataAttributeCandidateCount,
+      candidate_scroll_container_count: structure.scrollCandidateCount,
+      scrollable_chat_candidate_count: structure.scrollableCandidateCount,
+      selected_scroll_container_found: Boolean(structure.selectedScrollCandidate),
+      selected_scroll_client_height: structure.selectedScrollInfo?.metrics.clientHeight,
+      selected_scroll_height: structure.selectedScrollInfo?.metrics.scrollHeight,
+      selected_scroll_distance_from_chat_list: structure.selectedScrollInfo?.distanceFromChatList
     };
 
-    for (const element of candidateElements) {
-      const href = metadataHrefFromElement(element, url);
-      const conversationId = conversationIdFromElement(element) || conversationIdFromUrl(href);
-      if (!conversationId) continue;
-      const isInSidebar = sidebar !== root && isDescendantOf(element, sidebar);
-      const explicitProjectId = projectIdFromUrl(href);
-      if (explicitProjectId && explicitProjectId !== normalizedProjectId) {
+    const projectIdFromAncestorChain = (element, stopAt) => {
+      let current = element;
+      for (let depth = 0; current && depth < 32; depth += 1, current = current.parentElement) {
+        const projectIdFromMetadata = projectIdFromElement(current, baseUrl);
+        if (projectIdFromMetadata) return projectIdFromMetadata;
+        if (stopAt && current === stopAt) break;
+      }
+      return null;
+    };
+
+    for (const candidate of candidateElements) {
+      const { element, href, conversationId, explicitProjectId, sourceRegion } = candidate;
+      if (nonProjectGptIdFromUrl(href)) {
         collectionTelemetry.rejected_other_project_chat_count += 1;
         continue;
       }
-      // A /c/<id> link inside the sidebar is not enough to prove that it
-      // belongs to the opened Project. Accept it only when the expanded row,
-      // relation metadata, or current Project route provides that scope.
-      if (isInSidebar && !explicitProjectId
-        && !sidebarConversationBelongsToProject(
+      const isInSidebar = sourceRegion === "sidebar";
+      const relationProjectId = sourceRegion === "main" || sourceRegion === "sidebar"
+        ? projectIdFromAncestorChain(
+          element,
+          sourceRegion === "main" ? structure.mainRegion : sidebar)
+        : null;
+      const scopedSidebarMatch = isInSidebar
+        && !explicitProjectId
+        && sidebarConversationBelongsToProject(
           element,
           sidebar,
           normalizedProjectId,
           projectTitle,
-          projectRowsInSidebar(sidebar, url),
-          url)) {
+          projectRowsInSidebar(sidebar, baseUrl),
+          baseUrl);
+      const matchedProjectId = explicitProjectId || relationProjectId
+        || (scopedSidebarMatch ? normalizedProjectId : null);
+      if (matchedProjectId && matchedProjectId !== normalizedProjectId) {
+        collectionTelemetry.rejected_other_project_chat_count += 1;
+        continue;
+      }
+      // A Project page can render a row as a button/div with only a stable
+      // conversation id and no URL. Once the central Project region has been
+      // selected and the current Project route is verified, that explicit
+      // conversation metadata is scoped by the page itself. Do not apply this
+      // fallback to href-bearing /c links: without a Project relation those
+      // remain Projectless, even when they happen to be rendered in <main>.
+      const currentProjectMainMetadataMatch = sourceRegion === "main"
+        && !href
+        && Boolean(conversationIdFromElement(element))
+        && isProjectHomeUrl(baseUrl)
+        && projectIdFromUrl(baseUrl) === normalizedProjectId;
+      const effectiveMatchedProjectId = matchedProjectId || (
+        currentProjectMainMetadataMatch ? normalizedProjectId : null);
+      // A plain /c/<id> is Projectless unless its containing Project row/list
+      // supplies an explicit Project identity. The Project route alone is
+      // deliberately not used as ownership evidence.
+      if (effectiveMatchedProjectId !== normalizedProjectId) {
         collectionTelemetry.rejected_projectless_chat_count += 1;
         continue;
       }
+      const conversationUrl = explicitProjectId === normalizedProjectId
+        ? href
+        : `https://chatgpt.com/g/${encodeURIComponent(normalizedProjectId)}/c/${encodeURIComponent(conversationId)}`;
       collectionTelemetry.matching_project_chat_link_count += 1;
-      const conversationUrl = href
-        || `https://chatgpt.com/g/${encodeURIComponent(normalizedProjectId)}/c/${encodeURIComponent(conversationId)}`;
+      collectionTelemetry.matching_project_chat_count += 1;
       const entry = {
         conversation_id: conversationId,
         title: conversationTitleFromAnchor(element, conversationId),
@@ -3295,75 +3918,23 @@
         if (entry.url && !existing.url) existing.url = entry.url;
       }
     }
-    return { projects, conversations, ...collectionTelemetry };
+    return {
+      projects,
+      conversations,
+      ...collectionTelemetry,
+      selected_scroll_container_found: Boolean(structure.selectedScrollCandidate),
+      chat_scroll_container_count: structure.selectedScrollCandidate ? 1 : 0,
+      relevant_region_present: structure.mainRegionFound || structure.chatListFound
+    };
   }
 
   function findProjectPageScrollContainers(root, sidebar, projectId = null) {
-    const normalizedProjectId = metadataIdentifier(projectId);
-    const sidebarContainer = findSidebarScrollContainer(root, sidebar);
-    const candidates = [
-      sidebarContainer,
-      ...uniqueElements(sidebarScrollContainerSelectors, root),
-      ...discoveredScrollContainerCandidates(root)
-    ]
-      .filter(Boolean)
-      .filter((candidate, index, all) => all.indexOf(candidate) === index)
-      .map((candidate) => ({ candidate, metrics: scrollMetricsFor(candidate) }))
-      .filter((item) => item.metrics)
-      .map((item) => item.candidate);
-    const conversationElements = projectPageConversationElements(root);
-    const hasSidebar = Boolean(sidebar && sidebar !== root);
-    const projectRows = hasSidebar ? projectRowsInSidebar(sidebar, documentHref(root)) : [];
-    const projectTitle = normalizedProjectId
-      ? projectTitleFromPage(root, normalizedProjectId, documentHref(root))
-      : "";
-    const sidebarConversationElements = hasSidebar && normalizedProjectId
-      ? conversationElements.filter((element) => {
-        if (!isDescendantOf(element, sidebar)) return false;
-        const href = metadataHrefFromElement(element, documentHref(root));
-        const explicitProjectId = projectIdFromUrl(href);
-        if (explicitProjectId) return explicitProjectId === normalizedProjectId;
-        return sidebarConversationBelongsToProject(
-          element,
-          sidebar,
-          normalizedProjectId,
-          projectTitle,
-          projectRows,
-          documentHref(root));
-      })
-      : [];
-    const pageConversationElements = conversationElements.filter((element) =>
-      !hasSidebar || !isDescendantOf(element, sidebar));
-    const containsConversation = (candidate, elements) => elements.some((element) =>
-      candidate === element || isDescendantOf(element, candidate));
-    const pageCandidates = candidates.filter((candidate) =>
-      (!hasSidebar || (candidate !== sidebar && !isDescendantOf(candidate, sidebar)))
-      && containsConversation(candidate, pageConversationElements));
-    const sidebarCandidates = candidates.filter((candidate) =>
-      hasSidebar
-      && (candidate === sidebar || isDescendantOf(candidate, sidebar))
-      && containsConversation(candidate, sidebarConversationElements));
-    // A Project page may expose the current Project's chats in both the main
-    // list and an expanded Project branch in the global Sidebar. The Sidebar
-    // candidates have already been scoped by the current Project ID/owner;
-    // retain both sets so a second virtualized list cannot hide chats from the
-    // final ID-based merge.
-    const relevant = [...pageCandidates, ...sidebarCandidates]
-      .filter((candidate, index, all) => all.indexOf(candidate) === index);
-    const scrollableRelevant = relevant.filter((candidate) => scrollMetricsFor(candidate)?.canScroll);
-    // A Project page can have two independent virtualized lists: the global
-    // ChatGPT sidebar and the Project's main chat list. Scanning only the
-    // sidebar made the first visible chat look like the complete Project.
-    // Visit every relevant movable container, preserving DOM order and
-    // retaining the deepest candidate when a clipping shell contains the
-    // actual scrollport. The old first-ancestor rule could discard the
-    // Project page's real virtualized list.
-    if (scrollableRelevant.length > 0) {
-      return scrollableRelevant.filter((candidate, index, all) =>
-        !all.some((other, otherIndex) => otherIndex !== index && isDescendantOf(other, candidate)));
-    }
-    if (sidebarContainer && scrollMetricsFor(sidebarContainer)) return [sidebarContainer];
-    return relevant;
+    const structure = projectPageStructureFor(
+      root,
+      metadataIdentifier(projectId),
+      documentHref(root),
+      sidebar);
+    return structure.selectedScrollCandidate ? [structure.selectedScrollCandidate] : [];
   }
 
   async function collectChatGptProjectContextAsync(
@@ -3401,20 +3972,80 @@
       mutation_quiet_ms: hydration.mutation_quiet_ms,
       document_ready_state: hydration.document_ready_state,
       relevant_region_present: hydration.relevant_region_present,
-      chat_scroll_container_count: containers.length
+      chat_scroll_container_count: containers.length,
+      main_found: hydration.main_found,
+      main_descendant_count: hydration.main_descendant_count,
+      chat_tab_found: hydration.chat_tab_found,
+      chat_list_found: hydration.chat_list_found,
+      chat_list_candidate_count: hydration.chat_list_candidate_count,
+      chat_row_candidate_count: hydration.chat_row_candidate_count,
+      candidate_from_main_count: hydration.candidate_from_main_count,
+      candidate_from_sidebar_count: hydration.candidate_from_sidebar_count,
+      candidate_from_other_count: hydration.candidate_from_other_count,
+      selected_scroll_container_found: hydration.selected_scroll_container_found,
+      selected_scroll_client_height: hydration.selected_scroll_client_height,
+      selected_scroll_height: hydration.selected_scroll_height,
+      selected_scroll_distance_from_chat_list: hydration.selected_scroll_distance_from_chat_list,
+      scroll_candidate_count: hydration.scroll_candidate_count,
+      scrollable_chat_candidate_count: hydration.scrollable_chat_candidate_count
     };
     const hydrationSnapshot = collectProjectContextEntries(root, url, normalizedProjectId);
     const hydrationStructure = {
       ...hydrationTelemetry,
       candidate_chat_link_count: hydrationSnapshot.candidate_chat_link_count,
+      candidate_chat_count: hydrationSnapshot.candidate_chat_count,
+      candidate_from_main_count: hydrationSnapshot.candidate_from_main_count,
+      candidate_from_sidebar_count: hydrationSnapshot.candidate_from_sidebar_count,
+      candidate_from_other_count: hydrationSnapshot.candidate_from_other_count,
       matching_project_chat_link_count: hydrationSnapshot.matching_project_chat_link_count,
+      matching_project_chat_count: hydrationSnapshot.matching_project_chat_count,
       rejected_projectless_chat_count: hydrationSnapshot.rejected_projectless_chat_count,
       rejected_other_project_chat_count: hydrationSnapshot.rejected_other_project_chat_count,
+      main_found: hydrationSnapshot.main_found,
+      main_descendant_count: hydrationSnapshot.main_descendant_count,
+      chat_tab_found: hydrationSnapshot.chat_tab_found,
+      chat_list_found: hydrationSnapshot.chat_list_found,
+      chat_list_candidate_count: hydrationSnapshot.chat_list_candidate_count,
+      chat_row_candidate_count: hydrationSnapshot.chat_row_candidate_count,
+      anchor_count: hydrationSnapshot.anchor_count,
+      button_count: hydrationSnapshot.button_count,
+      role_button_count: hydrationSnapshot.role_button_count,
+      role_link_count: hydrationSnapshot.role_link_count,
+      href_element_count: hydrationSnapshot.href_element_count,
+      data_attribute_candidate_count: hydrationSnapshot.data_attribute_candidate_count,
+      candidate_scroll_container_count: hydrationSnapshot.candidate_scroll_container_count,
+      scrollable_chat_candidate_count: hydrationSnapshot.scrollable_chat_candidate_count,
+      selected_scroll_container_found: hydrationSnapshot.selected_scroll_container_found,
+      selected_scroll_client_height: hydrationSnapshot.selected_scroll_client_height,
+      selected_scroll_height: hydrationSnapshot.selected_scroll_height,
+      selected_scroll_distance_from_chat_list: hydrationSnapshot.selected_scroll_distance_from_chat_list,
       current_project_id: normalizedProjectId,
       project_page_ready: projectPageReady,
       stage: "collector_project_chat_dom_structure"
     };
     emitTelemetry(hydrationStructure);
+    emitTelemetry({
+      current_project_id: normalizedProjectId,
+      project_page_ready: projectPageReady,
+      candidate_chat_count: hydrationSnapshot.candidate_chat_count,
+      candidate_from_main_count: hydrationSnapshot.candidate_from_main_count,
+      candidate_from_sidebar_count: hydrationSnapshot.candidate_from_sidebar_count,
+      candidate_from_other_count: hydrationSnapshot.candidate_from_other_count,
+      matching_project_chat_count: hydrationSnapshot.matching_project_chat_count,
+      rejected_other_project_chat_count: hydrationSnapshot.rejected_other_project_chat_count,
+      rejected_projectless_chat_count: hydrationSnapshot.rejected_projectless_chat_count,
+      stage: "collector_project_chat_source_classification"
+    });
+    emitTelemetry({
+      current_project_id: normalizedProjectId,
+      candidate_scroll_container_count: hydrationSnapshot.candidate_scroll_container_count,
+      scrollable_chat_candidate_count: hydrationSnapshot.scrollable_chat_candidate_count,
+      selected_scroll_container_found: hydrationSnapshot.selected_scroll_container_found,
+      selected_scroll_client_height: hydrationSnapshot.selected_scroll_client_height,
+      selected_scroll_height: hydrationSnapshot.selected_scroll_height,
+      selected_scroll_distance_from_chat_list: hydrationSnapshot.selected_scroll_distance_from_chat_list,
+      stage: "collector_project_chat_scroll_candidates"
+    });
     if (!hydration.project_chat_hydration_completed) {
       emitTelemetry({
         ...hydrationStructure,
@@ -3443,9 +4074,27 @@
         project_chat_collection_complete: false,
         ...hydrationTelemetry,
         candidate_chat_link_count: hydrationSnapshot.candidate_chat_link_count || 0,
+        candidate_chat_count: hydrationSnapshot.candidate_chat_count || 0,
+        candidate_from_main_count: hydrationSnapshot.candidate_from_main_count || 0,
+        candidate_from_sidebar_count: hydrationSnapshot.candidate_from_sidebar_count || 0,
+        candidate_from_other_count: hydrationSnapshot.candidate_from_other_count || 0,
         matching_project_chat_link_count: hydrationSnapshot.matching_project_chat_link_count || 0,
+        matching_project_chat_count: hydrationSnapshot.matching_project_chat_count || 0,
         rejected_projectless_chat_count: hydrationSnapshot.rejected_projectless_chat_count || 0,
         rejected_other_project_chat_count: hydrationSnapshot.rejected_other_project_chat_count || 0,
+        main_found: hydrationSnapshot.main_found === true,
+        main_region_found: hydrationSnapshot.main_region_found === true,
+        main_descendant_count: hydrationSnapshot.main_descendant_count || 0,
+        chat_tab_found: hydrationSnapshot.chat_tab_found === true,
+        chat_list_found: hydrationSnapshot.chat_list_found === true,
+        chat_list_candidate_count: hydrationSnapshot.chat_list_candidate_count || 0,
+        chat_row_candidate_count: hydrationSnapshot.chat_row_candidate_count || 0,
+        candidate_scroll_container_count: hydrationSnapshot.candidate_scroll_container_count || 0,
+        scrollable_chat_candidate_count: hydrationSnapshot.scrollable_chat_candidate_count || 0,
+        selected_scroll_container_found: hydrationSnapshot.selected_scroll_container_found === true,
+        selected_scroll_client_height: hydrationSnapshot.selected_scroll_client_height || 0,
+        selected_scroll_height: hydrationSnapshot.selected_scroll_height || 0,
+        selected_scroll_distance_from_chat_list: hydrationSnapshot.selected_scroll_distance_from_chat_list,
         project_chat_hydration_completed: false,
         project_chat_hydration_timeout: true
       };
@@ -3459,8 +4108,7 @@
     let scrollIteration = 0;
     let lastScrollMetrics = null;
     let duplicateChatCount = 0;
-    let chatContainerFound = containers.length > 0;
-    const hasSidebar = Boolean(sidebar && sidebar !== root);
+    let chatContainerFound = containers.length > 0 || hydrationSnapshot.chat_list_found === true;
     let scrollPositionChanged = false;
     let latestSnapshot = hydrationSnapshot;
     let lastScanTelemetry = "";
@@ -3505,7 +4153,7 @@
     if (initialSettleMs > 0) await waitForSidebarMutation(root, initialSettleMs);
     if (!collect()) sidebarScrollComplete = false;
     emitScanTelemetry(false, true);
-    for (const [containerIndex, container] of containers.entries()) {
+    for (const container of containers) {
       let activeContainer = container;
       const initialMetrics = scrollMetricsFor(activeContainer);
       const originalScrollTop = initialMetrics?.scrollTop ?? 0;
@@ -3522,12 +4170,11 @@
               root,
               findSidebarRoot(root),
               normalizedProjectId);
-            // React may replace a virtualized scrollport after each lazy-load.
-            // Keep the same logical list by identity first, then by its
-            // stable container position; never jump to container zero while
-            // scanning a later Project-page list.
+            // React may replace the selected virtualized scrollport after a
+            // lazy-load. Re-resolve the single central Project list only;
+            // never fall back to the global Sidebar or another page list.
             const refreshedContainer = refreshedContainers.find((candidate) => candidate === activeContainer)
-              || refreshedContainers[containerIndex]
+              || refreshedContainers[0]
               || null;
             if (refreshedContainer && refreshedContainer !== activeContainer) {
               const previousTop = scrollMetricsFor(activeContainer)?.scrollTop;
@@ -3608,26 +4255,43 @@
       sidebarScrollComplete = sidebarScrollComplete && containerComplete;
     }
 
-    const visibleProjectPageContainers = uniqueElements([
-      "main",
-      '[role="main"]',
-      '[data-testid*="project"]'
-    ], root)
-      .filter((element) => isVisible(element))
-      .filter((element) => !hasSidebar || !isDescendantOf(element, sidebar));
-    chatContainerFound = chatContainerFound || visibleProjectPageContainers.length > 0;
+    chatContainerFound = chatContainerFound || latestSnapshot.chat_list_found === true;
     const finalMetrics = lastScrollMetrics
-      || scrollMetricsFor(containers.at(-1))
-      || scrollMetricsFor(findSidebarScrollContainer(root, sidebar));
+      || scrollMetricsFor(containers.at(-1));
     const projectChatCollectionComplete = projectPageReady
       && chatContainerFound
       && sidebarScrollComplete;
-    const finalRelevantRegion = projectPageRelevantRegionElements(root, sidebar).length > 0
+    const finalRelevantRegion = latestSnapshot.main_region_found === true
+      || latestSnapshot.chat_list_found === true
       || containers.length > 0;
     emitScanTelemetry(
       projectChatCollectionComplete
         || containers.every((container) => scrollMetricsFor(container)?.atBottom !== false),
       true);
+    if (projectChatCollectionComplete) {
+      emitTelemetry({
+        current_project_id: normalizedProjectId,
+        project_page_ready: projectPageReady,
+        current_project_id_verified: currentProjectId === normalizedProjectId,
+        chat_container_found: chatContainerFound,
+        candidate_chat_count: latestSnapshot.candidate_chat_count || 0,
+        candidate_from_main_count: latestSnapshot.candidate_from_main_count || 0,
+        candidate_from_sidebar_count: latestSnapshot.candidate_from_sidebar_count || 0,
+        matching_project_chat_count: latestSnapshot.matching_project_chat_count || 0,
+        rejected_other_project_chat_count: latestSnapshot.rejected_other_project_chat_count || 0,
+        rejected_projectless_chat_count: latestSnapshot.rejected_projectless_chat_count || 0,
+        selected_scroll_container_found: Boolean(latestSnapshot.selected_scroll_container_found),
+        scroll_iteration: scrollIteration,
+        scroll_top: finalMetrics ? Math.round(finalMetrics.scrollTop) : 0,
+        scroll_height: finalMetrics ? Math.round(finalMetrics.scrollHeight) : 0,
+        scroll_complete: true,
+        discovered_chat_count: merged.conversations.length,
+        deduped_chat_count: merged.conversations.length,
+        project_chat_collection_complete: true,
+        status: "completed",
+        stage: "collector_project_chat_collection_complete"
+      });
+    }
 
     return {
       projects: merged.projects,
@@ -3648,11 +4312,35 @@
       project_chat_hydration_completed: true,
       project_chat_hydration_timeout: false,
       candidate_chat_link_count: latestSnapshot.candidate_chat_link_count || 0,
+      candidate_chat_count: latestSnapshot.candidate_chat_count || 0,
+      candidate_from_main_count: latestSnapshot.candidate_from_main_count || 0,
+      candidate_from_sidebar_count: latestSnapshot.candidate_from_sidebar_count || 0,
+      candidate_from_other_count: latestSnapshot.candidate_from_other_count || 0,
       matching_project_chat_link_count: latestSnapshot.matching_project_chat_link_count || 0,
+      matching_project_chat_count: latestSnapshot.matching_project_chat_count || 0,
       rejected_projectless_chat_count: latestSnapshot.rejected_projectless_chat_count || 0,
       rejected_other_project_chat_count: latestSnapshot.rejected_other_project_chat_count || 0,
       chat_scroll_container_count: containers.length,
       relevant_region_present: finalRelevantRegion,
+      main_found: latestSnapshot.main_found === true,
+      main_region_found: latestSnapshot.main_region_found === true,
+      main_descendant_count: latestSnapshot.main_descendant_count || 0,
+      chat_tab_found: latestSnapshot.chat_tab_found === true,
+      chat_list_found: latestSnapshot.chat_list_found === true,
+      chat_list_candidate_count: latestSnapshot.chat_list_candidate_count || 0,
+      chat_row_candidate_count: latestSnapshot.chat_row_candidate_count || 0,
+      anchor_count: latestSnapshot.anchor_count || 0,
+      button_count: latestSnapshot.button_count || 0,
+      role_button_count: latestSnapshot.role_button_count || 0,
+      role_link_count: latestSnapshot.role_link_count || 0,
+      href_element_count: latestSnapshot.href_element_count || 0,
+      data_attribute_candidate_count: latestSnapshot.data_attribute_candidate_count || 0,
+      candidate_scroll_container_count: latestSnapshot.candidate_scroll_container_count || 0,
+      scrollable_chat_candidate_count: latestSnapshot.scrollable_chat_candidate_count || 0,
+      selected_scroll_container_found: latestSnapshot.selected_scroll_container_found === true,
+      selected_scroll_client_height: latestSnapshot.selected_scroll_client_height || 0,
+      selected_scroll_height: latestSnapshot.selected_scroll_height || 0,
+      selected_scroll_distance_from_chat_list: latestSnapshot.selected_scroll_distance_from_chat_list,
       document_ready_state: documentReadyStateFor(root),
       mutation_count: hydration.mutation_count,
       mutation_quiet_ms: hydration.mutation_quiet_ms,

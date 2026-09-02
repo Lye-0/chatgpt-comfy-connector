@@ -89,9 +89,52 @@ class FakeMetadataNode {
       return descendants.filter((element) => element.getAttribute("data-marquee-text") !== null);
     }
     if (selector === "a[href]") return descendants.filter((element) => element.tagName === "A" && element.getAttribute("href"));
+    if (selector === "[href]") return descendants.filter((element) => element.getAttribute("href") !== null);
     if (selector === "button") return descendants.filter((element) => element.tagName === "BUTTON");
+    if (selector.includes('role="link"')) return descendants.filter((element) => element.getAttribute("role") === "link");
     if (selector.includes('role="button"')) return descendants.filter((element) => element.getAttribute("role") === "button");
+    if (selector.includes('role="listitem"')) return descendants.filter((element) => element.getAttribute("role") === "listitem");
     if (selector.includes("data-sidebar-item")) return descendants.filter((element) => element.getAttribute("data-sidebar-item") === "true");
+    if (selector.includes("data-conversation-id") || selector.includes('data-conversation]') || selector.includes('data-conversation-key')) {
+      return descendants.filter((element) => element.getAttribute("data-conversation-id") !== null
+        || element.getAttribute("data-conversation-id-value") !== null
+        || element.getAttribute("data-conversation") !== null
+        || element.getAttribute("data-conversation-key") !== null);
+    }
+    if (selector.includes("data-thread-id") || selector.includes('data-thread]') || selector.includes('data-thread-key')) {
+      return descendants.filter((element) => element.getAttribute("data-thread-id") !== null
+        || element.getAttribute("data-thread") !== null
+        || element.getAttribute("data-thread-key") !== null);
+    }
+    if (selector.includes("data-chat-id") || selector.includes('data-chat]') || selector.includes('data-chat-key')) {
+      return descendants.filter((element) => element.getAttribute("data-chat-id") !== null
+        || element.getAttribute("data-chat-id-value") !== null
+        || element.getAttribute("data-chat") !== null
+        || element.getAttribute("data-chat-key") !== null);
+    }
+    if (selector.includes('data-testid*="conversation"') || selector.includes('data-testid*="chat"')
+      || selector.includes('data-testid*="thread"')) {
+      return descendants.filter((element) => /(?:conversation|chat|thread)/i.test(element.getAttribute("data-testid") || ""));
+    }
+    if (selector.includes('data-item-type="conversation"') || selector.includes('data-item-type="chat"')
+      || selector.includes('data-item-type="thread"')) {
+      return descendants.filter((element) => /^(?:conversation|chat|thread)$/i.test(element.getAttribute("data-item-type") || ""));
+    }
+    if (selector.includes('data-entity-type="conversation"') || selector.includes('data-entity-type="chat"')
+      || selector.includes('data-entity-type="thread"')) {
+      return descendants.filter((element) => /^(?:conversation|chat|thread)$/i.test(element.getAttribute("data-entity-type") || ""));
+    }
+    if (selector === "[data-id]") return descendants.filter((element) => element.getAttribute("data-id") !== null);
+    if (selector === "[data-item-id]") return descendants.filter((element) => element.getAttribute("data-item-id") !== null);
+    if (selector === "[data-entity-id]") return descendants.filter((element) => element.getAttribute("data-entity-id") !== null);
+    if (selector === "[data-uuid]") return descendants.filter((element) => element.getAttribute("data-uuid") !== null);
+    if (selector.includes("data-project-chat-list") || selector.includes("data-chat-list")) {
+      return descendants.filter((element) => element.getAttribute("data-project-chat-list") !== null
+        || element.getAttribute("data-chat-list") !== null);
+    }
+    if (selector === "ul" || selector === "ol") {
+      return descendants.filter((element) => element.tagName === "UL" || element.tagName === "OL");
+    }
     return [];
   }
 }
@@ -1583,7 +1626,7 @@ test("Project page collection scans conversation metadata outside the sidebar an
   const sidebar = new FakeMetadataNode(null, "NAV");
   const content = new FakeMetadataNode(null, "MAIN");
   const alphaChat = new FakeMetadataNode(null, "A", "", {
-    href: "/c/conversation-alpha"
+    href: "/g/g-p-alpha/c/conversation-alpha"
   });
   alphaChat.appendChild(new FakeMetadataNode(null, "SPAN", "Alpha chat", { "data-marquee-text": "true" }));
   const secondAlphaChat = new FakeMetadataNode(null, "A", "", {
@@ -1625,6 +1668,232 @@ test("Project page collection scans conversation metadata outside the sidebar an
   assert.equal(structure.rejected_other_project_chat_count, 1);
   assert.equal(structure.rejected_projectless_chat_count, 0);
   assert.equal(telemetry.some((event) => event.stage === "collector_project_chat_collection_failed"), false);
+});
+
+test("Project page collection prioritizes the central current-Project list over Sidebar noise", async () => {
+  const href = "https://chatgpt.com/g/g-p-central/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const sidebarOther = new FakeMetadataNode(null, "A", "Other Project chat", {
+    href: "/g/g-p-sidebar/c/sidebar-other"
+  });
+  const sidebarProjectless = new FakeMetadataNode(null, "A", "Projectless chat", {
+    href: "/c/sidebar-projectless"
+  });
+  sidebar.appendChild(sidebarOther);
+  sidebar.appendChild(sidebarProjectless);
+
+  const content = new FakeMetadataNode(null, "MAIN", "", { class: "project-chat-list scrollport" });
+  let contentScrollTop = 0;
+  const contentScrollWrites = [];
+  Object.defineProperty(content, "scrollTop", {
+    configurable: true,
+    get: () => contentScrollTop,
+    set: (value) => {
+      contentScrollTop = Number(value) || 0;
+      contentScrollWrites.push(contentScrollTop);
+    }
+  });
+  content.clientHeight = 120;
+  content.scrollHeight = 360;
+
+  const currentAnchor = new FakeMetadataNode(null, "A", "Same title", {
+    href: "/g/g-p-central/c/current-anchor"
+  });
+  const currentNestedRow = new FakeMetadataNode(null, "DIV", "", {
+    role: "button",
+    "data-conversation-id": "current-data",
+    "data-project-id": "g-p-central"
+  });
+  currentNestedRow.appendChild(new FakeMetadataNode(null, "SPAN", "Same title", {
+    "data-marquee-text": "true"
+  }));
+  const currentSecondAnchor = new FakeMetadataNode(null, "A", "Second current", {
+    href: "/g/g-p-central/c/current-second"
+  });
+  content.appendChild(currentAnchor);
+  content.appendChild(currentNestedRow);
+  content.appendChild(currentSecondAnchor);
+
+  // This element has scroll metrics but contains no Project Chat row. It is
+  // the kind of tiny header/control scrollport that the old root-wide scan
+  // could accidentally select.
+  const tinyUnrelatedScrollport = new FakeMetadataNode(null, "DIV", "", {
+    class: "header-scrollport"
+  });
+  tinyUnrelatedScrollport.scrollTop = 0;
+  tinyUnrelatedScrollport.clientHeight = 24;
+  tinyUnrelatedScrollport.scrollHeight = 48;
+  content.appendChild(tinyUnrelatedScrollport);
+
+  const document = new FakeProjectDocument(href, sidebar, content, "Central | ChatGPT");
+  for (const node of [
+    sidebar,
+    sidebarOther,
+    sidebarProjectless,
+    content,
+    currentAnchor,
+    currentNestedRow,
+    currentSecondAnchor,
+    tinyUnrelatedScrollport
+  ]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const telemetry = [];
+  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, "g-p-central", {
+    maxScrolls: 8,
+    timeoutMs: 5000,
+    onTelemetry: (event) => telemetry.push(event)
+  });
+
+  assert.deepEqual(
+    Array.from(snapshot.conversations, (conversation) => conversation.conversation_id).sort(),
+    ["current-anchor", "current-data", "current-second"].sort());
+  assert.equal(snapshot.candidate_chat_count, 5);
+  assert.equal(snapshot.candidate_from_main_count, 3);
+  assert.equal(snapshot.candidate_from_sidebar_count, 2);
+  assert.equal(snapshot.matching_project_chat_count, 3);
+  assert.equal(snapshot.rejected_other_project_chat_count, 1);
+  assert.equal(snapshot.rejected_projectless_chat_count, 1);
+  assert.equal(snapshot.selected_scroll_container_found, true);
+  assert.equal(snapshot.selected_scroll_client_height, 120);
+  assert.equal(snapshot.selected_scroll_height, 360);
+  assert.equal(snapshot.chat_scroll_container_count, 1);
+  assert.equal(snapshot.project_chat_collection_complete, true);
+  assert.equal(contentScrollTop, 0);
+  assert.ok(contentScrollWrites.some((value) => value > 0));
+  assert.equal(tinyUnrelatedScrollport.scrollTop, 0);
+
+  const source = telemetry.find((event) =>
+    event.stage === "collector_project_chat_source_classification");
+  assert.equal(source.candidate_from_main_count, 3);
+  assert.equal(source.candidate_from_sidebar_count, 2);
+  const scroll = telemetry.find((event) =>
+    event.stage === "collector_project_chat_scroll_candidates");
+  assert.equal(scroll.selected_scroll_client_height, 120);
+  assert.equal(scroll.selected_scroll_height, 360);
+  assert.equal(telemetry.some((event) =>
+    event.stage === "collector_project_chat_collection_complete"), true);
+});
+
+test("Project page collection rejects a plain Projectless main link while accepting data-backed rows", async () => {
+  const href = "https://chatgpt.com/g/g-p-data/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const content = new FakeMetadataNode(null, "MAIN");
+  const projectless = new FakeMetadataNode(null, "A", "Unscoped", {
+    href: "/c/unscoped-main"
+  });
+  const dataRow = new FakeMetadataNode(null, "DIV", "", {
+    "data-conversation-id": "data-backed",
+    "data-project-id": "g-p-data"
+  });
+  dataRow.appendChild(new FakeMetadataNode(null, "SPAN", "Data backed", {
+    "data-marquee-text": "true"
+  }));
+  content.appendChild(projectless);
+  content.appendChild(dataRow);
+  const document = new FakeProjectDocument(href, sidebar, content, "Data Project | ChatGPT");
+  for (const node of [sidebar, content, projectless, dataRow]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptProjectContextAsync(
+    document,
+    href,
+    "g-p-data",
+    { timeoutMs: 5000 });
+
+  assert.deepEqual(
+    Array.from(snapshot.conversations, (conversation) => conversation.conversation_id),
+    ["data-backed"]);
+  assert.equal(snapshot.rejected_projectless_chat_count, 1);
+  assert.equal(snapshot.matching_project_chat_count, 1);
+  assert.equal(snapshot.project_chat_collection_complete, true);
+});
+
+test("Project page collection finds a marked central list without a semantic main and supports nested data-backed rows", async () => {
+  const href = "https://chatgpt.com/g/g-p-marked/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const sidebarChat = new FakeMetadataNode(null, "A", "Sidebar chat", {
+    href: "/g/g-p-other/c/sidebar-chat"
+  });
+  sidebar.appendChild(sidebarChat);
+  const content = new FakeMetadataNode(null, "DIV", "", {
+    "data-project-chat-list": "true",
+    class: "project-chat-list scrollport"
+  });
+  content.scrollTop = 0;
+  content.clientHeight = 100;
+  content.scrollHeight = 220;
+  const dataButton = new FakeMetadataNode(null, "BUTTON", "Marked button", {
+    "data-conversation-id": "marked-button"
+  });
+  const nestedRow = new FakeMetadataNode(null, "DIV", "", {
+    "data-testid": "conversation-item"
+  });
+  nestedRow.appendChild(new FakeMetadataNode(null, "A", "Nested anchor", {
+    href: "/g/g-p-marked/c/nested-anchor"
+  }));
+  content.appendChild(dataButton);
+  content.appendChild(nestedRow);
+
+  const document = new FakeProjectDocument(href, sidebar, content, "Marked | ChatGPT");
+  // This fixture models a layout that has no <main>, while preserving the
+  // marked central Project list used to select the collection region.
+  document.querySelectorAll = (selector) => {
+    if (selector.startsWith("nav[")) return [sidebar];
+    if (selector === "main" || selector === '[role="main"]') return [];
+    return FakeMetadataNode.prototype.querySelectorAll.call(document, selector);
+  };
+  for (const node of [sidebar, sidebarChat, content, dataButton, nestedRow, ...nestedRow.children]) {
+    node.ownerDocument = document;
+  }
+
+  const locators = loadLocators(document);
+  const telemetry = [];
+  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, "g-p-marked", {
+    maxScrolls: 6,
+    timeoutMs: 5000,
+    onTelemetry: (event) => telemetry.push(event)
+  });
+
+  assert.deepEqual(
+    Array.from(snapshot.conversations, (conversation) => conversation.conversation_id).sort(),
+    ["marked-button", "nested-anchor"].sort());
+  assert.equal(snapshot.main_found, false);
+  assert.equal(snapshot.main_region_found, true);
+  assert.equal(snapshot.candidate_from_main_count >= 2, true);
+  assert.equal(snapshot.matching_project_chat_count >= 2, true);
+  assert.equal(snapshot.rejected_other_project_chat_count, 1);
+  assert.equal(snapshot.project_chat_collection_complete, true);
+  assert.equal(telemetry.some((event) => event.stage === "collector_project_chat_dom_structure"), true);
+});
+
+test("Project page collection rejects custom GPT routes even when they are rendered in the central region", async () => {
+  const href = "https://chatgpt.com/g/g-p-strict/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const content = new FakeMetadataNode(null, "MAIN");
+  const current = new FakeMetadataNode(null, "A", "Current", {
+    href: "/g/g-p-strict/c/current-chat"
+  });
+  const customGpt = new FakeMetadataNode(null, "A", "Custom GPT", {
+    href: "/g/g-custom/c/custom-chat"
+  });
+  content.appendChild(current);
+  content.appendChild(customGpt);
+  const document = new FakeProjectDocument(href, sidebar, content, "Strict | ChatGPT");
+  for (const node of [sidebar, content, current, customGpt]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptProjectContextAsync(
+    document,
+    href,
+    "g-p-strict",
+    { timeoutMs: 5000 });
+
+  assert.deepEqual(
+    Array.from(snapshot.conversations, (conversation) => conversation.conversation_id),
+    ["current-chat"]);
+  assert.equal(snapshot.rejected_other_project_chat_count, 1);
+  assert.equal(snapshot.project_chat_collection_complete, true);
 });
 
 test("Project page collection accepts a stable, hydrated Project page with zero chats", async () => {
@@ -1707,9 +1976,13 @@ test("Project page collection follows lazy Project chat growth with bounded scro
   content.scrollTop = 0;
   content.clientHeight = 100;
   content.scrollHeight = 280;
-  const firstChat = new FakeMetadataNode(null, "A", "", { href: "/c/conversation-lazy-first" });
+  const firstChat = new FakeMetadataNode(null, "A", "", {
+    href: "/g/g-p-lazy/c/conversation-lazy-first"
+  });
   firstChat.appendChild(new FakeMetadataNode(null, "SPAN", "First lazy chat", { "data-marquee-text": "true" }));
-  const secondChat = new FakeMetadataNode(null, "A", "", { href: "/c/conversation-lazy-second" });
+  const secondChat = new FakeMetadataNode(null, "A", "", {
+    href: "/g/g-p-lazy/c/conversation-lazy-second"
+  });
   secondChat.appendChild(new FakeMetadataNode(null, "SPAN", "Second lazy chat", { "data-marquee-text": "true" }));
   content.appendChild(firstChat);
   let lazyChatAttached = false;
@@ -1750,9 +2023,13 @@ test("Project page collection keeps independent sidebar and main-list scrollport
   content.scrollTop = 0;
   content.clientHeight = 100;
   content.scrollHeight = 280;
-  const firstChat = new FakeMetadataNode(null, "A", "", { href: "/c/conversation-two-lists-first" });
+  const firstChat = new FakeMetadataNode(null, "A", "", {
+    href: "/g/g-p-two-lists/c/conversation-two-lists-first"
+  });
   firstChat.appendChild(new FakeMetadataNode(null, "SPAN", "First list chat", { "data-marquee-text": "true" }));
-  const secondChat = new FakeMetadataNode(null, "A", "", { href: "/c/conversation-two-lists-second" });
+  const secondChat = new FakeMetadataNode(null, "A", "", {
+    href: "/g/g-p-two-lists/c/conversation-two-lists-second"
+  });
   secondChat.appendChild(new FakeMetadataNode(null, "SPAN", "Second list chat", { "data-marquee-text": "true" }));
   content.appendChild(firstChat);
   let secondAttached = false;

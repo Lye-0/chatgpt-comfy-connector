@@ -199,6 +199,30 @@ async function createHarness() {
             sidebar_ready: true
           };
         }
+        if (message?.type === "GET_COLLECTOR_ROOT_HYDRATION"
+          && result?.type !== "COLLECTOR_ROOT_HYDRATION_RESULT") {
+          return {
+            type: "COLLECTOR_ROOT_HYDRATION_RESULT",
+            requestId: message.requestId,
+            status: "ok",
+            refresh_generation: message.refreshGeneration,
+            navigation_generation: message.navigationGeneration,
+            collector_tab_id: message.collectorTabId,
+            expected_root_url: "https://chatgpt.com/",
+            root_hydration_started: true,
+            root_hydration_completed: true,
+            root_hydration_timeout: false,
+            hydration_wait_ms: 1,
+            document_ready_state: "complete",
+            sidebar_root_present: true,
+            sidebar_scroll_container_present: true,
+            sidebar_shell_present: true,
+            sidebar_sections_stable: true,
+            mutation_count: 0,
+            mutation_quiet_ms: 600,
+            root_url_verified: true
+          };
+        }
         if (message?.type === "GET_CHATGPT_CONTEXT"
           && result?.type === "CHATGPT_CONTEXT_RESULT"
           && result.status === "ok") {
@@ -1857,6 +1881,68 @@ test("Background reconciles duplicate Collector Tabs and keeps the canonical Tab
   assert.equal(topology.tab_count_in_collector_window, 1);
 });
 
+test("Background suppresses unchanged Collector topology and state telemetry", async () => {
+  const harness = await createHarness();
+  const project = {
+    project_id: "g-p-stable-topology",
+    title: "Stable topology Project",
+    url: "https://chatgpt.com/g/g-p-stable-topology/project"
+  };
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type === "GET_CHATGPT_CONTEXT" && message.collection === "project") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [project],
+        conversations: [],
+        current: null
+      };
+    }
+    if (message.type === "GET_CHATGPT_CONTEXT") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [project],
+        conversations: [],
+        current: null,
+        project_section_found: true,
+        sidebar_scroll_complete: true,
+        sidebar_at_bottom: true
+      };
+    }
+    return {};
+  });
+
+  const request = async (requestId) => {
+    const previousCount = harness.socket.sent.length;
+    harness.context.handleBridgeMessage({
+      type: "chatgpt.context.list.request",
+      request_id: requestId
+    }, harness.socket);
+    return await harness.waitForSocketMessage(
+      previousCount,
+      (message) => message.type === "chatgpt.context.list.response"
+        && message.request_id === requestId);
+  };
+
+  assert.equal((await request("collector-stable-topology-first")).status, "ok");
+  const firstCounts = {
+    topology: harness.diagnostics.filter(([, fields]) => fields?.stage === "collector_tab_topology").length,
+    state: harness.diagnostics.filter(([, fields]) => fields?.stage === "collector_tab_state_enforced").length
+  };
+  assert.equal((await request("collector-stable-topology-second")).status, "ok");
+  const secondCounts = {
+    topology: harness.diagnostics.filter(([, fields]) => fields?.stage === "collector_tab_topology").length,
+    state: harness.diagnostics.filter(([, fields]) => fields?.stage === "collector_tab_state_enforced").length
+  };
+  assert.deepEqual(secondCounts, firstCounts);
+});
+
 test("Background widens a Collector Window until the desktop sidebar viewport is ready", async () => {
   const harness = await createHarness();
   let viewportCalls = 0;
@@ -1917,6 +2003,205 @@ test("Background widens a Collector Window until the desktop sidebar viewport is
   assert.equal(viewportTelemetry.at(-1).viewport_retry_count, 1);
 });
 
+test("Background waits for Root Sidebar hydration before starting Project discovery", async () => {
+  const harness = await createHarness();
+  const events = [];
+  const project = {
+    project_id: "g-p-hydrated",
+    title: "Hydrated Project",
+    url: "https://chatgpt.com/g/g-p-hydrated/project"
+  };
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type === "GET_COLLECTOR_ROOT_HYDRATION") {
+      events.push("root-hydration");
+      return {
+        type: "COLLECTOR_ROOT_HYDRATION_RESULT",
+        requestId: message.requestId,
+        status: "ok",
+        refresh_generation: message.refreshGeneration,
+        navigation_generation: message.navigationGeneration,
+        collector_tab_id: message.collectorTabId,
+        expected_root_url: "https://chatgpt.com/",
+        root_hydration_started: true,
+        root_hydration_completed: true,
+        root_hydration_timeout: false,
+        hydration_wait_ms: 35,
+        document_ready_state: "complete",
+        sidebar_root_present: true,
+        sidebar_scroll_container_present: true,
+        sidebar_shell_present: true,
+        sidebar_sections_stable: true,
+        mutation_count: 2,
+        mutation_quiet_ms: 600,
+        root_url_verified: true
+      };
+    }
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    events.push(`context:${message.collection}`);
+    if (message.collection === "project") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [project],
+        conversations: [],
+        current: null
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [project],
+      conversations: [],
+      current: null,
+      project_section_found: true,
+      sidebar_scroll_complete: true,
+      sidebar_at_bottom: true
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-hydration-order"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response"
+      && message.request_id === "collector-hydration-order");
+
+  assert.equal(response.status, "ok");
+  assert.deepEqual(events, ["root-hydration", "context:root", "context:project"]);
+  const diagnosticEntries = harness.diagnostics.map(([eventName, fields]) => ({ eventName, fields }));
+  const hydrationCompleteIndex = diagnosticEntries.findIndex((entry) =>
+    entry.fields?.stage === "collector_root_hydration_complete");
+  const discoveryStartIndex = diagnosticEntries.findIndex((entry) =>
+    entry.fields?.stage === "collector_project_discovery_start");
+  assert.ok(hydrationCompleteIndex >= 0);
+  assert.ok(discoveryStartIndex > hydrationCompleteIndex);
+  assert.equal(diagnosticEntries[hydrationCompleteIndex].fields.root_hydration_completed, true);
+  assert.equal(diagnosticEntries[discoveryStartIndex].fields.root_hydration_completed, true);
+});
+
+test("Background does not start Project discovery when Root Sidebar hydration times out", async () => {
+  const harness = await createHarness();
+  let discoveryCalls = 0;
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type === "GET_COLLECTOR_ROOT_HYDRATION") {
+      return {
+        type: "COLLECTOR_ROOT_HYDRATION_RESULT",
+        requestId: message.requestId,
+        status: "error",
+        errorCode: "collector_root_hydration_timeout",
+        refresh_generation: message.refreshGeneration,
+        navigation_generation: message.navigationGeneration,
+        collector_tab_id: message.collectorTabId,
+        expected_root_url: "https://chatgpt.com/",
+        root_hydration_started: true,
+        root_hydration_completed: false,
+        root_hydration_timeout: true,
+        hydration_wait_ms: 30000,
+        document_ready_state: "loading",
+        sidebar_root_present: false,
+        sidebar_scroll_container_present: false,
+        sidebar_shell_present: false,
+        sidebar_sections_stable: false,
+        mutation_count: 4,
+        mutation_quiet_ms: 0,
+        root_url_verified: true
+      };
+    }
+    if (message.type === "GET_CHATGPT_CONTEXT") {
+      discoveryCalls += 1;
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [],
+        conversations: [],
+        current: null
+      };
+    }
+    return {};
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-hydration-timeout"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response"
+      && message.request_id === "collector-hydration-timeout");
+
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "collector_root_hydration_timeout");
+  assert.equal(discoveryCalls, 0);
+  assert.equal(harness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_project_discovery_start"), false);
+  const hydrationFailure = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_root_hydration_validation");
+  assert.equal(hydrationFailure?.root_hydration_completed, false);
+  assert.equal(hydrationFailure?.root_hydration_timeout, true);
+});
+
+test("Background rejects a stale Root hydration generation before Project discovery", async () => {
+  const harness = await createHarness();
+  let discoveryCalls = 0;
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type === "GET_COLLECTOR_ROOT_HYDRATION") {
+      return {
+        type: "COLLECTOR_ROOT_HYDRATION_RESULT",
+        requestId: message.requestId,
+        status: "ok",
+        refresh_generation: message.refreshGeneration,
+        navigation_generation: "stale-navigation-generation",
+        collector_tab_id: message.collectorTabId,
+        expected_root_url: "https://chatgpt.com/",
+        root_hydration_started: true,
+        root_hydration_completed: true,
+        root_hydration_timeout: false,
+        hydration_wait_ms: 10,
+        document_ready_state: "complete",
+        sidebar_root_present: true,
+        sidebar_scroll_container_present: true,
+        sidebar_shell_present: true,
+        sidebar_sections_stable: true,
+        mutation_count: 1,
+        mutation_quiet_ms: 600,
+        root_url_verified: true
+      };
+    }
+    if (message.type === "GET_CHATGPT_CONTEXT") discoveryCalls += 1;
+    return {};
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-stale-hydration"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response"
+      && message.request_id === "collector-stale-hydration");
+
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "collector_root_hydration_correlation_failed");
+  assert.equal(discoveryCalls, 0);
+  assert.equal(harness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_project_discovery_start"), false);
+});
+
 test("Background does not mark a wide zero-Project Collector scan as Collected", async () => {
   const harness = await createHarness();
   let rootCalls = 0;
@@ -1936,6 +2221,7 @@ test("Background does not mark a wide zero-Project Collector scan as Collected",
         sidebar_ready: true
       };
     }
+    if (message.type === "GET_COLLECTOR_ROOT_HYDRATION") return {};
     rootCalls += 1;
     return {
       type: "CHATGPT_CONTEXT_RESULT",
@@ -1967,6 +2253,50 @@ test("Background does not mark a wide zero-Project Collector scan as Collected",
   assert.equal(discoveryRuns[0].project_discovery_call_count, 1);
   assert.equal(harness.diagnostics.some(([, fields]) =>
     fields?.stage === "collector_window_collected"), false);
+});
+
+test("Background blocks a second incomplete Project discovery scan in one Refresh", async () => {
+  const harness = await createHarness();
+  let rootCalls = 0;
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_CHATGPT_CONTEXT") rootCalls += 1;
+    return {};
+  });
+  const pending = {
+    requestId: "collector-discovery-duplicate-fixture",
+    generation: 0,
+    tabId: 100,
+    projectDiscovery: {
+      refreshGeneration: 0,
+      runId: "refresh-0-project-duplicate",
+      callCount: 1,
+      started: true,
+      completed: false,
+      scanCompleted: false,
+      caller: "first_scan",
+      inFlight: false,
+      alreadyCompleted: false,
+      scrollDirection: null,
+      restoreCount: 0,
+      result: null,
+      promise: null
+    },
+    projectDiscoveryScanResult: null
+  };
+
+  assert.throws(
+    () => harness.context.collectCollectorRootResult(
+      { id: 100 },
+      pending,
+      {},
+      "recovery_orchestration"),
+    (error) => error?.code === "context_projects_incomplete");
+  assert.equal(rootCalls, 0);
+  const blocked = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_discovery_duplicate_blocked");
+  assert.equal(blocked.project_discovery_call_count, 1);
+  assert.equal(blocked.internal_reason, "project_discovery_already_attempted");
 });
 
 test("Background uses the received Project array as the discovery handoff source of truth", async () => {
@@ -2187,7 +2517,13 @@ test("Background resolves only the discovered Projects with navigation fallback,
       };
     }
     if (message.collection === "project_identity") {
-      identityMessages.push({ mode: message.identityMode, projectIndex: message.projects[0]?.project_index });
+      identityMessages.push({
+        mode: message.identityMode,
+        projectIndex: message.projects[0]?.project_index,
+        refreshGeneration: message.refreshGeneration,
+        navigationGeneration: message.navigationGeneration,
+        collectorTabId: message.collectorTabId
+      });
       if (message.identityMode === "dom") {
         return {
           type: "CHATGPT_CONTEXT_RESULT",
@@ -2245,9 +2581,27 @@ test("Background resolves only the discovered Projects with navigation fallback,
 
   assert.equal(response.status, "ok");
   assert.deepEqual(identityMessages, [
-    { mode: "dom", projectIndex: 0 },
-    { mode: "navigation", projectIndex: 0 },
-    { mode: "navigation", projectIndex: 1 }
+    {
+      mode: "dom",
+      projectIndex: 0,
+      refreshGeneration: undefined,
+      navigationGeneration: undefined,
+      collectorTabId: undefined
+    },
+    {
+      mode: "navigation",
+      projectIndex: 0,
+      refreshGeneration: 1,
+      navigationGeneration: "refresh-1-identity-0",
+      collectorTabId: 100
+    },
+    {
+      mode: "navigation",
+      projectIndex: 1,
+      refreshGeneration: 1,
+      navigationGeneration: "refresh-1-identity-1",
+      collectorTabId: 100
+    }
   ]);
   assert.deepEqual(navigationTargets, ["g-p-nav-0", "g-p-nav-1"]);
   assert.deepEqual(response.projects.map((project) => project.project_id), [
@@ -2259,14 +2613,158 @@ test("Background resolves only the discovered Projects with navigation fallback,
     fields?.stage === "collector_project_identity_resolution_complete");
   const firstProjectNavigationIndex = harness.diagnostics.findIndex(([, fields]) =>
     fields?.stage === "collector_project_url_navigation");
+  const navigationDispatchIndex = harness.diagnostics.findIndex(([, fields]) =>
+    fields?.stage === "collector_project_identity_navigation_dispatch");
+  const navigationResponseIndex = harness.diagnostics.findIndex(([, fields]) =>
+    fields?.stage === "collector_project_identity_navigation_response");
+  const metadataResolutionIndex = harness.diagnostics.findIndex(([, fields]) =>
+    fields?.stage === "collector_project_identity_metadata_resolution");
+  const navigationEntries = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_identity_navigation_entry");
+  const navigationPreconditions = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_identity_navigation_precondition");
+  const readyNavigationPreconditions = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_identity_navigation_precondition_ready");
+  const navigationExits = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_identity_navigation_exit");
   assert.ok(identityCompleteIndex >= 0);
   assert.ok(firstProjectNavigationIndex > identityCompleteIndex);
+  assert.ok(navigationDispatchIndex >= 0);
+  assert.ok(navigationResponseIndex > navigationDispatchIndex);
+  assert.ok(metadataResolutionIndex > navigationResponseIndex);
+  assert.equal(navigationEntries.length, 2);
+  assert.equal(navigationEntries[0].project_index, 0);
+  assert.equal(navigationEntries[0].target_project_present, true);
+  assert.equal(navigationEntries[0].project_index_valid, true);
+  assert.equal(navigationEntries[0].discovery_snapshot_present, true);
+  assert.equal(navigationEntries[0].discovery_fingerprint_present, true);
+  assert.equal(navigationPreconditions.length, 2);
+  assert.equal(readyNavigationPreconditions.length, 2);
+  assert.equal(navigationPreconditions.every((fields) => fields.root_state_ready === true), true);
+  assert.equal(readyNavigationPreconditions.every((fields) => fields.collector_tab_matches === true), true);
+  assert.equal(readyNavigationPreconditions.every((fields) => fields.refresh_generation_matches === true), true);
+  assert.equal(readyNavigationPreconditions.every((fields) => fields.navigation_generation_matches === true), true);
+  assert.equal(navigationExits.length, 2);
+  assert.equal(navigationExits.every((fields) => fields.success === true), true);
+  assert.equal(navigationExits.every((fields) => fields.exit_reason === "resolved"), true);
   const summary = harness.diagnostics
     .map(([, fields]) => fields)
     .find((fields) => fields?.stage === "collector_project_identity_resolution_complete");
   assert.equal(summary.non_navigation_resolved_count, 0);
   assert.equal(summary.navigation_resolved_count, 2);
   assert.equal(summary.unresolved_count, 0);
+});
+
+test("Background relays only correlated Project identity navigation telemetry", async () => {
+  const harness = await createHarness();
+  new Script(`contextRequests.set("collector-identity-telemetry", {
+    requestId: "collector-identity-telemetry",
+    tabId: 100,
+    generation: 7,
+    identityNavigationProjectIndex: 0,
+    identityNavigationTotalProjects: 10,
+    identityNavigationGeneration: "refresh-7-identity-0",
+    identityNavigationActive: true
+  });`).runInContext(harness.context);
+
+  const result = await harness.notifyRuntimeMessage({
+    type: "COLLECTOR_PROJECT_IDENTITY_TELEMETRY",
+    request_id: "collector-identity-telemetry",
+    refresh_generation: 7,
+    collector_tab_id: 100,
+    navigation_generation: "refresh-7-identity-0",
+    project_index: 0,
+    candidate_count: 10,
+    row_found: true,
+    match_method: "discovery_fingerprint",
+    section_verified: true,
+    stale_element_reused: false,
+    click_attempted: true,
+    click_dispatched: true,
+    click_target_is_project_row: true,
+    interactive_candidate_count: 2,
+    selected_target_type: "button",
+    selected_target_has_href: false,
+    selected_target_role: "button",
+    selected_target_tag: "BUTTON",
+    selected_target_inside_project_row: true,
+    selected_target_is_menu_control: false,
+    selected_target_is_overflow_control: false,
+    safe_candidate_count: 1,
+    visible_safe_candidate_count: 1,
+    selection_reason: "button",
+    menu_control_reason: "none",
+    row_tag: "DIV",
+    row_role: "button",
+    row_tabindex_present: false,
+    row_href_present: false,
+    row_aria_haspopup: "none",
+    row_aria_expanded: "false",
+    row_aria_controls_present: false,
+    direct_child_count: 1,
+    descendant_count: 1,
+    descendant_anchor_count: 0,
+    descendant_button_count: 1,
+    descendant_role_link_count: 0,
+    descendant_role_button_count: 1,
+    descendant_tabindex_count: 0,
+    descendant_href_count: 0,
+    shadow_root_present: false,
+    shadow_descendant_count: 0,
+    nearest_interactive_ancestor_present: false,
+    nearest_interactive_ancestor_tag: "none",
+    nearest_interactive_ancestor_role: "none",
+    row_is_menu_control: false,
+    row_is_overflow_control: false,
+    row_interactive_evidence: true,
+    stage: "collector_project_identity_click"
+  }, { tab: { id: 100, windowId: 200 } });
+
+  assert.deepEqual(Object.fromEntries(Object.entries(result)), { ok: true });
+  const entry = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_identity_click");
+  assert.equal(entry.project_index, 0);
+  assert.equal(entry.candidate_count, 10);
+  assert.equal(entry.row_found, true);
+  assert.equal(entry.click_dispatched, true);
+  assert.equal(entry.interactive_candidate_count, 2);
+  assert.equal(entry.selected_target_type, "button");
+  assert.equal(entry.selected_target_has_href, false);
+  assert.equal(entry.selected_target_role, "button");
+  assert.equal(entry.selected_target_tag, "BUTTON");
+  assert.equal(entry.selected_target_inside_project_row, true);
+  assert.equal(entry.selected_target_is_menu_control, false);
+  assert.equal(entry.selected_target_is_overflow_control, false);
+  assert.equal(entry.safe_candidate_count, 1);
+  assert.equal(entry.selection_reason, "button");
+  assert.equal(entry.menu_control_reason, "none");
+  assert.equal(entry.row_tag, "DIV");
+  assert.equal(entry.row_role, "button");
+  assert.equal(entry.row_is_menu_control, false);
+  assert.equal(entry.navigation_generation, "refresh-7-identity-0");
+  assert.equal(Object.hasOwn(entry, "prompt"), false);
+  assert.equal(Object.hasOwn(entry, "project_title"), false);
+
+  new Script('contextRequests.get("collector-identity-telemetry").identityNavigationActive = false;')
+    .runInContext(harness.context);
+  const lateResult = await harness.notifyRuntimeMessage({
+    type: "COLLECTOR_PROJECT_IDENTITY_TELEMETRY",
+    request_id: "collector-identity-telemetry",
+    refresh_generation: 7,
+    collector_tab_id: 100,
+    navigation_generation: "refresh-7-identity-0",
+    project_index: 0,
+    stage: "collector_project_identity_navigation_result"
+  }, { tab: { id: 100, windowId: 200 } });
+  assert.deepEqual(Object.fromEntries(Object.entries(lateResult)), {
+    ok: false,
+    error: "collector_project_identity_telemetry_not_correlated"
+  });
 });
 
 test("Background accepts a Project navigation after the Content Script port closes without replaying the click", async () => {
@@ -2353,6 +2851,7 @@ test("Background does not complete a Collector scan before the Project section i
         sidebar_ready: true
       };
     }
+    if (message.type === "GET_COLLECTOR_ROOT_HYDRATION") return {};
     rootCalls += 1;
     return {
       type: "CHATGPT_CONTEXT_RESULT",
@@ -2445,6 +2944,89 @@ test("Background does not publish a Project catalog when a Collector row has no 
     .find((fields) => fields?.stage === "collector_project_metadata_unresolved_reason_failed");
   assert.equal(reason.unresolved_reason, "missing_stable_identity");
   assert.equal(reason.unresolved_reason_count, 1);
+  const navigationEntry = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_identity_navigation_entry");
+  assert.equal(navigationEntry.target_project_present, true);
+  assert.equal(navigationEntry.discovery_snapshot_present, true);
+  const navigationFailure = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_identity_navigation_failed");
+  assert.equal(navigationFailure.navigation_failure_reason, "navigation_target_not_verified");
+  assert.equal(navigationFailure.internal_reason, "project_identity_navigation_target_not_verified");
+  const navigationExit = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_identity_navigation_exit");
+  assert.equal(navigationExit.success, false);
+  assert.equal(navigationExit.exit_reason, "navigation_target_not_verified");
+  assert.equal(navigationExit.internal_reason, "project_identity_navigation_target_not_verified");
+});
+
+test("Background preserves an unsafe Project-row navigation reason", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type === "GET_CHATGPT_CONTEXT" && message.collection === "root") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [{
+          title: "Menu Project",
+          discovery_key: "menu-project"
+        }],
+        conversations: [],
+        current: null
+      };
+    }
+    if (message.type === "GET_CHATGPT_CONTEXT" && message.collection === "project_identity") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [{
+          ...message.projects[0],
+          unresolved_reason: "no_safe_project_navigation_target"
+        }],
+        conversations: [],
+        current: null,
+        navigation_target_verified: false,
+        project_url_pattern_valid: false,
+        project_id_url_match: false,
+        navigation_failure_reason: "no_safe_project_navigation_target",
+        internal_reason: "project_row_is_menu_control"
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [],
+      conversations: [],
+      current: null
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "context-menu-row-fixture"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response"
+      && message.request_id === "context-menu-row-fixture");
+
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "context_projects_incomplete");
+  const failure = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_identity_navigation_failed");
+  assert.equal(failure.navigation_failure_reason, "no_safe_project_navigation_target");
+  assert.equal(failure.internal_reason, "project_row_is_menu_control");
 });
 
 test("Background keeps the Collector Window separate from the Managed Execution Window", async () => {

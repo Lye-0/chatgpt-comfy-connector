@@ -684,6 +684,43 @@ const handoff = {
   payload: "## Handoff\nProtocol: comfy-connector/1\nhandoff_id: handoff-fixture\nboundary_id: boundary-fixture\n"
 };
 
+test("Content Script preserves Project identity navigation stages in its safe runtime relay", async () => {
+  const harness = await createHarness({ url: "https://chatgpt.com/" });
+  const result = await harness.send({
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: "project-identity-telemetry-fixture",
+    refreshGeneration: 3,
+    navigationGeneration: "refresh-3-identity-0",
+    collectorTabId: 100,
+    mode: "list",
+    collection: "project_identity",
+    identityMode: "navigation",
+    projects: [{ project_index: 0, discovery_index: 0, title: "Project without a DOM row" }]
+  });
+
+  assert.equal(result.status, "ok");
+  const relocation = await harness.waitForRuntimeMessage((message) =>
+    message.type === "COLLECTOR_PROJECT_IDENTITY_TELEMETRY"
+      && message.stage === "collector_project_identity_row_relocation");
+  assert.equal(relocation.request_id, "project-identity-telemetry-fixture");
+  assert.equal(relocation.refresh_generation, 3);
+  assert.equal(relocation.navigation_generation, "refresh-3-identity-0");
+  assert.equal(relocation.project_index, 0);
+  assert.equal(relocation.row_found, false);
+  assert.equal(Object.hasOwn(relocation, "project_title"), false);
+  const target = await harness.waitForRuntimeMessage((message) =>
+    message.type === "COLLECTOR_PROJECT_IDENTITY_TELEMETRY"
+      && message.stage === "collector_project_identity_click_target");
+  assert.equal(target.selected_target_type, "none");
+  assert.equal(target.selected_target_inside_project_row, false);
+  assert.equal(target.interactive_candidate_count, 0);
+  assert.equal(target.safe_candidate_count, 0);
+  assert.equal(target.selection_reason, "no_safe_project_navigation_target");
+  assert.equal(Object.hasOwn(target, "project_title"), false);
+  assert.equal(result.navigation_failure_reason, "project_row_fingerprint_mismatch");
+  assert.equal(result.internal_reason, "project_row_fingerprint_mismatch");
+});
+
 test("Content Script reports Managed Tab readiness only after the composer and bound Conversation are ready", async () => {
   const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
   const result = await harness.send({

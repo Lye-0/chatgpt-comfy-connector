@@ -66,7 +66,10 @@ desktop sidebar viewport is available. Readiness never scrolls or collects
 Project rows. The root Project discovery call is a one-shot operation for its
 refresh generation: it selects one Sidebar and one scroll container, scans only
 downward through the virtualized Project section, restores the saved position
-once, and then freezes the resulting Project metadata while the Collector Tab
+once. Before that scan, the root URL, document readiness, Sidebar shell, and
+scroll container must remain structurally stable through a bounded quiet DOM
+interval; a hydration timeout prevents discovery from starting. It then freezes
+the resulting Project metadata while the Collector Tab
 visits Project URLs for Chat discovery. A bounded zero-Project result is
 reported as `context_projects_incomplete`, never as a successful empty
 snapshot. Each lifecycle reconciliation verifies one Window member, the active
@@ -200,7 +203,11 @@ metadata-only Sidebar route: it reads the known ChatGPT history sidebar's
 visible `data-sidebar-item="true"` rows and Project-home anchors. A dedicated
 `さらに表示`/`もっと見る` utility button may be expanded, but generic sidebar
 rows, navigation controls, search UI, and title-only rows are never clicked to
-infer a Project ID. If a Project entry is not ID/URL-complete, the Collector returns
+infer a Project ID. A confirmed Project row with `aria-controls` is handled
+separately as a disclosure: its controlled region is inspected for
+Project-scoped `/g/g-p-.../c/...` metadata, and the row may be expanded once
+to render that region. Its click is not treated as Project navigation. If a
+Project entry is not ID/URL-complete, the Collector returns
 `context_projects_incomplete` rather than publishing an incomplete Project
 catalog. The Desktop always provides
 an explicit `＋ 新しいChat` choice for a resolvable Project; selecting it does

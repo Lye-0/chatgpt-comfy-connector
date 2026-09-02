@@ -331,6 +331,36 @@
     return `${prefix}-${(hash >>> 0).toString(16)}`;
   }
 
+  function projectDiscoveryKeyForRow(row, title, discoveryIndex) {
+    // A title is not an identity: two Projects may deliberately have the same
+    // name. Prefer a row-local DOM token that remains stable while the
+    // virtualized Sidebar is rescanned. `aria-controls` is the usual token for
+    // the current disclosure row; the other attributes cover older ChatGPT
+    // layouts. The value is hashed before it leaves this module and is never
+    // emitted as telemetry.
+    const rowToken = [
+      "aria-controls",
+      "id",
+      "data-project-key",
+      "data-sidebar-item-id",
+      "data-item-id",
+      "data-key",
+      "data-index",
+      "data-item-index",
+      "aria-posinset"
+    ].map((name) => attributeValue(row, name).trim())
+      .find((value) => value.length > 0);
+    const position = Number.isSafeInteger(discoveryIndex) && discoveryIndex >= 0
+      ? discoveryIndex
+      : "unknown";
+    const identityToken = rowToken
+      ? `token:${rowToken}`
+      : `position:${position}`;
+    return stableMetadataKey(
+      "project",
+      `${identityToken}:${metadataTextKey(title)}`);
+  }
+
   function metadataTextKey(value) {
     return normalizeText(value).replace(/\s+/g, " ").trim().toLocaleLowerCase();
   }
@@ -555,6 +585,191 @@
     };
   }
 
+  function collectorRootUrl(value = globalThis.location?.href) {
+    const canonical = chatGptMetadataUrl(value, value);
+    if (!canonical) return null;
+    try {
+      const parsed = new URL(canonical);
+      return parsed.pathname === "/" ? canonical : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function rootSidebarStructureStats(sidebar) {
+    if (!sidebar) return { childCount: 0, descendantCount: 0, sectionCount: 0, buttonCount: 0 };
+    let childCount = 0;
+    let descendantCount = 0;
+    let sectionCount = 0;
+    let buttonCount = 0;
+    try { childCount = Number(sidebar.children?.length) || 0; } catch (_) { }
+    try { descendantCount = Number(sidebar.querySelectorAll?.("*")?.length) || 0; } catch (_) { }
+    for (const selector of ["section", '[role="region"]', '[data-sidebar-section]']) {
+      try { sectionCount += Number(sidebar.querySelectorAll?.(selector)?.length) || 0; } catch (_) { }
+    }
+    for (const selector of ["button", '[role="button"]']) {
+      try { buttonCount += Number(sidebar.querySelectorAll?.(selector)?.length) || 0; } catch (_) { }
+    }
+    return { childCount, descendantCount, sectionCount, buttonCount };
+  }
+
+  function rootSidebarStructureFingerprint(sidebar) {
+    const stats = rootSidebarStructureStats(sidebar);
+    return [stats.childCount, stats.descendantCount, stats.sectionCount, stats.buttonCount].join(":");
+  }
+
+  function getChatGptRootSidebarHydrationState(
+    root = globalThis.document,
+    expectedRootUrl = "https://chatgpt.com/") {
+    const currentUrl = documentHref(root, globalThis.location?.href);
+    const expectedUrl = collectorRootUrl(expectedRootUrl);
+    const rootUrlVerified = Boolean(expectedUrl && collectorRootUrl(currentUrl) === expectedUrl);
+    const documentReadyState = String(root?.readyState || "unknown").toLowerCase();
+    const sidebarMatches = uniqueElements(sidebarRootSelectors, root)
+      .filter((element) => element !== root);
+    const sidebar = sidebarMatches[0] || null;
+    const sidebarRootPresent = Boolean(sidebar);
+    const sidebarStructureStats = rootSidebarStructureStats(sidebar);
+    const sidebarShellPresent = sidebarRootPresent
+      && isVisible(sidebar)
+      && (sidebarStructureStats.childCount > 0
+        || sidebarStructureStats.descendantCount > 0
+        || sidebarStructureStats.sectionCount > 0
+        || sidebarStructureStats.buttonCount > 0);
+    const scrollContainer = sidebarRootPresent
+      ? findSidebarScrollContainer(root, sidebar)
+      : null;
+    const scrollMetrics = scrollMetricsFor(scrollContainer);
+    const sidebarScrollContainerPresent = Boolean(scrollContainer && scrollMetrics);
+    const sidebarStructureFingerprint = rootSidebarStructureFingerprint(sidebar);
+
+    return {
+      root_url_verified: rootUrlVerified,
+      document_ready_state: documentReadyState,
+      sidebar_root_present: sidebarRootPresent,
+      sidebar_shell_present: sidebarShellPresent,
+      sidebar_scroll_container_present: sidebarScrollContainerPresent,
+      sidebar_sections_stable: false,
+      sidebar_structure_fingerprint: sidebarStructureFingerprint,
+      sidebar_scroll_container_found: sidebarScrollContainerPresent
+    };
+  }
+
+  async function waitForChatGptRootSidebarHydrationAsync(
+    root = globalThis.document,
+    expectedRootUrl = "https://chatgpt.com/",
+    options = {}) {
+    const ownerWindow = root?.defaultView
+      || root?.ownerDocument?.defaultView
+      || globalThis;
+    const setTimer = ownerWindow?.setTimeout || globalThis.setTimeout;
+    const clearTimer = ownerWindow?.clearTimeout || globalThis.clearTimeout;
+    const MutationObserverCtor = ownerWindow?.MutationObserver
+      || root?.ownerDocument?.defaultView?.MutationObserver
+      || globalThis.MutationObserver;
+    const timeoutMs = Math.max(1000, Math.min(120000, Number(options.timeoutMs) || 30000));
+    const quietTargetMs = Math.max(100, Math.min(5000, Number(options.quietMs) || 600));
+    const pollMs = Math.max(25, Math.min(1000, Number(options.pollMs) || 100));
+    const startedAt = Date.now();
+
+    return await new Promise((resolve) => {
+      let mutationCount = 0;
+      let lastMutationAt = startedAt;
+      let lastFingerprint = null;
+      let fingerprintStableAt = startedAt;
+      let observer = null;
+      let pollTimer = null;
+      let timeoutTimer = null;
+      let settled = false;
+
+      const finish = (state, completed, errorCode = null) => {
+        if (settled) return;
+        settled = true;
+        if (observer) observer.disconnect();
+        if (pollTimer !== null) clearTimer?.(pollTimer);
+        if (timeoutTimer !== null) clearTimer?.(timeoutTimer);
+        const now = Date.now();
+        resolve({
+          type: "COLLECTOR_ROOT_HYDRATION_RESULT",
+          status: completed ? "ok" : "error",
+          root_hydration_completed: completed,
+          root_hydration_timeout: !completed && errorCode === "collector_root_hydration_timeout",
+          hydration_wait_ms: Math.max(0, now - startedAt),
+          mutation_count: mutationCount,
+          mutation_quiet_ms: Math.max(0, now - lastMutationAt),
+          sidebar_sections_stable: completed || state.sidebar_sections_stable === true,
+          ...state,
+          ...(errorCode ? { errorCode } : {})
+        });
+      };
+
+      const inspect = () => {
+        if (settled) return;
+        const state = getChatGptRootSidebarHydrationState(root, expectedRootUrl);
+        const fingerprint = state.sidebar_structure_fingerprint;
+        if (fingerprint !== lastFingerprint) {
+          lastFingerprint = fingerprint;
+          fingerprintStableAt = Date.now();
+        }
+        const now = Date.now();
+        const mutationQuietMs = Math.max(0, now - lastMutationAt);
+        const fingerprintStableMs = Math.max(0, now - fingerprintStableAt);
+        const sectionsStable = Boolean(
+          state.root_url_verified
+          && state.document_ready_state === "complete"
+          && state.sidebar_root_present
+          && state.sidebar_shell_present
+          && state.sidebar_scroll_container_present
+          && mutationQuietMs >= quietTargetMs
+          && fingerprintStableMs >= quietTargetMs);
+        state.sidebar_sections_stable = sectionsStable;
+        if (sectionsStable) {
+          finish(state, true);
+          return;
+        }
+        if (now - startedAt >= timeoutMs) {
+          finish(state, false, "collector_root_hydration_timeout");
+          return;
+        }
+        pollTimer = setTimer(inspect, pollMs);
+      };
+
+      if (typeof MutationObserverCtor === "function") {
+        try {
+          observer = new MutationObserverCtor((records) => {
+            mutationCount += Number.isSafeInteger(records?.length) && records.length > 0
+              ? records.length
+              : 1;
+            lastMutationAt = Date.now();
+          });
+          const observationTarget = root?.documentElement || root;
+          observer.observe(observationTarget, {
+            childList: true,
+            subtree: true,
+            characterData: true
+          });
+        } catch (_) {
+          observer = null;
+        }
+      }
+
+      if (typeof setTimer !== "function") {
+        finish(
+          getChatGptRootSidebarHydrationState(root, expectedRootUrl),
+          false,
+          "collector_root_hydration_timeout");
+        return;
+      }
+      timeoutTimer = setTimer(() => {
+        if (!settled) finish(
+          getChatGptRootSidebarHydrationState(root, expectedRootUrl),
+          false,
+          "collector_root_hydration_timeout");
+      }, timeoutMs);
+      inspect();
+    });
+  }
+
   function scrollMetricsFor(container) {
     if (!container
       || typeof container.scrollTop !== "number"
@@ -767,20 +982,33 @@
     let existing = projectId
       ? projects.find((candidate) => candidate.project_id === projectId)
       : null;
+    if (!existing && discoveryKey) {
+      const keyCandidate = projects.find((candidate) => candidate.discovery_key === discoveryKey);
+      // A discovery key may join a later metadata-bearing observation to the
+      // same row, but it must not override a different stable Project ID.
+      if (keyCandidate && (!projectId
+        || !keyCandidate.project_id
+        || keyCandidate.project_id === projectId)) {
+        existing = keyCandidate;
+      }
+    }
     if (!existing && projectId && titleKey) {
-      existing = projects.find((candidate) => !candidate.project_id
+      const titleCandidates = projects.filter((candidate) => !candidate.project_id
         && metadataTextKey(candidate.title) === titleKey);
+      // Title fallback is retained only for the unambiguous historical case.
+      // If two same-title rows exist, creating a new ID-bearing entry is safer
+      // than assigning that ID to the wrong Project.
+      if (titleCandidates.length === 1) existing = titleCandidates[0];
     }
     if (!existing && projectId) {
-      existing = projects.find((candidate) => !candidate.project_id
+      const fallbackCandidates = projects.filter((candidate) => !candidate.project_id
         && fallbackProjectIdFromTitle(candidate.title) === projectId);
+      if (fallbackCandidates.length === 1) existing = fallbackCandidates[0];
     }
-    if (!existing && discoveryKey) {
-      existing = projects.find((candidate) => candidate.discovery_key === discoveryKey);
-    }
-    if (!existing && !projectId && titleKey) {
-      existing = projects.find((candidate) => !candidate.project_id
+    if (!existing && !projectId && !discoveryKey && titleKey) {
+      const titleCandidates = projects.filter((candidate) => !candidate.project_id
         && metadataTextKey(candidate.title) === titleKey);
+      if (titleCandidates.length === 1) existing = titleCandidates[0];
     }
 
     if (existing) {
@@ -860,13 +1088,20 @@
     for (const [discoveryIndex, row] of projectRows.entries()) {
       const title = visibleTitleFromElement(row);
       if (!title) continue;
-      const projectId = projectIdFromElement(row, url);
-      const projectUrl = projectUrlFromElement(row, url);
+      // Keep the historical metadata-only scan, but accept the stable
+      // Project carrier ChatGPT currently renders inside the row.  It may be
+      // a non-anchor href for a Project conversation (`/g/g-p-*/c/*`).
+      // `projectIdentityFromElement` normalizes that carrier to `/project`
+      // without clicking or changing the discovery/scroll path.
+      const rowIdentity = projectIdentityFromElement(row, url);
+      const projectId = rowIdentity.projectId || projectIdFromElement(row, url);
+      const projectUrl = rowIdentity.projectUrl || projectUrlFromElement(row, url);
+      const discoveryKey = projectDiscoveryKeyForRow(row, title, discoveryIndex);
       upsertProject(
         projectId,
         title,
         projectUrl,
-        projectId ? null : stableMetadataKey("project", title),
+        discoveryKey,
         discoveryIndex);
     }
 
@@ -875,14 +1110,25 @@
     // the only safe ID source in that case. Associate it only with the
     // visibly expanded row; never infer an ID from a title or from row order.
     if (currentProjectId) {
-      const expandedProjectRow = projectRows.find((row) =>
+      const expandedProjectIndex = projectRows.findIndex((row) =>
         attributeValue(row, "aria-expanded").toLowerCase() === "true");
+      const expandedProjectRow = expandedProjectIndex >= 0
+        ? projectRows[expandedProjectIndex]
+        : null;
       const currentProjectTitle = visibleTitleFromElement(expandedProjectRow, "");
       if (currentProjectTitle) {
         const currentProjectUrl = isProjectHomeUrl(url)
           ? chatGptMetadataUrl(url, url)
           : projectUrlFromConversationUrl(url, currentProjectId);
-        upsertProject(currentProjectId, currentProjectTitle, currentProjectUrl);
+        upsertProject(
+          currentProjectId,
+          currentProjectTitle,
+          currentProjectUrl,
+          projectDiscoveryKeyForRow(
+            expandedProjectRow,
+            currentProjectTitle,
+            expandedProjectIndex),
+          expandedProjectIndex);
       }
     }
 
@@ -951,9 +1197,19 @@
 
   function projectIdentityFromUrlCandidate(value, baseUrl = globalThis.location?.href) {
     const canonical = chatGptMetadataUrl(value, baseUrl);
-    if (!canonical || !isProjectRouteUrl(canonical)) return null;
+    if (!canonical) return null;
     const projectId = projectIdFromUrl(canonical);
-    const projectUrl = canonicalProjectUrl(projectId, canonical, baseUrl);
+    if (!projectId) return null;
+
+    // The historical Project discovery path also found Project identity on
+    // conversation links rendered inside the Project row.  Those links use
+    // `/g/g-p-.../c/...`, not the Project home route.  Normalize that
+    // metadata-only carrier to the canonical Project URL without navigating.
+    const projectUrl = isProjectRouteUrl(canonical)
+      ? canonicalProjectUrl(projectId, canonical, baseUrl)
+      : conversationIdFromUrl(canonical)
+        ? projectUrlFromConversationUrl(canonical, projectId)
+        : null;
     if (!projectId || !projectUrl) return null;
     return { projectId, projectUrl };
   }
@@ -990,13 +1246,116 @@
       "data-project-id-value",
       "data-project-url",
       "data-href",
-      "data-url"
+      "data-url",
+      "data-conversation-url"
     ]) {
       const value = attributeValue(element, name);
       if (!value) continue;
       if (name.startsWith("data-project-") || projectIdentityFromUrlCandidate(value, baseUrl)) return true;
     }
     return false;
+  }
+
+  function findElementByAriaControlId(root, controlId) {
+    const normalizedId = String(controlId ?? "").trim();
+    // `aria-controls` values are opaque DOM IDs.  Do not interpolate them
+    // into a selector; compare the attribute after resolving through the DOM
+    // API so a malformed value cannot escape the collector's metadata scope.
+    if (!normalizedId || normalizedId.length > 256 || /\s/.test(normalizedId)) return null;
+    const sources = [];
+    const addSource = (source) => {
+      if (!source || sources.includes(source)) return;
+      sources.push(source);
+    };
+    addSource(root);
+    addSource(root?.ownerDocument);
+    addSource(globalThis.document);
+    for (const source of sources) {
+      try {
+        const direct = source.getElementById?.(normalizedId);
+        if (direct) return direct;
+      } catch (_) { }
+    }
+    for (const source of sources) {
+      try {
+        const candidates = source.querySelectorAll?.("[id]") || [];
+        for (const candidate of candidates) {
+          if (attributeValue(candidate, "id") === normalizedId) return candidate;
+        }
+      } catch (_) { }
+    }
+    return null;
+  }
+
+  function projectDisclosureRegionForRow(row, root = row?.ownerDocument || globalThis.document) {
+    const controls = attributeValue(row, "aria-controls").trim();
+    if (!controls) return null;
+    // ARIA permits a space-separated list.  ChatGPT normally exposes one
+    // controlled list, but accepting the first resolvable ID keeps this read
+    // bounded and avoids treating arbitrary Sidebar nodes as a Project.
+    for (const controlId of controls.split(/\s+/).slice(0, 4)) {
+      const region = findElementByAriaControlId(root, controlId);
+      if (!region || region === row) continue;
+      const rowDocument = row?.ownerDocument;
+      const regionDocument = region?.ownerDocument;
+      if (rowDocument && regionDocument && rowDocument !== regionDocument) continue;
+      return region;
+    }
+    return null;
+  }
+
+  function projectDisclosureElements(region) {
+    if (!region) return [];
+    const elements = [region];
+    try { elements.push(...Array.from(region.querySelectorAll?.("*") || [])); } catch (_) { }
+    return elements;
+  }
+
+  function projectDisclosureStructureForRow(
+    row,
+    root = row?.ownerDocument || globalThis.document,
+    baseUrl = globalThis.location?.href) {
+    const controls = attributeValue(row, "aria-controls").trim();
+    const region = projectDisclosureRegionForRow(row, root);
+    const regionElements = projectDisclosureElements(region);
+    const projectChatLinks = new Set();
+    const projectHomeLinks = new Set();
+    for (const element of regionElements) {
+      for (const attribute of [
+        "href",
+        "data-project-url",
+        "data-href",
+        "data-url",
+        "data-conversation-url"
+      ]) {
+        const candidateUrl = chatGptMetadataUrl(attributeValue(element, attribute), baseUrl);
+        const identity = projectIdentityFromUrlCandidate(candidateUrl, baseUrl);
+        if (!identity) continue;
+        const conversationId = conversationIdFromUrl(candidateUrl);
+        if (conversationId) projectChatLinks.add(`${identity.projectId}:${conversationId}`);
+        else projectHomeLinks.add(identity.projectId);
+      }
+    }
+    const identity = region
+      ? projectIdentityFromElement(region, baseUrl)
+      : { reason: "controlled_region_not_found" };
+    const ariaExpanded = safeAriaToken(row, "aria-expanded");
+    return {
+      rowIsDisclosureControl: Boolean(controls),
+      ariaControlsPresent: Boolean(controls),
+      controlledRegionFound: Boolean(region),
+      controlledRegionVisible: Boolean(region && isVisible(region)),
+      controlledRegionElementCount: regionElements.length,
+      controlledRegionProjectChatLinkCount: projectChatLinks.size,
+      controlledRegionProjectHomeLinkCount: projectHomeLinks.size,
+      controlledRegionProjectIdentityPresent: Boolean(identity?.projectId),
+      controlledRegionIdentityReason: identity?.projectId
+        ? "none"
+        : (identity?.reason || "missing_stable_identity"),
+      ariaExpanded,
+      identity,
+      region
+    };
   }
 
   function projectIdentityElementsForRow(row, baseUrl = globalThis.location?.href) {
@@ -1011,6 +1370,12 @@
     try {
       for (const element of row?.querySelectorAll?.("*") || []) add(element);
     } catch (_) { }
+    // A current ChatGPT Project row is a disclosure button. Its controlled
+    // chat list is a sibling region, not a descendant, so include only the
+    // region explicitly named by aria-controls. This is still a metadata-only
+    // read and never broadens the scan to generic Sidebar controls.
+    const controlledRegion = projectDisclosureRegionForRow(row);
+    for (const element of projectDisclosureElements(controlledRegion)) add(element);
     let ancestor = row?.parentElement;
     for (let depth = 0; ancestor && depth < 5; depth += 1, ancestor = ancestor.parentElement) {
       if (projectIdentityCarrier(ancestor, baseUrl)) add(ancestor);
@@ -1030,7 +1395,13 @@
       }
 
       let fromUrl = null;
-      for (const attribute of ["data-project-url", "href", "data-href", "data-url"]) {
+      for (const attribute of [
+        "data-project-url",
+        "href",
+        "data-href",
+        "data-url",
+        "data-conversation-url"
+      ]) {
         const candidateUrl = attributeValue(candidate, attribute);
         if (!candidateUrl) continue;
         const identity = projectIdentityFromUrlCandidate(candidateUrl, baseUrl);
@@ -1051,35 +1422,660 @@
     return { reason: invalidReason || "missing_stable_identity" };
   }
 
-  function projectRowForIdentityDescriptor(rows, descriptor, baseUrl = globalThis.location?.href) {
+  function safeAriaToken(element, name) {
+    const value = attributeValue(element, name).trim().toLowerCase();
+    if (!value) return "none";
+    if (["true", "false", "menu", "listbox", "dialog", "tree", "grid", "none"].includes(value)) {
+      return value;
+    }
+    return "other";
+  }
+
+  function projectInteractiveControlFlags(element) {
+    const tagName = String(element?.tagName || "").toLowerCase();
+    const role = attributeValue(element, "role").trim().toLowerCase();
+    const ariaHasPopup = attributeValue(element, "aria-haspopup").trim().toLowerCase();
+    const ariaLabelAndTitle = [
+      attributeValue(element, "aria-label"),
+      attributeValue(element, "title")
+    ].join(" ");
+    const dataSemantic = [
+      attributeValue(element, "data-testid"),
+      attributeValue(element, "data-test-id"),
+      attributeValue(element, "data-state")
+    ].join(" ");
+    // Do not treat arbitrary class/id tokens such as `group/menu-item` as
+    // proof that the Project row is a menu control.  ChatGPT uses menu-like
+    // CSS names for ordinary Project rows.  Only accessibility semantics and
+    // narrowly named test hooks are strong enough to exclude a target.
+    const hasMenuSemantic = /(?:\bmenu\b|\bcontext[-_ ]?menu\b|メニュー|コンテキスト)/i.test(
+      ariaLabelAndTitle);
+    const hasOverflowSemantic = /(?:\boverflow\b|\bkebab\b|\bellipsis\b|\bmore\b|\boptions?\b|\bactions?\b|さらに表示|もっと見る|その他(?:の| )?(?:オプション|操作)?)/i.test(
+      ariaLabelAndTitle);
+    const hasKnownMenuData = /(?:^|[-_ ])(?:menu-button|menu-trigger|menu-control|context-menu|overflow-menu)(?:$|[-_ ])/i.test(dataSemantic);
+    const hasKnownOverflowData = /(?:^|[-_ ])(?:overflow-button|kebab-button|ellipsis-button|more-options|more-button)(?:$|[-_ ])/i.test(dataSemantic);
+    const menu = role === "menu"
+      || role === "menuitem"
+      || (ariaHasPopup.length > 0 && ariaHasPopup !== "false")
+      || hasMenuSemantic
+      || hasKnownMenuData;
+    const overflow = hasOverflowSemantic || hasKnownOverflowData;
+    let menuControlReason = "none";
+    if (role === "menu") menuControlReason = "menu_role";
+    else if (role === "menuitem") menuControlReason = "menuitem_role";
+    else if (ariaHasPopup === "menu") menuControlReason = "aria_haspopup_menu";
+    else if (ariaHasPopup.length > 0 && ariaHasPopup !== "false") menuControlReason = "aria_haspopup";
+    else if (hasOverflowSemantic && ariaLabelAndTitle.trim().length > 0) menuControlReason = "overflow_aria_label";
+    else if (hasKnownOverflowData) menuControlReason = "overflow_data_attribute";
+    else if (hasKnownMenuData) menuControlReason = "known_menu_selector";
+    else if (hasMenuSemantic) menuControlReason = "menu_aria_label";
+    return {
+      tagName,
+      isMenuControl: menu,
+      isOverflowControl: overflow,
+      menuControlReason
+    };
+  }
+
+  function projectInteractiveNavigationValue(element) {
+    for (const attribute of [
+      "href",
+      "data-project-url",
+      "data-href",
+      "data-url",
+      "data-conversation-url"
+    ]) {
+      const value = attributeValue(element, attribute).trim();
+      if (value) return value;
+    }
+    return "";
+  }
+
+  function projectInteractiveShape(element) {
+    const tagName = String(element?.tagName || "").toLowerCase();
+    const role = attributeValue(element, "role").trim().toLowerCase();
+    const hasHref = attributeValue(element, "href").trim().length > 0;
+    const hasTabIndex = hasAttribute(element, "tabindex");
+    const hasInlineClick = typeof element?.onclick === "function" || hasAttribute(element, "onclick");
+    return (tagName === "a" && hasHref)
+      || role === "link"
+      || tagName === "button"
+      || role === "button"
+      || hasTabIndex
+      || hasInlineClick;
+  }
+
+  function projectInteractivePriority(element) {
+    const tagName = String(element?.tagName || "").toLowerCase();
+    const role = attributeValue(element, "role").trim().toLowerCase();
+    if (tagName === "a" && attributeValue(element, "href").trim()) return 0;
+    if (role === "link") return 1;
+    if (tagName === "button") return 2;
+    if (role === "button") return 2;
+    return 3;
+  }
+
+  function projectInteractiveTargetType(element) {
+    if (!element) return "none";
+    const tagName = String(element.tagName || "").toLowerCase();
+    const role = attributeValue(element, "role").trim().toLowerCase();
+    if (tagName === "a" && attributeValue(element, "href").trim()) return "anchor";
+    if (role === "link") return "role_link";
+    if (tagName === "button") return "button";
+    if (role === "button") return "role_button";
+    if (hasAttribute(element, "tabindex")) return "tabindex";
+    if (typeof element.onclick === "function" || hasAttribute(element, "onclick")) return "onclick";
+    return "interactive";
+  }
+
+  function projectRowDescendantsForInspection(row) {
+    const descendants = [];
+    const shadowDescendants = new Set();
+    const seen = new Set();
+    const add = (element, fromShadow = false) => {
+      if (!element || seen.has(element)) return;
+      seen.add(element);
+      descendants.push(element);
+      if (fromShadow) shadowDescendants.add(element);
+    };
+    try {
+      for (const element of row?.querySelectorAll?.("*") || []) add(element);
+    } catch (_) { }
+    const visitedShadowHosts = new Set();
+    const visitShadowRoot = (host, depth = 0) => {
+      if (!host || depth > 8 || visitedShadowHosts.has(host)) return;
+      visitedShadowHosts.add(host);
+      let shadowRoot = null;
+      try { shadowRoot = host.shadowRoot || null; } catch (_) { shadowRoot = null; }
+      if (!shadowRoot) return;
+      let shadowElements = [];
+      try { shadowElements = Array.from(shadowRoot.querySelectorAll?.("*") || []); } catch (_) { shadowElements = []; }
+      for (const element of shadowElements) add(element, true);
+      for (const element of shadowElements) visitShadowRoot(element, depth + 1);
+    };
+    visitShadowRoot(row);
+    for (const element of [...descendants]) visitShadowRoot(element);
+    return {
+      descendants,
+      shadowDescendants,
+      shadowRootPresent: shadowDescendants.size > 0
+    };
+  }
+
+  function projectInteractiveAncestorForRow(row) {
+    let current = row?.parentElement || null;
+    for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
+      if (projectInteractiveShape(current)) return current;
+    }
+    return null;
+  }
+
+  function projectRowHasInteractiveEvidence(row, baseUrl = globalThis.location?.href) {
+    if (!row) return false;
+    const tagName = String(row.tagName || "").toLowerCase();
+    const role = attributeValue(row, "role").trim().toLowerCase();
+    const navigationValue = projectInteractiveNavigationValue(row);
+    return Boolean(
+      (tagName === "a" && navigationValue && projectIdentityFromUrlCandidate(navigationValue, baseUrl))
+      || tagName === "button"
+      || role === "link"
+      || role === "button"
+      || hasAttribute(row, "tabindex")
+      || typeof row.onclick === "function"
+      || hasAttribute(row, "onclick"));
+  }
+
+  function projectRowStructureFor(row, baseUrl = globalThis.location?.href) {
+    const inspection = projectRowDescendantsForInspection(row);
+    const descendants = inspection.descendants;
+    const rowControls = projectInteractiveControlFlags(row);
+    const disclosure = projectDisclosureStructureForRow(row, row?.ownerDocument, baseUrl);
+    const nearestInteractiveAncestor = projectInteractiveAncestorForRow(row);
+    const count = (predicate) => descendants.reduce((total, element) => total + (predicate(element) ? 1 : 0), 0);
+    const tagNameOf = (element) => String(element?.tagName || "").toLowerCase();
+    const roleOf = (element) => attributeValue(element, "role").trim().toLowerCase();
+    const hrefPresent = (element) => attributeValue(element, "href").trim().length > 0;
+    return {
+      descendants,
+      rowTag: String(row?.tagName || "").toUpperCase() || "none",
+      rowRole: attributeValue(row, "role").trim().toLowerCase() || "none",
+      rowTabIndexPresent: hasAttribute(row, "tabindex"),
+      rowHrefPresent: hrefPresent(row),
+      rowAriaHasPopup: safeAriaToken(row, "aria-haspopup"),
+      rowAriaExpanded: safeAriaToken(row, "aria-expanded"),
+      rowAriaControlsPresent: attributeValue(row, "aria-controls").trim().length > 0,
+      directChildCount: (() => {
+        try { return Array.from(row?.children || []).length; } catch (_) { return 0; }
+      })(),
+      descendantCount: descendants.length,
+      descendantAnchorCount: count((element) => tagNameOf(element) === "a"),
+      descendantButtonCount: count((element) => tagNameOf(element) === "button"),
+      descendantRoleLinkCount: count((element) => roleOf(element) === "link"),
+      descendantRoleButtonCount: count((element) => roleOf(element) === "button"),
+      descendantTabIndexCount: count((element) => hasAttribute(element, "tabindex")),
+      descendantHrefCount: count(hrefPresent),
+      shadowRootPresent: inspection.shadowRootPresent,
+      shadowDescendantCount: inspection.shadowDescendants.size,
+      nearestInteractiveAncestorPresent: Boolean(nearestInteractiveAncestor),
+      nearestInteractiveAncestorTag: nearestInteractiveAncestor
+        ? String(nearestInteractiveAncestor.tagName || "").toUpperCase() || "UNKNOWN"
+        : "none",
+      nearestInteractiveAncestorRole: nearestInteractiveAncestor
+        ? (attributeValue(nearestInteractiveAncestor, "role").trim().toLowerCase() || "none")
+        : "none",
+      rowIsMenuControl: rowControls.isMenuControl,
+      rowIsOverflowControl: rowControls.isOverflowControl,
+      rowIsDisclosureControl: disclosure.rowIsDisclosureControl,
+      controlledRegionFound: disclosure.controlledRegionFound,
+      controlledRegionVisible: disclosure.controlledRegionVisible,
+      controlledRegionElementCount: disclosure.controlledRegionElementCount,
+      controlledRegionProjectChatLinkCount: disclosure.controlledRegionProjectChatLinkCount,
+      controlledRegionProjectHomeLinkCount: disclosure.controlledRegionProjectHomeLinkCount,
+      controlledRegionProjectIdentityPresent: disclosure.controlledRegionProjectIdentityPresent,
+      controlledRegionIdentityReason: disclosure.controlledRegionIdentityReason,
+      rowInteractiveEvidence: projectRowHasInteractiveEvidence(row, baseUrl),
+      rowMenuControlReason: rowControls.menuControlReason
+    };
+  }
+
+  function projectInteractiveSelectionReason(element) {
+    const type = projectInteractiveTargetType(element);
+    return {
+      anchor: "anchor_href",
+      role_link: "role_link",
+      button: "button",
+      role_button: "role_button",
+      tabindex: "tabindex",
+      onclick: "onclick",
+      interactive: "interactive"
+    }[type] || "interactive";
+  }
+
+  function projectElementIsInsideRow(row, element) {
+    if (!row || !element) return false;
+    if (row === element) return true;
+    try {
+      if (typeof row.contains === "function") return row.contains(element) === true;
+    } catch (_) { }
+    let current = element?.parentElement;
+    for (let depth = 0; current && depth < 64; depth += 1, current = current.parentElement) {
+      if (current === row) return true;
+    }
+    let rootNode = null;
+    try { rootNode = element?.getRootNode?.() || null; } catch (_) { rootNode = null; }
+    for (let depth = 0; rootNode?.host && depth < 8; depth += 1) {
+      if (rootNode.host === row) return true;
+      if (typeof row.contains === "function" && row.contains(rootNode.host)) return true;
+      try { rootNode = rootNode.host.getRootNode?.() || null; } catch (_) { rootNode = null; }
+    }
+    return false;
+  }
+
+  function projectInteractiveTargetForRow(row, baseUrl = globalThis.location?.href) {
+    const structure = projectRowStructureFor(row, baseUrl);
+    const descendants = structure.descendants || [];
+    const shapedCandidates = descendants.filter((element) => projectInteractiveShape(element));
+    const candidates = shapedCandidates.filter((element) => {
+      const controls = projectInteractiveControlFlags(element);
+      if (controls.isMenuControl || controls.isOverflowControl) return false;
+      const navigationValue = projectInteractiveNavigationValue(element);
+      return !navigationValue || Boolean(projectIdentityFromUrlCandidate(navigationValue, baseUrl));
+    });
+    const visibleCandidates = candidates.filter((element) => {
+      try { return isVisible(element); } catch (_) { return false; }
+    });
+    visibleCandidates.sort((left, right) => projectInteractivePriority(left) - projectInteractivePriority(right));
+    let target = visibleCandidates[0] || null;
+    let targetType = projectInteractiveTargetType(target);
+    let selectionReason = target ? projectInteractiveSelectionReason(target) : null;
+    const rowCanFallback = !target
+      && structure.rowInteractiveEvidence
+      && !structure.rowIsMenuControl
+      && !structure.rowIsOverflowControl
+      && (typeof row?.click === "function" || typeof row?.dispatchEvent === "function");
+    if (rowCanFallback) {
+      target = row;
+      targetType = "row";
+      selectionReason = "row_fallback";
+    }
+    if (!target) selectionReason = "no_safe_project_navigation_target";
+    const controls = projectInteractiveControlFlags(target || row);
+    return {
+      target,
+      candidateCount: shapedCandidates.length,
+      safeCandidateCount: candidates.length,
+      visibleSafeCandidateCount: visibleCandidates.length,
+      targetType,
+      selectionReason,
+      targetHasHref: Boolean(target && attributeValue(target, "href").trim()),
+      targetRole: target ? (attributeValue(target, "role").trim() || "none") : "none",
+      targetTag: target ? (String(target.tagName || "").toUpperCase() || "UNKNOWN") : "none",
+      targetInsideProjectRow: projectElementIsInsideRow(row, target),
+      targetIsMenuControl: Boolean(target && controls.isMenuControl),
+      targetIsOverflowControl: Boolean(target && controls.isOverflowControl),
+      menuControlReason: target ? controls.menuControlReason : structure.rowMenuControlReason,
+      structure
+    };
+  }
+
+  function dispatchProjectInteractiveEventSequence(target, row, root, initialUrl) {
+    if (!projectElementIsInsideRow(row, target) || typeof target?.dispatchEvent !== "function") {
+      return { dispatched: false, eventCount: 0 };
+    }
+    const eventTypes = ["pointerdown", "mousedown", "pointerup", "mouseup", "click"];
+    const ownerWindow = target.ownerDocument?.defaultView || globalThis;
+    let eventCount = 0;
+    for (const type of eventTypes) {
+      const constructors = type.startsWith("pointer")
+        ? [ownerWindow?.PointerEvent, ownerWindow?.MouseEvent, ownerWindow?.Event, globalThis.PointerEvent, globalThis.MouseEvent, globalThis.Event]
+        : [ownerWindow?.MouseEvent, ownerWindow?.Event, globalThis.MouseEvent, globalThis.Event];
+      let event = null;
+      for (const EventConstructor of constructors) {
+        if (typeof EventConstructor !== "function") continue;
+        try {
+          event = new EventConstructor(type, {
+            bubbles: true,
+            cancelable: true,
+            view: ownerWindow
+          });
+          break;
+        } catch (_) { }
+      }
+      if (!event) event = { type, bubbles: true, cancelable: true };
+      try {
+        target.dispatchEvent(event);
+        eventCount += 1;
+      } catch (_) {
+        continue;
+      }
+      if (initialUrl && documentHref(root, globalThis.location?.href) !== initialUrl) break;
+    }
+    return { dispatched: eventCount > 0, eventCount };
+  }
+
+  function projectRowRelocationForIdentityDescriptor(
+    sidebar,
+    rows,
+    descriptor,
+    baseUrl = globalThis.location?.href) {
+    const candidateCount = Number.isSafeInteger(rows?.length) ? rows.length : 0;
     const projectIndex = Number.isSafeInteger(descriptor?.discovery_index)
       && descriptor.discovery_index >= 0
       ? descriptor.discovery_index
       : (Number.isSafeInteger(descriptor?.project_index) && descriptor.project_index >= 0
         ? descriptor.project_index
         : null);
-    if (projectIndex === null) return null;
-    const row = rows?.[projectIndex];
-    if (!row) return null;
+    const sectionVerified = Boolean(sidebar && typeof sidebar.querySelectorAll === "function");
+    if (projectIndex === null) {
+      return {
+        row: null,
+        candidateCount,
+        rowFound: false,
+        matchMethod: "none",
+        sectionVerified,
+        reason: "project_row_not_found"
+      };
+    }
     const expectedTitle = metadataTextKey(metadataTitle(descriptor?.title));
+    const matchingRows = expectedTitle
+      ? (rows || []).filter((candidate) => metadataTextKey(visibleTitleFromElement(candidate, "")) === expectedTitle)
+      : [];
+    const expectedDiscoveryKey = metadataIdentifier(descriptor?.discovery_key || descriptor?.discoveryKey);
+    const fingerprintRows = expectedDiscoveryKey
+      ? (rows || []).filter((candidate, candidateIndex) =>
+        projectDiscoveryKeyForRow(
+          candidate,
+          visibleTitleFromElement(candidate, ""),
+          candidateIndex) === expectedDiscoveryKey)
+      : [];
+    let row = null;
+    // Keep the historical telemetry value for index-based relocation. A
+    // discovery key is an additional disambiguator, not a new public match
+    // category for callers that already consume discovery_fingerprint.
+    let matchMethod = "discovery_fingerprint";
+    if (expectedDiscoveryKey) {
+      if (fingerprintRows.length === 1) {
+        row = fingerprintRows[0];
+        matchMethod = "discovery_fingerprint";
+      } else if (fingerprintRows.length === 0
+        && matchingRows.length === 1
+        && rows?.[projectIndex]
+        && metadataTextKey(visibleTitleFromElement(rows[projectIndex], "")) === expectedTitle) {
+        // React may regenerate an aria-controls/id token after returning to
+        // the root. The original discovery index plus a unique title is a
+        // bounded relocation fallback; duplicate titles remain rejected.
+        row = rows[projectIndex];
+        matchMethod = "discovery_index_title";
+      } else {
+        return {
+          row: null,
+          candidateCount,
+          rowFound: false,
+          matchMethod: fingerprintRows.length > 1
+            ? "ambiguous_discovery_fingerprint"
+            : "discovery_fingerprint",
+          sectionVerified,
+          reason: fingerprintRows.length > 1
+            ? "ambiguous_project_row_match"
+            : "project_row_fingerprint_mismatch"
+        };
+      }
+    } else {
+      row = rows?.[projectIndex] || null;
+    }
+    if (!row) {
+      return {
+        row: null,
+        candidateCount,
+        rowFound: false,
+        matchMethod: matchingRows.length > 1 ? "ambiguous_title_only_rejected" : matchMethod,
+        sectionVerified,
+        reason: matchingRows.length > 1
+          ? "ambiguous_project_row_match"
+          : "project_row_not_found"
+      };
+    }
     const actualTitle = metadataTextKey(visibleTitleFromElement(row, ""));
-    if (!expectedTitle || actualTitle !== expectedTitle) return null;
+    if (!expectedTitle || actualTitle !== expectedTitle) {
+      return {
+        row: null,
+        candidateCount,
+        rowFound: false,
+        matchMethod: matchingRows.length > 1 ? "ambiguous_title_only_rejected" : matchMethod,
+        sectionVerified,
+        reason: matchingRows.length > 1
+          ? "ambiguous_project_row_match"
+          : "project_row_fingerprint_mismatch"
+      };
+    }
     const expectedProjectId = metadataIdentifier(descriptor?.project_id || descriptor?.projectId);
     if (expectedProjectId) {
       const rowIdentity = projectIdentityFromElement(row, baseUrl);
-      if (rowIdentity.projectId && rowIdentity.projectId !== expectedProjectId) return null;
+      if (rowIdentity.projectId && rowIdentity.projectId !== expectedProjectId) {
+        return {
+          row: null,
+          candidateCount,
+          rowFound: false,
+          matchMethod,
+          sectionVerified,
+          reason: "project_row_fingerprint_mismatch"
+        };
+      }
     }
-    return row;
+    return {
+      row,
+      candidateCount,
+      rowFound: true,
+      matchMethod,
+      sectionVerified,
+      reason: null
+    };
   }
 
-  async function waitForProjectHomeNavigation(root, timeoutMs = 10000) {
+  function projectRowForIdentityDescriptor(rows, descriptor, baseUrl = globalThis.location?.href) {
+    return projectRowRelocationForIdentityDescriptor(null, rows, descriptor, baseUrl).row;
+  }
+
+  async function resolveProjectIdentityFromDisclosureAsync(
+    root,
+    initialRow,
+    descriptor,
+    baseUrl = globalThis.location?.href,
+    options = {}) {
+    let row = initialRow || null;
+    const initialUrl = documentHref(root, globalThis.location?.href);
+    const timeoutMs = Math.max(
+      250,
+      Math.min(10000, Number(options.disclosureTimeoutMs)
+        || Number(options.navigationTimeoutMs)
+        || 2500));
+    const startedAt = Date.now();
+    let clickAttempted = false;
+    let clickDispatched = false;
+    let eventFallbackAttempted = false;
+    let eventFallbackDispatched = false;
+    let urlChanged = false;
+    let navigationIdentity = null;
+    const before = projectDisclosureStructureForRow(row, root, baseUrl);
+    let after = before;
+    let lastReason = before.controlledRegionFound
+      ? before.controlledRegionIdentityReason
+      : "controlled_region_not_found";
+
+    const expectedProjectId = metadataIdentifier(descriptor?.project_id || descriptor?.projectId);
+    const currentRow = () => {
+      try {
+        const relocated = options.relocateRow?.();
+        if (relocated) row = relocated;
+      } catch (_) { }
+      return row;
+    };
+    const inspect = () => {
+      currentRow();
+      after = projectDisclosureStructureForRow(row, root, baseUrl);
+      let identity = after.identity?.projectId ? after.identity : null;
+      if (!identity && row) {
+        const rowIdentity = projectIdentityFromElement(row, baseUrl);
+        if (rowIdentity?.projectId) identity = rowIdentity;
+        else if (rowIdentity?.reason && rowIdentity.reason !== "missing_stable_identity") {
+          lastReason = rowIdentity.reason;
+        }
+      }
+      const currentUrl = documentHref(root, globalThis.location?.href);
+      urlChanged = currentUrl !== initialUrl;
+      if (urlChanged && !identity) {
+        const routeIdentity = projectIdentityFromUrlCandidate(currentUrl, currentUrl);
+        if (routeIdentity) {
+          navigationIdentity = routeIdentity;
+          identity = routeIdentity;
+        }
+      }
+      if (identity && expectedProjectId && identity.projectId !== expectedProjectId) {
+        lastReason = "project_id_url_mismatch";
+        return null;
+      }
+      if (identity) {
+        lastReason = "none";
+      } else if (urlChanged) {
+        lastReason = "disclosure_navigation_target_not_project";
+      } else if (after.controlledRegionIdentityReason) {
+        lastReason = after.controlledRegionIdentityReason;
+      }
+      return identity;
+    };
+    const result = (identity, reason = null) => ({
+      isDisclosure: before.rowIsDisclosureControl === true,
+      identity: identity || null,
+      navigationIdentity,
+      row,
+      before,
+      after,
+      clickAttempted,
+      clickDispatched,
+      eventFallbackAttempted,
+      eventFallbackDispatched,
+      urlChanged,
+      navigationDetected: Boolean(navigationIdentity),
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+      reason: reason || (identity ? "none" : lastReason || "project_disclosure_identity_not_found")
+    });
+
+    if (!before.rowIsDisclosureControl) return result(null, "not_a_disclosure_control");
+
+    let identity = inspect();
+    if (identity) return result(identity);
+
+    // An expanded region may be present but still hydrating. Do not click it
+    // again; the bounded wait below gives its metadata a chance to arrive.
+    if (before.ariaExpanded !== "true") {
+      const target = currentRow();
+      if (!target || (typeof target.click !== "function"
+        && typeof target.dispatchEvent !== "function")) {
+        return result(null, "project_disclosure_not_clickable");
+      }
+      clickAttempted = true;
+      try {
+        if (typeof target.click === "function") {
+          target.click();
+          clickDispatched = true;
+        }
+      } catch (_) {
+        clickDispatched = false;
+      }
+
+      // Give React's click handler a short opportunity to update aria-expanded
+      // or mount the controlled list before considering an event fallback.
+      await waitForLocatorDelay(Math.min(150, Math.max(0, timeoutMs)));
+      identity = inspect();
+      const stateChanged = before.ariaExpanded !== after.ariaExpanded
+        || before.controlledRegionFound !== after.controlledRegionFound
+        || before.controlledRegionElementCount !== after.controlledRegionElementCount
+        || before.controlledRegionProjectChatLinkCount !== after.controlledRegionProjectChatLinkCount
+        || before.controlledRegionProjectHomeLinkCount !== after.controlledRegionProjectHomeLinkCount;
+      if (!identity
+        && !stateChanged
+        && !urlChanged
+        && typeof row?.dispatchEvent === "function") {
+        eventFallbackAttempted = true;
+        const eventResult = dispatchProjectInteractiveEventSequence(row, row, root, initialUrl);
+        eventFallbackDispatched = eventResult.dispatched;
+        await waitForLocatorDelay(Math.min(100, Math.max(0, timeoutMs)));
+        identity = inspect();
+      }
+    }
+
+    if (identity) return result(identity);
+    const deadline = startedAt + timeoutMs;
+    while (Date.now() <= deadline) {
+      await waitForLocatorDelay(Math.min(100, Math.max(0, deadline - Date.now())));
+      identity = inspect();
+      if (identity) return result(identity);
+    }
+    return result(
+      null,
+      urlChanged ? "disclosure_navigation_target_not_project" : "project_disclosure_identity_not_found");
+  }
+
+  async function waitForProjectHomeNavigation(root, timeoutMs = 10000, options = {}) {
     const deadline = Date.now() + Math.max(250, Math.min(30000, Number(timeoutMs) || 10000));
+    const startedAt = Date.now();
+    const projectIndex = Number.isSafeInteger(options.projectIndex) ? options.projectIndex : 0;
+    const emit = typeof options.emit === "function" ? options.emit : () => {};
+    const initialUrl = typeof options.initialUrl === "string"
+      ? options.initialUrl
+      : documentHref(root, globalThis.location?.href);
+    let urlChanged = false;
+    emit("collector_project_identity_navigation_wait", {
+      project_index: projectIndex,
+      navigation_wait_started: true,
+      url_changed: false,
+      navigation_detected: false,
+      content_script_reloaded: false,
+      tab_update_observed: false,
+      navigation_wait_ms: 0,
+      navigation_timeout: false
+    });
     while (Date.now() <= deadline) {
       const currentUrl = documentHref(root, globalThis.location?.href);
+      if (!urlChanged && currentUrl !== initialUrl) {
+        urlChanged = true;
+        emit("collector_project_identity_navigation_wait", {
+          project_index: projectIndex,
+          navigation_wait_started: true,
+          url_changed: true,
+          navigation_detected: false,
+          content_script_reloaded: false,
+          tab_update_observed: false,
+          navigation_wait_ms: Math.max(0, Date.now() - startedAt),
+          navigation_timeout: false
+        });
+      }
       const identity = projectIdentityFromUrlCandidate(currentUrl, currentUrl);
-      if (identity && isProjectHomeUrl(currentUrl)) return identity;
+      if (identity && isProjectHomeUrl(currentUrl)) {
+        emit("collector_project_identity_navigation_wait", {
+          project_index: projectIndex,
+          navigation_wait_started: true,
+          url_changed: urlChanged,
+          navigation_detected: true,
+          content_script_reloaded: false,
+          tab_update_observed: false,
+          navigation_wait_ms: Math.max(0, Date.now() - startedAt),
+          navigation_timeout: false
+        });
+        return identity;
+      }
       await waitForLocatorDelay(Math.min(100, Math.max(0, deadline - Date.now())));
     }
+    emit("collector_project_identity_navigation_wait", {
+      project_index: projectIndex,
+      navigation_wait_started: true,
+      url_changed: urlChanged,
+      navigation_detected: false,
+      content_script_reloaded: false,
+      tab_update_observed: false,
+      navigation_wait_ms: Math.max(0, Date.now() - startedAt),
+      navigation_timeout: true
+    });
     return null;
   }
 
@@ -1128,6 +2124,102 @@
     let navigationTargetVerified = false;
     let projectUrlPatternValid = false;
     let projectIdUrlMatch = false;
+    let navigationInternalReason = "none";
+    const navigationTelemetryKeys = [
+      "project_index",
+      "candidate_count",
+      "row_found",
+      "match_method",
+      "section_verified",
+      "stale_element_reused",
+      "clickable_element_found",
+      "click_attempted",
+      "click_dispatched",
+      "click_method",
+      "click_target_is_project_row",
+      "click_target_section_verified",
+      "interactive_candidate_count",
+      "selected_target_type",
+      "selected_target_has_href",
+      "selected_target_role",
+      "selected_target_tag",
+      "selected_target_inside_project_row",
+      "selected_target_is_menu_control",
+      "selected_target_is_overflow_control",
+      "safe_candidate_count",
+      "visible_safe_candidate_count",
+      "selection_reason",
+      "menu_control_reason",
+      "row_tag",
+      "row_role",
+      "row_aria_haspopup",
+      "row_aria_expanded",
+      "row_is_menu_control",
+      "row_is_overflow_control",
+      "row_is_disclosure_control",
+      "controlled_region_found",
+      "controlled_region_visible",
+      "controlled_region_element_count",
+      "controlled_region_project_chat_link_count",
+      "controlled_region_project_home_link_count",
+      "controlled_region_project_identity_present",
+      "controlled_region_identity_reason",
+      "aria_expanded_before",
+      "aria_expanded_after",
+      "disclosure_click_attempted",
+      "disclosure_click_dispatched",
+      "disclosure_event_fallback_attempted",
+      "disclosure_event_fallback_dispatched",
+      "disclosure_state_changed",
+      "disclosure_url_changed",
+      "disclosure_resolution_method",
+      "row_interactive_evidence",
+      "row_tabindex_present",
+      "row_href_present",
+      "row_aria_controls_present",
+      "direct_child_count",
+      "descendant_count",
+      "descendant_anchor_count",
+      "descendant_button_count",
+      "descendant_role_link_count",
+      "descendant_role_button_count",
+      "descendant_tabindex_count",
+      "descendant_href_count",
+      "shadow_root_present",
+      "shadow_descendant_count",
+      "nearest_interactive_ancestor_present",
+      "nearest_interactive_ancestor_tag",
+      "nearest_interactive_ancestor_role",
+      "exit_reason",
+      "internal_reason",
+      "navigation_failure_reason",
+      "navigation_wait_started",
+      "url_changed",
+      "navigation_detected",
+      "content_script_reloaded",
+      "tab_update_observed",
+      "navigation_wait_ms",
+      "navigation_timeout",
+      "navigation_target_verified",
+      "project_url_pattern_valid",
+      "project_id_extracted",
+      "project_id_url_match",
+      "resolution_success",
+      "unresolved_reason"
+    ];
+    const navigationTelemetry = [];
+    const emitNavigationTelemetry = (stage, fields = {}) => {
+      const event = {
+        stage: typeof stage === "string" ? stage.slice(0, 128) : "collector_project_identity_navigation"
+      };
+      for (const key of navigationTelemetryKeys) {
+        if (typeof fields[key] === "boolean") event[key] = fields[key];
+        else if (Number.isSafeInteger(fields[key]) && fields[key] >= 0) event[key] = fields[key];
+        else if (typeof fields[key] === "string" && fields[key].length <= 128) event[key] = fields[key];
+      }
+      navigationTelemetry.push(event);
+      try { options.onTelemetry?.(event); } catch (_) { }
+    };
 
     // This resolver intentionally performs only bounded DOM reads in `dom`
     // mode. It never selects a new scrollport, scrolls the Sidebar, or calls
@@ -1170,41 +2262,488 @@
       let reason = currentIdentity && expectedProjectId !== currentIdentity.projectId
         ? "project_id_url_mismatch"
         : null;
+      let observedIdentity = currentIdentity;
+      let targetInfo = null;
+      navigationInternalReason = reason || "none";
       if (!identity) {
         const sidebar = findSidebarRoot(root);
         const rows = projectRowsInSidebar(sidebar, baseUrl);
-        const row = projectRowForIdentityDescriptor(rows, descriptor, baseUrl);
+        emitNavigationTelemetry("collector_project_identity_row_relocation_start", {
+          project_index: currentProjectIndex
+        });
+        const relocation = projectRowRelocationForIdentityDescriptor(
+          sidebar,
+          rows,
+          descriptor,
+          baseUrl);
+        emitNavigationTelemetry("collector_project_identity_row_relocation", {
+          project_index: currentProjectIndex,
+          candidate_count: relocation.candidateCount,
+          row_found: relocation.rowFound,
+          match_method: relocation.matchMethod,
+          section_verified: relocation.sectionVerified,
+          stale_element_reused: false,
+          unresolved_reason: relocation.reason || "none"
+        });
+        const row = relocation.row;
+        let disclosureResult = null;
+        if (row) {
+          const relocateRow = () => {
+            const currentSidebar = findSidebarRoot(root);
+            const currentRows = projectRowsInSidebar(currentSidebar, baseUrl);
+            return projectRowRelocationForIdentityDescriptor(
+              currentSidebar,
+              currentRows,
+              descriptor,
+              baseUrl).row;
+          };
+          disclosureResult = await resolveProjectIdentityFromDisclosureAsync(
+            root,
+            row,
+            descriptor,
+            baseUrl,
+            {
+              navigationTimeoutMs: options.navigationTimeoutMs,
+              relocateRow
+            });
+          const beforeDisclosure = disclosureResult.before || {};
+          const afterDisclosure = disclosureResult.after || {};
+          const disclosureStateChanged = beforeDisclosure.ariaExpanded
+            !== afterDisclosure.ariaExpanded
+            || beforeDisclosure.controlledRegionFound
+            !== afterDisclosure.controlledRegionFound
+            || beforeDisclosure.controlledRegionElementCount
+            !== afterDisclosure.controlledRegionElementCount
+            || beforeDisclosure.controlledRegionProjectChatLinkCount
+            !== afterDisclosure.controlledRegionProjectChatLinkCount
+            || beforeDisclosure.controlledRegionProjectHomeLinkCount
+            !== afterDisclosure.controlledRegionProjectHomeLinkCount;
+          emitNavigationTelemetry("collector_project_identity_disclosure_structure", {
+            project_index: currentProjectIndex,
+            row_is_disclosure_control: beforeDisclosure.rowIsDisclosureControl,
+            row_aria_controls_present: beforeDisclosure.ariaControlsPresent,
+            row_aria_expanded: beforeDisclosure.ariaExpanded,
+            controlled_region_found: afterDisclosure.controlledRegionFound,
+            controlled_region_visible: afterDisclosure.controlledRegionVisible,
+            controlled_region_element_count: afterDisclosure.controlledRegionElementCount,
+            controlled_region_project_chat_link_count: afterDisclosure.controlledRegionProjectChatLinkCount,
+            controlled_region_project_home_link_count: afterDisclosure.controlledRegionProjectHomeLinkCount,
+            controlled_region_project_identity_present: afterDisclosure.controlledRegionProjectIdentityPresent,
+            controlled_region_identity_reason: afterDisclosure.controlledRegionIdentityReason,
+            aria_expanded_before: beforeDisclosure.ariaExpanded,
+            aria_expanded_after: afterDisclosure.ariaExpanded,
+            disclosure_state_changed: disclosureStateChanged,
+            disclosure_url_changed: disclosureResult.urlChanged,
+            disclosure_resolution_method: disclosureResult.identity
+              ? (disclosureResult.navigationIdentity ? "navigation" : "dom")
+              : "none"
+          });
+          if (disclosureResult.clickAttempted || disclosureResult.eventFallbackAttempted) {
+            emitNavigationTelemetry("collector_project_identity_disclosure_click", {
+              project_index: currentProjectIndex,
+              clickable_element_found: Boolean(
+                typeof disclosureResult.row?.click === "function"
+                || typeof disclosureResult.row?.dispatchEvent === "function"),
+              click_attempted: disclosureResult.clickAttempted,
+              click_dispatched: disclosureResult.clickDispatched,
+              click_method: disclosureResult.eventFallbackAttempted
+                ? "event_sequence"
+                : "disclosure.click",
+              click_target_is_project_row: true,
+              click_target_section_verified: relocation.sectionVerified,
+              disclosure_click_attempted: disclosureResult.clickAttempted,
+              disclosure_click_dispatched: disclosureResult.clickDispatched,
+              disclosure_event_fallback_attempted: disclosureResult.eventFallbackAttempted,
+              disclosure_event_fallback_dispatched: disclosureResult.eventFallbackDispatched,
+              disclosure_state_changed: disclosureStateChanged,
+              disclosure_url_changed: disclosureResult.urlChanged
+            });
+          }
+          if (disclosureResult.identity) {
+            identity = disclosureResult.identity;
+            observedIdentity = disclosureResult.navigationIdentity;
+            reason = null;
+            navigationInternalReason = "none";
+          } else if (disclosureResult.isDisclosure) {
+            reason = disclosureResult.reason || "project_disclosure_identity_not_found";
+            navigationInternalReason = "project_row_disclosure_identity_unresolved";
+          }
+          if (disclosureResult.isDisclosure) {
+            emitNavigationTelemetry("collector_project_identity_disclosure_result", {
+              project_index: currentProjectIndex,
+              navigation_target_verified: Boolean(disclosureResult.navigationIdentity),
+              project_url_pattern_valid: Boolean(
+                disclosureResult.identity?.projectUrl
+                && isProjectHomeUrl(disclosureResult.identity.projectUrl)),
+              project_id_extracted: Boolean(disclosureResult.identity?.projectId),
+              project_id_url_match: Boolean(
+                disclosureResult.identity?.projectId
+                && disclosureResult.identity?.projectUrl
+                && projectIdFromUrl(disclosureResult.identity.projectUrl)
+                  === disclosureResult.identity.projectId),
+              resolution_success: Boolean(disclosureResult.identity),
+              exit_reason: disclosureResult.identity
+                ? "resolved"
+                : (disclosureResult.reason || "project_disclosure_identity_not_found"),
+              internal_reason: disclosureResult.identity
+                ? "none"
+                : "project_row_disclosure_identity_unresolved",
+              unresolved_reason: disclosureResult.identity
+                ? "none"
+                : (disclosureResult.reason || "project_disclosure_identity_not_found"),
+              disclosure_state_changed: disclosureStateChanged,
+              disclosure_url_changed: disclosureResult.urlChanged,
+              disclosure_resolution_method: disclosureResult.identity
+                ? (disclosureResult.navigationIdentity ? "navigation" : "dom")
+                : "none"
+            });
+          }
+        }
+        targetInfo = projectInteractiveTargetForRow(row, baseUrl);
+        const structure = targetInfo.structure || {};
+        emitNavigationTelemetry("collector_project_identity_row_structure", {
+          project_index: currentProjectIndex,
+          row_tag: structure.rowTag,
+          row_role: structure.rowRole,
+          row_tabindex_present: structure.rowTabIndexPresent,
+          row_href_present: structure.rowHrefPresent,
+          row_aria_haspopup: structure.rowAriaHasPopup,
+          row_aria_expanded: structure.rowAriaExpanded,
+          row_aria_controls_present: structure.rowAriaControlsPresent,
+          direct_child_count: structure.directChildCount,
+          descendant_count: structure.descendantCount,
+          descendant_anchor_count: structure.descendantAnchorCount,
+          descendant_button_count: structure.descendantButtonCount,
+          descendant_role_link_count: structure.descendantRoleLinkCount,
+          descendant_role_button_count: structure.descendantRoleButtonCount,
+          descendant_tabindex_count: structure.descendantTabIndexCount,
+          descendant_href_count: structure.descendantHrefCount,
+          shadow_root_present: structure.shadowRootPresent,
+          shadow_descendant_count: structure.shadowDescendantCount,
+          nearest_interactive_ancestor_present: structure.nearestInteractiveAncestorPresent,
+          nearest_interactive_ancestor_tag: structure.nearestInteractiveAncestorTag,
+          nearest_interactive_ancestor_role: structure.nearestInteractiveAncestorRole,
+          row_is_menu_control: structure.rowIsMenuControl,
+          row_is_overflow_control: structure.rowIsOverflowControl,
+          row_is_disclosure_control: structure.rowIsDisclosureControl,
+          controlled_region_found: structure.controlledRegionFound,
+          controlled_region_visible: structure.controlledRegionVisible,
+          controlled_region_element_count: structure.controlledRegionElementCount,
+          controlled_region_project_chat_link_count: structure.controlledRegionProjectChatLinkCount,
+          controlled_region_project_home_link_count: structure.controlledRegionProjectHomeLinkCount,
+          controlled_region_project_identity_present: structure.controlledRegionProjectIdentityPresent,
+          controlled_region_identity_reason: structure.controlledRegionIdentityReason,
+          row_interactive_evidence: structure.rowInteractiveEvidence,
+          menu_control_reason: structure.rowMenuControlReason
+        });
+        emitNavigationTelemetry("collector_project_identity_click_target", {
+          project_index: currentProjectIndex,
+          interactive_candidate_count: targetInfo.candidateCount,
+          safe_candidate_count: targetInfo.safeCandidateCount,
+          visible_safe_candidate_count: targetInfo.visibleSafeCandidateCount,
+          selected_target_type: targetInfo.targetType,
+          selection_reason: targetInfo.selectionReason,
+          selected_target_has_href: targetInfo.targetHasHref,
+          selected_target_role: targetInfo.targetRole,
+          selected_target_tag: targetInfo.targetTag,
+          selected_target_inside_project_row: targetInfo.targetInsideProjectRow,
+          selected_target_is_menu_control: targetInfo.targetIsMenuControl,
+          selected_target_is_overflow_control: targetInfo.targetIsOverflowControl,
+          menu_control_reason: targetInfo.menuControlReason,
+          row_is_menu_control: structure.rowIsMenuControl,
+          row_is_overflow_control: structure.rowIsOverflowControl,
+          row_is_disclosure_control: structure.rowIsDisclosureControl,
+          controlled_region_found: structure.controlledRegionFound,
+          controlled_region_project_identity_present: structure.controlledRegionProjectIdentityPresent,
+          row_interactive_evidence: structure.rowInteractiveEvidence
+        });
         if (!row) {
-          reason = reason || "project_row_not_found";
-        } else if (typeof row.click !== "function") {
-          reason = "project_row_not_clickable";
+          reason = reason || relocation.reason || "project_row_not_found";
+          navigationInternalReason = reason;
         } else {
+          // A Project href or explicit Project data attribute is a stable
+          // identity. Resolve it without clicking, even in navigation mode.
+          // This keeps the fallback limited to rows that discovery already
+          // confirmed and avoids turning a metadata read into navigation.
+          const identityCandidates = [targetInfo.target, row].filter(Boolean);
+          let identityCandidateReason = null;
+          for (const identityCandidate of identityCandidates) {
+            const candidateIdentity = projectIdentityFromElement(identityCandidate, baseUrl);
+            if (candidateIdentity?.projectId) {
+              if (expectedProjectId && expectedProjectId !== candidateIdentity.projectId) {
+                reason = "project_id_url_mismatch";
+                navigationInternalReason = reason;
+                identityCandidateReason = reason;
+                break;
+              }
+              identity = candidateIdentity;
+              reason = null;
+              break;
+            }
+            if (candidateIdentity?.reason && candidateIdentity.reason !== "missing_stable_identity") {
+              identityCandidateReason = identityCandidateReason || candidateIdentity.reason;
+            }
+          }
+
+          if (identity) {
+            emitNavigationTelemetry("collector_project_identity_click", {
+              project_index: currentProjectIndex,
+              clickable_element_found: Boolean(targetInfo.target),
+              click_attempted: false,
+              click_dispatched: false,
+              click_method: disclosureResult?.identity ? "disclosure_identity" : "dom_identity",
+              click_target_is_project_row: targetInfo.targetInsideProjectRow,
+              click_target_section_verified: relocation.sectionVerified
+            });
+          } else if (identityCandidateReason === "project_id_url_mismatch") {
+            emitNavigationTelemetry("collector_project_identity_click", {
+              project_index: currentProjectIndex,
+              clickable_element_found: Boolean(targetInfo.target),
+              click_attempted: false,
+              click_dispatched: false,
+              click_method: "identity_rejected",
+              click_target_is_project_row: targetInfo.targetInsideProjectRow,
+              click_target_section_verified: relocation.sectionVerified,
+              unresolved_reason: identityCandidateReason
+            });
+            reason = identityCandidateReason;
+            navigationInternalReason = reason;
+          } else if (disclosureResult?.isDisclosure) {
+            const disclosureFailureReason = disclosureResult.reason
+              || "project_disclosure_identity_not_found";
+            emitNavigationTelemetry("collector_project_identity_click", {
+              project_index: currentProjectIndex,
+              clickable_element_found: Boolean(targetInfo.target),
+              click_attempted: disclosureResult.clickAttempted,
+              click_dispatched: disclosureResult.clickDispatched,
+              click_method: disclosureResult.eventFallbackAttempted
+                ? "event_sequence"
+                : "disclosure.click",
+              click_target_is_project_row: true,
+              click_target_section_verified: relocation.sectionVerified,
+              disclosure_click_attempted: disclosureResult.clickAttempted,
+              disclosure_click_dispatched: disclosureResult.clickDispatched,
+              disclosure_event_fallback_attempted: disclosureResult.eventFallbackAttempted,
+              disclosure_event_fallback_dispatched: disclosureResult.eventFallbackDispatched,
+              disclosure_url_changed: disclosureResult.urlChanged,
+              unresolved_reason: disclosureFailureReason,
+              exit_reason: disclosureFailureReason,
+              internal_reason: "project_row_disclosure_identity_unresolved",
+              navigation_failure_reason: disclosureFailureReason
+            });
+            reason = disclosureFailureReason;
+            navigationInternalReason = "project_row_disclosure_identity_unresolved";
+        } else if (targetInfo.targetIsMenuControl
+          || targetInfo.targetIsOverflowControl
+          || !targetInfo.target
+            || (typeof targetInfo.target.click !== "function"
+              && typeof targetInfo.target.dispatchEvent !== "function")) {
+          const noSafeTarget = targetInfo.targetIsMenuControl
+            || targetInfo.targetIsOverflowControl
+            || targetInfo.selectionReason === "no_safe_project_navigation_target";
+          const clickFailureReason = noSafeTarget
+            ? "no_safe_project_navigation_target"
+            : (identityCandidateReason || "project_row_not_clickable");
+          const internalReason = targetInfo.targetIsMenuControl || structure.rowIsMenuControl
+            ? "project_row_is_menu_control"
+            : targetInfo.targetIsOverflowControl || structure.rowIsOverflowControl
+              ? "project_row_is_overflow_control"
+              : clickFailureReason;
+          emitNavigationTelemetry("collector_project_identity_click", {
+            project_index: currentProjectIndex,
+            clickable_element_found: Boolean(targetInfo.target),
+            click_attempted: false,
+            click_dispatched: false,
+            click_method: noSafeTarget
+              ? "no_safe_project_navigation_target"
+              : (targetInfo.targetType === "row" ? "row.click" : "target.click"),
+            click_target_is_project_row: Boolean(row),
+            click_target_section_verified: relocation.sectionVerified,
+            selected_target_is_menu_control: targetInfo.targetIsMenuControl,
+            selected_target_is_overflow_control: targetInfo.targetIsOverflowControl,
+            selection_reason: targetInfo.selectionReason,
+            menu_control_reason: targetInfo.menuControlReason,
+            unresolved_reason: clickFailureReason,
+            exit_reason: clickFailureReason,
+            internal_reason: internalReason,
+            navigation_failure_reason: clickFailureReason
+          });
+            reason = clickFailureReason;
+            navigationInternalReason = internalReason;
+          } else {
+            const target = targetInfo.target;
+            const clickMethod = target === row ? "row.click" : "target.click";
+          emitNavigationTelemetry("collector_project_identity_click", {
+            project_index: currentProjectIndex,
+            clickable_element_found: true,
+            click_attempted: false,
+            click_dispatched: false,
+            click_method: clickMethod,
+            click_target_is_project_row: targetInfo.targetInsideProjectRow,
+            click_target_section_verified: relocation.sectionVerified
+          });
           try {
             // Only a row selected from the already discovered Project-row
             // collection is allowed to navigate. Generic Sidebar controls are
             // never queried or clicked here.
-            row.click();
-            identity = await waitForProjectHomeNavigation(root, options.navigationTimeoutMs);
-            if (!identity) reason = "navigation_target_not_project";
-            else if (expectedProjectId && expectedProjectId !== identity.projectId) {
+            const preClickUrl = documentHref(root, globalThis.location?.href);
+            emitNavigationTelemetry("collector_project_identity_click", {
+              project_index: currentProjectIndex,
+              clickable_element_found: true,
+              click_attempted: true,
+              click_dispatched: false,
+              click_method: clickMethod,
+              click_target_is_project_row: targetInfo.targetInsideProjectRow,
+              click_target_section_verified: relocation.sectionVerified
+            });
+            const clickStartedAt = Date.now();
+            let clickDispatched = false;
+            let clickError = null;
+            if (typeof target.click === "function") {
+              try {
+                target.click();
+                clickDispatched = true;
+              } catch (error) {
+                clickError = error;
+              }
+            }
+            emitNavigationTelemetry("collector_project_identity_click", {
+              project_index: currentProjectIndex,
+              clickable_element_found: true,
+              click_attempted: true,
+              click_dispatched: clickDispatched,
+              click_method: clickMethod,
+              click_target_is_project_row: targetInfo.targetInsideProjectRow,
+              click_target_section_verified: relocation.sectionVerified,
+              ...(clickError ? { unresolved_reason: "project_navigation_click_failed" } : {})
+            });
+            const navigationTimeoutMs = Math.max(
+              250,
+              Math.min(30000, Number(options.navigationTimeoutMs) || 10000));
+            const navigationProbeTimeoutMs = Math.min(
+              navigationTimeoutMs,
+              Math.max(250, Math.min(1000, Number(options.navigationProbeTimeoutMs) || 1000)));
+            observedIdentity = await waitForProjectHomeNavigation(root, navigationProbeTimeoutMs, {
+              projectIndex: currentProjectIndex,
+              emit: emitNavigationTelemetry,
+              initialUrl: preClickUrl
+            });
+            const currentUrlAfterClick = documentHref(root, globalThis.location?.href);
+            let fallbackNavigationWaitCompleted = false;
+            const canTryEventFallback = !observedIdentity
+              && currentUrlAfterClick === preClickUrl
+              && targetInfo.targetInsideProjectRow
+              && !targetInfo.targetIsMenuControl
+              && !targetInfo.targetIsOverflowControl
+              && target?.isConnected !== false
+              && typeof target?.dispatchEvent === "function";
+            if (canTryEventFallback) {
+              emitNavigationTelemetry("collector_project_identity_click", {
+                project_index: currentProjectIndex,
+                clickable_element_found: true,
+                click_attempted: true,
+                click_dispatched: false,
+                click_method: "event_sequence",
+                click_target_is_project_row: true,
+                click_target_section_verified: relocation.sectionVerified
+              });
+              const eventResult = dispatchProjectInteractiveEventSequence(
+                target,
+                row,
+                root,
+                preClickUrl);
+              emitNavigationTelemetry("collector_project_identity_click", {
+                project_index: currentProjectIndex,
+                clickable_element_found: true,
+                click_attempted: true,
+                click_dispatched: eventResult.dispatched,
+                click_method: "event_sequence",
+                click_target_is_project_row: true,
+                click_target_section_verified: relocation.sectionVerified,
+                ...(eventResult.dispatched ? {} : { unresolved_reason: "project_navigation_event_failed" })
+              });
+              if (eventResult.dispatched) {
+                const elapsedMs = Math.max(0, Date.now() - clickStartedAt);
+                const remainingTimeoutMs = Math.max(250, navigationTimeoutMs - elapsedMs);
+                observedIdentity = await waitForProjectHomeNavigation(root, remainingTimeoutMs, {
+                  projectIndex: currentProjectIndex,
+                  emit: emitNavigationTelemetry,
+                  initialUrl: preClickUrl
+                });
+                fallbackNavigationWaitCompleted = true;
+              }
+            }
+            if (!observedIdentity
+              && !fallbackNavigationWaitCompleted
+              && navigationProbeTimeoutMs < navigationTimeoutMs) {
+              const elapsedMs = Math.max(0, Date.now() - clickStartedAt);
+              observedIdentity = await waitForProjectHomeNavigation(
+                root,
+                Math.max(250, navigationTimeoutMs - elapsedMs),
+                {
+                  projectIndex: currentProjectIndex,
+                  emit: emitNavigationTelemetry,
+                  initialUrl: preClickUrl
+                });
+            }
+            identity = observedIdentity;
+            if (!identity) {
+              reason = "navigation_target_not_project";
+              navigationInternalReason = reason;
+            } else if (expectedProjectId && expectedProjectId !== identity.projectId) {
               identity = null;
               reason = "project_id_url_mismatch";
+              navigationInternalReason = reason;
             }
           } catch (_) {
+            emitNavigationTelemetry("collector_project_identity_click", {
+              project_index: currentProjectIndex,
+              clickable_element_found: true,
+              click_attempted: true,
+              click_dispatched: false,
+              click_method: clickMethod,
+              click_target_is_project_row: targetInfo.targetInsideProjectRow,
+              click_target_section_verified: relocation.sectionVerified,
+              unresolved_reason: "project_navigation_failed"
+            });
             reason = "project_navigation_failed";
+            navigationInternalReason = reason;
           }
         }
+        }
       }
+      const navigationResultIdentity = observedIdentity || identity;
+      const navigationResolved = Boolean(observedIdentity);
+      emitNavigationTelemetry("collector_project_identity_navigation_result", {
+        project_index: currentProjectIndex,
+        navigation_target_verified: navigationResolved,
+        project_url_pattern_valid: Boolean(
+          navigationResultIdentity?.projectUrl
+          && isProjectHomeUrl(navigationResultIdentity.projectUrl)),
+        project_id_extracted: Boolean(navigationResultIdentity?.projectId),
+        project_id_url_match: Boolean(
+          navigationResultIdentity?.projectId
+          && navigationResultIdentity?.projectUrl
+          && projectIdFromUrl(navigationResultIdentity.projectUrl) === navigationResultIdentity.projectId),
+        resolution_success: Boolean(identity),
+        unresolved_reason: identity ? "none" : (reason || "missing_stable_identity"),
+        exit_reason: identity ? "resolved" : (reason || "missing_stable_identity"),
+        internal_reason: identity
+          ? "none"
+          : (navigationInternalReason || reason || "missing_stable_identity"),
+        navigation_failure_reason: identity ? "none" : (reason || "missing_stable_identity")
+      });
       output[0] = identityProjectResult(
         descriptor,
         currentProjectIndex,
         identity,
-        "navigation",
+        navigationResolved ? "navigation" : "dom",
         reason,
-        Boolean(identity));
+        navigationResolved);
       if (identity) {
-        navigationResolvedCount = 1;
-        navigationTargetVerified = true;
+        if (navigationResolved) navigationResolvedCount = 1;
+        else nonNavigationResolvedCount = 1;
+        navigationTargetVerified = navigationResolved;
         projectUrlPatternValid = isProjectHomeUrl(identity.projectUrl);
         projectIdUrlMatch = projectIdFromUrl(identity.projectUrl) === identity.projectId;
       }
@@ -1227,7 +2766,12 @@
       resolution_method: mode,
       navigation_target_verified: navigationTargetVerified,
       project_url_pattern_valid: projectUrlPatternValid,
-      project_id_url_match: projectIdUrlMatch
+      project_id_url_match: projectIdUrlMatch,
+      navigation_failure_reason: output.find((project) => project?.unresolved_reason)?.unresolved_reason || "none",
+      internal_reason: output.find((project) => project?.unresolved_reason)
+        ? (navigationInternalReason || "missing_stable_identity")
+        : "none",
+      navigation_telemetry: navigationTelemetry
     };
   }
 
@@ -1458,6 +3002,7 @@
   function projectPageConversationElements(root) {
     return uniqueElements([
       "a[href]",
+      "[href]",
       '[role="link"][href]',
       '[data-href]',
       '[data-url]',
@@ -2679,6 +4224,8 @@
     collectChatGptProjectContextAsync,
     getCurrentChatGptContext,
     getChatGptCollectorViewport,
+    getChatGptRootSidebarHydrationState,
+    waitForChatGptRootSidebarHydrationAsync,
     findSidebarRoot,
     findSidebarScrollContainer,
     sidebarScrollTelemetry,
@@ -2687,6 +4234,8 @@
     visibleTitleFromElement,
     stripMetadataDescriptionSuffix,
     fallbackProjectIdFromTitle,
+    projectDisclosureStructureForRow,
+    projectInteractiveTargetForRow,
     sidebarRootSelectors: Object.freeze([...sidebarRootSelectors]),
     sidebarScrollContainerSelectors: Object.freeze([...sidebarScrollContainerSelectors]),
     projectRowSelectors: Object.freeze([...projectRowSelectors]),

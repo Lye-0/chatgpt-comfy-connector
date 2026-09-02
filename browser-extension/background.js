@@ -78,6 +78,12 @@ const COLLECTOR_PROJECT_TIMEOUT_MS = 30000;
 const COLLECTOR_VIEWPORT_MAX_RETRIES = 4;
 const COLLECTOR_SIDEBAR_READY_MAX_RETRIES = 8;
 const COLLECTOR_VIEWPORT_RETRY_DELAY_MS = 250;
+// Content Script ready and a visible Sidebar do not guarantee that ChatGPT's
+// React history shell has finished hydrating.  Wait for a bounded quiet DOM
+// interval before entering the one-shot Project discovery pass.
+const COLLECTOR_ROOT_HYDRATION_TIMEOUT_MS = 30000;
+const COLLECTOR_ROOT_HYDRATION_QUIET_MS = 600;
+const COLLECTOR_ROOT_HYDRATION_POLL_MS = 100;
 // A replacement Content Script can become ready before ChatGPT has hydrated
 // the newly opened conversation's message list. Keep checking the same
 // marker-bearing user message without ever issuing another Handoff send.
@@ -106,6 +112,7 @@ const CHATGPT_CONTEXT_LIST_RESPONSE_TYPE = "chatgpt.context.list.response";
 const CHATGPT_CONTEXT_CURRENT_RESPONSE_TYPE = "chatgpt.context.current.response";
 const CHATGPT_CONTEXT_RESULT_MESSAGE_TYPE = "CHATGPT_CONTEXT_RESULT";
 const CHATGPT_CONTEXT_CHANGED_MESSAGE_TYPE = "CHATGPT_CONTEXT_CHANGED";
+const COLLECTOR_PROJECT_IDENTITY_TELEMETRY_MESSAGE_TYPE = "COLLECTOR_PROJECT_IDENTITY_TELEMETRY";
 const REVIEW_MEDIA_ATTACH_BEGIN_MESSAGE_TYPE = "REVIEW_MEDIA_ATTACH_BEGIN";
 const REVIEW_MEDIA_ATTACH_CHUNK_MESSAGE_TYPE = "REVIEW_MEDIA_ATTACH_CHUNK";
 const REVIEW_MEDIA_ATTACH_END_MESSAGE_TYPE = "REVIEW_MEDIA_ATTACH_END";
@@ -233,11 +240,26 @@ const defaultCollectorWindowState = {
   navigationTargetVerified: false,
   projectUrlPatternValid: false,
   projectIdUrlMatch: false,
+  rootHydrationStarted: false,
+  rootHydrationCompleted: false,
+  rootHydrationTimeout: false,
+  hydrationWaitMs: 0,
+  documentReadyState: null,
+  sidebarRootPresent: false,
+  sidebarScrollContainerPresent: false,
+  sidebarShellPresent: false,
+  sidebarSectionsStable: false,
+  mutationCount: 0,
+  mutationQuietMs: 0,
+  rootUrlVerified: false,
+  rootNavigationGeneration: null,
   requestId: null
 };
 let collectorWindowState = { ...defaultCollectorWindowState };
 let collectorWindowStateOperation = Promise.resolve();
 let projectDiscoverySequence = 0;
+let lastCollectorTabEnforcementTelemetrySignature = null;
+let lastCollectorTabTopologyTelemetrySignature = null;
 
 const managedTabStateReady = (async () => {
   try {
@@ -370,6 +392,91 @@ function diagnostic(eventName, fields = {}) {
     "navigation_target_verified",
     "project_url_pattern_valid",
     "project_id_url_match",
+    "candidate_count",
+    "row_found",
+    "match_method",
+    "section_verified",
+    "stale_element_reused",
+    "clickable_element_found",
+    "click_attempted",
+    "click_dispatched",
+    "click_method",
+    "click_target_is_project_row",
+    "click_target_section_verified",
+    "interactive_candidate_count",
+    "selected_target_type",
+    "selected_target_has_href",
+    "selected_target_role",
+    "selected_target_tag",
+    "selected_target_inside_project_row",
+    "selected_target_is_menu_control",
+    "selected_target_is_overflow_control",
+    "safe_candidate_count",
+    "visible_safe_candidate_count",
+    "selection_reason",
+    "menu_control_reason",
+    "row_tag",
+    "row_role",
+    "row_tabindex_present",
+    "row_href_present",
+    "row_aria_haspopup",
+    "row_aria_expanded",
+    "row_aria_controls_present",
+    "direct_child_count",
+    "descendant_count",
+    "descendant_anchor_count",
+    "descendant_button_count",
+    "descendant_role_link_count",
+    "descendant_role_button_count",
+    "descendant_tabindex_count",
+    "descendant_href_count",
+    "shadow_root_present",
+    "shadow_descendant_count",
+    "nearest_interactive_ancestor_present",
+    "nearest_interactive_ancestor_tag",
+    "nearest_interactive_ancestor_role",
+    "row_is_menu_control",
+    "row_is_overflow_control",
+    "row_interactive_evidence",
+    "navigation_wait_started",
+    "url_changed",
+    "navigation_detected",
+    "content_script_reloaded",
+    "tab_update_observed",
+    "navigation_wait_ms",
+    "navigation_timeout",
+    "project_id_extracted",
+    "resolution_success",
+    "success",
+    "target_project_present",
+    "project_index_valid",
+    "collector_tab_present",
+    "collector_tab_matches",
+    "refresh_generation_matches",
+    "navigation_generation_present",
+    "navigation_generation_matches",
+    "root_state_ready",
+    "discovery_snapshot_present",
+    "discovery_fingerprint_present",
+    "project_section_snapshot_present",
+    "navigation_failure_reason",
+    "internal_reason",
+    "exit_reason",
+    "root_hydration_started",
+    "root_hydration_completed",
+    "root_hydration_timeout",
+    "hydration_wait_ms",
+    "document_ready_state",
+    "sidebar_root_present",
+    "sidebar_scroll_container_present",
+    "sidebar_shell_present",
+    "sidebar_sections_stable",
+    "mutation_count",
+    "mutation_quiet_ms",
+    "root_url_verified",
+    "expected_root_url",
+    "root_navigation_generation",
+    "navigation_generation",
     "unresolved_reason_count",
     "title_present",
     "project_id_present",
@@ -778,6 +885,19 @@ function recordProjectDiscoveryTelemetry(eventName, pending, fields = {}) {
     project_discovery_already_completed: discovery.alreadyCompleted,
     project_discovery_scroll_direction: discovery.scrollDirection,
     project_discovery_restore_count: discovery.restoreCount,
+    root_hydration_started: collectorWindowState.rootHydrationStarted,
+    root_hydration_completed: collectorWindowState.rootHydrationCompleted,
+    root_hydration_timeout: collectorWindowState.rootHydrationTimeout,
+    hydration_wait_ms: collectorWindowState.hydrationWaitMs,
+    document_ready_state: collectorWindowState.documentReadyState,
+    sidebar_root_present: collectorWindowState.sidebarRootPresent,
+    sidebar_scroll_container_present: collectorWindowState.sidebarScrollContainerPresent,
+    sidebar_shell_present: collectorWindowState.sidebarShellPresent,
+    sidebar_sections_stable: collectorWindowState.sidebarSectionsStable,
+    mutation_count: collectorWindowState.mutationCount,
+    mutation_quiet_ms: collectorWindowState.mutationQuietMs,
+    root_url_verified: collectorWindowState.rootUrlVerified,
+    root_navigation_generation: collectorWindowState.rootNavigationGeneration,
     ...fields
   });
 }
@@ -796,7 +916,20 @@ function projectDiscoveryTraceFields(pending) {
     project_discovery_in_flight: discovery.inFlight === true,
     project_discovery_already_completed: discovery.alreadyCompleted === true,
     project_discovery_scroll_direction: discovery.scrollDirection,
-    project_discovery_restore_count: discovery.restoreCount
+    project_discovery_restore_count: discovery.restoreCount,
+    root_hydration_started: collectorWindowState.rootHydrationStarted,
+    root_hydration_completed: collectorWindowState.rootHydrationCompleted,
+    root_hydration_timeout: collectorWindowState.rootHydrationTimeout,
+    hydration_wait_ms: collectorWindowState.hydrationWaitMs,
+    document_ready_state: collectorWindowState.documentReadyState,
+    sidebar_root_present: collectorWindowState.sidebarRootPresent,
+    sidebar_scroll_container_present: collectorWindowState.sidebarScrollContainerPresent,
+    sidebar_shell_present: collectorWindowState.sidebarShellPresent,
+    sidebar_sections_stable: collectorWindowState.sidebarSectionsStable,
+    mutation_count: collectorWindowState.mutationCount,
+    mutation_quiet_ms: collectorWindowState.mutationQuietMs,
+    root_url_verified: collectorWindowState.rootUrlVerified,
+    root_navigation_generation: collectorWindowState.rootNavigationGeneration
   };
 }
 
@@ -1518,6 +1651,19 @@ function collectorWindowLifecycle(lifecycle, fields = {}) {
     navigation_target_verified: collectorWindowState.navigationTargetVerified,
     project_url_pattern_valid: collectorWindowState.projectUrlPatternValid,
     project_id_url_match: collectorWindowState.projectIdUrlMatch,
+    root_hydration_started: collectorWindowState.rootHydrationStarted,
+    root_hydration_completed: collectorWindowState.rootHydrationCompleted,
+    root_hydration_timeout: collectorWindowState.rootHydrationTimeout,
+    hydration_wait_ms: collectorWindowState.hydrationWaitMs,
+    document_ready_state: collectorWindowState.documentReadyState,
+    sidebar_root_present: collectorWindowState.sidebarRootPresent,
+    sidebar_scroll_container_present: collectorWindowState.sidebarScrollContainerPresent,
+    sidebar_shell_present: collectorWindowState.sidebarShellPresent,
+    sidebar_sections_stable: collectorWindowState.sidebarSectionsStable,
+    mutation_count: collectorWindowState.mutationCount,
+    mutation_quiet_ms: collectorWindowState.mutationQuietMs,
+    root_url_verified: collectorWindowState.rootUrlVerified,
+    root_navigation_generation: collectorWindowState.rootNavigationGeneration,
     collector_window_width: collectorWindowState.windowWidth,
     collector_window_height: collectorWindowState.windowHeight,
     collector_content_inner_width: collectorWindowState.contentInnerWidth,
@@ -1573,18 +1719,28 @@ function recordCollectorTabTopology(windowId, tabs, collectorTab, trace = {}) {
     tabCountInWindow: topology.tabCount
   };
   const valid = topology.tabCount === 1 && topology.collectorTabActive;
-  diagnostic("collector tab topology observed", {
-    ...trace,
-    collector_window_id: collectorWindowState.windowId,
-    collector_tab_id: topology.collectorTabId,
-    active_tab_id_in_collector_window: topology.activeTabId,
-    collector_tab_active: topology.collectorTabActive,
-    tab_count_in_collector_window: topology.tabCount,
-    collector_window_exists: Number.isSafeInteger(collectorWindowState.windowId),
-    status: valid ? "observed" : "error",
-    error_code: valid ? undefined : "collector_tab_topology_invalid",
-    stage: "collector_tab_topology"
-  });
+  const signature = [
+    collectorWindowState.windowId,
+    topology.collectorTabId,
+    topology.activeTabId,
+    topology.collectorTabActive,
+    topology.tabCount
+  ].join(":");
+  if (signature !== lastCollectorTabTopologyTelemetrySignature) {
+    lastCollectorTabTopologyTelemetrySignature = signature;
+    diagnostic("collector tab topology observed", {
+      ...trace,
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: topology.collectorTabId,
+      active_tab_id_in_collector_window: topology.activeTabId,
+      collector_tab_active: topology.collectorTabActive,
+      tab_count_in_collector_window: topology.tabCount,
+      collector_window_exists: Number.isSafeInteger(collectorWindowState.windowId),
+      status: valid ? "observed" : "error",
+      error_code: valid ? undefined : "collector_tab_topology_invalid",
+      stage: "collector_tab_topology"
+    });
+  }
   void persistCollectorWindowState();
   return valid;
 }
@@ -1749,6 +1905,73 @@ function recordCollectorViewportTelemetry(window, viewport, viewportRetryCount, 
     window_id: collectorWindowState.windowId
   });
   void persistCollectorWindowState();
+}
+
+function recordCollectorRootHydrationTelemetry(source, pending = null, trace = {}) {
+  const integerOrZero = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  const navigationGeneration = typeof trace.root_navigation_generation === "string"
+    ? trace.root_navigation_generation
+    : (typeof source?.navigation_generation === "string"
+      ? source.navigation_generation : collectorWindowState.rootNavigationGeneration);
+  collectorWindowState = {
+    ...collectorWindowState,
+    rootHydrationStarted: trace.root_hydration_started !== undefined
+      ? trace.root_hydration_started === true
+      : source?.root_hydration_started === true
+        || collectorWindowState.rootHydrationStarted,
+    rootHydrationCompleted: trace.root_hydration_completed !== undefined
+      ? trace.root_hydration_completed === true
+      : source?.root_hydration_completed === true,
+    rootHydrationTimeout: trace.root_hydration_timeout !== undefined
+      ? trace.root_hydration_timeout === true
+      : source?.root_hydration_timeout === true,
+    hydrationWaitMs: integerOrZero(trace.hydration_wait_ms ?? source?.hydration_wait_ms),
+    documentReadyState: typeof (trace.document_ready_state || source?.document_ready_state) === "string"
+      ? String(trace.document_ready_state || source.document_ready_state).slice(0, 128)
+      : collectorWindowState.documentReadyState,
+    sidebarRootPresent: trace.sidebar_root_present !== undefined
+      ? trace.sidebar_root_present === true
+      : source?.sidebar_root_present === true,
+    sidebarScrollContainerPresent: trace.sidebar_scroll_container_present !== undefined
+      ? trace.sidebar_scroll_container_present === true
+      : source?.sidebar_scroll_container_present === true,
+    sidebarShellPresent: trace.sidebar_shell_present !== undefined
+      ? trace.sidebar_shell_present === true
+      : source?.sidebar_shell_present === true,
+    sidebarSectionsStable: trace.sidebar_sections_stable !== undefined
+      ? trace.sidebar_sections_stable === true
+      : source?.sidebar_sections_stable === true,
+    mutationCount: integerOrZero(trace.mutation_count ?? source?.mutation_count),
+    mutationQuietMs: integerOrZero(trace.mutation_quiet_ms ?? source?.mutation_quiet_ms),
+    rootUrlVerified: trace.root_url_verified !== undefined
+      ? trace.root_url_verified === true
+      : source?.root_url_verified === true,
+    rootNavigationGeneration: navigationGeneration || collectorWindowState.rootNavigationGeneration
+  };
+  diagnostic("collector root hydration", {
+    ...trace,
+    request_id: pending?.requestId || trace.request_id,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: pending?.tabId || collectorWindowState.tabId,
+    root_hydration_started: collectorWindowState.rootHydrationStarted,
+    root_hydration_completed: collectorWindowState.rootHydrationCompleted,
+    root_hydration_timeout: collectorWindowState.rootHydrationTimeout,
+    hydration_wait_ms: collectorWindowState.hydrationWaitMs,
+    document_ready_state: collectorWindowState.documentReadyState,
+    sidebar_root_present: collectorWindowState.sidebarRootPresent,
+    sidebar_scroll_container_present: collectorWindowState.sidebarScrollContainerPresent,
+    sidebar_shell_present: collectorWindowState.sidebarShellPresent,
+    sidebar_sections_stable: collectorWindowState.sidebarSectionsStable,
+    mutation_count: collectorWindowState.mutationCount,
+    mutation_quiet_ms: collectorWindowState.mutationQuietMs,
+    root_url_verified: collectorWindowState.rootUrlVerified,
+    expected_root_url: safeChatGptContextUrl(COLLECTOR_TAB_URL),
+    root_navigation_generation: collectorWindowState.rootNavigationGeneration,
+    status: trace.status || (collectorWindowState.rootHydrationCompleted ? "completed" : "waiting"),
+    stage: trace.stage || "collector_root_hydration",
+    target_tab_id: pending?.tabId || collectorWindowState.tabId
+  });
+  return collectorWindowState;
 }
 
 function recordCollectorScrollTelemetry(source, pending = null, trace = {}) {
@@ -2009,16 +2232,27 @@ async function enforceCollectorTab(tab, trace = {}) {
     }
   }
   collectorWindowState = { ...collectorWindowState, tabId: normalized.id };
-  diagnostic("collector tab state enforced", {
-    ...trace,
-    collector_window_id: normalized.windowId,
-    collector_tab_id: normalized.id,
-    target_tab_id: normalized.id,
-    tab_active: normalized.active === true,
-    tab_auto_discardable: normalized.autoDiscardable === false ? false : normalized.autoDiscardable,
-    status: "enforced",
-    stage: "collector_tab_state_enforced"
-  });
+  const signature = [
+    normalized.windowId,
+    normalized.id,
+    normalized.active === true,
+    normalized.autoDiscardable === false,
+    normalized.discarded === true,
+    normalized.frozen === true
+  ].join(":");
+  if (signature !== lastCollectorTabEnforcementTelemetrySignature || Object.keys(changes).length > 0) {
+    lastCollectorTabEnforcementTelemetrySignature = signature;
+    diagnostic("collector tab state enforced", {
+      ...trace,
+      collector_window_id: normalized.windowId,
+      collector_tab_id: normalized.id,
+      target_tab_id: normalized.id,
+      tab_active: normalized.active === true,
+      tab_auto_discardable: normalized.autoDiscardable === false ? false : normalized.autoDiscardable,
+      status: "enforced",
+      stage: "collector_tab_state_enforced"
+    });
+  }
   return normalized;
 }
 
@@ -2272,6 +2506,14 @@ async function navigateCollectorTab(tab, url, trace = {}) {
   if (!(await waitForTabReady(updated.id, COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS))) {
     throw bridgeError("Collector TabのProjectページ読み込みがタイムアウトしました。", 0, "collector_tab_navigation_timeout");
   }
+  if (!isProjectNavigation) {
+    diagnostic("collector root navigation completed", {
+      ...navigationTrace,
+      status: "completed",
+      stage: "collector_root_url_navigation_completed",
+      target_tab_id: updated.id
+    });
+  }
   return updated;
 }
 
@@ -2298,6 +2540,191 @@ async function readCollectorViewport(tab, trace = {}) {
       result?.errorCode || result?.error_code || "collector_viewport_unavailable");
   }
   return result;
+}
+
+function validateCollectorRootHydrationResponse(source, pending, tab, navigationGeneration) {
+  const requestId = source?.requestId || source?.request_id;
+  const responseGeneration = source?.refresh_generation;
+  const responseNavigationGeneration = source?.navigation_generation;
+  if (!source || typeof source !== "object"
+    || source.type !== "COLLECTOR_ROOT_HYDRATION_RESULT"
+    || requestId !== pending.requestId
+    || responseGeneration !== pending.generation
+    || responseNavigationGeneration !== navigationGeneration
+    || source.collector_tab_id !== tab.id) {
+    throw bridgeError(
+      "Root Sidebar hydration responseの識別情報が一致しません。",
+      0,
+      "collector_root_hydration_correlation_failed");
+  }
+  if (!isCollectorRootUrl(source.expected_root_url)
+    || source.root_url_verified !== true
+    || source.document_ready_state !== "complete"
+    || source.root_hydration_completed !== true
+    || source.sidebar_root_present !== true
+    || source.sidebar_scroll_container_present !== true
+    || source.sidebar_shell_present !== true
+    || source.sidebar_sections_stable !== true) {
+    throw bridgeError(
+      "Root Sidebarのhydrationが完了しませんでした。",
+      0,
+      source.errorCode || source.error_code || "collector_root_hydration_timeout");
+  }
+  return source;
+}
+
+async function waitForRootSidebarHydration(tab, pending, request, attempt = 0) {
+  throwIfCollectorRequestSuperseded(pending);
+  const navigationGeneration = "refresh-" + pending.generation + "-root-" + (attempt + 1);
+  const startedAt = Date.now();
+  pending.rootNavigationGeneration = navigationGeneration;
+  collectorWindowState = {
+    ...collectorWindowState,
+    rootHydrationStarted: true,
+    rootHydrationCompleted: false,
+    rootHydrationTimeout: false,
+    hydrationWaitMs: 0,
+    documentReadyState: null,
+    sidebarRootPresent: false,
+    sidebarScrollContainerPresent: false,
+    sidebarShellPresent: false,
+    sidebarSectionsStable: false,
+    mutationCount: 0,
+    mutationQuietMs: 0,
+    rootUrlVerified: false,
+    rootNavigationGeneration: navigationGeneration
+  };
+  diagnostic("collector root hydration started", {
+    request_id: pending.requestId,
+    refresh_generation: pending.generation,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: tab.id,
+    expected_root_url: safeChatGptContextUrl(COLLECTOR_TAB_URL),
+    root_navigation_generation: navigationGeneration,
+    root_hydration_started: true,
+    root_hydration_completed: false,
+    root_hydration_timeout: false,
+    status: "started",
+    stage: "collector_root_hydration_start",
+    target_tab_id: tab.id
+  });
+
+  let source;
+  try {
+    source = await dispatchToContentScript(tab.id, {
+      type: "GET_COLLECTOR_ROOT_HYDRATION",
+      requestId: pending.requestId,
+      refreshGeneration: pending.generation,
+      navigationGeneration,
+      collectorTabId: tab.id,
+      expectedRootUrl: COLLECTOR_TAB_URL,
+      timeoutMs: COLLECTOR_ROOT_HYDRATION_TIMEOUT_MS,
+      quietMs: COLLECTOR_ROOT_HYDRATION_QUIET_MS,
+      pollMs: COLLECTOR_ROOT_HYDRATION_POLL_MS
+    }, {
+      ...request,
+      request_id: pending.requestId,
+      refresh_generation: pending.generation,
+      root_navigation_generation: navigationGeneration,
+      expected_root_url: safeChatGptContextUrl(COLLECTOR_TAB_URL),
+      stage: "collector_root_hydration_wait"
+    }, {
+      timeoutMs: COLLECTOR_ROOT_HYDRATION_TIMEOUT_MS + 5000,
+      timeoutStage: "collector_root_hydration_timeout"
+    });
+  } catch (error) {
+    const elapsed = Math.max(0, Date.now() - startedAt);
+    const timeoutLike = error?.code === "send_failed"
+      || error?.code === "collector_root_hydration_timeout";
+    collectorWindowState = {
+      ...collectorWindowState,
+      rootHydrationCompleted: false,
+      rootHydrationTimeout: timeoutLike,
+      hydrationWaitMs: elapsed
+    };
+    diagnostic("collector root hydration failed", {
+      request_id: pending.requestId,
+      refresh_generation: pending.generation,
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: tab.id,
+      expected_root_url: safeChatGptContextUrl(COLLECTOR_TAB_URL),
+      root_navigation_generation: navigationGeneration,
+      root_hydration_started: true,
+      root_hydration_completed: false,
+      root_hydration_timeout: timeoutLike,
+      hydration_wait_ms: elapsed,
+      status: "error",
+      error_code: timeoutLike ? "collector_root_hydration_timeout" : error?.code,
+      stage: error?.stage || "collector_root_hydration_dispatch",
+      target_tab_id: tab.id
+    });
+    throw bridgeError(
+      "Root Sidebarのhydrationが完了しませんでした。",
+      0,
+      timeoutLike ? "collector_root_hydration_timeout" : error?.code || "collector_root_hydration_failed");
+  }
+
+  recordCollectorRootHydrationTelemetry(source, pending, {
+    request_id: pending.requestId,
+    refresh_generation: pending.generation,
+    root_navigation_generation: navigationGeneration,
+    status: source.status === "ok" ? "observed" : "error",
+    error_code: source.errorCode || source.error_code,
+    stage: source.stage || "collector_root_hydration_observed"
+  });
+
+  try {
+    validateCollectorRootHydrationResponse(source, pending, tab, navigationGeneration);
+    const currentTab = typeof chrome.tabs?.get === "function"
+      ? await chrome.tabs.get(tab.id)
+      : tab;
+    if (!currentTab || currentTab.windowId !== collectorWindowState.windowId
+      || !isCollectorRootUrl(currentTab.url)
+      || (typeof currentTab.status === "string" && currentTab.status !== "complete")) {
+      throw bridgeError(
+        "Root navigation generationが一致しません。",
+        0,
+        "collector_root_navigation_generation_mismatch");
+    }
+    recordCollectorRootHydrationTelemetry(source, pending, {
+      request_id: pending.requestId,
+      refresh_generation: pending.generation,
+      root_navigation_generation: navigationGeneration,
+      root_hydration_started: true,
+      root_hydration_completed: true,
+      root_hydration_timeout: false,
+      root_url_verified: true,
+      status: "completed",
+      stage: "collector_root_hydration_complete"
+    });
+    return currentTab;
+  } catch (error) {
+    const elapsed = Math.max(0, Date.now() - startedAt);
+    const errorCode = error?.code || "collector_root_hydration_timeout";
+    collectorWindowState = {
+      ...collectorWindowState,
+      rootHydrationCompleted: false,
+      rootHydrationTimeout: errorCode === "collector_root_hydration_timeout",
+      hydrationWaitMs: Math.max(collectorWindowState.hydrationWaitMs, elapsed)
+    };
+    diagnostic("collector root hydration failed", {
+      request_id: pending.requestId,
+      refresh_generation: pending.generation,
+      collector_window_id: collectorWindowState.windowId,
+      collector_tab_id: tab.id,
+      expected_root_url: safeChatGptContextUrl(COLLECTOR_TAB_URL),
+      root_navigation_generation: navigationGeneration,
+      root_hydration_started: true,
+      root_hydration_completed: false,
+      root_hydration_timeout: errorCode === "collector_root_hydration_timeout",
+      hydration_wait_ms: Math.max(collectorWindowState.hydrationWaitMs, elapsed),
+      status: "error",
+      error_code: errorCode,
+      stage: error?.stage || "collector_root_hydration_validation",
+      target_tab_id: tab.id
+    });
+    throw error;
+  }
 }
 
 // Readiness only: this function may reconcile/resize/wait for the Collector
@@ -3071,7 +3498,7 @@ function collectorProjectIdentityDescriptor(project, projectIndex) {
   return descriptor;
 }
 
-function validateCollectorProjectIdentityResponse(source, pending) {
+function validateCollectorProjectIdentityResponse(source, pending, expected = {}) {
   if (!source || typeof source !== "object") {
     throw bridgeError(
       "ChatGPT Project identity responseを取得できませんでした。",
@@ -3080,6 +3507,20 @@ function validateCollectorProjectIdentityResponse(source, pending) {
   }
   const requestId = source.requestId || source.request_id;
   if (requestId !== pending.requestId || (source.mode || "list") !== "list") {
+    throw bridgeError(
+      "ChatGPT Project identity responseの識別情報が一致しません。",
+      0,
+      "context_response_correlation_failed");
+  }
+  const sourceGeneration = source.refresh_generation ?? source.refreshGeneration;
+  const sourceNavigationGeneration = source.navigation_generation
+    ?? source.navigationGeneration;
+  const sourceCollectorTabId = source.collector_tab_id ?? source.collectorTabId;
+  if ((Number.isSafeInteger(sourceGeneration) && sourceGeneration !== pending.generation)
+    || (Number.isSafeInteger(sourceCollectorTabId) && sourceCollectorTabId !== pending.tabId)
+    || (expected.navigationGeneration
+      && sourceNavigationGeneration
+      && sourceNavigationGeneration !== expected.navigationGeneration)) {
     throw bridgeError(
       "ChatGPT Project identity responseの識別情報が一致しません。",
       0,
@@ -3206,6 +3647,278 @@ function recordCollectorProjectIdentityResolution(
   return resolution;
 }
 
+const collectorProjectIdentityNavigationTelemetryKeys = [
+  "project_index",
+  "candidate_count",
+  "row_found",
+  "match_method",
+  "section_verified",
+  "stale_element_reused",
+  "clickable_element_found",
+  "click_attempted",
+  "click_dispatched",
+  "click_method",
+  "click_target_is_project_row",
+  "click_target_section_verified",
+  "interactive_candidate_count",
+  "selected_target_type",
+  "selected_target_has_href",
+  "selected_target_role",
+  "selected_target_tag",
+  "selected_target_inside_project_row",
+  "selected_target_is_menu_control",
+  "selected_target_is_overflow_control",
+  "safe_candidate_count",
+  "visible_safe_candidate_count",
+  "selection_reason",
+  "menu_control_reason",
+  "row_tag",
+  "row_role",
+  "row_tabindex_present",
+  "row_href_present",
+  "row_aria_haspopup",
+  "row_aria_expanded",
+  "row_aria_controls_present",
+  "direct_child_count",
+  "descendant_count",
+  "descendant_anchor_count",
+  "descendant_button_count",
+  "descendant_role_link_count",
+  "descendant_role_button_count",
+  "descendant_tabindex_count",
+  "descendant_href_count",
+  "shadow_root_present",
+  "shadow_descendant_count",
+  "nearest_interactive_ancestor_present",
+  "nearest_interactive_ancestor_tag",
+  "nearest_interactive_ancestor_role",
+  "row_is_menu_control",
+  "row_is_overflow_control",
+  "row_is_disclosure_control",
+  "controlled_region_found",
+  "controlled_region_visible",
+  "controlled_region_element_count",
+  "controlled_region_project_chat_link_count",
+  "controlled_region_project_home_link_count",
+  "controlled_region_project_identity_present",
+  "controlled_region_identity_reason",
+  "aria_expanded_before",
+  "aria_expanded_after",
+  "disclosure_click_attempted",
+  "disclosure_click_dispatched",
+  "disclosure_event_fallback_attempted",
+  "disclosure_event_fallback_dispatched",
+  "disclosure_state_changed",
+  "disclosure_url_changed",
+  "disclosure_resolution_method",
+  "row_interactive_evidence",
+  "navigation_wait_started",
+  "url_changed",
+  "navigation_detected",
+  "content_script_reloaded",
+  "tab_update_observed",
+  "navigation_wait_ms",
+  "navigation_timeout",
+  "navigation_target_verified",
+  "project_url_pattern_valid",
+  "project_id_extracted",
+  "project_id_url_match",
+  "resolution_success",
+  "success",
+  "target_project_present",
+  "project_index_valid",
+  "collector_tab_present",
+  "collector_tab_matches",
+  "refresh_generation_matches",
+  "navigation_generation_present",
+  "navigation_generation_matches",
+  "root_state_ready",
+  "discovery_snapshot_present",
+  "discovery_fingerprint_present",
+  "project_section_snapshot_present",
+  "navigation_failure_reason",
+  "internal_reason",
+  "exit_reason",
+  "unresolved_reason"
+];
+
+function collectorProjectIdentityNavigationTelemetryFields(source = {}) {
+  const fields = {};
+  for (const key of collectorProjectIdentityNavigationTelemetryKeys) {
+    if (typeof source[key] === "boolean") fields[key] = source[key];
+    else if (Number.isSafeInteger(source[key]) && source[key] >= 0) fields[key] = source[key];
+    else if (typeof source[key] === "string" && source[key].length <= 128) fields[key] = source[key];
+  }
+  if (typeof source.stage === "string" && source.stage.length <= 128) {
+    fields.stage = source.stage;
+  }
+  return fields;
+}
+
+function recordCollectorProjectIdentityNavigationTelemetry(eventName, pending, fields = {}) {
+  const safeFields = collectorProjectIdentityNavigationTelemetryFields(fields);
+  diagnostic(eventName, {
+    request_id: pending?.requestId,
+    collector_window_id: collectorWindowState.windowId,
+    collector_tab_id: pending?.tabId,
+    ...projectDiscoveryTraceFields(pending),
+    project_index: Number.isSafeInteger(safeFields.project_index)
+      ? safeFields.project_index
+      : pending?.identityNavigationProjectIndex,
+    total_projects: Number.isSafeInteger(pending?.identityNavigationTotalProjects)
+      ? pending.identityNavigationTotalProjects
+      : collectorWindowState.totalProjects,
+    refresh_generation: pending?.generation,
+    navigation_generation: pending?.identityNavigationGeneration,
+    target_tab_id: pending?.tabId,
+    ...safeFields,
+    stage: safeFields.stage || "collector_project_identity_navigation"
+  });
+}
+
+function collectorProjectIdentityNavigationExitReason(error, fallback = "unexpected_exception") {
+  const code = typeof error?.code === "string" ? error.code : "";
+  if (code === "context_refresh_superseded") return "refresh_generation_mismatch";
+  if (code === "collector_tab_unavailable"
+    || code === "collector_tab_navigation_timeout"
+    || code === "collector_tab_navigation_failed") return "collector_tab_not_ready";
+  if (code === "context_response_correlation_failed") return "navigation_generation_mismatch";
+  if (code === "collector_project_identity_navigation_timeout") return "navigation_timeout";
+  return fallback;
+}
+
+function collectorProjectIdentityNavigationFailureReason(identityResult, target, responseProject) {
+  const reportedReason = typeof identityResult?.navigation_failure_reason === "string"
+    ? identityResult.navigation_failure_reason.trim()
+    : "";
+  if (reportedReason && reportedReason !== "none") return reportedReason;
+  const itemReason = typeof responseProject?.unresolved_reason === "string"
+    ? responseProject.unresolved_reason.trim()
+    : "";
+  if (itemReason && itemReason !== "none") return itemReason;
+  if (identityResult?.navigation_target_verified !== true) return "navigation_target_not_verified";
+  if (identityResult?.project_url_pattern_valid !== true) return "project_url_pattern_invalid";
+  if (identityResult?.project_id_url_match !== true) return "project_id_url_mismatch";
+  if (!responseProject?.project_id) return "project_id_not_extracted";
+  if (!target) return "project_identity_unresolved";
+  return "none";
+}
+
+function collectorProjectIdentityNavigationInternalReason(
+  identityResult,
+  target,
+  responseProject,
+  failureReason) {
+  const reportedReason = typeof identityResult?.internal_reason === "string"
+    ? identityResult.internal_reason.trim()
+    : "";
+  if (reportedReason && reportedReason !== "none") return reportedReason;
+  if (failureReason === "no_safe_project_navigation_target") {
+    const itemReason = typeof responseProject?.unresolved_reason === "string"
+      ? responseProject.unresolved_reason.trim()
+      : "";
+    if (itemReason === "project_row_is_menu_control") return itemReason;
+    if (itemReason === "project_row_is_overflow_control") return itemReason;
+    return failureReason;
+  }
+  if (failureReason === "none" && target) return "none";
+  return `project_identity_${failureReason || "unexpected_exception"}`;
+}
+
+function collectorProjectIdentityNavigationPreconditions(
+  tab,
+  pending,
+  descriptor,
+  targetProject,
+  projectIndex,
+  totalProjects,
+  discovery,
+  rootResult,
+  rootStateReady = false) {
+  const projectIndexValid = Number.isSafeInteger(projectIndex)
+    && projectIndex >= 0
+    && projectIndex < totalProjects;
+  const discoverySnapshotPresent = Array.isArray(rootResult?.projects)
+    && rootResult.projects.length > 0
+    && totalProjects > 0;
+  const discoveryFingerprintPresent = Boolean(
+    Number.isSafeInteger(descriptor?.discovery_index)
+    || (typeof descriptor?.discovery_key === "string" && descriptor.discovery_key.length > 0));
+  return {
+    target_project_present: Boolean(targetProject && typeof targetProject === "object"),
+    project_index_valid: projectIndexValid,
+    collector_tab_present: Boolean(tab && Number.isSafeInteger(tab.id)),
+    collector_tab_matches: Boolean(
+      tab && Number.isSafeInteger(tab.id)
+      && Number.isSafeInteger(pending?.tabId)
+      && tab.id === pending.tabId),
+    refresh_generation_matches: Number.isSafeInteger(pending?.generation)
+      && pending.generation === discovery?.refreshGeneration,
+    navigation_generation_present: typeof pending?.identityNavigationGeneration === "string"
+      && pending.identityNavigationGeneration.length > 0,
+    navigation_generation_matches: typeof pending?.identityNavigationGeneration === "string"
+      && pending.identityNavigationGeneration.length > 0
+      && pending.identityNavigationGeneration === `refresh-${pending.generation}-identity-${projectIndex}`,
+    root_state_ready: rootStateReady === true,
+    discovery_snapshot_present: discoverySnapshotPresent,
+    discovery_fingerprint_present: discoveryFingerprintPresent,
+    project_section_snapshot_present: rootResult?.project_section_found === true
+      || collectorWindowState.projectSectionFound === true
+  };
+}
+
+function collectorProjectIdentityPendingForTab(tabId) {
+  if (!Number.isSafeInteger(tabId)) return null;
+  for (const pending of contextRequests.values()) {
+    if (pending?.tabId === tabId
+      && pending.identityNavigationActive === true
+      && Number.isSafeInteger(pending.identityNavigationProjectIndex)) return pending;
+  }
+  return null;
+}
+
+async function handleCollectorProjectIdentityTelemetryFromContent(message, sender) {
+  const requestId = message?.requestId || message?.request_id;
+  const senderTabId = sender?.tab?.id;
+  const pending = contextRequests.get(requestId);
+  const messageGeneration = message?.refresh_generation ?? message?.refreshGeneration;
+  const messageNavigationGeneration = message?.navigation_generation
+    ?? message?.navigationGeneration;
+  const messageCollectorTabId = message?.collector_tab_id ?? message?.collectorTabId;
+  const messageProjectIndex = message?.project_index ?? message?.projectIndex;
+  const correlationValid = Boolean(
+    pending
+    && pending.identityNavigationActive === true
+    && senderTabId === pending.tabId
+    && (!Number.isSafeInteger(messageGeneration) || messageGeneration === pending.generation)
+    && (!Number.isSafeInteger(messageCollectorTabId) || messageCollectorTabId === senderTabId)
+    && (!Number.isSafeInteger(messageProjectIndex)
+      || messageProjectIndex === pending.identityNavigationProjectIndex)
+    && (!messageNavigationGeneration
+      || messageNavigationGeneration === pending.identityNavigationGeneration));
+  if (!correlationValid) {
+    diagnostic("collector project identity navigation telemetry rejected", {
+      request_id: requestId,
+      refresh_generation: Number.isSafeInteger(messageGeneration) ? messageGeneration : undefined,
+      collector_tab_id: messageCollectorTabId,
+      target_tab_id: senderTabId,
+      project_index: Number.isSafeInteger(messageProjectIndex) ? messageProjectIndex : undefined,
+      navigation_generation: typeof messageNavigationGeneration === "string"
+        ? messageNavigationGeneration : undefined,
+      status: "error",
+      error_code: "collector_project_identity_telemetry_not_correlated",
+      stage: "collector_project_identity_telemetry_correlation"
+    });
+    return { ok: false, error: "collector_project_identity_telemetry_not_correlated" };
+  }
+  const fields = collectorProjectIdentityNavigationTelemetryFields(message);
+  recordCollectorProjectIdentityNavigationTelemetry(
+    "collector project identity navigation telemetry",
+    pending,
+    fields);
+  return { ok: true };
+}
+
 function collectorProjectIdentityFromTab(tab) {
   const projectUrl = safeChatGptProjectUrl(tab?.url);
   const projectId = chatGptProjectId(projectUrl);
@@ -3310,50 +4023,155 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
     .filter((item) => !item.resolved)
     .map((item) => item.projectIndex);
   for (const projectIndex of unresolvedIndexes) {
-    throwIfCollectorRequestSuperseded(pending);
-    const descriptor = collectorProjectIdentityDescriptor(projects[projectIndex], projectIndex);
-    tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
-      request_id: pending.requestId,
-      project_index: projectIndex,
-      total_projects: projects.length,
-      project_discovery_completed: false,
-      project_discovery_scan_completed: true,
-      project_discovery_run_id: discovery.runId,
-      project_discovery_result_received: true,
-      stage: "collector_project_identity_root_navigation"
-    });
-    tab = await ensureCollectorReady(tab, {
-      request_id: pending.requestId,
-      project_index: projectIndex,
-      total_projects: projects.length,
-      stage: "collector_project_identity_root_ready"
-    });
-    pending.tabId = tab.id;
-    collectorWindowState = {
-      ...collectorWindowState,
-      currentProjectIndex: projectIndex,
-      identityResolutionMethod: "navigation",
-      navigationTargetVerified: false,
-      projectUrlPatternValid: false,
-      projectIdUrlMatch: false
+    const identityNavigationGeneration = `refresh-${pending.generation}-identity-${projectIndex}`;
+    const targetProject = projects[projectIndex];
+    const descriptor = collectorProjectIdentityDescriptor(targetProject, projectIndex);
+    pending.identityNavigationProjectIndex = projectIndex;
+    pending.identityNavigationTotalProjects = projects.length;
+    pending.identityNavigationGeneration = identityNavigationGeneration;
+    pending.identityNavigationActive = false;
+    let navigationExitEmitted = false;
+    let navigationFailureReason = null;
+    const emitNavigationExit = (success, exitReason, fields = {}) => {
+      if (navigationExitEmitted) return;
+      navigationExitEmitted = true;
+      const reason = typeof exitReason === "string" && exitReason.length > 0
+        ? exitReason
+        : (success ? "resolved" : "unexpected_exception");
+      recordCollectorProjectIdentityNavigationTelemetry(
+        "collector project identity navigation exit",
+        pending,
+        {
+          project_index: projectIndex,
+          success: success === true,
+          resolution_success: success === true,
+          exit_reason: reason,
+          navigation_failure_reason: success === true ? "none" : reason,
+          internal_reason: fields.internal_reason || reason,
+          ...fields,
+          stage: "collector_project_identity_navigation_exit"
+        });
     };
-    diagnostic("collector project identity navigation started", {
-      request_id: pending.requestId,
-      collector_window_id: collectorWindowState.windowId,
-      collector_tab_id: tab.id,
-      project_index: projectIndex,
-      total_projects: projects.length,
-      resolution_method: "navigation",
-      status: "started",
-      stage: "collector_project_identity_navigation_start",
-      target_tab_id: tab.id
-    });
+    recordCollectorProjectIdentityNavigationTelemetry(
+      "collector project identity navigation entry",
+      pending,
+      {
+        ...collectorProjectIdentityNavigationPreconditions(
+          tab,
+          pending,
+          descriptor,
+          targetProject,
+          projectIndex,
+          projects.length,
+          discovery,
+          rootResult,
+          isCollectorRootUrl(tab?.url)),
+        exit_reason: "none",
+        project_index: projectIndex,
+        stage: "collector_project_identity_navigation_entry"
+      });
+    try {
+      throwIfCollectorRequestSuperseded(pending);
+      recordCollectorProjectIdentityNavigationTelemetry(
+        "collector project identity navigation precondition",
+        pending,
+        {
+          ...collectorProjectIdentityNavigationPreconditions(
+            tab,
+            pending,
+            descriptor,
+            targetProject,
+            projectIndex,
+            projects.length,
+            discovery,
+            rootResult,
+            isCollectorRootUrl(tab?.url)),
+          project_index: projectIndex,
+          exit_reason: "none",
+          stage: "collector_project_identity_navigation_precondition"
+        });
+      tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
+        request_id: pending.requestId,
+        project_index: projectIndex,
+        total_projects: projects.length,
+        project_discovery_completed: false,
+        project_discovery_scan_completed: true,
+        project_discovery_run_id: discovery.runId,
+        project_discovery_result_received: true,
+        stage: "collector_project_identity_root_navigation"
+      });
+      tab = await ensureCollectorReady(tab, {
+        request_id: pending.requestId,
+        project_index: projectIndex,
+        total_projects: projects.length,
+        stage: "collector_project_identity_root_ready"
+      });
+      pending.tabId = tab.id;
+      pending.identityNavigationActive = true;
+      collectorWindowState = {
+        ...collectorWindowState,
+        currentProjectIndex: projectIndex,
+        identityResolutionMethod: "navigation",
+        navigationTargetVerified: false,
+        projectUrlPatternValid: false,
+        projectIdUrlMatch: false
+      };
+      recordCollectorProjectIdentityNavigationTelemetry(
+        "collector project identity navigation precondition",
+        pending,
+        {
+          ...collectorProjectIdentityNavigationPreconditions(
+            tab,
+            pending,
+            descriptor,
+            targetProject,
+            projectIndex,
+            projects.length,
+            discovery,
+            rootResult,
+            isCollectorRootUrl(tab?.url)),
+          project_index: projectIndex,
+          exit_reason: "none",
+          stage: "collector_project_identity_navigation_precondition_ready"
+        });
+      pending.identityNavigationContentReadyBeforeDispatch = contentScriptReadyTabs.has(tab.id);
+      diagnostic("collector project identity navigation started", {
+        request_id: pending.requestId,
+        collector_window_id: collectorWindowState.windowId,
+        collector_tab_id: tab.id,
+        project_index: projectIndex,
+        total_projects: projects.length,
+        refresh_generation: pending.generation,
+        navigation_generation: identityNavigationGeneration,
+        resolution_method: "navigation",
+        status: "started",
+        stage: "collector_project_identity_navigation_start",
+        target_tab_id: tab.id
+      });
+      recordCollectorProjectIdentityNavigationTelemetry(
+        "collector project identity navigation dispatch requested",
+        pending,
+        {
+          project_index: projectIndex,
+          navigation_wait_started: false,
+          url_changed: false,
+          navigation_detected: false,
+          content_script_reloaded: false,
+          tab_update_observed: false,
+          navigation_wait_ms: 0,
+          navigation_timeout: false,
+          resolution_success: false,
+          stage: "collector_project_identity_navigation_dispatch"
+        });
 
     let identityResult;
     try {
       identityResult = await dispatchToContentScript(tab.id, {
         type: "GET_CHATGPT_CONTEXT",
         requestId: pending.requestId,
+        refreshGeneration: pending.generation,
+        navigationGeneration: identityNavigationGeneration,
+        collectorTabId: tab.id,
         mode: "list",
         collection: "project_identity",
         identityMode: "navigation",
@@ -3367,7 +4185,34 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
         // URL below and let the Content Script's route check be idempotent.
         retryMissingContentScript: false
       });
+      recordCollectorProjectIdentityNavigationTelemetry(
+        "collector project identity navigation response received",
+        pending,
+        {
+          project_index: projectIndex,
+          navigation_wait_started: true,
+          navigation_target_verified: identityResult?.navigation_target_verified === true,
+          project_url_pattern_valid: identityResult?.project_url_pattern_valid === true,
+          project_id_extracted: Boolean(identityResult?.projects?.[0]?.project_id),
+          project_id_url_match: identityResult?.project_id_url_match === true,
+          resolution_success: identityResult?.status === "ok"
+            && (identityResult?.navigation_target_verified === true
+              || identityResult?.resolution_method === "dom"),
+          navigation_timeout: false,
+          stage: "collector_project_identity_navigation_response"
+        });
     } catch (error) {
+      recordCollectorProjectIdentityNavigationTelemetry(
+        "collector project identity navigation dispatch failed",
+        pending,
+        {
+          project_index: projectIndex,
+          navigation_wait_started: true,
+          navigation_timeout: false,
+          content_script_reloaded: contentScriptReadyTabs.has(tab.id)
+            && pending.identityNavigationContentReadyBeforeDispatch !== true,
+          stage: "collector_project_identity_navigation_dispatch_failed"
+        });
       // A full navigation can close the Content Script message port before
       // tabs.update/onUpdated has exposed the final URL to this turn. Poll
       // the exact Collector Tab until navigation is complete before deciding
@@ -3376,6 +4221,23 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
       const fromTab = await waitForCollectorProjectIdentityTab(
         tab.id,
         COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS);
+      recordCollectorProjectIdentityNavigationTelemetry(
+        "collector project identity navigation tab result",
+        pending,
+        {
+          project_index: projectIndex,
+          navigation_wait_started: true,
+          navigation_detected: Boolean(fromTab),
+          navigation_target_verified: Boolean(fromTab),
+          project_url_pattern_valid: Boolean(fromTab),
+          project_id_extracted: Boolean(fromTab?.projectId),
+          project_id_url_match: Boolean(fromTab?.projectId && fromTab?.projectUrl),
+          resolution_success: Boolean(fromTab),
+          navigation_timeout: !fromTab,
+          content_script_reloaded: contentScriptReadyTabs.has(tab.id)
+            && pending.identityNavigationContentReadyBeforeDispatch !== true,
+          stage: "collector_project_identity_navigation_tab_result"
+        });
       identityResult = fromTab
         ? {
           type: CHATGPT_CONTEXT_RESULT_MESSAGE_TYPE,
@@ -3407,14 +4269,38 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
         };
     }
     throwIfCollectorRequestSuperseded(pending);
-    validateCollectorProjectIdentityResponse(identityResult, pending);
+    validateCollectorProjectIdentityResponse(identityResult, pending, {
+      navigationGeneration: pending.identityNavigationGeneration
+    });
     const beforeNavigation = projects;
     projects = mergeCollectorProjectIdentityResponse(projects, identityResult);
     const target = collectorProjectTarget(projects[projectIndex]);
+    const responseProject = collectorProjectIdentityResponseItem(
+      identityResult.projects,
+      projectIndex,
+      1);
+    recordCollectorProjectIdentityNavigationTelemetry(
+      "collector project identity metadata resolution",
+      pending,
+      {
+        project_index: projectIndex,
+        navigation_target_verified: identityResult.navigation_target_verified === true,
+        project_url_pattern_valid: identityResult.project_url_pattern_valid === true,
+        project_id_extracted: Boolean(responseProject?.project_id),
+        project_id_url_match: identityResult.project_id_url_match === true,
+        resolution_success: Boolean(target),
+        navigation_timeout: false,
+        stage: "collector_project_identity_metadata_resolution"
+      });
+    recordCollectorProjectMetadataResolution({ projects }, pending);
     const navigationResolved = !collectorProjectTarget(beforeNavigation[projectIndex]) && Boolean(target);
+    const resolvedWithoutNavigation = navigationResolved && identityResult?.resolution_method === "dom";
     if (!target) {
+      navigationFailureReason = collectorProjectIdentityNavigationFailureReason(
+        identityResult,
+        target,
+        responseProject);
       const failedResolution = collectProjectMetadataResolution({ projects });
-      recordCollectorProjectMetadataResolution({ projects }, pending);
       recordCollectorProjectMetadataResolutionFailure(
         failedResolution,
         pending,
@@ -3433,6 +4319,12 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
           navigation_target_verified: identityResult.navigation_target_verified === true,
           project_url_pattern_valid: identityResult.project_url_pattern_valid === true,
           project_id_url_match: identityResult.project_id_url_match === true,
+          navigation_failure_reason: navigationFailureReason,
+          internal_reason: collectorProjectIdentityNavigationInternalReason(
+            identityResult,
+            target,
+            responseProject,
+            navigationFailureReason),
           status: "error",
           error_code: "context_projects_incomplete",
           stage: "collector_project_identity_navigation_failed"
@@ -3442,7 +4334,8 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
         0,
         "context_projects_incomplete");
     }
-    if (navigationResolved) navigationResolvedCount += 1;
+    if (resolvedWithoutNavigation) nonNavigationResolvedCount += 1;
+    else if (navigationResolved) navigationResolvedCount += 1;
     pending.projectIdentityResult = {
       ...rootResult,
       projects,
@@ -3458,13 +4351,14 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
         non_navigation_resolved_count: nonNavigationResolvedCount,
         navigation_resolved_count: navigationResolvedCount,
         current_project_index: projectIndex,
-        resolution_method: "navigation",
+        resolution_method: resolvedWithoutNavigation ? "dom" : "navigation",
         navigation_target_verified: identityResult.navigation_target_verified !== false,
         project_url_pattern_valid: identityResult.project_url_pattern_valid !== false,
         project_id_url_match: identityResult.project_id_url_match !== false,
         status: "resolved",
         stage: "collector_project_identity_navigation_resolved"
       });
+    pending.identityNavigationActive = false;
     // Always return to the discovery/root page before attempting the next
     // confirmed Project row. This is identity resolution only; Project
     // discovery itself is not re-entered.
@@ -3478,9 +4372,48 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
       stage: "collector_project_identity_root_restore"
     });
     pending.tabId = tab.id;
+    emitNavigationExit(true, "resolved", {
+      navigation_target_verified: true,
+      project_url_pattern_valid: true,
+      project_id_url_match: true,
+      internal_reason: "project_identity_resolved"
+    });
+    pending.identityNavigationProjectIndex = null;
+    pending.identityNavigationTotalProjects = null;
+    pending.identityNavigationGeneration = null;
     unresolvedIndexes = collectProjectMetadataResolution({ projects }).items
       .filter((item) => !item.resolved)
       .map((item) => item.projectIndex);
+    } catch (error) {
+      const exitReason = navigationFailureReason
+        || collectorProjectIdentityNavigationExitReason(error);
+      // Stop attributing late tabs.onUpdated / CONTENT_SCRIPT_READY events to
+      // this identity click once the current fallback attempt has exited.
+      // Keep the index/generation until after EXIT telemetry is emitted so the
+      // failure remains correlated, but make the attempt inactive first.
+      pending.identityNavigationActive = false;
+      if (!navigationFailureReason) {
+        navigationFailureReason = exitReason;
+        recordCollectorProjectIdentityNavigationTelemetry(
+          "collector project identity navigation failed",
+          pending,
+          {
+            project_index: projectIndex,
+            navigation_target_verified: false,
+            project_url_pattern_valid: false,
+            project_id_url_match: false,
+            resolution_success: false,
+            navigation_failure_reason: exitReason,
+            internal_reason: `project_identity_${exitReason}`,
+            exit_reason: exitReason,
+            stage: "collector_project_identity_navigation_failed"
+          });
+      }
+      emitNavigationExit(false, exitReason, {
+        internal_reason: `project_identity_${exitReason}`
+      });
+      throw error;
+    }
   }
 
   const finalResolution = collectProjectMetadataResolution({ projects });
@@ -3672,6 +4605,26 @@ function collectCollectorRootResult(tab, pending, request, caller = "refresh_orc
   const scanAlreadyCompleted = discovery.scanCompleted === true
     && pending.projectDiscoveryScanResult
     && Array.isArray(pending.projectDiscoveryScanResult.projects);
+  // A Project discovery scan is one-shot for a Refresh generation.  Once a
+  // scan has started, a lost Collector medium must not silently re-enter the
+  // scan and move the Sidebar a second time.  Identity resolution may still
+  // resume from `scanAlreadyCompleted`, but an incomplete scan is surfaced to
+  // the caller with its original snapshot boundary intact.
+  if (!scanAlreadyCompleted && discovery.callCount > 0) {
+    discovery.alreadyCompleted = false;
+    recordProjectDiscoveryTelemetry("collector project discovery duplicate blocked", pending, {
+      project_discovery_caller: caller,
+      status: "error",
+      error_code: "collector_project_discovery_already_attempted",
+      stage: "collector_project_discovery_duplicate_blocked",
+      internal_reason: "project_discovery_already_attempted",
+      target_tab_id: pending.tabId
+    });
+    throw bridgeError(
+      "ChatGPT Project discoveryは同じRefreshで再実行できません。",
+      0,
+      "context_projects_incomplete");
+  }
   if (!scanAlreadyCompleted) {
     discovery.callCount += 1;
     discovery.started = true;
@@ -3990,9 +4943,22 @@ async function collectContextWithRecovery(tab, pending, request) {
         pending.collectorMediumLost = false;
         pending.collectorMediumLossReason = null;
       }
+      const needsRootHydration = !pending.currentOnly
+        && !(
+          projectDiscoveryStateFor(pending).scanCompleted === true
+          && pending.projectDiscoveryScanResult
+          && Array.isArray(pending.projectDiscoveryScanResult.projects)
+        );
+      const rootNavigationGeneration = "refresh-"
+        + pending.generation
+        + "-root-"
+        + (attempt + 1);
       tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
         request_id: pending.requestId,
         retry_count: attempt,
+        refresh_generation: pending.generation,
+        expected_root_url: safeChatGptContextUrl(COLLECTOR_TAB_URL),
+        root_navigation_generation: rootNavigationGeneration,
         stage: "collector_root_navigation"
       });
       pending.tabId = tab.id;
@@ -4003,6 +4969,15 @@ async function collectContextWithRecovery(tab, pending, request) {
       });
       pending.tabId = tab.id;
       pending.collectorWindowId = collectorWindowState.windowId;
+      if (needsRootHydration) {
+        tab = await waitForRootSidebarHydration(
+          tab,
+          pending,
+          request,
+          attempt);
+        pending.tabId = tab.id;
+        pending.collectorWindowId = collectorWindowState.windowId;
+      }
       if (!pending.currentOnly
         && (!pending.projectDiscoveryResult || !projectDiscoveryStateFor(pending).completed)) {
         // This is the single explicit Project discovery entry point for the
@@ -4025,7 +5000,30 @@ async function collectContextWithRecovery(tab, pending, request) {
       // lifecycle listeners while that scan was in flight. Ordinary DOM
       // readiness/retry paths must surface the error instead of starting a
       // second scan and moving the Sidebar back to the top.
-      const canRecover = pending.collectorMediumLost === true && attempt === 0;
+      const discovery = projectDiscoveryStateFor(pending);
+      const discoveryCanResume = discovery.callCount === 0
+        || discovery.scanCompleted === true;
+      const canRecover = pending.collectorMediumLost === true
+        && attempt === 0
+        && discoveryCanResume;
+      if (pending.collectorMediumLost === true
+        && attempt === 0
+        && !discoveryCanResume) {
+        diagnostic("collector project discovery recovery blocked", {
+          request_id: pending.requestId,
+          retry_count: attempt + 1,
+          refresh_generation: discovery.refreshGeneration,
+          project_discovery_run_id: discovery.runId,
+          project_discovery_call_count: discovery.callCount,
+          project_discovery_started: discovery.started,
+          project_discovery_scan_completed: discovery.scanCompleted,
+          error_code: "collector_project_discovery_already_attempted",
+          internal_reason: "project_discovery_already_attempted",
+          status: "error",
+          stage: "collector_project_discovery_recovery_blocked",
+          target_tab_id: pending.tabId
+        });
+      }
       if (!canRecover || (terminalError && pending.collectorMediumLost !== true)) {
         diagnostic("collector refresh terminal failure", {
           request_id: pending.requestId,
@@ -4087,6 +5085,7 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
       projectDiscoveryResult: null,
       projectDiscoveryScanResult: null,
       projectIdentityResult: null,
+      rootNavigationGeneration: null,
       message: request,
       generation
     };
@@ -4149,7 +5148,20 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
         identityResolutionMethod: null,
         navigationTargetVerified: false,
         projectUrlPatternValid: false,
-        projectIdUrlMatch: false
+        projectIdUrlMatch: false,
+        rootHydrationStarted: false,
+        rootHydrationCompleted: false,
+        rootHydrationTimeout: false,
+        hydrationWaitMs: 0,
+        documentReadyState: null,
+        sidebarRootPresent: false,
+        sidebarScrollContainerPresent: false,
+        sidebarShellPresent: false,
+        sidebarSectionsStable: false,
+        mutationCount: 0,
+        mutationQuietMs: 0,
+        rootUrlVerified: false,
+        rootNavigationGeneration: null
       };
       tab = await ensureCollectorWindow(COLLECTOR_TAB_URL, {
         request_id: requestId,
@@ -4976,6 +5988,10 @@ function safeChatGptProjectUrl(value) {
   } catch (_) {
     return null;
   }
+}
+
+function isCollectorRootUrl(value) {
+  return safeChatGptContextUrl(value) === safeChatGptContextUrl(COLLECTOR_TAB_URL);
 }
 
 function conversationTargetFromMessage(message) {
@@ -7051,6 +8067,32 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
       tab_status: typeof tab?.status === "string" ? tab.status : changeInfo?.status
     });
   }
+  const identityNavigationPending = isCollectorWindowTab
+    ? collectorProjectIdentityPendingForTab(tabId)
+    : null;
+  if (identityNavigationPending) {
+    const urlChanged = Object.prototype.hasOwnProperty.call(changeInfo || {}, "url");
+    const navigationDetected = Boolean(collectorProjectIdentityFromTab(tab));
+    recordCollectorProjectIdentityNavigationTelemetry(
+      "collector project identity navigation tab update",
+      identityNavigationPending,
+      {
+        project_index: identityNavigationPending.identityNavigationProjectIndex,
+        navigation_wait_started: true,
+        url_changed: urlChanged,
+        navigation_detected: navigationDetected,
+        content_script_reloaded: false,
+        tab_update_observed: true,
+        navigation_wait_ms: 0,
+        navigation_timeout: false,
+        navigation_target_verified: navigationDetected,
+        project_url_pattern_valid: navigationDetected,
+        project_id_extracted: navigationDetected,
+        project_id_url_match: navigationDetected,
+        resolution_success: navigationDetected,
+        stage: "collector_project_identity_navigation_tab_update"
+      });
+  }
   if (isCollectorWindowTab && changeInfo?.status === "loading") {
     contentScriptReadyTabs.delete(tabId);
     collectorWindowLifecycle("WaitingContentScript", {
@@ -7423,6 +8465,15 @@ chrome.windows?.onRemoved?.addListener?.((windowId) => {
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === COLLECTOR_PROJECT_IDENTITY_TELEMETRY_MESSAGE_TYPE) {
+    handleCollectorProjectIdentityTelemetryFromContent(message, _sender)
+      .then(sendResponse)
+      .catch(() => sendResponse({
+        ok: false,
+        error: "collector_project_identity_telemetry_relay_failed"
+      }));
+    return true;
+  }
   if (message?.type === CHATGPT_CONTEXT_RESULT_MESSAGE_TYPE) {
     handleContextResultFromContent(message, _sender)
       .then(() => sendResponse({ ok: true }))
@@ -7471,6 +8522,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             status: "ready",
             stage: "content_script_ready"
           });
+          const identityNavigationPending = collectorProjectIdentityPendingForTab(readyTabId);
+          if (identityNavigationPending) {
+            recordCollectorProjectIdentityNavigationTelemetry(
+              "collector project identity content script ready",
+              identityNavigationPending,
+              {
+                project_index: identityNavigationPending.identityNavigationProjectIndex,
+                navigation_wait_started: true,
+                content_script_reloaded: !wasReady,
+                tab_update_observed: !wasReady,
+                navigation_timeout: false,
+                stage: "collector_project_identity_content_script_ready"
+              });
+          }
           recordManagedTabLifecycleTelemetry(
             wasReady ? "content_script_reconnect" : "content_script_ready",
             {

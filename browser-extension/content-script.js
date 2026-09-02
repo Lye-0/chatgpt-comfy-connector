@@ -8,6 +8,8 @@
   const handoffMessageType = "HANDOFF_SEND";
   const contextRequestMessageType = "GET_CHATGPT_CONTEXT";
   const collectorViewportRequestMessageType = "GET_COLLECTOR_VIEWPORT";
+  const collectorRootHydrationRequestMessageType = "GET_COLLECTOR_ROOT_HYDRATION";
+  const collectorProjectIdentityTelemetryMessageType = "COLLECTOR_PROJECT_IDENTITY_TELEMETRY";
   const contextChangedMessageType = "CHATGPT_CONTEXT_CHANGED";
   const responseWatchMessageType = "WATCH_ASSISTANT_RESPONSE";
   const executionReadyMessageType = "CHATGPT_EXECUTION_READY";
@@ -88,7 +90,85 @@
       "document_was_discarded",
       "content_script_alive",
       "watcher_state",
-      "assistant_state"
+      "assistant_state",
+      "root_hydration_started",
+      "root_hydration_completed",
+      "root_hydration_timeout",
+      "hydration_wait_ms",
+      "document_ready_state",
+      "sidebar_root_present",
+      "sidebar_scroll_container_present",
+      "sidebar_shell_present",
+      "sidebar_sections_stable",
+      "mutation_count",
+      "mutation_quiet_ms",
+      "root_url_verified",
+      "refresh_generation",
+      "navigation_generation",
+      "collector_tab_id",
+      "project_index",
+      "candidate_count",
+      "row_found",
+      "match_method",
+      "section_verified",
+      "stale_element_reused",
+      "clickable_element_found",
+      "click_attempted",
+      "click_dispatched",
+      "click_method",
+      "click_target_is_project_row",
+      "click_target_section_verified",
+      "interactive_candidate_count",
+      "selected_target_type",
+      "selected_target_has_href",
+      "selected_target_role",
+      "selected_target_tag",
+      "selected_target_inside_project_row",
+      "selected_target_is_menu_control",
+      "selected_target_is_overflow_control",
+      "safe_candidate_count",
+      "visible_safe_candidate_count",
+      "selection_reason",
+      "menu_control_reason",
+      "row_tag",
+      "row_role",
+      "row_tabindex_present",
+      "row_href_present",
+      "row_aria_haspopup",
+      "row_aria_expanded",
+      "row_aria_controls_present",
+      "direct_child_count",
+      "descendant_count",
+      "descendant_anchor_count",
+      "descendant_button_count",
+      "descendant_role_link_count",
+      "descendant_role_button_count",
+      "descendant_tabindex_count",
+      "descendant_href_count",
+      "shadow_root_present",
+      "shadow_descendant_count",
+      "nearest_interactive_ancestor_present",
+      "nearest_interactive_ancestor_tag",
+      "nearest_interactive_ancestor_role",
+      "row_is_menu_control",
+      "row_is_overflow_control",
+      "row_interactive_evidence",
+      "navigation_wait_started",
+      "url_changed",
+      "navigation_detected",
+      "content_script_reloaded",
+      "tab_update_observed",
+      "navigation_wait_ms",
+      "navigation_timeout",
+      "navigation_target_verified",
+      "project_url_pattern_valid",
+      "project_id_extracted",
+      "project_id_url_match",
+      "resolution_success",
+      "unresolved_reason",
+      "exit_reason",
+      "internal_reason",
+      "navigation_failure_reason"
     ]) {
       if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
       if (typeof fields[key] === "boolean") safe[key] = fields[key];
@@ -128,6 +208,124 @@
       target_tab_id: message?.targetTabId ?? message?.target_tab_id,
       ...fields
     };
+  }
+
+  const collectorProjectIdentityTelemetryKeys = [
+    "project_index",
+    "candidate_count",
+    "row_found",
+    "match_method",
+    "section_verified",
+    "stale_element_reused",
+    "clickable_element_found",
+    "click_attempted",
+    "click_dispatched",
+    "click_method",
+    "click_target_is_project_row",
+    "click_target_section_verified",
+    "interactive_candidate_count",
+    "selected_target_type",
+    "selected_target_has_href",
+    "selected_target_role",
+    "selected_target_tag",
+    "selected_target_inside_project_row",
+    "selected_target_is_menu_control",
+    "selected_target_is_overflow_control",
+    "safe_candidate_count",
+    "visible_safe_candidate_count",
+    "selection_reason",
+    "menu_control_reason",
+    "row_tag",
+    "row_role",
+    "row_tabindex_present",
+    "row_href_present",
+    "row_aria_haspopup",
+    "row_aria_expanded",
+    "row_aria_controls_present",
+    "direct_child_count",
+    "descendant_count",
+    "descendant_anchor_count",
+    "descendant_button_count",
+    "descendant_role_link_count",
+    "descendant_role_button_count",
+    "descendant_tabindex_count",
+    "descendant_href_count",
+    "shadow_root_present",
+    "shadow_descendant_count",
+    "nearest_interactive_ancestor_present",
+    "nearest_interactive_ancestor_tag",
+    "nearest_interactive_ancestor_role",
+    "row_is_menu_control",
+    "row_is_overflow_control",
+    "row_is_disclosure_control",
+    "controlled_region_found",
+    "controlled_region_visible",
+    "controlled_region_element_count",
+    "controlled_region_project_chat_link_count",
+    "controlled_region_project_home_link_count",
+    "controlled_region_project_identity_present",
+    "controlled_region_identity_reason",
+    "aria_expanded_before",
+    "aria_expanded_after",
+    "disclosure_click_attempted",
+    "disclosure_click_dispatched",
+    "disclosure_event_fallback_attempted",
+    "disclosure_event_fallback_dispatched",
+    "disclosure_state_changed",
+    "disclosure_url_changed",
+    "disclosure_resolution_method",
+    "row_interactive_evidence",
+    "navigation_wait_started",
+    "url_changed",
+    "navigation_detected",
+    "content_script_reloaded",
+    "tab_update_observed",
+    "navigation_wait_ms",
+    "navigation_timeout",
+    "navigation_target_verified",
+    "project_url_pattern_valid",
+    "project_id_extracted",
+    "project_id_url_match",
+    "resolution_success",
+    "unresolved_reason",
+    "exit_reason",
+    "internal_reason",
+    "navigation_failure_reason"
+  ];
+
+  function collectorProjectIdentityTelemetryFor(message, event = {}) {
+    const result = {
+      type: collectorProjectIdentityTelemetryMessageType,
+      request_id: message?.requestId || message?.request_id || ""
+    };
+    if (typeof event.stage === "string" && event.stage.length <= 128) {
+      result.stage = event.stage;
+    }
+    if (Number.isSafeInteger(message?.refreshGeneration)) {
+      result.refresh_generation = message.refreshGeneration;
+    }
+    if (typeof message?.navigationGeneration === "string"
+      && message.navigationGeneration.length <= 128) {
+      result.navigation_generation = message.navigationGeneration;
+    }
+    if (Number.isSafeInteger(message?.collectorTabId)) {
+      result.collector_tab_id = message.collectorTabId;
+    }
+    for (const key of collectorProjectIdentityTelemetryKeys) {
+      if (typeof event[key] === "boolean") result[key] = event[key];
+      else if (Number.isSafeInteger(event[key]) && event[key] >= 0) result[key] = event[key];
+      else if (typeof event[key] === "string" && event[key].length <= 128) result[key] = event[key];
+    }
+    return result;
+  }
+
+  function emitCollectorProjectIdentityTelemetry(message, event = {}) {
+    const telemetry = collectorProjectIdentityTelemetryFor(message, event);
+    diagnostic("collector project identity navigation", traceForMessage(message, telemetry));
+    // This is best-effort metadata only. A full navigation may destroy the
+    // current Content Script immediately after row.click(), so the Background
+    // also observes the exact Collector Tab through tabs.onUpdated.
+    void sendRuntimeMessage(telemetry);
   }
 
   function contentLifecycleTrace(watcher = null, fields = {}) {
@@ -290,6 +488,16 @@
       conversations: Array.isArray(data.conversations) ? data.conversations : [],
       current: data.current || null
     };
+    if (Number.isSafeInteger(message?.refreshGeneration)) {
+      result.refresh_generation = message.refreshGeneration;
+    }
+    if (typeof message?.navigationGeneration === "string"
+      && message.navigationGeneration.length <= 128) {
+      result.navigation_generation = message.navigationGeneration;
+    }
+    if (Number.isSafeInteger(message?.collectorTabId)) {
+      result.collector_tab_id = message.collectorTabId;
+    }
     if (errorCode) result.errorCode = errorCode;
     if (text) result.message = text;
     if (stage) result.stage = stage;
@@ -319,6 +527,9 @@
     }
     if (data.resolution_method === "dom" || data.resolution_method === "navigation") {
       result.resolution_method = data.resolution_method;
+    }
+    for (const key of ["exit_reason", "internal_reason", "navigation_failure_reason"]) {
+      if (typeof data[key] === "string" && data[key].length <= 128) result[key] = data[key];
     }
     for (const key of [
       "sidebar_scroll_top",
@@ -399,6 +610,108 @@
     }
   }
 
+  function collectorRootHydrationResultFor(message, status, errorCode, text, stage, data = {}) {
+    const result = {
+      type: "COLLECTOR_ROOT_HYDRATION_RESULT",
+      requestId: message?.requestId || message?.request_id || "",
+      status,
+      refresh_generation: Number.isSafeInteger(message?.refreshGeneration)
+        ? message.refreshGeneration : null,
+      navigation_generation: typeof message?.navigationGeneration === "string"
+        ? message.navigationGeneration.slice(0, 128) : "",
+      collector_tab_id: Number.isSafeInteger(message?.collectorTabId)
+        ? message.collectorTabId : null,
+      expected_root_url: typeof message?.expectedRootUrl === "string"
+        ? message.expectedRootUrl.slice(0, 2048) : "",
+      root_hydration_started: true,
+      root_hydration_completed: data.root_hydration_completed === true,
+      root_hydration_timeout: data.root_hydration_timeout === true,
+      hydration_wait_ms: Number.isSafeInteger(data.hydration_wait_ms)
+        ? data.hydration_wait_ms : 0,
+      document_ready_state: typeof data.document_ready_state === "string"
+        ? data.document_ready_state : "unknown",
+      sidebar_root_present: data.sidebar_root_present === true,
+      sidebar_scroll_container_present: data.sidebar_scroll_container_present === true,
+      sidebar_shell_present: data.sidebar_shell_present === true,
+      sidebar_sections_stable: data.sidebar_sections_stable === true,
+      mutation_count: Number.isSafeInteger(data.mutation_count) ? data.mutation_count : 0,
+      mutation_quiet_ms: Number.isSafeInteger(data.mutation_quiet_ms)
+        ? data.mutation_quiet_ms : 0,
+      root_url_verified: data.root_url_verified === true
+    };
+    if (errorCode) result.errorCode = errorCode;
+    if (text) result.message = text;
+    if (stage) result.stage = stage;
+    return result;
+  }
+
+  async function handleGetCollectorRootHydration(message) {
+    if (!locators || !locators.isChatGptPage?.()) {
+      return collectorRootHydrationResultFor(
+        message,
+        "error",
+        "active_tab_not_chatgpt",
+        "Collector TabはChatGPTではありません。",
+        "collector_root_hydration_page_check");
+    }
+    try {
+      const state = await locators.waitForChatGptRootSidebarHydrationAsync?.(
+        document,
+        message?.expectedRootUrl || "https://chatgpt.com/",
+        {
+          timeoutMs: message?.timeoutMs,
+          quietMs: message?.quietMs,
+          pollMs: message?.pollMs
+        });
+      if (!state) {
+        return collectorRootHydrationResultFor(
+          message,
+          "error",
+          "collector_root_hydration_unavailable",
+          "Root Sidebar hydration状態を取得できませんでした。",
+          "collector_root_hydration_extraction");
+      }
+      const result = collectorRootHydrationResultFor(
+        message,
+        state.status === "ok" ? "ok" : "error",
+        state.errorCode || (state.status === "ok" ? null : "collector_root_hydration_timeout"),
+        state.status === "ok" ? null : "Root Sidebarのhydrationが完了しませんでした。",
+        state.status === "ok"
+          ? "collector_root_hydration_completed"
+          : "collector_root_hydration_timeout",
+        state);
+      diagnostic("collector root hydration", {
+        request_id: message?.requestId,
+        refresh_generation: message?.refreshGeneration,
+        navigation_generation: message?.navigationGeneration,
+        collector_tab_id: message?.collectorTabId,
+        status: result.status,
+        error_code: result.errorCode,
+        stage: result.stage,
+        root_hydration_started: true,
+        root_hydration_completed: result.root_hydration_completed,
+        root_hydration_timeout: result.root_hydration_timeout,
+        hydration_wait_ms: result.hydration_wait_ms,
+        document_ready_state: result.document_ready_state,
+        sidebar_root_present: result.sidebar_root_present,
+        sidebar_scroll_container_present: result.sidebar_scroll_container_present,
+        sidebar_shell_present: result.sidebar_shell_present,
+        sidebar_sections_stable: result.sidebar_sections_stable,
+        mutation_count: result.mutation_count,
+        mutation_quiet_ms: result.mutation_quiet_ms,
+        root_url_verified: result.root_url_verified
+      });
+      return result;
+    } catch (_) {
+      return collectorRootHydrationResultFor(
+        message,
+        "error",
+        "collector_root_hydration_timeout",
+        "Root Sidebarのhydrationが完了しませんでした。",
+        "collector_root_hydration_timeout");
+    }
+  }
+
   async function handleGetChatGptContext(message) {
     if (!locators || !locators.isChatGptPage()) {
       return contextResultFor(
@@ -422,7 +735,8 @@
           Array.isArray(message.projects) ? message.projects : [],
           {
             identityMode: message.identityMode || message.identity_mode,
-            navigationTimeoutMs: message.navigationTimeoutMs
+            navigationTimeoutMs: message.navigationTimeoutMs,
+            onTelemetry: (event) => emitCollectorProjectIdentityTelemetry(message, event)
           });
       } else if (message?.collection === "project"
         && typeof locators.collectChatGptProjectContextAsync === "function") {
@@ -1990,6 +2304,18 @@
           "collector_viewport_unavailable",
           "Collector viewportの取得に失敗しました。",
           "collector_viewport_extraction")));
+      return true;
+    }
+    if (message?.type === collectorRootHydrationRequestMessageType) {
+      if (sender?.id && sender.id !== chrome.runtime.id) return false;
+      handleGetCollectorRootHydration(message)
+        .then(sendResponse)
+        .catch(() => sendResponse(collectorRootHydrationResultFor(
+          message,
+          "error",
+          "collector_root_hydration_timeout",
+          "Root Sidebarのhydrationが完了しませんでした。",
+          "collector_root_hydration_timeout")));
       return true;
     }
     if (message?.type === executionReadyMessageType) {

@@ -405,11 +405,19 @@ per refresh generation: the first known ChatGPT history sidebar, its visible
 one bounded sidebar scroll container. It may expand only a dedicated
 `さらに表示`/`もっと見る` utility button; it never opens a generic row to infer
 an ID, so navigation items such as `/schedule` and `/plugins` cannot become
-Project targets. Readiness only checks the Window, active Tab, viewport, and
-Sidebar root; it does not scroll or collect rows. The root scan freezes its
+Project targets. After root navigation, a separate bounded hydration phase
+requires the root URL, complete document state, visible Sidebar shell, and
+scroll container to remain structurally stable through a quiet DOM interval;
+Content Script ready alone does not start discovery. Readiness and hydration
+do not scroll or collect rows. The root scan freezes its
 Sidebar and scroll container, moves only downward, restores once, and passes
-the resulting Project catalog to the same active Collector Tab for direct
-Project URL visits. The sidebar and Project-page scrollports are rebound
+the resulting Project catalog to stable-identity resolution. For current
+ChatGPT disclosure rows, resolution reads the `aria-controls` region and its
+Project-scoped `/g/g-p-.../c/...` metadata, expanding that already-discovered
+Project row at most once when the region is not yet rendered; it does not
+interpret the row click as Project navigation. Only after every Project has a
+verified `g-p-*` ID and canonical URL does the same active Collector Tab make
+direct Project URL visits. The sidebar and Project-page scrollports are rebound
 after SPA DOM replacement only for the Project-page Chat scan, and every
 independent Project-page list is scanned without jumping back to the first container. Each resolved Project page is scanned with bounded incremental
 scrolling until no new Conversation IDs appear; duplicate

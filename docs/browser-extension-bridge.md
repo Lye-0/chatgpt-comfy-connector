@@ -237,13 +237,15 @@ phase, so `/schedule`, `/plugins`, search controls, and other generic Sidebar
 navigation cannot become discovery targets. The resolved Project entries are
 merged by `project_id`, and conversations are merged by `conversation_id`. For
 every resolved Project, the same Collector Tab navigates directly to its Project URL and
-scans every independent Project chat scrollport with the same actual-container
-selection, bounded scrolling, timeout, and cancellation. The active scrollport
-is rebound by logical container position after SPA replacement rather than
+scans only the current Project's Chat containers with the same actual-container
+selection, bounded scrolling, timeout, and cancellation. Project-page Chat
+collection has its own page/Chat-container/scroll completion state; it never
+re-validates Root Project-sidebar completeness. The active scrollport is
+rebound by logical container position after SPA replacement rather than
 silently switching to the first list. The original scroll positions are
-restored in `finally` paths. The Collector result is therefore an ID-complete metadata
-snapshot without selecting a Chat, changing the composer, or sending a
-Handoff.
+restored in `finally` paths. The Collector result is therefore an ID-complete
+metadata snapshot without selecting a Chat, changing the composer, or sending
+a Handoff.
 
 The Collector Window is independent from the Managed Execution Window. A
 closed Collector Window or Tab is recreated/reused for the next refresh, while

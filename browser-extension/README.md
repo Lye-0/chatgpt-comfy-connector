@@ -68,3 +68,8 @@ successful snapshot. Window membership is reconciled before the single root
 scan so the
 initial `windows.create({ url })` Tab is reused and duplicate Collector Tabs
 are removed.
+
+After the Root Project catalog is resolved, Project-page collection uses only
+the current Project's Chat containers and its own bounded scroll-completion
+state. It does not require the Root Project sidebar to remain complete; a
+failed Project Chat scan is reported as `context_project_chats_incomplete`.

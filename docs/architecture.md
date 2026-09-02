@@ -417,14 +417,19 @@ Project-scoped `/g/g-p-.../c/...` metadata, expanding that already-discovered
 Project row at most once when the region is not yet rendered; it does not
 interpret the row click as Project navigation. Only after every Project has a
 verified `g-p-*` ID and canonical URL does the same active Collector Tab make
-direct Project URL visits. The sidebar and Project-page scrollports are rebound
-after SPA DOM replacement only for the Project-page Chat scan, and every
-independent Project-page list is scanned without jumping back to the first container. Each resolved Project page is scanned with bounded incremental
-scrolling until no new Conversation IDs appear; duplicate
-Project/Conversation metadata is merged by ID and the original scroll
-positions are restored. If a Project row cannot be resolved within the
-bounded navigation window, the refresh returns `context_projects_incomplete`
-instead of publishing an incomplete catalog.
+direct Project URL visits. The Root Project catalog-completeness state ends at
+that point. Project-page collection verifies only the current Project route,
+its Chat container, and its own bounded scroll completion; it does not apply
+Root `sidebar_scroll_complete` or Project-section validation to a Project
+page. The sidebar and Project-page scrollports are rebound after SPA DOM
+replacement only for the Project-page Chat scan, and every independent
+Project-page list is scanned without jumping back to the first container. Each
+resolved Project page is scanned with bounded incremental scrolling until no
+new Conversation IDs appear; duplicate Project/Conversation metadata is merged
+by ID and the original scroll positions are restored. A Project catalog
+failure remains `context_projects_incomplete`, while a Project-page Chat scan
+failure is reported separately as `context_project_chats_incomplete` so the
+failure stage is not misclassified.
 
 `chatgpt.context.list.request` and
 `chatgpt.context.current.request` travel over the existing authenticated

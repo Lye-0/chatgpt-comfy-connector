@@ -3013,6 +3013,177 @@
     ], root);
   }
 
+  function documentReadyStateFor(root) {
+    try {
+      const state = root?.readyState || root?.ownerDocument?.readyState;
+      return typeof state === "string" && state.length > 0 ? state : "complete";
+    } catch (_) {
+      return "unknown";
+    }
+  }
+
+  function projectPageRelevantRegionElements(root, sidebar) {
+    const hasSidebar = Boolean(sidebar && sidebar !== root);
+    return uniqueElements([
+      "main",
+      '[role="main"]',
+      '[data-project-id]',
+      '[data-project-page]'
+    ], root)
+      .filter((element) => isVisible(element))
+      .filter((element) => !hasSidebar || !isDescendantOf(element, sidebar));
+  }
+
+  function projectPageHydrationState(root, projectId, sidebarOverride = null) {
+    const currentUrl = documentHref(root);
+    const normalizedProjectId = metadataIdentifier(projectId);
+    const currentProjectId = projectIdFromUrl(currentUrl);
+    const projectPageReady = isProjectHomeUrl(currentUrl)
+      && currentProjectId === normalizedProjectId;
+    const sidebar = sidebarOverride || findSidebarRoot(root);
+    const candidates = projectPageConversationElements(root);
+    const relevantRegions = projectPageRelevantRegionElements(root, sidebar);
+    const hasSidebar = Boolean(sidebar && sidebar !== root);
+    const pageCandidates = candidates.filter((element) =>
+      !hasSidebar || !isDescendantOf(element, sidebar));
+    const containers = findProjectPageScrollContainers(root, sidebar, normalizedProjectId);
+    return {
+      project_page_ready: projectPageReady,
+      document_ready_state: documentReadyStateFor(root),
+      sidebar_root_present: Boolean(sidebar && sidebar !== root),
+      sidebar_scroll_container_present: Boolean(findSidebarScrollContainer(root, sidebar)),
+      candidate_chat_link_count: pageCandidates.filter((element) =>
+        Boolean(conversationIdFromElement(element)
+          || conversationIdFromUrl(metadataHrefFromElement(element, currentUrl)))).length,
+      chat_scroll_container_count: containers.length,
+      relevant_region_present: relevantRegions.length > 0
+        || containers.length > 0
+        || pageCandidates.length > 0
+    };
+  }
+
+  function waitForProjectChatHydrationAsync(
+    root,
+    projectId,
+    options = {}) {
+    const initialState = projectPageHydrationState(root, projectId);
+    const setTimer = typeof globalThis.setTimeout === "function"
+      ? globalThis.setTimeout.bind(globalThis)
+      : null;
+    const clearTimer = typeof globalThis.clearTimeout === "function"
+      ? globalThis.clearTimeout.bind(globalThis)
+      : null;
+    const MutationObserverCtor = root?.ownerDocument?.defaultView?.MutationObserver
+      || globalThis.MutationObserver;
+    const timeoutMs = Math.max(250, Math.min(15000,
+      Number(options.projectChatHydrationTimeoutMs) || 10000));
+    const quietTargetMs = Math.max(50, Math.min(3000,
+      Number(options.projectChatHydrationQuietMs) || 350));
+    const pollMs = Math.max(25, Math.min(500,
+      Number(options.projectChatHydrationPollMs) || 100));
+
+    // Unit-test/minimal DOM hosts may not expose timers. In that environment
+    // there is no asynchronous lifecycle to wait for; the caller still gets
+    // the structural state and the real browser path uses the observer below.
+    if (!setTimer) {
+      return Promise.resolve({
+        ...initialState,
+        mutation_count: 0,
+        mutation_quiet_ms: 0,
+        project_chat_hydration_completed: initialState.project_page_ready,
+        project_chat_hydration_timeout: false
+      });
+    }
+
+    return new Promise((resolve) => {
+      const startedAt = Date.now();
+      let lastMutationAt = startedAt;
+      let stableAt = startedAt;
+      let lastFingerprint = "";
+      let mutationCount = 0;
+      let observer = null;
+      let pollTimer = null;
+      let timeoutTimer = null;
+      let settled = false;
+
+      const stateWithTiming = (state, completed, errorCode = null) => ({
+        ...state,
+        mutation_count: mutationCount,
+        mutation_quiet_ms: Math.max(0, Date.now() - lastMutationAt),
+        project_chat_hydration_completed: completed,
+        project_chat_hydration_timeout: !completed,
+        ...(errorCode ? { errorCode } : {})
+      });
+      const finish = (state, completed, errorCode = null) => {
+        if (settled) return;
+        settled = true;
+        if (observer) observer.disconnect();
+        if (pollTimer !== null) clearTimer?.(pollTimer);
+        if (timeoutTimer !== null) clearTimer?.(timeoutTimer);
+        resolve(stateWithTiming(state, completed, errorCode));
+      };
+      const inspect = () => {
+        if (settled) return;
+        const state = projectPageHydrationState(root, projectId);
+        const fingerprint = [
+          state.project_page_ready,
+          state.document_ready_state,
+          state.sidebar_root_present,
+          state.sidebar_scroll_container_present,
+          state.candidate_chat_link_count,
+          state.chat_scroll_container_count,
+          state.relevant_region_present
+        ].join("|");
+        if (fingerprint !== lastFingerprint) {
+          lastFingerprint = fingerprint;
+          stableAt = Date.now();
+        }
+        const now = Date.now();
+        const quietMs = Math.max(0, now - lastMutationAt);
+        const fingerprintStableMs = Math.max(0, now - stableAt);
+        const ready = state.project_page_ready
+          && state.document_ready_state !== "loading"
+          && state.relevant_region_present
+          && quietMs >= quietTargetMs
+          && fingerprintStableMs >= quietTargetMs;
+        if (ready) {
+          finish(state, true);
+          return;
+        }
+        if (now - startedAt >= timeoutMs) {
+          finish(state, false, "context_project_chat_dom_unavailable");
+          return;
+        }
+        pollTimer = setTimer(inspect, pollMs);
+      };
+
+      if (typeof MutationObserverCtor === "function") {
+        try {
+          observer = new MutationObserverCtor((records) => {
+            mutationCount += Number.isSafeInteger(records?.length) && records.length > 0
+              ? records.length
+              : 1;
+            lastMutationAt = Date.now();
+          });
+          observer.observe(root?.documentElement || root, {
+            childList: true,
+            subtree: true,
+            characterData: true
+          });
+        } catch (_) {
+          observer = null;
+        }
+      }
+      timeoutTimer = setTimer(() => {
+        if (!settled) finish(
+          projectPageHydrationState(root, projectId),
+          false,
+          "context_project_chat_dom_unavailable");
+      }, timeoutMs);
+      inspect();
+    });
+  }
+
   function sidebarConversationBelongsToProject(
     element,
     sidebar,
@@ -3023,7 +3194,6 @@
     if (!element || !sidebar) return false;
     const currentProjectId = projectIdFromUrl(chatGptMetadataUrl(url, url));
     const normalizedTitle = String(projectTitle || "").trim().toLowerCase();
-    const expandedProjectRows = expandedProjectRowsInSidebar(sidebar);
     let current = element;
     for (let depth = 0; current && depth < 32; depth += 1, current = current.parentElement) {
       if (projectIdFromElement(current, url) === normalizedProjectId) return true;
@@ -3043,10 +3213,12 @@
     ].join(" ").toLowerCase();
     if (normalizedTitle && relationText.includes(normalizedTitle)) return true;
 
-    // Keep the route-based fallback deliberately narrow: one expanded row and
-    // one visible Project row means the sidebar has an unambiguous owner.
-    return currentProjectId === normalizedProjectId
-      && expandedProjectRows.length === 1;
+    // The current Project route alone does not establish ownership for a
+    // plain /c/<id> link in the global Sidebar: that Sidebar can still contain
+    // Projectless and other-Project conversations. Without an explicit
+    // Project-scoped link, relation metadata, or an expanded owning row, keep
+    // the entry out of this Project scan.
+    return false;
   }
 
   function collectProjectContextEntries(
@@ -3069,26 +3241,42 @@
     }];
     const conversations = [];
     const conversationById = new Map();
+    const candidateElements = projectPageConversationElements(root);
+    const conversationCandidates = candidateElements.filter((element) =>
+      Boolean(conversationIdFromElement(element)
+        || conversationIdFromUrl(metadataHrefFromElement(element, url))));
+    const collectionTelemetry = {
+      candidate_chat_link_count: conversationCandidates.length,
+      matching_project_chat_link_count: 0,
+      rejected_projectless_chat_count: 0,
+      rejected_other_project_chat_count: 0
+    };
 
-    for (const element of projectPageConversationElements(root)) {
+    for (const element of candidateElements) {
       const href = metadataHrefFromElement(element, url);
       const conversationId = conversationIdFromElement(element) || conversationIdFromUrl(href);
       if (!conversationId) continue;
+      const isInSidebar = sidebar !== root && isDescendantOf(element, sidebar);
       const explicitProjectId = projectIdFromUrl(href);
-      if (explicitProjectId && explicitProjectId !== normalizedProjectId) continue;
+      if (explicitProjectId && explicitProjectId !== normalizedProjectId) {
+        collectionTelemetry.rejected_other_project_chat_count += 1;
+        continue;
+      }
       // A /c/<id> link inside the sidebar is not enough to prove that it
       // belongs to the opened Project. Accept it only when the expanded row,
       // relation metadata, or current Project route provides that scope.
-      if (!explicitProjectId
-        && sidebar !== root
-        && isDescendantOf(element, sidebar)
+      if (isInSidebar && !explicitProjectId
         && !sidebarConversationBelongsToProject(
           element,
           sidebar,
           normalizedProjectId,
           projectTitle,
           projectRowsInSidebar(sidebar, url),
-          url)) continue;
+          url)) {
+        collectionTelemetry.rejected_projectless_chat_count += 1;
+        continue;
+      }
+      collectionTelemetry.matching_project_chat_link_count += 1;
       const conversationUrl = href
         || `https://chatgpt.com/g/${encodeURIComponent(normalizedProjectId)}/c/${encodeURIComponent(conversationId)}`;
       const entry = {
@@ -3107,11 +3295,12 @@
         if (entry.url && !existing.url) existing.url = entry.url;
       }
     }
-    return { projects, conversations };
+    return { projects, conversations, ...collectionTelemetry };
   }
 
-  function findProjectPageScrollContainers(root, sidebar) {
-    const sidebarContainer = findSidebarScrollContainer(root);
+  function findProjectPageScrollContainers(root, sidebar, projectId = null) {
+    const normalizedProjectId = metadataIdentifier(projectId);
+    const sidebarContainer = findSidebarScrollContainer(root, sidebar);
     const candidates = [
       sidebarContainer,
       ...uniqueElements(sidebarScrollContainerSelectors, root),
@@ -3123,11 +3312,44 @@
       .filter((item) => item.metrics)
       .map((item) => item.candidate);
     const conversationElements = projectPageConversationElements(root);
-    const containsConversation = (candidate) => candidate === sidebar
-      || candidate === sidebarContainer
-      || conversationElements.some((element) =>
-        candidate === element || isDescendantOf(element, candidate));
-    const relevant = candidates.filter(containsConversation);
+    const hasSidebar = Boolean(sidebar && sidebar !== root);
+    const projectRows = hasSidebar ? projectRowsInSidebar(sidebar, documentHref(root)) : [];
+    const projectTitle = normalizedProjectId
+      ? projectTitleFromPage(root, normalizedProjectId, documentHref(root))
+      : "";
+    const sidebarConversationElements = hasSidebar && normalizedProjectId
+      ? conversationElements.filter((element) => {
+        if (!isDescendantOf(element, sidebar)) return false;
+        const href = metadataHrefFromElement(element, documentHref(root));
+        const explicitProjectId = projectIdFromUrl(href);
+        if (explicitProjectId) return explicitProjectId === normalizedProjectId;
+        return sidebarConversationBelongsToProject(
+          element,
+          sidebar,
+          normalizedProjectId,
+          projectTitle,
+          projectRows,
+          documentHref(root));
+      })
+      : [];
+    const pageConversationElements = conversationElements.filter((element) =>
+      !hasSidebar || !isDescendantOf(element, sidebar));
+    const containsConversation = (candidate, elements) => elements.some((element) =>
+      candidate === element || isDescendantOf(element, candidate));
+    const pageCandidates = candidates.filter((candidate) =>
+      (!hasSidebar || (candidate !== sidebar && !isDescendantOf(candidate, sidebar)))
+      && containsConversation(candidate, pageConversationElements));
+    const sidebarCandidates = candidates.filter((candidate) =>
+      hasSidebar
+      && (candidate === sidebar || isDescendantOf(candidate, sidebar))
+      && containsConversation(candidate, sidebarConversationElements));
+    // A Project page may expose the current Project's chats in both the main
+    // list and an expanded Project branch in the global Sidebar. The Sidebar
+    // candidates have already been scoped by the current Project ID/owner;
+    // retain both sets so a second virtualized list cannot hide chats from the
+    // final ID-based merge.
+    const relevant = [...pageCandidates, ...sidebarCandidates]
+      .filter((candidate, index, all) => all.indexOf(candidate) === index);
     const scrollableRelevant = relevant.filter((candidate) => scrollMetricsFor(candidate)?.canScroll);
     // A Project page can have two independent virtualized lists: the global
     // ChatGPT sidebar and the Project's main chat list. Scanning only the
@@ -3140,7 +3362,7 @@
       return scrollableRelevant.filter((candidate, index, all) =>
         !all.some((other, otherIndex) => otherIndex !== index && isDescendantOf(other, candidate)));
     }
-    if (sidebarContainer) return [sidebarContainer];
+    if (sidebarContainer && scrollMetricsFor(sidebarContainer)) return [sidebarContainer];
     return relevant;
   }
 
@@ -3153,15 +3375,113 @@
     if (!normalizedProjectId) return { projects: [], conversations: [], current: getCurrentChatGptContext(root, url) };
 
     const merged = { projects: [], conversations: [] };
-    const sidebar = findSidebarRoot(root);
-    const containers = findProjectPageScrollContainers(root, sidebar);
+    const currentUrl = documentHref(root, url);
+    const currentProjectId = projectIdFromUrl(currentUrl);
+    const projectPageReady = isProjectHomeUrl(currentUrl)
+      && currentProjectId === normalizedProjectId;
     const deadline = Date.now() + Math.max(1000, Math.min(120000, Number(options.timeoutMs) || 30000));
     const maxScrolls = Math.max(1, Math.min(128, Number(options.maxScrolls) || 64));
     const initialSettleMs = options.initialSettleMs === undefined
       ? 250
       : Math.max(0, Math.min(2000, Number(options.initialSettleMs) || 0));
+    const emitTelemetry = (event = {}) => {
+      try { options.onTelemetry?.(event); } catch (_) { }
+    };
+    const hydration = await waitForProjectChatHydrationAsync(root, normalizedProjectId, {
+      projectChatHydrationTimeoutMs: options.projectChatHydrationTimeoutMs,
+      projectChatHydrationQuietMs: options.projectChatHydrationQuietMs === undefined
+        ? Math.max(150, initialSettleMs)
+        : options.projectChatHydrationQuietMs,
+      projectChatHydrationPollMs: options.projectChatHydrationPollMs
+    });
+    let sidebar = findSidebarRoot(root);
+    let containers = findProjectPageScrollContainers(root, sidebar, normalizedProjectId);
+    const hydrationTelemetry = {
+      mutation_count: hydration.mutation_count,
+      mutation_quiet_ms: hydration.mutation_quiet_ms,
+      document_ready_state: hydration.document_ready_state,
+      relevant_region_present: hydration.relevant_region_present,
+      chat_scroll_container_count: containers.length
+    };
+    const hydrationSnapshot = collectProjectContextEntries(root, url, normalizedProjectId);
+    const hydrationStructure = {
+      ...hydrationTelemetry,
+      candidate_chat_link_count: hydrationSnapshot.candidate_chat_link_count,
+      matching_project_chat_link_count: hydrationSnapshot.matching_project_chat_link_count,
+      rejected_projectless_chat_count: hydrationSnapshot.rejected_projectless_chat_count,
+      rejected_other_project_chat_count: hydrationSnapshot.rejected_other_project_chat_count,
+      current_project_id: normalizedProjectId,
+      project_page_ready: projectPageReady,
+      stage: "collector_project_chat_dom_structure"
+    };
+    emitTelemetry(hydrationStructure);
+    if (!hydration.project_chat_hydration_completed) {
+      emitTelemetry({
+        ...hydrationStructure,
+        error_code: hydration.errorCode || "context_project_chat_dom_unavailable",
+        failure_stage: "project_chat_hydration",
+        internal_reason: "project_page_not_hydrated",
+        exception_reason: "none",
+        resolution_success: false,
+        stage: "collector_project_chat_collection_failed"
+      });
+      return {
+        projects: hydrationSnapshot.projects,
+        conversations: [],
+        current: getCurrentChatGptContextFromEntries(hydrationSnapshot, root, url),
+        project_page_ready: projectPageReady,
+        current_project_id_verified: currentProjectId === normalizedProjectId,
+        chat_container_found: false,
+        visible_chat_count: 0,
+        discovered_chat_count: 0,
+        deduped_chat_count: 0,
+        duplicate_chat_count: 0,
+        scroll_iteration: 0,
+        scroll_top: 0,
+        scroll_height: 0,
+        scroll_complete: false,
+        project_chat_collection_complete: false,
+        ...hydrationTelemetry,
+        candidate_chat_link_count: hydrationSnapshot.candidate_chat_link_count || 0,
+        matching_project_chat_link_count: hydrationSnapshot.matching_project_chat_link_count || 0,
+        rejected_projectless_chat_count: hydrationSnapshot.rejected_projectless_chat_count || 0,
+        rejected_other_project_chat_count: hydrationSnapshot.rejected_other_project_chat_count || 0,
+        project_chat_hydration_completed: false,
+        project_chat_hydration_timeout: true
+      };
+    }
     let noGrowthCount = 0;
-    let sidebarScrollComplete = containers.length === 0;
+    // No scroll container means the page exposed a static Chat list. That is
+    // a completed scan once a Project Chat container (or entry) is observed;
+    // only a detected container that fails its bounded scan makes this false.
+    let sidebarScrollComplete = true;
+    let visibleChatCount = 0;
+    let scrollIteration = 0;
+    let lastScrollMetrics = null;
+    let duplicateChatCount = 0;
+    let chatContainerFound = containers.length > 0;
+    const hasSidebar = Boolean(sidebar && sidebar !== root);
+    let scrollPositionChanged = false;
+    let latestSnapshot = hydrationSnapshot;
+    let lastScanTelemetry = "";
+    const emitScanTelemetry = (reachedEnd = false, force = false) => {
+      const scan = {
+        current_project_id: normalizedProjectId,
+        discovered_chat_count: merged.conversations.length,
+        deduped_chat_count: merged.conversations.length,
+        scan_iteration: scrollIteration,
+        mutation_count: hydration.mutation_count,
+        mutation_quiet_ms: hydration.mutation_quiet_ms,
+        scroll_position_changed: scrollPositionChanged,
+        reached_end: reachedEnd,
+        stage: "collector_project_chat_scan"
+      };
+      const signature = JSON.stringify(scan);
+      if (force || signature !== lastScanTelemetry) {
+        lastScanTelemetry = signature;
+        emitTelemetry(scan);
+      }
+    };
     const collect = () => {
       if (options.signal?.aborted) {
         const error = new Error("Collection cancelled");
@@ -3169,14 +3489,22 @@
         throw error;
       }
       if (Date.now() >= deadline) return false;
+      const beforeCount = merged.conversations.length;
       const snapshot = collectProjectContextEntries(root, url, normalizedProjectId);
+      latestSnapshot = snapshot;
       mergeContextProjectCatalog(merged, snapshot);
       mergeContextConversationCatalog(merged, snapshot);
+      visibleChatCount = Math.max(visibleChatCount, snapshot.conversations.length);
+      duplicateChatCount += Math.max(0, snapshot.conversations.length
+        - (merged.conversations.length - beforeCount));
+      chatContainerFound = chatContainerFound
+        || snapshot.conversations.length > 0;
       return true;
     };
 
     if (initialSettleMs > 0) await waitForSidebarMutation(root, initialSettleMs);
     if (!collect()) sidebarScrollComplete = false;
+    emitScanTelemetry(false, true);
     for (const [containerIndex, container] of containers.entries()) {
       let activeContainer = container;
       const initialMetrics = scrollMetricsFor(activeContainer);
@@ -3190,7 +3518,10 @@
           containerComplete = false;
         } else {
           for (let pass = 0; pass < maxScrolls && Date.now() < deadline; pass += 1) {
-            const refreshedContainers = findProjectPageScrollContainers(root, findSidebarRoot(root));
+            const refreshedContainers = findProjectPageScrollContainers(
+              root,
+              findSidebarRoot(root),
+              normalizedProjectId);
             // React may replace a virtualized scrollport after each lazy-load.
             // Keep the same logical list by identity first, then by its
             // stable container position; never jump to container zero while
@@ -3214,6 +3545,7 @@
               containerComplete = false;
               break;
             }
+            lastScrollMetrics = beforeMetrics;
             if (!collect()) {
               containerComplete = false;
               break;
@@ -3233,6 +3565,8 @@
             }
             try {
               activeContainer.scrollTop = nextTop;
+              scrollIteration += 1;
+              scrollPositionChanged = true;
             } catch (_) {
               containerNoGrowthCount += 1;
               if (containerNoGrowthCount >= 2) containerComplete = true;
@@ -3249,6 +3583,7 @@
               containerComplete = false;
               break;
             }
+            lastScrollMetrics = afterMetrics;
             const added = merged.conversations.length - beforeCount;
             if (added === 0
               && afterMetrics.scrollTop === beforeMetrics.scrollTop
@@ -3259,8 +3594,10 @@
             }
             if (afterMetrics.atBottom || containerNoGrowthCount >= 2) {
               containerComplete = true;
+              emitScanTelemetry(true, true);
               break;
             }
+            emitScanTelemetry(false, added > 0);
           }
         }
         if (!containerComplete && Date.now() >= deadline) sidebarScrollComplete = false;
@@ -3271,16 +3608,63 @@
       sidebarScrollComplete = sidebarScrollComplete && containerComplete;
     }
 
+    const visibleProjectPageContainers = uniqueElements([
+      "main",
+      '[role="main"]',
+      '[data-testid*="project"]'
+    ], root)
+      .filter((element) => isVisible(element))
+      .filter((element) => !hasSidebar || !isDescendantOf(element, sidebar));
+    chatContainerFound = chatContainerFound || visibleProjectPageContainers.length > 0;
+    const finalMetrics = lastScrollMetrics
+      || scrollMetricsFor(containers.at(-1))
+      || scrollMetricsFor(findSidebarScrollContainer(root, sidebar));
+    const projectChatCollectionComplete = projectPageReady
+      && chatContainerFound
+      && sidebarScrollComplete;
+    const finalRelevantRegion = projectPageRelevantRegionElements(root, sidebar).length > 0
+      || containers.length > 0;
+    emitScanTelemetry(
+      projectChatCollectionComplete
+        || containers.every((container) => scrollMetricsFor(container)?.atBottom !== false),
+      true);
+
     return {
       projects: merged.projects,
       conversations: merged.conversations,
       current: getCurrentChatGptContextFromEntries(merged, root, url),
+      project_page_ready: projectPageReady,
+      current_project_id_verified: currentProjectId === normalizedProjectId,
+      chat_container_found: chatContainerFound,
+      visible_chat_count: visibleChatCount,
+      discovered_chat_count: merged.conversations.length,
+      deduped_chat_count: merged.conversations.length,
+      duplicate_chat_count: duplicateChatCount,
+      scroll_iteration: scrollIteration,
+      scroll_top: finalMetrics ? Math.round(finalMetrics.scrollTop) : 0,
+      scroll_height: finalMetrics ? Math.round(finalMetrics.scrollHeight) : 0,
+      scroll_complete: projectChatCollectionComplete,
+      project_chat_collection_complete: projectChatCollectionComplete,
+      project_chat_hydration_completed: true,
+      project_chat_hydration_timeout: false,
+      candidate_chat_link_count: latestSnapshot.candidate_chat_link_count || 0,
+      matching_project_chat_link_count: latestSnapshot.matching_project_chat_link_count || 0,
+      rejected_projectless_chat_count: latestSnapshot.rejected_projectless_chat_count || 0,
+      rejected_other_project_chat_count: latestSnapshot.rejected_other_project_chat_count || 0,
+      chat_scroll_container_count: containers.length,
+      relevant_region_present: finalRelevantRegion,
+      document_ready_state: documentReadyStateFor(root),
+      mutation_count: hydration.mutation_count,
+      mutation_quiet_ms: hydration.mutation_quiet_ms,
+      scroll_position_changed: scrollPositionChanged,
+      reached_end: projectChatCollectionComplete
+        || containers.every((container) => scrollMetricsFor(container)?.atBottom !== false),
       ...sidebarScrollTelemetry(
         root,
-        findSidebarScrollContainer(root),
+        finalMetrics ? containers.at(-1) : null,
         noGrowthCount,
         merged.projects.length,
-        sidebarScrollComplete)
+        projectChatCollectionComplete)
     };
   }
 

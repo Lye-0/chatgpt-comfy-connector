@@ -10,6 +10,7 @@
   const collectorViewportRequestMessageType = "GET_COLLECTOR_VIEWPORT";
   const collectorRootHydrationRequestMessageType = "GET_COLLECTOR_ROOT_HYDRATION";
   const collectorProjectIdentityTelemetryMessageType = "COLLECTOR_PROJECT_IDENTITY_TELEMETRY";
+  const collectorProjectChatTelemetryMessageType = "COLLECTOR_PROJECT_CHAT_TELEMETRY";
   const contextChangedMessageType = "CHATGPT_CONTEXT_CHANGED";
   const responseWatchMessageType = "WATCH_ASSISTANT_RESPONSE";
   const executionReadyMessageType = "CHATGPT_EXECUTION_READY";
@@ -76,6 +77,7 @@
       "conversation_id",
       "conversation_url",
       "project_id",
+      "current_project_id",
       "content_ready",
       "conversation_ready",
       "composer_ready",
@@ -168,7 +170,22 @@
       "unresolved_reason",
       "exit_reason",
       "internal_reason",
-      "navigation_failure_reason"
+      "navigation_failure_reason",
+      "candidate_chat_link_count",
+      "matching_project_chat_link_count",
+      "rejected_projectless_chat_count",
+      "rejected_other_project_chat_count",
+      "chat_scroll_container_count",
+      "relevant_region_present",
+      "scroll_position_changed",
+      "reached_end",
+      "scan_iteration",
+      "failure_stage",
+      "exception_name",
+      "exception_reason",
+      "project_chat_collection_error_reason",
+      "project_chat_hydration_completed",
+      "project_chat_hydration_timeout"
     ]) {
       if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
       if (typeof fields[key] === "boolean") safe[key] = fields[key];
@@ -293,6 +310,38 @@
     "navigation_failure_reason"
   ];
 
+  const collectorProjectChatTelemetryKeys = [
+    "project_index",
+    "total_projects",
+    "current_project_id",
+    "project_page_ready",
+    "current_project_id_verified",
+    "candidate_chat_link_count",
+    "matching_project_chat_link_count",
+    "rejected_projectless_chat_count",
+    "rejected_other_project_chat_count",
+    "chat_scroll_container_count",
+    "relevant_region_present",
+    "document_ready_state",
+    "mutation_count",
+    "mutation_quiet_ms",
+    "discovered_chat_count",
+    "deduped_chat_count",
+    "scan_iteration",
+    "scroll_position_changed",
+    "reached_end",
+    "scroll_complete",
+    "project_chat_collection_complete",
+    "project_chat_hydration_completed",
+    "project_chat_hydration_timeout",
+    "error_code",
+    "failure_stage",
+    "internal_reason",
+    "exception_name",
+    "exception_reason",
+    "project_chat_collection_error_reason"
+  ];
+
   function collectorProjectIdentityTelemetryFor(message, event = {}) {
     const result = {
       type: collectorProjectIdentityTelemetryMessageType,
@@ -325,6 +374,38 @@
     // This is best-effort metadata only. A full navigation may destroy the
     // current Content Script immediately after row.click(), so the Background
     // also observes the exact Collector Tab through tabs.onUpdated.
+    void sendRuntimeMessage(telemetry);
+  }
+
+  function collectorProjectChatTelemetryFor(message, event = {}) {
+    const result = {
+      type: collectorProjectChatTelemetryMessageType,
+      request_id: message?.requestId || message?.request_id || ""
+    };
+    if (typeof event.stage === "string" && event.stage.length <= 128) {
+      result.stage = event.stage;
+    }
+    if (Number.isSafeInteger(message?.refreshGeneration)) {
+      result.refresh_generation = message.refreshGeneration;
+    }
+    if (typeof message?.navigationGeneration === "string"
+      && message.navigationGeneration.length <= 128) {
+      result.navigation_generation = message.navigationGeneration;
+    }
+    if (Number.isSafeInteger(message?.collectorTabId)) {
+      result.collector_tab_id = message.collectorTabId;
+    }
+    for (const key of collectorProjectChatTelemetryKeys) {
+      if (typeof event[key] === "boolean") result[key] = event[key];
+      else if (Number.isSafeInteger(event[key]) && event[key] >= 0) result[key] = event[key];
+      else if (typeof event[key] === "string" && event[key].length <= 128) result[key] = event[key];
+    }
+    return result;
+  }
+
+  function emitCollectorProjectChatTelemetry(message, event = {}) {
+    const telemetry = collectorProjectChatTelemetryFor(message, event);
+    diagnostic("collector project chat telemetry", traceForMessage(message, telemetry));
     void sendRuntimeMessage(telemetry);
   }
 
@@ -512,7 +593,9 @@
       "non_navigation_resolved_count",
       "navigation_resolved_count",
       "unresolved_count",
-      "current_project_index"
+      "current_project_index",
+      "project_index",
+      "total_projects"
     ]) {
       if (Number.isSafeInteger(data[key])) result[key] = data[key];
     }
@@ -538,7 +621,22 @@
       "visible_project_rows",
       "discovered_project_count",
       "no_growth_count",
-      "sidebar_restore_count"
+      "sidebar_restore_count",
+      "visible_chat_count",
+      "discovered_chat_count",
+      "deduped_chat_count",
+      "duplicate_chat_count",
+      "scroll_iteration",
+      "scroll_top",
+      "scroll_height",
+      "candidate_chat_link_count",
+      "matching_project_chat_link_count",
+      "rejected_projectless_chat_count",
+      "rejected_other_project_chat_count",
+      "chat_scroll_container_count",
+      "mutation_count",
+      "mutation_quiet_ms",
+      "scan_iteration"
     ]) {
       if (Number.isSafeInteger(data[key])) result[key] = data[key];
     }
@@ -547,14 +645,124 @@
       "sidebar_at_bottom",
       "project_section_found",
       "sidebar_scroll_complete",
-      "sidebar_scroll_container_found"
+      "sidebar_scroll_container_found",
+      "project_page_ready",
+      "current_project_id_verified",
+      "chat_container_found",
+      "scroll_complete",
+      "project_chat_collection_complete",
+      "relevant_region_present",
+      "scroll_position_changed",
+      "reached_end",
+      "project_chat_hydration_completed",
+      "project_chat_hydration_timeout"
     ]) {
       if (typeof data[key] === "boolean") result[key] = data[key];
     }
     if (data.sidebar_scroll_direction === "down" || data.sidebar_scroll_direction === "none") {
       result.sidebar_scroll_direction = data.sidebar_scroll_direction;
     }
+    for (const key of [
+      "document_ready_state",
+      "failure_stage",
+      "internal_reason",
+      "exception_name",
+      "exception_reason",
+      "project_chat_collection_error_reason"
+    ]) {
+      if (typeof data[key] === "string" && data[key].length <= 128) result[key] = data[key];
+    }
     return result;
+  }
+
+  const projectChatErrorCodes = new Set([
+    "context_project_page_unavailable",
+    "context_project_chat_dom_unavailable",
+    "context_project_chats_incomplete",
+    "context_response_invalid",
+    "context_response_correlation_failed",
+    "context_extraction_failed"
+  ]);
+
+  function safeProjectChatExceptionName(error) {
+    const name = typeof error?.name === "string" ? error.name : "";
+    return [
+      "AbortError",
+      "DOMException",
+      "Error",
+      "RangeError",
+      "ReferenceError",
+      "SyntaxError",
+      "TypeError"
+    ].includes(name) ? name : "Error";
+  }
+
+  function safeProjectChatExceptionReason(error) {
+    const name = safeProjectChatExceptionName(error);
+    const reasons = {
+      AbortError: "abort_error",
+      DOMException: "dom_exception",
+      RangeError: "range_error",
+      ReferenceError: "reference_error",
+      SyntaxError: "syntax_error",
+      TypeError: "type_error"
+    };
+    return reasons[name] || "unexpected_exception";
+  }
+
+  function projectChatFailureResult(message, error = null, overrides = {}) {
+    const errorCode = projectChatErrorCodes.has(overrides.errorCode)
+      ? overrides.errorCode
+      : (projectChatErrorCodes.has(error?.code) ? error.code : "context_extraction_failed");
+    const failureStage = typeof overrides.failureStage === "string"
+      && overrides.failureStage.length <= 128
+      ? overrides.failureStage
+      : (typeof error?.stage === "string" && error.stage.length <= 128
+        ? error.stage
+        : "project_chat_collection");
+    const exceptionName = error ? safeProjectChatExceptionName(error) : "none";
+    const exceptionReason = error
+      ? safeProjectChatExceptionReason(error)
+      : (overrides.exceptionReason || "none");
+    const telemetry = {
+      project_index: Number.isSafeInteger(message?.projectIndex) ? message.projectIndex : 0,
+      total_projects: Number.isSafeInteger(message?.totalProjects) ? message.totalProjects : 0,
+      current_project_id: message?.projectId || message?.project_id,
+      project_page_ready: overrides.projectPageReady,
+      current_project_id_verified: overrides.currentProjectIdVerified,
+      candidate_chat_link_count: overrides.candidateChatLinkCount,
+      matching_project_chat_link_count: overrides.matchingProjectChatLinkCount,
+      rejected_projectless_chat_count: overrides.rejectedProjectlessChatCount,
+      rejected_other_project_chat_count: overrides.rejectedOtherProjectChatCount,
+      chat_scroll_container_count: overrides.chatScrollContainerCount,
+      relevant_region_present: overrides.relevantRegionPresent,
+      document_ready_state: overrides.documentReadyState,
+      mutation_count: overrides.mutationCount,
+      mutation_quiet_ms: overrides.mutationQuietMs,
+      discovered_chat_count: overrides.discoveredChatCount || 0,
+      deduped_chat_count: overrides.dedupedChatCount || 0,
+      scan_iteration: overrides.scanIteration || 0,
+      scroll_position_changed: overrides.scrollPositionChanged,
+      reached_end: overrides.reachedEnd,
+      error_code: errorCode,
+      failure_stage: failureStage,
+      internal_reason: overrides.internalReason || safeProjectChatExceptionReason(error),
+      exception_name: exceptionName,
+      exception_reason: exceptionReason,
+      project_chat_collection_error_reason: overrides.internalReason
+        || safeProjectChatExceptionReason(error),
+      status: "error",
+      stage: "collector_project_chat_collection_failed"
+    };
+    diagnostic("collector project chat collection failed", traceForMessage(message, telemetry));
+    emitCollectorProjectChatTelemetry(message, telemetry);
+    return contextResultFor(
+      message,
+      "error",
+      errorCode,
+      "ChatGPT Project内のChat一覧を取得できませんでした。",
+      failureStage,
+      telemetry);
   }
 
   function collectorViewportResultFor(message, status, errorCode, text, stage, data = {}) {
@@ -722,6 +930,7 @@
         "active_tab_check");
     }
 
+    const isProjectChatCollection = message?.collection === "project";
     try {
       const currentOnly = message?.mode === "current";
       let value;
@@ -747,7 +956,11 @@
           {
             maxScrolls: message.maxScrolls,
             timeoutMs: message.timeoutMs,
-            projectDiscoverySource: message.projectDiscoverySource
+            projectDiscoverySource: message.projectDiscoverySource,
+            projectChatHydrationTimeoutMs: message.projectChatHydrationTimeoutMs,
+            projectChatHydrationQuietMs: message.projectChatHydrationQuietMs,
+            projectChatHydrationPollMs: message.projectChatHydrationPollMs,
+            onTelemetry: (event) => emitCollectorProjectChatTelemetry(message, event)
           });
       } else if (typeof locators.collectChatGptContextAsync === "function") {
         value = await locators.collectChatGptContextAsync(document, globalThis.location?.href, {
@@ -761,12 +974,36 @@
         value = locators.collectChatGptContext?.(document, globalThis.location?.href);
       }
       if (!value) {
+        if (isProjectChatCollection) {
+          return projectChatFailureResult(message, null, {
+            errorCode: "context_response_invalid",
+            failureStage: "project_chat_result_validation",
+            internalReason: "collector_result_missing",
+            exceptionReason: "none"
+          });
+        }
         return contextResultFor(message, "error", "context_extraction_failed", "ChatGPTのContextを取得できませんでした。", "context_extraction");
+      }
+      if (isProjectChatCollection
+        && (typeof value !== "object"
+          || !Array.isArray(value.projects)
+          || !Array.isArray(value.conversations))) {
+        return projectChatFailureResult(message, null, {
+          errorCode: "context_response_invalid",
+          failureStage: "project_chat_result_validation",
+          internalReason: "collector_result_malformed",
+          exceptionReason: "none"
+        });
       }
       return contextResultFor(message, "ok", null, null, "context_extracted", currentOnly
         ? { current: value }
         : value);
-    } catch (_) {
+    } catch (error) {
+      if (isProjectChatCollection) {
+        return projectChatFailureResult(message, error, {
+          failureStage: "project_chat_collection"
+        });
+      }
       // Metadata discovery must not expose page text or DOM errors to the
       // authenticated Bridge. The Desktop receives only a stable error code.
       return contextResultFor(message, "error", "context_extraction_failed", "ChatGPTのContext取得に失敗しました。", "context_extraction");
@@ -2286,12 +2523,15 @@
       if (sender?.id && sender.id !== chrome.runtime.id) return false;
       handleGetChatGptContext(message)
         .then(sendResponse)
-        .catch(() => sendResponse(contextResultFor(
-          message,
-          "error",
-          "context_extraction_failed",
-          "ChatGPTのContext取得に失敗しました。",
-          "context_extraction")));
+        .catch((error) => sendResponse(
+          message?.collection === "project"
+            ? projectChatFailureResult(message, error)
+            : contextResultFor(
+              message,
+              "error",
+              "context_extraction_failed",
+              "ChatGPTのContext取得に失敗しました。",
+              "context_extraction")));
       return true;
     }
     if (message?.type === collectorViewportRequestMessageType) {

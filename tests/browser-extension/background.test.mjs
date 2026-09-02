@@ -1825,6 +1825,213 @@ test("Background forwards a complete metadata snapshot through an active Collect
   assert.equal(response.current.project_id, "g-p-project-a");
 });
 
+test("Background separates Project chat completeness from Root Project catalog completeness", async () => {
+  const harness = await createHarness();
+  const project = {
+    project_id: "g-p-project-page",
+    title: "Project page",
+    url: "https://chatgpt.com/g/g-p-project-page/project"
+  };
+  harness.setContentHandler((message) => {
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    if (message.collection === "project") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [project],
+        conversations: [{
+          conversation_id: "project-page-chat",
+          title: "Project page chat",
+          url: "https://chatgpt.com/g/g-p-project-page/c/project-page-chat",
+          project_id: project.project_id
+        }],
+        current: null,
+        // The Root Project sidebar is intentionally not complete on a
+        // Project page. That must not invalidate the Project chat scan.
+        sidebar_scroll_complete: false,
+        project_page_ready: true,
+        current_project_id_verified: true,
+        chat_container_found: true,
+        visible_chat_count: 1,
+        discovered_chat_count: 1,
+        deduped_chat_count: 1,
+        scroll_iteration: 2,
+        scroll_top: 0,
+        scroll_height: 1200,
+        scroll_complete: true,
+        project_chat_collection_complete: true
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [project],
+      conversations: [],
+      current: null,
+      project_section_found: true,
+      sidebar_scroll_complete: true,
+      sidebar_at_bottom: true
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-project-chat-completeness"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response"
+      && message.request_id === "collector-project-chat-completeness");
+
+  assert.equal(response.status, "ok");
+  assert.deepEqual(response.conversations.map((conversation) => conversation.conversation_id), [
+    "project-page-chat"
+  ]);
+  assert.equal(harness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_project_sidebar_scan_incomplete"), false);
+  const scan = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_chat_scan");
+  assert.equal(scan.project_page_ready, true);
+  assert.equal(scan.current_project_id_verified, true);
+  assert.equal(scan.discovered_chat_count, 1);
+  assert.equal(scan.deduped_chat_count, 1);
+  assert.equal(scan.scroll_complete, true);
+  const structure = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_chat_dom_structure");
+  assert.equal(structure.current_project_id, project.project_id);
+  assert.equal(structure.project_page_ready, true);
+  assert.equal(structure.current_project_id_verified, true);
+  assert.equal(harness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_project_chat_collection_complete"), true);
+});
+
+test("Background rejects an incomplete Project chat scan without relabeling it as a catalog error", async () => {
+  const harness = await createHarness();
+  const project = {
+    project_id: "g-p-incomplete-project-page",
+    title: "Incomplete Project page",
+    url: "https://chatgpt.com/g/g-p-incomplete-project-page/project"
+  };
+  harness.setContentHandler((message) => {
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    if (message.collection === "project") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [project],
+        conversations: [],
+        current: null,
+        project_page_ready: true,
+        current_project_id_verified: true,
+        chat_container_found: false,
+        scroll_complete: false,
+        project_chat_collection_complete: false
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [project],
+      conversations: [],
+      current: null,
+      project_section_found: true,
+      sidebar_scroll_complete: true,
+      sidebar_at_bottom: true
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-project-chat-incomplete"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response"
+      && message.request_id === "collector-project-chat-incomplete");
+
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "context_project_chats_incomplete");
+  const failure = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_chat_collection_incomplete");
+  assert.equal(failure.error_code, "context_project_chats_incomplete");
+  assert.equal(harness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_project_sidebar_scan_incomplete"), false);
+});
+
+test("Background preserves the Content Script Project Chat failure classification", async () => {
+  const harness = await createHarness();
+  const project = {
+    project_id: "g-p-project-chat-error",
+    title: "Project Chat error",
+    url: "https://chatgpt.com/g/g-p-project-chat-error/project"
+  };
+  harness.setContentHandler((message) => {
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    if (message.collection === "project") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "error",
+        errorCode: "context_extraction_failed",
+        failure_stage: "project_chat_collection",
+        internal_reason: "reference_error",
+        exception_name: "ReferenceError",
+        exception_reason: "reference_error",
+        projects: [],
+        conversations: [],
+        current: null
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [project],
+      conversations: [],
+      current: null,
+      project_section_found: true,
+      sidebar_scroll_complete: true,
+      sidebar_at_bottom: true
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-project-chat-error"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response"
+      && message.request_id === "collector-project-chat-error");
+
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "context_extraction_failed");
+  const failure = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_chat_collection_failed");
+  assert.equal(failure.error_code, "context_extraction_failed");
+  assert.equal(failure.failure_stage, "project_chat_collection");
+  assert.equal(failure.internal_reason, "reference_error");
+  assert.equal(failure.exception_name, "ReferenceError");
+  assert.equal(failure.exception_reason, "reference_error");
+});
+
 test("Background reconciles duplicate Collector Tabs and keeps the canonical Tab active", async () => {
   const harness = await createHarness();
   harness.setContentHandler((message) => ({

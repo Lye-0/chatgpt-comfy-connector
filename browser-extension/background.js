@@ -113,6 +113,7 @@ const CHATGPT_CONTEXT_CURRENT_RESPONSE_TYPE = "chatgpt.context.current.response"
 const CHATGPT_CONTEXT_RESULT_MESSAGE_TYPE = "CHATGPT_CONTEXT_RESULT";
 const CHATGPT_CONTEXT_CHANGED_MESSAGE_TYPE = "CHATGPT_CONTEXT_CHANGED";
 const COLLECTOR_PROJECT_IDENTITY_TELEMETRY_MESSAGE_TYPE = "COLLECTOR_PROJECT_IDENTITY_TELEMETRY";
+const COLLECTOR_PROJECT_CHAT_TELEMETRY_MESSAGE_TYPE = "COLLECTOR_PROJECT_CHAT_TELEMETRY";
 const REVIEW_MEDIA_ATTACH_BEGIN_MESSAGE_TYPE = "REVIEW_MEDIA_ATTACH_BEGIN";
 const REVIEW_MEDIA_ATTACH_CHUNK_MESSAGE_TYPE = "REVIEW_MEDIA_ATTACH_CHUNK";
 const REVIEW_MEDIA_ATTACH_END_MESSAGE_TYPE = "REVIEW_MEDIA_ATTACH_END";
@@ -506,6 +507,35 @@ function diagnostic(eventName, fields = {}) {
     "project_section_found",
     "no_growth_count",
     "sidebar_scroll_complete",
+    "project_page_ready",
+    "current_project_id_verified",
+    "chat_container_found",
+    "candidate_chat_link_count",
+    "matching_project_chat_link_count",
+    "rejected_projectless_chat_count",
+    "rejected_other_project_chat_count",
+    "chat_scroll_container_count",
+    "relevant_region_present",
+    "document_ready_state",
+    "mutation_count",
+    "mutation_quiet_ms",
+    "visible_chat_count",
+    "deduped_chat_count",
+    "duplicate_chat_count",
+    "scroll_iteration",
+    "scroll_top",
+    "scroll_height",
+    "scroll_complete",
+    "project_chat_collection_complete",
+    "project_chat_collection_error_reason",
+    "scan_iteration",
+    "scroll_position_changed",
+    "reached_end",
+    "failure_stage",
+    "exception_name",
+    "exception_reason",
+    "project_chat_hydration_completed",
+    "project_chat_hydration_timeout",
     "target_tab_id",
     "tab_id",
     "window_id",
@@ -3919,6 +3949,99 @@ async function handleCollectorProjectIdentityTelemetryFromContent(message, sende
   return { ok: true };
 }
 
+const collectorProjectChatTelemetryKeys = [
+  "project_index",
+  "total_projects",
+  "current_project_id",
+  "project_page_ready",
+  "current_project_id_verified",
+  "candidate_chat_link_count",
+  "matching_project_chat_link_count",
+  "rejected_projectless_chat_count",
+  "rejected_other_project_chat_count",
+  "chat_scroll_container_count",
+  "relevant_region_present",
+  "document_ready_state",
+  "mutation_count",
+  "mutation_quiet_ms",
+  "discovered_chat_count",
+  "deduped_chat_count",
+  "scan_iteration",
+  "scroll_position_changed",
+  "reached_end",
+  "scroll_complete",
+  "project_chat_collection_complete",
+  "project_chat_hydration_completed",
+  "project_chat_hydration_timeout",
+  "error_code",
+  "failure_stage",
+  "internal_reason",
+  "exception_name",
+  "exception_reason",
+  "project_chat_collection_error_reason"
+];
+
+function collectorProjectChatTelemetryFields(source = {}) {
+  const fields = {};
+  for (const key of collectorProjectChatTelemetryKeys) {
+    if (typeof source[key] === "boolean") fields[key] = source[key];
+    else if (Number.isSafeInteger(source[key]) && source[key] >= 0) fields[key] = source[key];
+    else if (typeof source[key] === "string" && source[key].length <= 128) fields[key] = source[key];
+  }
+  if (typeof source.stage === "string" && source.stage.length <= 128) fields.stage = source.stage;
+  return fields;
+}
+
+function collectorProjectChatTelemetryEventName(stage) {
+  const names = {
+    collector_project_chat_dom_structure: "collector project chat dom structure",
+    collector_project_chat_scan: "collector project chat scan",
+    collector_project_chat_collection_failed: "collector project chat collection failed"
+  };
+  return names[stage] || "collector project chat telemetry";
+}
+
+async function handleCollectorProjectChatTelemetryFromContent(message, sender) {
+  const requestId = message?.requestId || message?.request_id;
+  const senderTabId = sender?.tab?.id;
+  const pending = contextRequests.get(requestId);
+  const messageGeneration = message?.refresh_generation ?? message?.refreshGeneration;
+  const messageCollectorTabId = message?.collector_tab_id ?? message?.collectorTabId;
+  const messageProjectId = message?.current_project_id || message?.project_id;
+  const pendingProjectId = pending?.currentProjectId || null;
+  const correlationValid = Boolean(
+    pending
+    && senderTabId === pending.tabId
+    && (!Number.isSafeInteger(messageGeneration) || messageGeneration === pending.generation)
+    && (!Number.isSafeInteger(messageCollectorTabId) || messageCollectorTabId === senderTabId)
+    && (!messageProjectId || !pendingProjectId || messageProjectId === pendingProjectId));
+  if (!correlationValid) {
+    diagnostic("collector project chat telemetry rejected", {
+      request_id: requestId,
+      collector_tab_id: messageCollectorTabId,
+      target_tab_id: senderTabId,
+      status: "error",
+      error_code: "collector_project_chat_telemetry_not_correlated",
+      stage: "collector_project_chat_telemetry_correlation"
+    });
+    return { ok: false, error: "collector_project_chat_telemetry_not_correlated" };
+  }
+  const fields = collectorProjectChatTelemetryFields(message);
+  const projectIndex = Number.isSafeInteger(fields.project_index)
+    ? fields.project_index
+    : (Number.isSafeInteger(collectorWindowState.projectIndex)
+      ? collectorWindowState.projectIndex
+      : 0);
+  recordCollectorProjectChatTelemetry(
+    collectorProjectChatTelemetryEventName(fields.stage),
+    pending,
+    { projectId: pendingProjectId },
+    projectIndex,
+    message,
+    fields);
+  return { ok: true };
+}
+
 function collectorProjectIdentityFromTab(tab) {
   const projectUrl = safeChatGptProjectUrl(tab?.url);
   const projectId = chatGptProjectId(projectUrl);
@@ -4487,33 +4610,254 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
   };
 }
 
-function validateCollectorProjectResult(source, pending) {
-  validateCollectorRootResult(source, pending);
-  if (source.sidebar_scroll_complete === true) return;
-  diagnostic("collector project sidebar scan incomplete", {
-    request_id: pending.requestId,
+function recordCollectorProjectChatTelemetry(eventName, pending, target, projectIndex, source = null, fields = {}) {
+  const discoveredChatCount = Array.isArray(source?.conversations)
+    ? source.conversations.length
+    : 0;
+  const numberOrNull = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const sourceOrField = (key) => fields[key] !== undefined ? fields[key] : source?.[key];
+  const telemetry = {
+    request_id: pending?.requestId,
     collector_window_id: collectorWindowState.windowId,
-    collector_tab_id: pending.tabId,
-    current_project_id: pending.currentProjectId,
-    sidebar_scroll_top: source.sidebar_scroll_top,
-    sidebar_scroll_height: source.sidebar_scroll_height,
-    sidebar_client_height: source.sidebar_client_height,
-    sidebar_can_scroll: source.sidebar_can_scroll === true,
-    sidebar_at_bottom: source.sidebar_at_bottom === true,
-    visible_project_rows: source.visible_project_rows,
-    discovered_project_count: source.discovered_project_count,
-    project_section_found: source.project_section_found === true,
-    no_growth_count: source.no_growth_count,
-    sidebar_scroll_complete: false,
-    status: "error",
-    error_code: "context_projects_incomplete",
-    stage: "collector_project_sidebar_scan_incomplete",
-    target_tab_id: pending.tabId
-  });
-  throw bridgeError(
-    "ChatGPT Project内のChat一覧を完全には取得できませんでした。",
-    0,
-    "context_projects_incomplete");
+    collector_tab_id: pending?.tabId,
+    current_project_id: target?.projectId || pending?.currentProjectId,
+    project_index: projectIndex,
+    total_projects: fields.total_projects,
+    current_project_id_verified: sourceOrField("current_project_id_verified"),
+    project_page_ready: sourceOrField("project_page_ready"),
+    candidate_chat_link_count: numberOrNull(sourceOrField("candidate_chat_link_count")),
+    matching_project_chat_link_count: numberOrNull(sourceOrField("matching_project_chat_link_count")),
+    rejected_projectless_chat_count: numberOrNull(sourceOrField("rejected_projectless_chat_count")),
+    rejected_other_project_chat_count: numberOrNull(sourceOrField("rejected_other_project_chat_count")),
+    chat_scroll_container_count: numberOrNull(sourceOrField("chat_scroll_container_count")),
+    relevant_region_present: sourceOrField("relevant_region_present"),
+    document_ready_state: sourceOrField("document_ready_state"),
+    mutation_count: numberOrNull(sourceOrField("mutation_count")),
+    mutation_quiet_ms: numberOrNull(sourceOrField("mutation_quiet_ms")),
+    chat_container_found: sourceOrField("chat_container_found"),
+    visible_chat_count: numberOrNull(sourceOrField("visible_chat_count")),
+    discovered_chat_count: numberOrNull(sourceOrField("discovered_chat_count")) ?? discoveredChatCount,
+    deduped_chat_count: numberOrNull(sourceOrField("deduped_chat_count")) ?? discoveredChatCount,
+    duplicate_chat_count: numberOrNull(sourceOrField("duplicate_chat_count")),
+    scroll_iteration: numberOrNull(sourceOrField("scroll_iteration")),
+    scan_iteration: numberOrNull(sourceOrField("scan_iteration")),
+    scroll_top: numberOrNull(sourceOrField("scroll_top")),
+    scroll_height: numberOrNull(sourceOrField("scroll_height")),
+    scroll_complete: sourceOrField("scroll_complete"),
+    scroll_position_changed: sourceOrField("scroll_position_changed"),
+    reached_end: sourceOrField("reached_end"),
+    project_chat_collection_complete: sourceOrField("project_chat_collection_complete"),
+    project_chat_hydration_completed: sourceOrField("project_chat_hydration_completed"),
+    project_chat_hydration_timeout: sourceOrField("project_chat_hydration_timeout"),
+    status: fields.status || "observed",
+    error_code: fields.error_code || source?.errorCode || source?.error_code,
+    failure_stage: sourceOrField("failure_stage"),
+    internal_reason: sourceOrField("internal_reason"),
+    exception_name: sourceOrField("exception_name"),
+    exception_reason: sourceOrField("exception_reason"),
+    project_chat_collection_error_reason: sourceOrField("project_chat_collection_error_reason"),
+    stage: fields.stage,
+    target_tab_id: pending?.tabId
+  };
+  diagnostic(eventName, telemetry);
+}
+
+function validateCollectorProjectChatResult(source, pending, target, projectIndex, tab) {
+  if (!source || typeof source !== "object") {
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection failed",
+      pending,
+      target,
+      projectIndex,
+      source,
+      {
+        status: "error",
+        error_code: "context_response_invalid",
+        failure_stage: "project_chat_result_validation",
+        internal_reason: "collector_result_missing",
+        exception_name: "none",
+        exception_reason: "none",
+        stage: "collector_project_chat_collection_failed"
+      });
+    throw bridgeError(
+      "ChatGPT Project内のChat一覧を取得できませんでした。",
+      0,
+      "context_project_chats_incomplete");
+  }
+  const requestId = source.requestId || source.request_id;
+  if (requestId !== pending.requestId || (source.mode || "list") !== "list") {
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection failed",
+      pending,
+      target,
+      projectIndex,
+      source,
+      {
+        status: "error",
+        error_code: "context_response_correlation_failed",
+        failure_stage: "project_chat_result_validation",
+        internal_reason: "context_response_correlation_failed",
+        exception_name: "none",
+        exception_reason: "none",
+        stage: "collector_project_chat_collection_failed"
+      });
+    throw bridgeError(
+      "ChatGPT Project内Chat responseの識別情報が一致しません。",
+      0,
+      "context_response_correlation_failed");
+  }
+  if (source.status === "error") {
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection failed",
+      pending,
+      target,
+      projectIndex,
+      source,
+      {
+        status: "error",
+        error_code: source.errorCode || source.error_code || "context_extraction_failed",
+        failure_stage: source.failure_stage || source.stage || "project_chat_collection",
+        internal_reason: source.internal_reason
+          || source.project_chat_collection_error_reason
+          || "content_script_collection_failed",
+        exception_name: source.exception_name || "none",
+        exception_reason: source.exception_reason || "none",
+        stage: "collector_project_chat_collection_failed"
+      });
+    throw bridgeError(
+      source.message || "ChatGPT Project内のChat一覧を取得できませんでした。",
+      0,
+      source.errorCode || source.error_code || "context_project_chats_incomplete");
+  }
+  if (source.status !== "ok"
+    || !Array.isArray(source.projects)
+    || !Array.isArray(source.conversations)) {
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection failed",
+      pending,
+      target,
+      projectIndex,
+      source,
+      {
+        status: "error",
+        error_code: "context_response_invalid",
+        failure_stage: "project_chat_result_validation",
+        internal_reason: "collector_result_malformed",
+        exception_name: "none",
+        exception_reason: "none",
+        stage: "collector_project_chat_collection_failed"
+      });
+    throw bridgeError(
+      "ChatGPT Project内Chat responseが不正です。",
+      0,
+      "context_response_invalid");
+  }
+
+  const actualProjectUrl = safeChatGptContextUrl(tab?.url);
+  const actualProjectId = chatGptProjectId(actualProjectUrl);
+  const targetProjectId = target?.projectId || null;
+  const routeVerified = Boolean(
+    actualProjectUrl
+    && safeChatGptProjectUrl(actualProjectUrl)
+    && targetProjectId
+    && actualProjectId === targetProjectId);
+  const pageReady = source.project_page_ready === undefined
+    ? routeVerified
+    : source.project_page_ready === true;
+  const currentProjectVerified = source.current_project_id_verified === undefined
+    ? routeVerified
+    : source.current_project_id_verified === true;
+  const projectChatComplete = source.project_chat_collection_complete === undefined
+    ? source.sidebar_scroll_complete === true
+    : source.project_chat_collection_complete === true;
+  const chatContainerFound = source.chat_container_found === undefined
+    ? projectChatComplete
+    : source.chat_container_found === true;
+
+  if (!routeVerified || !pageReady || !currentProjectVerified) {
+    recordCollectorProjectChatTelemetry(
+      "collector project page validation failed",
+      pending,
+      target,
+      projectIndex,
+      source,
+      {
+        status: "error",
+        error_code: "context_project_page_unavailable",
+        failure_stage: "project_page_validation",
+        internal_reason: "project_route_not_verified",
+        project_page_ready: pageReady,
+        current_project_id_verified: currentProjectVerified,
+        stage: "collector_project_page_validation"
+      });
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection failed",
+      pending,
+      target,
+      projectIndex,
+      source,
+      {
+        status: "error",
+        error_code: "context_project_page_unavailable",
+        failure_stage: "project_page_validation",
+        internal_reason: "project_route_not_verified",
+        project_page_ready: pageReady,
+        current_project_id_verified: currentProjectVerified,
+        stage: "collector_project_chat_collection_failed"
+      });
+    throw bridgeError(
+      "ChatGPTのProjectページを確認できませんでした。",
+      0,
+      "context_project_page_unavailable");
+  }
+
+  if (!projectChatComplete || !chatContainerFound) {
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection incomplete",
+      pending,
+      target,
+      projectIndex,
+      source,
+      {
+        status: "error",
+        error_code: "context_project_chats_incomplete",
+        failure_stage: "project_chat_scan",
+        internal_reason: source.project_chat_hydration_timeout === true
+          ? "project_page_not_hydrated"
+          : "project_chat_scan_incomplete",
+        exception_name: "none",
+        exception_reason: "none",
+        stage: "collector_project_chat_collection_incomplete"
+      });
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection failed",
+      pending,
+      target,
+      projectIndex,
+      source,
+      {
+        status: "error",
+        error_code: "context_project_chats_incomplete",
+        failure_stage: "project_chat_scan",
+        internal_reason: source.project_chat_hydration_timeout === true
+          ? "project_page_not_hydrated"
+          : "project_chat_scan_incomplete",
+        exception_name: "none",
+        exception_reason: "none",
+        stage: "collector_project_chat_collection_failed"
+      });
+    throw bridgeError(
+      "ChatGPT Project内のChat一覧を完全には取得できませんでした。",
+      0,
+      "context_project_chats_incomplete");
+  }
+  return {
+    routeVerified,
+    pageReady,
+    currentProjectVerified,
+    projectChatComplete,
+    chatContainerFound
+  };
 }
 
 async function collectProjectsOnce(tab, pending, request) {
@@ -4831,6 +5175,18 @@ async function collectCompleteChatGptContext(tab, pending, request) {
         0,
         "context_projects_incomplete");
     }
+    pending.currentProjectId = target.projectId;
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection start",
+      pending,
+      target,
+      index,
+      null,
+      {
+        total_projects: projects.length,
+        status: "started",
+        stage: "collector_project_chat_collection_start"
+      });
     tab = await navigateCollectorTab(
       await ensureCollectorWindow(COLLECTOR_TAB_URL, {
         request_id: pending.requestId,
@@ -4878,12 +5234,33 @@ async function collectCompleteChatGptContext(tab, pending, request) {
     });
     pending.tabId = tab.id;
     throwIfCollectorRequestSuperseded(pending);
+    const currentProjectUrl = safeChatGptContextUrl(tab.url);
+    const currentProjectId = chatGptProjectId(currentProjectUrl);
+    recordCollectorProjectChatTelemetry(
+      "collector project page ready",
+      pending,
+      target,
+      index,
+      null,
+      {
+        total_projects: projects.length,
+        current_project_id_verified: Boolean(currentProjectId === target.projectId
+          && safeChatGptProjectUrl(currentProjectUrl)),
+        project_page_ready: Boolean(currentProjectId === target.projectId
+          && safeChatGptProjectUrl(currentProjectUrl)),
+        status: "ready",
+        stage: "collector_project_page_ready"
+      });
     const projectResult = await dispatchToContentScript(tab.id, {
       type: "GET_CHATGPT_CONTEXT",
       requestId: pending.requestId,
       mode: "list",
       collection: "project",
       projectId: target.projectId,
+      projectIndex: index,
+      totalProjects: projects.length,
+      refreshGeneration: pending.generation,
+      collectorTabId: tab.id,
       maxScrolls: COLLECTOR_PROJECT_SCROLL_MAX,
       timeoutMs: COLLECTOR_PROJECT_TIMEOUT_MS
     }, request, {
@@ -4891,14 +5268,47 @@ async function collectCompleteChatGptContext(tab, pending, request) {
       timeoutStage: "collector_project_content_script_timeout"
     });
     throwIfCollectorRequestSuperseded(pending);
-    pending.currentProjectId = target.projectId;
-    validateCollectorProjectResult(projectResult, pending);
-    recordCollectorScrollTelemetry(projectResult, pending, {
-      project_id: target.projectId,
-      project_index: index,
-      stage: "collector_project_sidebar_scan"
-    });
+    // The Content Script emits the same stages as best-effort runtime
+    // telemetry. Record the stable DOM/scan snapshot here as well so the
+    // Desktop diagnostics still contain it when a runtime message races the
+    // request response or the tab is replaced during navigation.
+    recordCollectorProjectChatTelemetry(
+      "collector project chat dom structure",
+      pending,
+      target,
+      index,
+      projectResult,
+      {
+        total_projects: projects.length,
+        status: projectResult?.status === "error" ? "error" : "observed",
+        stage: "collector_project_chat_dom_structure"
+      });
+    recordCollectorProjectChatTelemetry(
+      "collector project chat scan",
+      pending,
+      target,
+      index,
+      projectResult,
+      {
+        total_projects: projects.length,
+        status: "observed",
+        stage: "collector_project_chat_scan"
+      });
+    validateCollectorProjectChatResult(projectResult, pending, target, index, tab);
     mergeCollectorMetadata(aggregate, projectResult, target.projectId);
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection complete",
+      pending,
+      target,
+      index,
+      projectResult,
+      {
+        total_projects: projects.length,
+        current_project_id_verified: true,
+        project_page_ready: true,
+        status: "completed",
+        stage: "collector_project_chat_collection_complete"
+      });
     collectorWindowLifecycle("CollectingProject", {
       tabId: tab.id,
       currentProjectId: target.projectId,
@@ -8471,6 +8881,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch(() => sendResponse({
         ok: false,
         error: "collector_project_identity_telemetry_relay_failed"
+      }));
+    return true;
+  }
+  if (message?.type === COLLECTOR_PROJECT_CHAT_TELEMETRY_MESSAGE_TYPE) {
+    handleCollectorProjectChatTelemetryFromContent(message, _sender)
+      .then(sendResponse)
+      .catch(() => sendResponse({
+        ok: false,
+        error: "collector_project_chat_telemetry_relay_failed"
       }));
     return true;
   }

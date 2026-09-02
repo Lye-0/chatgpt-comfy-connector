@@ -611,6 +611,15 @@ async function createHarness(options) {
     }
   });
   new Script(locatorSource).runInContext(context);
+  if (options?.locatorOverrides) {
+    // The production locator object is frozen. Replace the global object in
+    // the fixture before loading Content Script so error-envelope tests can
+    // exercise the same boundary without altering the page fixtures.
+    context.ChatGptComfyConnectorLocators = {
+      ...context.ChatGptComfyConnectorLocators,
+      ...options.locatorOverrides
+    };
+  }
   // Keep the production wait long enough for a real ChatGPT render, while
   // keeping the negative fixture fast and deterministic.
   const fixtureContentSource = contentSource.replace(
@@ -719,6 +728,75 @@ test("Content Script preserves Project identity navigation stages in its safe ru
   assert.equal(Object.hasOwn(target, "project_title"), false);
   assert.equal(result.navigation_failure_reason, "project_row_fingerprint_mismatch");
   assert.equal(result.internal_reason, "project_row_fingerprint_mismatch");
+});
+
+test("Content Script preserves safe diagnostics when Project Chat collection throws", async () => {
+  const harness = await createHarness({
+    url: "https://chatgpt.com/g/g-p-project-page/project",
+    locatorOverrides: {
+      collectChatGptProjectContextAsync: async () => {
+        const error = new Error("sensitive page details must not cross the boundary");
+        error.name = "ReferenceError";
+        throw error;
+      }
+    }
+  });
+  const result = await harness.send({
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: "project-chat-error-fixture",
+    refreshGeneration: 4,
+    collectorTabId: 101,
+    projectIndex: 0,
+    totalProjects: 10,
+    projectId: "g-p-project-page",
+    mode: "list",
+    collection: "project"
+  });
+
+  assert.equal(result.status, "error");
+  assert.equal(result.errorCode, "context_extraction_failed");
+  assert.equal(result.failure_stage, "project_chat_collection");
+  assert.equal(result.internal_reason, "reference_error");
+  assert.equal(Object.hasOwn(result, "exception_message"), false);
+  const failure = await harness.waitForRuntimeMessage((message) =>
+    message.type === "COLLECTOR_PROJECT_CHAT_TELEMETRY"
+      && message.stage === "collector_project_chat_collection_failed");
+  assert.equal(failure.current_project_id, "g-p-project-page");
+  assert.equal(failure.project_index, 0);
+  assert.equal(failure.total_projects, 10);
+  assert.equal(failure.exception_name, "ReferenceError");
+  assert.equal(failure.exception_reason, "reference_error");
+  assert.equal(Object.hasOwn(failure, "exception_message"), false);
+  assert.equal(JSON.stringify(failure).includes("sensitive page details"), false);
+});
+
+test("Content Script rejects a malformed Project Chat collection result with a safe reason", async () => {
+  const harness = await createHarness({
+    url: "https://chatgpt.com/g/g-p-project-page/project",
+    locatorOverrides: {
+      collectChatGptProjectContextAsync: async () => ({
+        projects: [],
+        conversations: "not-an-array"
+      })
+    }
+  });
+  const result = await harness.send({
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: "project-chat-malformed-fixture",
+    projectId: "g-p-project-page",
+    mode: "list",
+    collection: "project"
+  });
+
+  assert.equal(result.status, "error");
+  assert.equal(result.errorCode, "context_response_invalid");
+  assert.equal(result.internal_reason, "collector_result_malformed");
+  const failure = await harness.waitForRuntimeMessage((message) =>
+    message.type === "COLLECTOR_PROJECT_CHAT_TELEMETRY"
+      && message.stage === "collector_project_chat_collection_failed");
+  assert.equal(failure.error_code, "context_response_invalid");
+  assert.equal(failure.internal_reason, "collector_result_malformed");
+  assert.equal(failure.exception_reason, "none");
 });
 
 test("Content Script reports Managed Tab readiness only after the composer and bound Conversation are ready", async () => {

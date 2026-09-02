@@ -249,6 +249,7 @@ class FakeProjectDocument extends FakeMetadataNode {
 
   querySelectorAll(selector) {
     if (selector.startsWith("nav[")) return [this.sidebar];
+    if (selector === "main" || selector === '[role="main"]') return [this.content];
     return super.querySelectorAll(selector);
   }
 }
@@ -1599,7 +1600,10 @@ test("Project page collection scans conversation metadata outside the sidebar an
   for (const node of [sidebar, content, alphaChat, secondAlphaChat, otherProjectChat]) node.ownerDocument = document;
 
   const locators = loadLocators(document);
-  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, "g-p-alpha");
+  const telemetry = [];
+  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, "g-p-alpha", {
+    onTelemetry: (event) => telemetry.push(event)
+  });
 
   assert.deepEqual(Array.from(snapshot.projects, (project) => project.project_id), ["g-p-alpha"]);
   assert.deepEqual(Array.from(snapshot.conversations, (conversation) => conversation.conversation_id), [
@@ -1607,6 +1611,93 @@ test("Project page collection scans conversation metadata outside the sidebar an
     "conversation-second"
   ]);
   assert.ok(snapshot.conversations.every((conversation) => conversation.project_id === "g-p-alpha"));
+  assert.equal(snapshot.project_page_ready, true);
+  assert.equal(snapshot.current_project_id_verified, true);
+  assert.equal(snapshot.chat_container_found, true);
+  assert.equal(snapshot.project_chat_collection_complete, true);
+  assert.equal(snapshot.scroll_complete, true);
+  assert.equal(snapshot.project_chat_hydration_completed, true);
+  assert.equal(snapshot.project_chat_hydration_timeout, false);
+  const structure = telemetry.find((event) => event.stage === "collector_project_chat_dom_structure");
+  assert.equal(structure.project_page_ready, true);
+  assert.equal(structure.candidate_chat_link_count, 3);
+  assert.equal(structure.matching_project_chat_link_count, 2);
+  assert.equal(structure.rejected_other_project_chat_count, 1);
+  assert.equal(structure.rejected_projectless_chat_count, 0);
+  assert.equal(telemetry.some((event) => event.stage === "collector_project_chat_collection_failed"), false);
+});
+
+test("Project page collection accepts a stable, hydrated Project page with zero chats", async () => {
+  const href = "https://chatgpt.com/g/g-p-empty/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const content = new FakeMetadataNode(null, "MAIN");
+  const document = new FakeProjectDocument(href, sidebar, content, "Empty Project | ChatGPT");
+  for (const node of [sidebar, content]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const telemetry = [];
+  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, "g-p-empty", {
+    onTelemetry: (event) => telemetry.push(event)
+  });
+
+  assert.equal(snapshot.conversations.length, 0);
+  assert.equal(snapshot.project_page_ready, true);
+  assert.equal(snapshot.relevant_region_present, true);
+  assert.equal(snapshot.project_chat_hydration_completed, true);
+  assert.equal(snapshot.project_chat_collection_complete, true);
+  assert.equal(snapshot.scroll_complete, true);
+  const scan = telemetry.filter((event) => event.stage === "collector_project_chat_scan").at(-1);
+  assert.equal(scan.discovered_chat_count, 0);
+  assert.equal(scan.deduped_chat_count, 0);
+  assert.equal(scan.reached_end, true);
+});
+
+test("Project page collection waits for delayed chat hydration before scanning", async () => {
+  const href = "https://chatgpt.com/g/g-p-delayed/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const content = new FakeMetadataNode(null, "MAIN");
+  const document = new FakeProjectDocument(href, sidebar, content, "Delayed Project | ChatGPT");
+  for (const node of [sidebar, content]) node.ownerDocument = document;
+  document.readyState = "complete";
+  document.documentElement = document;
+  document.defaultView = {
+    getComputedStyle() { return { display: "", visibility: "" }; },
+    MutationObserver: FakeMutationObserver
+  };
+  FakeMutationObserver.instances.length = 0;
+
+  const locators = loadLocators(document, {
+    MutationObserver: FakeMutationObserver,
+    setTimeout,
+    clearTimeout
+  });
+  const collectionPromise = locators.collectChatGptProjectContextAsync(
+    document,
+    href,
+    "g-p-delayed",
+    {
+      initialSettleMs: 0,
+      projectChatHydrationQuietMs: 30,
+      projectChatHydrationPollMs: 5,
+      projectChatHydrationTimeoutMs: 300
+    });
+
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  const delayedChat = new FakeMetadataNode(null, "A", "Delayed chat", {
+    href: "/g/g-p-delayed/c/delayed-chat"
+  });
+  delayedChat.ownerDocument = document;
+  content.appendChild(delayedChat);
+  const observer = FakeMutationObserver.instances.at(-1);
+  assert.ok(observer);
+  observer.emit([{ type: "childList" }]);
+
+  const snapshot = await collectionPromise;
+  assert.deepEqual(
+    Array.from(snapshot.conversations, (conversation) => conversation.conversation_id),
+    ["delayed-chat"]);
+  assert.equal(snapshot.project_chat_hydration_completed, true);
+  assert.equal(snapshot.project_chat_collection_complete, true);
 });
 
 test("Project page collection follows lazy Project chat growth with bounded scrolling", async () => {
@@ -1689,8 +1780,99 @@ test("Project page collection keeps independent sidebar and main-list scrollport
     "conversation-two-lists-first",
     "conversation-two-lists-second"
   ]);
+  assert.equal(snapshot.project_page_ready, true);
+  assert.equal(snapshot.current_project_id_verified, true);
+  assert.equal(snapshot.chat_container_found, true);
+  assert.equal(snapshot.discovered_chat_count, 2);
+  assert.equal(snapshot.deduped_chat_count, 2);
+  assert.equal(snapshot.project_chat_collection_complete, true);
+  assert.equal(snapshot.scroll_complete, true);
   assert.equal(content.scrollTop, 0);
   assert.equal(sidebar.scrollTop, 0);
+});
+
+test("Project page collection includes scoped Sidebar chats without importing Projectless chats", async () => {
+  const href = "https://chatgpt.com/g/g-p-scoped/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  sidebar.scrollTop = 0;
+  sidebar.clientHeight = 100;
+  sidebar.scrollHeight = 220;
+  const scopedChat = new FakeMetadataNode(null, "A", "", {
+    href: "/g/g-p-scoped/c/sidebar-scoped"
+  });
+  scopedChat.appendChild(new FakeMetadataNode(null, "SPAN", "Scoped Sidebar chat", {
+    "data-marquee-text": "true"
+  }));
+  const projectlessChat = new FakeMetadataNode(null, "A", "", {
+    href: "/c/sidebar-projectless"
+  });
+  projectlessChat.appendChild(new FakeMetadataNode(null, "SPAN", "Projectless Sidebar chat", {
+    "data-marquee-text": "true"
+  }));
+  sidebar.appendChild(scopedChat);
+  sidebar.appendChild(projectlessChat);
+  const content = new FakeMetadataNode(null, "MAIN");
+  const mainChat = new FakeMetadataNode(null, "A", "", {
+    href: "/g/g-p-scoped/c/main-scoped"
+  });
+  mainChat.appendChild(new FakeMetadataNode(null, "SPAN", "Main scoped chat", {
+    "data-marquee-text": "true"
+  }));
+  content.appendChild(mainChat);
+  const document = new FakeProjectDocument(href, sidebar, content, "Scoped | ChatGPT");
+  for (const node of [sidebar, scopedChat, projectlessChat, content, mainChat]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, "g-p-scoped", {
+    maxScrolls: 8,
+    timeoutMs: 5000
+  });
+
+  assert.deepEqual(Array.from(snapshot.conversations, (conversation) => conversation.conversation_id).sort(), [
+    "main-scoped",
+    "sidebar-scoped"
+  ]);
+  assert.equal(snapshot.project_chat_collection_complete, true);
+  assert.equal(snapshot.scroll_complete, true);
+  assert.equal(sidebar.scrollTop, 0);
+});
+
+test("Project page collection handles a plain Chat link under the expanded current Project row", async () => {
+  const href = "https://chatgpt.com/g/g-p-expanded/project";
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const projectRow = new FakeMetadataNode(null, "DIV", "", {
+    role: "button",
+    "data-sidebar-item": "true",
+    "aria-expanded": "true"
+  });
+  projectRow.appendChild(new FakeMetadataNode(null, "SPAN", "Expanded Project", {
+    "data-marquee-text": "true"
+  }));
+  const nestedChat = new FakeMetadataNode(null, "A", "", {
+    href: "/c/expanded-project-chat"
+  });
+  nestedChat.appendChild(new FakeMetadataNode(null, "SPAN", "Expanded Project chat", {
+    "data-marquee-text": "true"
+  }));
+  projectRow.appendChild(nestedChat);
+  sidebar.appendChild(projectRow);
+  const document = new FakeProjectDocument(
+    href,
+    sidebar,
+    new FakeMetadataNode(null, "MAIN"),
+    "Expanded Project | ChatGPT");
+  for (const node of [sidebar, projectRow, nestedChat, document.content]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, "g-p-expanded", {
+    maxScrolls: 4,
+    timeoutMs: 5000
+  });
+
+  assert.deepEqual(Array.from(snapshot.conversations, (conversation) => conversation.conversation_id), [
+    "expanded-project-chat"
+  ]);
+  assert.equal(snapshot.project_chat_collection_complete, true);
 });
 
 function assertProject(projects, projectId) {

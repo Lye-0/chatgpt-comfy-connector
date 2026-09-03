@@ -463,6 +463,16 @@ function diagnostic(eventName, fields = {}) {
     "navigation_failure_reason",
     "internal_reason",
     "exit_reason",
+    "disclosure_found",
+    "child_chat_count",
+    "child_project_url_count",
+    "row_project_url_found",
+    "nested_project_url_found",
+    "stable_identity_candidate_count",
+    "identity_source",
+    "empty_project_candidate",
+    "navigation_fallback_attempted",
+    "navigation_fallback_success",
     "root_hydration_started",
     "root_hydration_completed",
     "root_hydration_timeout",
@@ -3822,7 +3832,17 @@ const collectorProjectIdentityNavigationTelemetryKeys = [
   "navigation_failure_reason",
   "internal_reason",
   "exit_reason",
-  "unresolved_reason"
+  "unresolved_reason",
+  "disclosure_found",
+  "child_chat_count",
+  "child_project_url_count",
+  "row_project_url_found",
+  "nested_project_url_found",
+  "stable_identity_candidate_count",
+  "identity_source",
+  "empty_project_candidate",
+  "navigation_fallback_attempted",
+  "navigation_fallback_success"
 ];
 
 function collectorProjectIdentityNavigationTelemetryFields(source = {}) {

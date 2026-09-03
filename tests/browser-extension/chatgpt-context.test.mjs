@@ -1159,6 +1159,12 @@ test("Project disclosure row resolves identity from its aria-controls region wit
   assert.equal(click.click_target_is_project_row, true);
   assert.equal(telemetry.some((event) =>
     event.stage === "collector_project_identity_navigation_wait"), false);
+  const source = telemetry.find((event) =>
+    event.stage === "collector_project_identity_source_classification");
+  assert.equal(source.identity_source, "child_chat_url");
+  assert.equal(source.empty_project_candidate, false);
+  assert.equal(source.resolution_success, true);
+  assert.equal(source.child_chat_count, 1);
 });
 
 test("Project disclosure without a stable controlled-region identity does not fall through to URL navigation", async () => {
@@ -1201,6 +1207,255 @@ test("Project disclosure without a stable controlled-region identity does not fa
     event.stage === "collector_project_identity_disclosure_result");
   assert.equal(disclosureResult.resolution_success, false);
   assert.equal(disclosureResult.unresolved_reason, "project_disclosure_identity_not_found");
+  const source = telemetry.find((event) =>
+    event.stage === "collector_project_identity_source_classification");
+  assert.equal(source.empty_project_candidate, true);
+  assert.equal(source.navigation_fallback_attempted, false);
+  assert.equal(source.resolution_success, false);
+  assert.equal(source.identity_source, "none");
+});
+
+test("Empty Project disclosure resolves identity from an exclusive-shell Project home URL", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["ネットワーク"], [], null, null, []);
+  document.sidebar = sidebar;
+  const row = sidebar.projectRows[0];
+  row.attributes.set("aria-controls", "empty-network-list");
+  document.registerElementById(new FakeMetadataNode(document, "DIV", "", {
+    id: "empty-network-list"
+  }));
+  const wrapper = new FakeMetadataNode(document, "DIV", "", { class: "group/project-item" });
+  const projectHome = new FakeMetadataNode(document, "A", "", {
+    href: "/g/g-p-network-empty/project"
+  });
+  wrapper.appendChild(row);
+  wrapper.appendChild(projectHome);
+  let rowClickCount = 0;
+  row.click = () => { rowClickCount += 1; };
+
+  const locators = loadLocators(document);
+  const telemetry = [];
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "ネットワーク" }],
+    {
+      identityMode: "navigation",
+      navigationTimeoutMs: 250,
+      onTelemetry: (event) => telemetry.push(event)
+    });
+
+  assert.equal(result.projects[0].project_id, "g-p-network-empty");
+  assert.equal(result.projects[0].url, "https://chatgpt.com/g/g-p-network-empty/project");
+  assert.equal(result.projects[0].resolution_method, "dom");
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(rowClickCount, 0);
+  assert.equal(document.location.href, rootHref);
+  const source = telemetry.find((event) =>
+    event.stage === "collector_project_identity_source_classification");
+  assert.equal(source.identity_source, "nested_url");
+  assert.equal(source.nested_project_url_found, true);
+  assert.equal(source.resolution_success, true);
+  assert.equal(source.navigation_fallback_attempted, false);
+});
+
+test("Empty Project disclosure resolves identity from a row-local g-p-* data attribute", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["ネットワーク"], [], null, null, []);
+  document.sidebar = sidebar;
+  const row = sidebar.projectRows[0];
+  row.attributes.set("aria-controls", "empty-attr-list");
+  row.attributes.set("data-sidebar-item-id", "g-p-attr-empty");
+  document.registerElementById(new FakeMetadataNode(document, "DIV", "", {
+    id: "empty-attr-list"
+  }));
+  let clickCount = 0;
+  row.click = () => { clickCount += 1; };
+
+  const locators = loadLocators(document);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "ネットワーク" }],
+    { identityMode: "navigation", navigationTimeoutMs: 250 });
+
+  assert.equal(result.projects[0].project_id, "g-p-attr-empty");
+  assert.equal(result.projects[0].url, "https://chatgpt.com/g/g-p-attr-empty/project");
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(clickCount, 0);
+});
+
+test("Empty Project disclosure navigates a nested role=link instead of re-clicking the disclosure", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["ネットワーク"], [], null, null, []);
+  document.sidebar = sidebar;
+  const row = sidebar.projectRows[0];
+  row.attributes.set("aria-controls", "empty-nav-list");
+  document.registerElementById(new FakeMetadataNode(document, "DIV", "", {
+    id: "empty-nav-list"
+  }));
+  const projectLink = new FakeMetadataNode(document, "DIV", "ネットワーク", { role: "link" });
+  let rowClickCount = 0;
+  let linkClickCount = 0;
+  row.click = () => {
+    rowClickCount += 1;
+    row.attributes.set("aria-expanded", "true");
+  };
+  projectLink.click = () => {
+    linkClickCount += 1;
+    document.location.href = "https://chatgpt.com/g/g-p-nav-empty/project";
+  };
+  row.appendChild(projectLink);
+
+  const locators = loadLocators(document);
+  const telemetry = [];
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "ネットワーク" }],
+    {
+      identityMode: "navigation",
+      navigationTimeoutMs: 400,
+      onTelemetry: (event) => telemetry.push(event)
+    });
+
+  assert.equal(result.projects[0].project_id, "g-p-nav-empty");
+  assert.equal(result.projects[0].url, "https://chatgpt.com/g/g-p-nav-empty/project");
+  assert.equal(result.projects[0].resolution_method, "navigation");
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(rowClickCount, 1);
+  assert.equal(linkClickCount, 1);
+  const source = telemetry.find((event) =>
+    event.stage === "collector_project_identity_source_classification");
+  assert.equal(source.empty_project_candidate, true);
+  assert.equal(source.navigation_fallback_attempted, true);
+  assert.equal(source.navigation_fallback_success, true);
+  assert.equal(source.identity_source, "navigation_url");
+});
+
+test("Multiple empty Projects resolve to distinct Stable IDs from their own shells", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["ネットワーク", "ネットワーク"], [], null, null, []);
+  document.sidebar = sidebar;
+  const ids = ["g-p-empty-one", "g-p-empty-two"];
+  sidebar.projectRows.forEach((row, index) => {
+    row.attributes.set("aria-controls", `empty-multi-${index}`);
+    document.registerElementById(new FakeMetadataNode(document, "DIV", "", {
+      id: `empty-multi-${index}`
+    }));
+    const wrapper = new FakeMetadataNode(document, "DIV", "", { class: "group/project-item" });
+    wrapper.appendChild(row);
+    wrapper.appendChild(new FakeMetadataNode(document, "A", "", {
+      href: `/g/${ids[index]}/project`
+    }));
+  });
+
+  const locators = loadLocators(document);
+  const first = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "ネットワーク" }],
+    { identityMode: "navigation", navigationTimeoutMs: 250 });
+  const second = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 1, discovery_index: 1, title: "ネットワーク" }],
+    { identityMode: "navigation", navigationTimeoutMs: 250 });
+
+  assert.equal(first.projects[0].project_id, "g-p-empty-one");
+  assert.equal(second.projects[0].project_id, "g-p-empty-two");
+  assert.notEqual(first.projects[0].project_id, second.projects[0].project_id);
+});
+
+test("Empty Project identity ignores nearby other-Project chats, Projectless chats, and custom GPT routes", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["ネットワーク", "Other Project"], [], null, null, []);
+  document.sidebar = sidebar;
+  const emptyRow = sidebar.projectRows[0];
+  const otherRow = sidebar.projectRows[1];
+  emptyRow.attributes.set("aria-controls", "empty-ignore-list");
+  document.registerElementById(new FakeMetadataNode(document, "DIV", "", {
+    id: "empty-ignore-list"
+  }));
+  const wrapper = new FakeMetadataNode(document, "DIV", "", { class: "group/project-item" });
+  wrapper.appendChild(emptyRow);
+  wrapper.appendChild(new FakeMetadataNode(document, "A", "Projectless", {
+    href: "/c/projectless-nearby"
+  }));
+  wrapper.appendChild(new FakeMetadataNode(document, "A", "Custom GPT", {
+    href: "/g/g-custom/c/custom-nearby"
+  }));
+  otherRow.appendChild(new FakeMetadataNode(document, "A", "Other chat", {
+    href: "/g/g-p-other-nearby/c/other-chat"
+  }));
+  emptyRow.click = () => { emptyRow.attributes.set("aria-expanded", "true"); };
+
+  const locators = loadLocators(document);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "ネットワーク" }],
+    { identityMode: "navigation", navigationTimeoutMs: 250 });
+
+  assert.equal(result.projects[0].project_id, undefined);
+  assert.equal(result.projects[0].unresolved_reason, "project_disclosure_identity_not_found");
+  assert.equal(result.unresolved_count, 1);
+});
+
+test("Empty Project identity then collects zero chats on a verified Project page with a tiny unrelated scrollport", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["ネットワーク"], [], null, null, []);
+  document.sidebar = sidebar;
+  const row = sidebar.projectRows[0];
+  row.attributes.set("aria-controls", "empty-collect-list");
+  document.registerElementById(new FakeMetadataNode(document, "DIV", "", {
+    id: "empty-collect-list"
+  }));
+  const wrapper = new FakeMetadataNode(document, "DIV", "", { class: "group/project-item" });
+  wrapper.appendChild(row);
+  wrapper.appendChild(new FakeMetadataNode(document, "A", "", {
+    href: "/g/g-p-empty-collect/project"
+  }));
+
+  const locators = loadLocators(document);
+  const identity = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "ネットワーク" }],
+    { identityMode: "navigation", navigationTimeoutMs: 250 });
+  assert.equal(identity.projects[0].project_id, "g-p-empty-collect");
+
+  const href = identity.projects[0].url;
+  const pageSidebar = new FakeMetadataNode(null, "NAV");
+  const content = new FakeMetadataNode(null, "MAIN");
+  content.appendChild(new FakeMetadataNode(null, "DIV", "プロジェクトのチャットはありません"));
+  const tinyUnrelatedScrollport = new FakeMetadataNode(null, "DIV", "", {
+    class: "header-scrollport"
+  });
+  tinyUnrelatedScrollport.scrollTop = 0;
+  tinyUnrelatedScrollport.clientHeight = 52;
+  tinyUnrelatedScrollport.scrollHeight = 56;
+  content.appendChild(tinyUnrelatedScrollport);
+  const projectDocument = new FakeProjectDocument(href, pageSidebar, content, "ネットワーク | ChatGPT");
+  for (const node of [pageSidebar, content, tinyUnrelatedScrollport]) {
+    node.ownerDocument = projectDocument;
+  }
+
+  const snapshot = await locators.collectChatGptProjectContextAsync(
+    projectDocument,
+    href,
+    "g-p-empty-collect",
+    { timeoutMs: 5000 });
+  assert.equal(snapshot.conversations.length, 0);
+  assert.equal(snapshot.project_page_ready, true);
+  assert.equal(snapshot.project_chat_collection_complete, true);
+  assert.equal(snapshot.scroll_complete, true);
 });
 
 test("Project discovery promotes a row's Project conversation href to stable metadata", () => {

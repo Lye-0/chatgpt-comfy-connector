@@ -358,6 +358,9 @@ function diagnostic(eventName, fields = {}) {
     "collector_navigation_target",
     "project_discovery_source",
     "current_project_id",
+    "current_project_identity_source",
+    "current_project_identity_navigation_fallback_used",
+    "current_project_identity_discovery_index",
     "current_project_url",
     "project_index",
     "total_projects",
@@ -469,10 +472,89 @@ function diagnostic(eventName, fields = {}) {
     "row_project_url_found",
     "nested_project_url_found",
     "stable_identity_candidate_count",
+    "distinct_candidate_project_id_count",
+    "candidate_project_id_fingerprints",
+    "resolved_project_id_fingerprint",
+    "identity_candidate_consistent",
+    "discovery_key_present",
+    "duplicate_project_id_fingerprint",
+    "duplicate_project_indices",
+    "duplicate_discovery_key_count",
+    "duplicate_rows_same_discovery_key",
+    "collision_identity_sources",
+    "collision_candidate_consistency",
+    "collision_first_index",
+    "collision_second_index",
     "identity_source",
     "empty_project_candidate",
+    "sidebar_child_identity_unavailable",
     "navigation_fallback_attempted",
     "navigation_fallback_success",
+    "relocation_attempted",
+    "relocation_success",
+    "fingerprint_match",
+    "fingerprint_match_component_count",
+    "fingerprint_mismatch_component_count",
+    "discovery_row_still_connected",
+    "discovery_row_reused",
+    "current_sidebar_candidate_count",
+    "exact_candidate_count",
+    "ambiguous_candidate_count",
+    "sidebar_dom_generation_changed",
+    "aria_controls_changed",
+    "row_position_changed",
+    "navigation_since_discovery",
+    "relocation_method",
+    "failure_reason",
+    "relocation_attempt",
+    "more_clicked",
+    "more_attempted",
+    "scroll_attempts",
+    "relocation_phase",
+    "catalog_entry_found",
+    "catalog_title_unique",
+    "catalog_title_match_count",
+    "visible_project_row_count",
+    "project_section_found",
+    "project_scroll_container_found",
+    "scroll_required",
+    "scroll_position_changed",
+    "more_available",
+    "rows_reenumerated_after_navigation",
+    "stale_discovery_row_discarded",
+    "identity_catalog_count",
+    "identity_resolution_input_count",
+    "identity_resolution_resolved_count",
+    "discovery_catalog_count",
+    "final_project_count",
+    "collector_final_project_count",
+    "collector_final_chat_count",
+    "context_result_project_count",
+    "context_result_chat_count",
+    "source_collector_project_count",
+    "forwarded_project_count",
+    "forwarded_chat_count",
+    "forwarding_source",
+    "context_normalized_skipped_project_count",
+    "unique_stable_project_id_count",
+    "duplicate_stable_project_id_count",
+    "duplicate_stable_project_id_group_count",
+    "source_project_index",
+    "source_project_count",
+    "normalization_status",
+    "skip_reason",
+    "has_project_id",
+    "project_id_pattern_valid",
+    "has_discovery_key",
+    "has_title",
+    "has_url",
+    "url_pattern_valid",
+    "duplicate_project_id",
+    "duplicate_discovery_key",
+    "duplicate_normalized_key",
+    "normalized_identity_source",
+    "output_project_index",
+    "output_project_count",
     "root_hydration_started",
     "root_hydration_completed",
     "root_hydration_timeout",
@@ -539,6 +621,19 @@ function diagnostic(eventName, fields = {}) {
     "main_candidate_without_project_id_count",
     "main_current_project_match_count",
     "main_project_mismatch_count",
+    "main_candidate_project_id_unique_count",
+    "main_mismatch_project_id_unique_count",
+    "main_current_project_id_occurrence_count",
+    "main_mismatch_all_same_project_id",
+    "main_mismatch_same_project_id_count",
+    "main_mismatch_project_id",
+    "project_id_source_chat_href_count",
+    "project_id_source_nested_href_count",
+    "project_id_source_data_attribute_count",
+    "project_id_source_ancestor_count",
+    "project_id_source_project_wrapper_count",
+    "project_id_source_unknown_count",
+    "project_chat_membership_inconsistent",
     "main_projectless_count",
     "main_custom_gpt_count",
     "main_candidate_from_verified_project_region_count",
@@ -1705,6 +1800,8 @@ function collectorWindowLifecycle(lifecycle, fields = {}) {
     total_projects: collectorWindowState.totalProjects,
     discovered_project_count: collectorWindowState.discoveredProjectCount,
     discovered_chat_count: collectorWindowState.discoveredChatCount,
+    collector_final_project_count: collectorWindowState.discoveredProjectCount,
+    collector_final_chat_count: collectorWindowState.discoveredChatCount,
     retry_count: collectorWindowState.retryCount,
     project_discovery_retry_count: collectorWindowState.projectDiscoveryRetryCount,
     refresh_generation: collectorWindowState.refreshGeneration,
@@ -3094,6 +3191,80 @@ function normalizeContextDiscoveryKey(value) {
   return safeContextIdentifier(value);
 }
 
+function uniqueStableProjectIdCount(projects) {
+  return stableProjectIdCollisionStats(projects).unique_stable_project_id_count;
+}
+
+function stableProjectIdCollisionStats(projects) {
+  const details = stableProjectIdCollisionDetails(projects);
+  return {
+    unique_stable_project_id_count: details.unique_stable_project_id_count,
+    duplicate_stable_project_id_count: details.duplicate_stable_project_id_count,
+    duplicate_stable_project_id_group_count: details.duplicate_stable_project_id_group_count
+  };
+}
+
+function stableProjectIdCollisionDetails(projects) {
+  const fingerprints = new Map();
+  const groups = new Map();
+  const seenDiscoveryKeys = new Set();
+  const list = Array.isArray(projects) ? projects : [];
+  for (let index = 0; index < list.length; index += 1) {
+    const project = list[index];
+    const discoveryKey = normalizeContextDiscoveryKey(project?.discovery_key || project?.discoveryKey);
+    if (discoveryKey) {
+      if (seenDiscoveryKeys.has(discoveryKey)) continue;
+      seenDiscoveryKeys.add(discoveryKey);
+    }
+    const projectId = safeContextIdentifier(project?.project_id || project?.projectId);
+    if (!projectId) continue;
+    if (!fingerprints.has(projectId)) fingerprints.set(projectId, `pid-${fingerprints.size + 1}`);
+    const group = groups.get(projectId) || {
+      fingerprint: fingerprints.get(projectId),
+      indices: [],
+      discoveryKeys: new Set(),
+      sources: [],
+      candidateConsistency: []
+    };
+    group.indices.push(Number.isSafeInteger(project?.project_index) ? project.project_index : index);
+    if (discoveryKey) group.discoveryKeys.add(discoveryKey);
+    const source = typeof project?.identity_source === "string" && project.identity_source
+      ? project.identity_source
+      : "unknown";
+    if (!group.sources.includes(source)) group.sources.push(source);
+    if (typeof project?.identity_candidate_consistent === "boolean") {
+      group.candidateConsistency.push(project.identity_candidate_consistent);
+    }
+    groups.set(projectId, group);
+  }
+  const duplicateGroups = [...groups.values()].filter((group) => group.indices.length > 1);
+  let duplicateCount = 0;
+  for (const group of duplicateGroups) duplicateCount += group.indices.length - 1;
+  const primary = duplicateGroups[0] || null;
+  const sameDiscoveryKey = primary
+    ? primary.indices.length > 1 && primary.discoveryKeys.size === 1
+    : false;
+  let candidateConsistency = "unknown";
+  if (primary && primary.candidateConsistency.length > 0) {
+    candidateConsistency = primary.candidateConsistency.every((value) => value === true)
+      ? "consistent"
+      : "inconsistent";
+  }
+  return {
+    unique_stable_project_id_count: groups.size,
+    duplicate_stable_project_id_count: duplicateCount,
+    duplicate_stable_project_id_group_count: duplicateGroups.length,
+    duplicate_project_id_fingerprint: primary?.fingerprint || null,
+    duplicate_project_indices: primary ? primary.indices.join(",") : "",
+    duplicate_discovery_key_count: primary ? primary.discoveryKeys.size : 0,
+    duplicate_rows_same_discovery_key: sameDiscoveryKey,
+    collision_identity_sources: primary ? primary.sources.join(",") : "",
+    collision_candidate_consistency: candidateConsistency,
+    collision_first_index: primary ? primary.indices[0] : null,
+    collision_second_index: primary && primary.indices.length > 1 ? primary.indices[1] : null
+  };
+}
+
 function normalizeContextResult(contentResult, pending) {
   if (!contentResult || typeof contentResult !== "object") {
     return contextResultError(pending.message, "context_extraction_failed", "ChatGPT Content ScriptからContextを取得できませんでした。", "context_result_invalid");
@@ -3119,33 +3290,75 @@ function normalizeContextResult(contentResult, pending) {
 
   const projects = [];
   const projectIds = new Set();
-  const projectKeys = new Set();
-  for (const item of contentResult.projects) {
+  const discoveryKeys = new Set();
+  let skippedProjectCount = 0;
+  const sourceProjectCount = contentResult.projects.length;
+  for (let sourceIndex = 0; sourceIndex < contentResult.projects.length; sourceIndex += 1) {
+    const item = contentResult.projects[sourceIndex];
     const projectId = normalizeContextEntryId(item?.project_id || item?.projectId);
     const discoveryKey = normalizeContextDiscoveryKey(item?.discovery_key || item?.discoveryKey);
     const title = typeof item?.title === "string" ? item.title.trim().slice(0, 512) : "";
     const url = safeChatGptContextUrl(item?.url);
-    const hasProjectId = item && Object.prototype.hasOwnProperty.call(item, "project_id")
-      && item.project_id !== null && item.project_id !== undefined;
-    const hasDiscoveryKey = item && Object.prototype.hasOwnProperty.call(item, "discovery_key")
-      && item.discovery_key !== null && item.discovery_key !== undefined;
-    const hasUrl = item && Object.prototype.hasOwnProperty.call(item, "url") && item.url !== null && item.url !== undefined;
-    if (!title
+    const hasProjectId = Boolean(item && Object.prototype.hasOwnProperty.call(item, "project_id")
+      && item.project_id !== null && item.project_id !== undefined);
+    const hasDiscoveryKey = Boolean(item && Object.prototype.hasOwnProperty.call(item, "discovery_key")
+      && item.discovery_key !== null && item.discovery_key !== undefined);
+    const hasUrl = Boolean(item && Object.prototype.hasOwnProperty.call(item, "url") && item.url !== null && item.url !== undefined);
+    const hasTitle = title.length > 0;
+    const projectIdPatternValid = !hasProjectId || Boolean(projectId);
+    const urlPatternValid = !hasUrl || Boolean(url);
+    if (!hasTitle
       || (hasProjectId && !projectId)
       || (hasDiscoveryKey && !discoveryKey)
       || (!projectId && !discoveryKey)
       || (hasUrl && !url)) {
       return contextResultError(pending.message, "context_metadata_invalid", "ChatGPT Project metadataが不正です。", "context_metadata_validation");
     }
-    const projectKey = projectId ? `id:${projectId}` : `discovery:${discoveryKey}`;
-    if (projectKeys.has(projectKey)) continue;
-    projectKeys.add(projectKey);
-    if (projectId) projectIds.add(projectId);
-    projects.push({
-      ...(projectId ? { project_id: projectId } : {}),
-      title,
-      ...(url ? { url } : {}),
-      ...(discoveryKey ? { discovery_key: discoveryKey } : {})
+
+    const duplicateDiscoveryKey = Boolean(discoveryKey && discoveryKeys.has(discoveryKey));
+    const duplicateProjectId = Boolean(projectId && projectIds.has(projectId));
+    let skipReason = null;
+    if (duplicateDiscoveryKey) skipReason = "duplicate_discovery_key";
+    else if (duplicateProjectId && !discoveryKey) skipReason = "duplicate_project_id";
+    const duplicateNormalizedKey = skipReason !== null;
+    const kept = skipReason === null;
+    if (!kept) {
+      skippedProjectCount += 1;
+    } else {
+      if (projectId) projectIds.add(projectId);
+      if (discoveryKey) discoveryKeys.add(discoveryKey);
+      projects.push({
+        ...(projectId ? { project_id: projectId } : {}),
+        title,
+        ...(url ? { url } : {}),
+        ...(discoveryKey ? { discovery_key: discoveryKey } : {})
+      });
+    }
+
+    diagnostic("chatgpt.context project normalization", {
+      request_id: pending.requestId,
+      refresh_generation: pending.generation,
+      stage: "context_project_normalization",
+      source_project_index: sourceIndex,
+      source_project_count: sourceProjectCount,
+      normalization_status: kept ? "kept" : "skipped",
+      skip_reason: skipReason || "none",
+      has_project_id: Boolean(projectId),
+      project_id_pattern_valid: projectIdPatternValid,
+      has_discovery_key: Boolean(discoveryKey),
+      has_title: hasTitle,
+      has_url: Boolean(url),
+      url_pattern_valid: urlPatternValid,
+      duplicate_project_id: duplicateProjectId,
+      duplicate_discovery_key: duplicateDiscoveryKey,
+      duplicate_normalized_key: duplicateNormalizedKey,
+      normalized_identity_source: projectId && discoveryKey
+        ? "project_id_and_discovery_key"
+        : (projectId ? "project_id" : "discovery_key"),
+      output_project_index: kept ? projects.length - 1 : -1,
+      output_project_count: projects.length,
+      status: kept ? "ok" : "skipped",
+      target_tab_id: pending.tabId
     });
   }
 
@@ -3189,7 +3402,9 @@ function normalizeContextResult(contentResult, pending) {
     status: "ok",
     projects,
     conversations,
-    current
+    current,
+    context_normalized_skipped_project_count: skippedProjectCount,
+    source_collector_project_count: contentResult.projects.length
   };
 }
 
@@ -3222,9 +3437,17 @@ function sendChatGptContextResponseToBridge(result, pending) {
     pending.bridgeSocket.send(JSON.stringify(envelope));
     diagnostic("chatgpt.context response sent", {
       request_id: result.requestId,
+      refresh_generation: pending.generation,
       status: result.status,
       error_code: result.errorCode,
       stage: result.stage || "context_response_sent",
+      context_result_project_count: Array.isArray(envelope.projects) ? envelope.projects.length : 0,
+      context_result_chat_count: Array.isArray(envelope.conversations) ? envelope.conversations.length : 0,
+      forwarded_project_count: Array.isArray(envelope.projects) ? envelope.projects.length : 0,
+      forwarded_chat_count: Array.isArray(envelope.conversations) ? envelope.conversations.length : 0,
+      forwarding_source: pending.currentOnly
+        ? "request_current"
+        : (pending.projectOnly ? "refresh_result" : "refresh_result"),
       target_tab_id: pending.tabId
     });
     return true;
@@ -3246,19 +3469,67 @@ async function completeContextRequest(contentResult, pending) {
   if (!isCurrentCollectorRequest(pending)) {
     diagnostic("chatgpt.context stale result discarded", {
       request_id: pending.requestId,
+      refresh_generation: pending.generation,
       status: "discarded",
       error_code: "context_refresh_superseded",
       stage: "context_stale_result_discarded",
+      source_collector_project_count: Array.isArray(contentResult?.projects)
+        ? contentResult.projects.length
+        : 0,
       target_tab_id: pending.tabId
     });
     return;
   }
-  const result = normalizeContextResult(contentResult, pending);
+  const catalogSource = !pending.currentOnly && !pending.projectOnly
+    && Array.isArray(pending.projectDiscoveryResult?.projects)
+    && pending.projectDiscoveryResult.projects.length > 0
+    ? pending.projectDiscoveryResult
+    : contentResult;
+  const publishSource = catalogSource === contentResult
+    ? contentResult
+    : {
+      ...contentResult,
+      status: contentResult?.status || catalogSource.status,
+      projects: catalogSource.projects,
+      conversations: Array.isArray(contentResult?.conversations)
+        ? contentResult.conversations
+        : catalogSource.conversations,
+      current: contentResult?.current ?? catalogSource.current
+    };
+  if (catalogSource !== contentResult
+    && Array.isArray(contentResult?.projects)
+    && contentResult.projects.length !== catalogSource.projects.length) {
+    diagnostic("chatgpt.context catalog preserved from collector final", {
+      request_id: pending.requestId,
+      refresh_generation: pending.generation,
+      source_collector_project_count: catalogSource.projects.length,
+      context_result_project_count: contentResult.projects.length,
+      collector_final_project_count: catalogSource.projects.length,
+      status: "preserved",
+      stage: "context_catalog_preserved",
+      target_tab_id: pending.tabId
+    });
+  }
+  const result = normalizeContextResult(publishSource, pending);
   diagnostic("chatgpt.context result", {
     request_id: pending.requestId,
+    refresh_generation: pending.generation,
     status: result.status,
     error_code: result.errorCode,
     stage: result.stage || "context_result",
+    source_collector_project_count: Array.isArray(publishSource?.projects)
+      ? publishSource.projects.length
+      : 0,
+    collector_final_project_count: Array.isArray(pending.projectDiscoveryResult?.projects)
+      ? pending.projectDiscoveryResult.projects.length
+      : (Array.isArray(publishSource?.projects) ? publishSource.projects.length : 0),
+    collector_final_chat_count: Array.isArray(pending.projectDiscoveryResult?.conversations)
+      ? pending.projectDiscoveryResult.conversations.filter(isProjectlessCollectorConversation).length
+      : (Array.isArray(publishSource?.conversations) ? publishSource.conversations.length : 0),
+    context_result_project_count: Array.isArray(result.projects) ? result.projects.length : 0,
+    context_result_chat_count: Array.isArray(result.conversations) ? result.conversations.length : 0,
+    context_normalized_skipped_project_count: result.context_normalized_skipped_project_count,
+    unique_stable_project_id_count: uniqueStableProjectIdCount(result.projects),
     target_tab_id: pending.tabId
   });
   sendChatGptContextResponseToBridge(result, pending);
@@ -3273,7 +3544,13 @@ function collectorProjectTarget(project) {
   if (urlProjectId && explicitProjectId && urlProjectId !== explicitProjectId) return null;
   return {
     projectId,
-    projectUrl
+    projectUrl,
+    identitySource: typeof project?.identity_source === "string" ? project.identity_source : null,
+    navigationFallbackUsed: project?.navigation_fallback_attempted === true
+      || project?.navigation_fallback_success === true,
+    discoveryIndex: Number.isSafeInteger(project?.discovery_index) && project.discovery_index >= 0
+      ? project.discovery_index
+      : null
   };
 }
 
@@ -3398,6 +3675,12 @@ function validateCollectorRootResult(source, pending) {
   // is useful for display diagnostics, but it is not a safe navigation target
   // and must never make the final metadata snapshot look complete.
   const resolution = collectProjectMetadataResolution(source);
+  if (Array.isArray(pending?.projectDiscoveryScanResult?.projects)
+    && source.projects.length !== pending.projectDiscoveryScanResult.projects.length) {
+    return Math.max(
+      1,
+      Math.max(reportedUnresolved, resolution.unresolvedCount));
+  }
   return Math.max(reportedUnresolved, resolution.unresolvedCount);
 }
 
@@ -3588,6 +3871,19 @@ function collectorProjectIdentityDescriptor(project, projectIndex) {
   if (projectUrl) descriptor.url = projectUrl;
   const discoveryKey = safeContextIdentifier(project?.discovery_key || project?.discoveryKey);
   if (discoveryKey) descriptor.discovery_key = discoveryKey;
+  const identitySource = typeof project?.identity_source === "string"
+    ? project.identity_source.trim().slice(0, 128)
+    : "";
+  if (identitySource) descriptor.identity_source = identitySource;
+  if (typeof project?.navigation_fallback_attempted === "boolean") {
+    descriptor.navigation_fallback_attempted = project.navigation_fallback_attempted;
+  }
+  if (typeof project?.navigation_fallback_success === "boolean") {
+    descriptor.navigation_fallback_success = project.navigation_fallback_success;
+  }
+  if (typeof project?.identity_candidate_consistent === "boolean") {
+    descriptor.identity_candidate_consistent = project.identity_candidate_consistent;
+  }
   return descriptor;
 }
 
@@ -3636,11 +3932,14 @@ function validateCollectorProjectIdentityResponse(source, pending, expected = {}
 }
 
 function collectorProjectIdentityResponseItem(sourceProjects, projectIndex, expectedLength) {
-  const indexed = sourceProjects.find((project) =>
+  const list = Array.isArray(sourceProjects) ? sourceProjects : [];
+  const indexed = list.find((project) =>
     Number.isSafeInteger(project?.project_index) && project.project_index === projectIndex);
   if (indexed) return indexed;
-  if (sourceProjects.length === expectedLength) return sourceProjects[projectIndex] || null;
-  if (sourceProjects.length === 1 && expectedLength === 1) return sourceProjects[0];
+  const hasExplicitIndexes = list.some((project) => Number.isSafeInteger(project?.project_index));
+  if (hasExplicitIndexes) return null;
+  if (list.length === expectedLength) return list[projectIndex] || null;
+  if (list.length === 1 && expectedLength === 1) return list[0];
   return null;
 }
 
@@ -3659,6 +3958,19 @@ function mergeCollectorProjectIdentity(project, identityProject, projectIndex) {
   if (projectUrl) merged.url = projectUrl;
   const discoveryKey = safeContextIdentifier(identityProject?.discovery_key || identityProject?.discoveryKey);
   if (discoveryKey && !merged.discovery_key) merged.discovery_key = discoveryKey;
+  const identitySource = typeof identityProject?.identity_source === "string"
+    ? identityProject.identity_source.trim().slice(0, 128)
+    : "";
+  if (identitySource) merged.identity_source = identitySource;
+  if (typeof identityProject?.navigation_fallback_attempted === "boolean") {
+    merged.navigation_fallback_attempted = identityProject.navigation_fallback_attempted;
+  }
+  if (typeof identityProject?.navigation_fallback_success === "boolean") {
+    merged.navigation_fallback_success = identityProject.navigation_fallback_success;
+  }
+  if (typeof identityProject?.identity_candidate_consistent === "boolean") {
+    merged.identity_candidate_consistent = identityProject.identity_candidate_consistent;
+  }
   const discoveryIndex = Number.isSafeInteger(identityProject?.discovery_index)
     && identityProject.discovery_index >= 0
     ? identityProject.discovery_index
@@ -3667,6 +3979,25 @@ function mergeCollectorProjectIdentity(project, identityProject, projectIndex) {
       : projectIndex);
   merged.discovery_index = discoveryIndex;
   return merged;
+}
+
+function mergeIdentityProgressOntoDiscovery(discoveryProjects, identityProjects) {
+  const prior = Array.isArray(identityProjects) ? identityProjects : [];
+  return (Array.isArray(discoveryProjects) ? discoveryProjects : []).map((project, index) => {
+    const base = collectorProjectIdentityDescriptor(project, index);
+    const fromPrior = prior.find((item) => {
+      const priorKey = safeContextIdentifier(item?.discovery_key || item?.discoveryKey);
+      if (base.discovery_key && priorKey === base.discovery_key) return true;
+      if (Number.isSafeInteger(item?.project_index) && item.project_index === index) return true;
+      if (Number.isSafeInteger(item?.discovery_index)
+        && Number.isSafeInteger(base.discovery_index)
+        && item.discovery_index === base.discovery_index) {
+        return true;
+      }
+      return false;
+    });
+    return fromPrior ? mergeCollectorProjectIdentity(base, fromPrior, index) : base;
+  });
 }
 
 function mergeCollectorProjectIdentityResponse(projects, source) {
@@ -3839,10 +4170,50 @@ const collectorProjectIdentityNavigationTelemetryKeys = [
   "row_project_url_found",
   "nested_project_url_found",
   "stable_identity_candidate_count",
+  "distinct_candidate_project_id_count",
+  "candidate_project_id_fingerprints",
+  "resolved_project_id_fingerprint",
+  "identity_candidate_consistent",
+  "discovery_key_present",
   "identity_source",
   "empty_project_candidate",
+  "sidebar_child_identity_unavailable",
   "navigation_fallback_attempted",
-  "navigation_fallback_success"
+  "navigation_fallback_success",
+  "relocation_attempted",
+  "relocation_success",
+  "fingerprint_match",
+  "fingerprint_match_component_count",
+  "fingerprint_mismatch_component_count",
+  "discovery_row_still_connected",
+  "discovery_row_reused",
+  "current_sidebar_candidate_count",
+  "exact_candidate_count",
+  "ambiguous_candidate_count",
+  "sidebar_dom_generation_changed",
+  "aria_controls_changed",
+  "row_position_changed",
+  "navigation_since_discovery",
+  "relocation_method",
+  "failure_reason",
+  "relocation_attempt",
+  "more_clicked",
+  "more_attempted",
+  "scroll_attempts",
+  "relocation_phase",
+  "catalog_entry_found",
+  "catalog_title_unique",
+  "catalog_title_match_count",
+  "visible_project_row_count",
+  "project_section_found",
+  "project_scroll_container_found",
+  "scroll_required",
+  "scroll_position_changed",
+  "more_available",
+  "rows_reenumerated_after_navigation",
+  "stale_discovery_row_discarded",
+  "identity_catalog_count",
+  "total_projects"
 ];
 
 function collectorProjectIdentityNavigationTelemetryFields(source = {}) {
@@ -3868,13 +4239,20 @@ function recordCollectorProjectIdentityNavigationTelemetry(eventName, pending, f
     project_index: Number.isSafeInteger(safeFields.project_index)
       ? safeFields.project_index
       : pending?.identityNavigationProjectIndex,
-    total_projects: Number.isSafeInteger(pending?.identityNavigationTotalProjects)
-      ? pending.identityNavigationTotalProjects
-      : collectorWindowState.totalProjects,
     refresh_generation: pending?.generation,
     navigation_generation: pending?.identityNavigationGeneration,
     target_tab_id: pending?.tabId,
     ...safeFields,
+    total_projects: Number.isSafeInteger(pending?.identityNavigationTotalProjects)
+      ? pending.identityNavigationTotalProjects
+      : (Number.isSafeInteger(safeFields.total_projects)
+        ? safeFields.total_projects
+        : collectorWindowState.totalProjects),
+    identity_catalog_count: Number.isSafeInteger(safeFields.identity_catalog_count)
+      ? safeFields.identity_catalog_count
+      : (Number.isSafeInteger(pending?.identityNavigationTotalProjects)
+        ? pending.identityNavigationTotalProjects
+        : undefined),
     stage: safeFields.stage || "collector_project_identity_navigation"
   });
 }
@@ -4026,6 +4404,9 @@ const collectorProjectChatTelemetryKeys = [
   "project_index",
   "total_projects",
   "current_project_id",
+  "current_project_identity_source",
+  "current_project_identity_navigation_fallback_used",
+  "current_project_identity_discovery_index",
   "project_page_ready",
   "current_project_id_verified",
   "candidate_chat_link_count",
@@ -4043,6 +4424,19 @@ const collectorProjectChatTelemetryKeys = [
   "main_candidate_without_project_id_count",
   "main_current_project_match_count",
   "main_project_mismatch_count",
+  "main_candidate_project_id_unique_count",
+  "main_mismatch_project_id_unique_count",
+  "main_current_project_id_occurrence_count",
+  "main_mismatch_all_same_project_id",
+  "main_mismatch_same_project_id_count",
+  "main_mismatch_project_id",
+  "project_id_source_chat_href_count",
+  "project_id_source_nested_href_count",
+  "project_id_source_data_attribute_count",
+  "project_id_source_ancestor_count",
+  "project_id_source_project_wrapper_count",
+  "project_id_source_unknown_count",
+  "project_chat_membership_inconsistent",
   "main_projectless_count",
   "main_custom_gpt_count",
   "main_candidate_from_verified_project_region_count",
@@ -4174,11 +4568,13 @@ async function waitForCollectorProjectIdentityTab(tabId, timeoutMs = COLLECTOR_T
 async function resolveCollectorProjectIdentities(tab, pending, request, rootResult) {
   throwIfCollectorRequestSuperseded(pending);
   const discovery = projectDiscoveryStateFor(pending);
-  const sourceProjects = Array.isArray(pending.projectIdentityResult?.projects)
-    ? pending.projectIdentityResult.projects
-    : rootResult.projects;
-  let projects = sourceProjects.map((project, index) =>
-    collectorProjectIdentityDescriptor(project, index));
+  const discoveryProjects = Array.isArray(pending.projectDiscoveryScanResult?.projects)
+    && pending.projectDiscoveryScanResult.projects.length > 0
+    ? pending.projectDiscoveryScanResult.projects
+    : (Array.isArray(rootResult?.projects) ? rootResult.projects : []);
+  let projects = mergeIdentityProgressOntoDiscovery(
+    discoveryProjects,
+    pending.projectIdentityResult?.projects);
   const initialResolution = collectProjectMetadataResolution({ projects });
   const initialUnresolvedIndexes = initialResolution.items
     .filter((item) => !item.resolved)
@@ -4191,6 +4587,8 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
     {
       project_identity_resolution_started: true,
       project_identity_resolution_completed: false,
+      identity_resolution_input_count: projects.length,
+      discovery_catalog_count: discoveryProjects.length,
       current_project_index: -1,
       resolution_method: "dom",
       navigation_target_verified: false,
@@ -4215,6 +4613,7 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
       collection: "project_identity",
       identityMode: "dom",
       projects,
+      totalProjects: projects.length,
       navigationTimeoutMs: 10000
     }, request, {
       timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
@@ -4408,6 +4807,9 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
         collection: "project_identity",
         identityMode: "navigation",
         projects: [descriptor],
+        identityCatalog: projects.map((project, index) =>
+          collectorProjectIdentityDescriptor(project, index)),
+        totalProjects: projects.length,
         navigationTimeoutMs: 10000
       }, request, {
         timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
@@ -4648,6 +5050,12 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
     }
   }
 
+  if (projects.length !== discoveryProjects.length) {
+    throw bridgeError(
+      "ChatGPT Projectのmetadataを完全には取得できませんでした。",
+      0,
+      "context_projects_incomplete");
+  }
   const finalResolution = collectProjectMetadataResolution({ projects });
   if (finalResolution.unresolvedCount > 0) {
     recordCollectorProjectIdentityResolution(
@@ -4671,6 +5079,42 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
       "context_projects_incomplete");
   }
 
+  const collision = stableProjectIdCollisionDetails(projects);
+  if (collision.duplicate_stable_project_id_group_count > 0) {
+    recordCollectorProjectIdentityResolution(
+      "collector project identity resolution failed",
+      pending,
+      projects,
+      {
+        project_identity_resolution_started: true,
+        project_identity_resolution_completed: false,
+        identity_resolution_input_count: projects.length,
+        identity_resolution_resolved_count: finalResolution.resolvedCount,
+        resolved_project_count: finalResolution.resolvedCount,
+        discovery_catalog_count: discoveryProjects.length,
+        final_project_count: projects.length,
+        unique_stable_project_id_count: collision.unique_stable_project_id_count,
+        duplicate_stable_project_id_count: collision.duplicate_stable_project_id_count,
+        duplicate_stable_project_id_group_count: collision.duplicate_stable_project_id_group_count,
+        duplicate_project_id_fingerprint: collision.duplicate_project_id_fingerprint,
+        duplicate_project_indices: collision.duplicate_project_indices,
+        duplicate_discovery_key_count: collision.duplicate_discovery_key_count,
+        duplicate_rows_same_discovery_key: collision.duplicate_rows_same_discovery_key,
+        collision_identity_sources: collision.collision_identity_sources,
+        collision_candidate_consistency: collision.collision_candidate_consistency,
+        collision_first_index: collision.collision_first_index,
+        collision_second_index: collision.collision_second_index,
+        unresolved_count: 0,
+        status: "error",
+        error_code: "context_project_identity_collision",
+        stage: "collector_project_identity_collision"
+      });
+    throw bridgeError(
+      "ChatGPT ProjectのStable IDが複数行に重複して割り当てられました。",
+      0,
+      "context_projects_incomplete");
+  }
+
   collectorWindowState = {
     ...collectorWindowState,
     currentProjectIndex: -1,
@@ -4690,6 +5134,10 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
       project_identity_resolution_completed: true,
       non_navigation_resolved_count: nonNavigationResolvedCount,
       navigation_resolved_count: navigationResolvedCount,
+      identity_resolution_input_count: projects.length,
+      identity_resolution_resolved_count: finalResolution.resolvedCount,
+      discovery_catalog_count: discoveryProjects.length,
+      final_project_count: projects.length,
       unresolved_count: 0,
       current_project_index: -1,
       resolution_method: domChecked && navigationResolvedCount > 0 ? "navigation" : "dom",
@@ -4698,6 +5146,10 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
         : false,
       project_url_pattern_valid: true,
       project_id_url_match: true,
+      unique_stable_project_id_count: collision.unique_stable_project_id_count,
+      duplicate_stable_project_id_count: collision.duplicate_stable_project_id_count,
+      duplicate_stable_project_id_group_count: collision.duplicate_stable_project_id_group_count,
+      resolved_project_count: finalResolution.resolvedCount,
       status: "completed",
       stage: "collector_project_identity_resolution_complete"
     });
@@ -4730,6 +5182,16 @@ function recordCollectorProjectChatTelemetry(eventName, pending, target, project
     collector_window_id: collectorWindowState.windowId,
     collector_tab_id: pending?.tabId,
     current_project_id: target?.projectId || pending?.currentProjectId,
+    current_project_identity_source: fields.current_project_identity_source
+      || target?.identitySource
+      || null,
+    current_project_identity_navigation_fallback_used: fields.current_project_identity_navigation_fallback_used
+      !== undefined
+      ? fields.current_project_identity_navigation_fallback_used
+      : (target?.navigationFallbackUsed === true),
+    current_project_identity_discovery_index: Number.isSafeInteger(fields.current_project_identity_discovery_index)
+      ? fields.current_project_identity_discovery_index
+      : (Number.isSafeInteger(target?.discoveryIndex) ? target.discoveryIndex : null),
     project_index: projectIndex,
     total_projects: fields.total_projects,
     current_project_id_verified: sourceOrField("current_project_id_verified"),
@@ -4751,6 +5213,29 @@ function recordCollectorProjectChatTelemetry(eventName, pending, target, project
       sourceOrField("main_current_project_match_count")),
     main_project_mismatch_count: numberOrNull(
       sourceOrField("main_project_mismatch_count")),
+    main_candidate_project_id_unique_count: numberOrNull(
+      sourceOrField("main_candidate_project_id_unique_count")),
+    main_mismatch_project_id_unique_count: numberOrNull(
+      sourceOrField("main_mismatch_project_id_unique_count")),
+    main_current_project_id_occurrence_count: numberOrNull(
+      sourceOrField("main_current_project_id_occurrence_count")),
+    main_mismatch_all_same_project_id: sourceOrField("main_mismatch_all_same_project_id"),
+    main_mismatch_same_project_id_count: numberOrNull(
+      sourceOrField("main_mismatch_same_project_id_count")),
+    main_mismatch_project_id: sourceOrField("main_mismatch_project_id"),
+    project_id_source_chat_href_count: numberOrNull(
+      sourceOrField("project_id_source_chat_href_count")),
+    project_id_source_nested_href_count: numberOrNull(
+      sourceOrField("project_id_source_nested_href_count")),
+    project_id_source_data_attribute_count: numberOrNull(
+      sourceOrField("project_id_source_data_attribute_count")),
+    project_id_source_ancestor_count: numberOrNull(
+      sourceOrField("project_id_source_ancestor_count")),
+    project_id_source_project_wrapper_count: numberOrNull(
+      sourceOrField("project_id_source_project_wrapper_count")),
+    project_id_source_unknown_count: numberOrNull(
+      sourceOrField("project_id_source_unknown_count")),
+    project_chat_membership_inconsistent: sourceOrField("project_chat_membership_inconsistent"),
     main_projectless_count: numberOrNull(sourceOrField("main_projectless_count")),
     main_custom_gpt_count: numberOrNull(sourceOrField("main_custom_gpt_count")),
     main_candidate_from_verified_project_region_count: numberOrNull(
@@ -4954,6 +5439,39 @@ function validateCollectorProjectChatResult(source, pending, target, projectInde
       "ChatGPTのProjectページを確認できませんでした。",
       0,
       "context_project_page_unavailable");
+  }
+
+  if (source.project_chat_membership_inconsistent === true) {
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection incomplete",
+      pending,
+      target,
+      projectIndex,
+      source,
+      {
+        status: "error",
+        error_code: "context_project_chat_membership_mismatch",
+        failure_stage: "project_chat_membership",
+        internal_reason: "main_candidates_all_other_project",
+        stage: "collector_project_chat_collection_incomplete"
+      });
+    recordCollectorProjectChatTelemetry(
+      "collector project chat collection failed",
+      pending,
+      target,
+      projectIndex,
+      source,
+      {
+        status: "error",
+        error_code: "context_project_chat_membership_mismatch",
+        failure_stage: "project_chat_membership",
+        internal_reason: "main_candidates_all_other_project",
+        stage: "collector_project_chat_collection_failed"
+      });
+    throw bridgeError(
+      "ChatGPT Project内のChat所属判定が一致しませんでした。",
+      0,
+      "context_project_chat_membership_mismatch");
   }
 
   if (!projectChatComplete || !chatContainerFound) {
@@ -5894,6 +6412,23 @@ async function handleContextResultFromContent(message, sender) {
     });
     return;
   }
+  // List and selected-Project refreshes are completed by the Collector
+  // orchestrator. A mid-scan Content Script result must not publish a
+  // shorter catalog as the Refresh outcome.
+  if (!pending.currentOnly) {
+    diagnostic("chatgpt.context unsolicited result ignored", {
+      request_id: requestId,
+      refresh_generation: pending.generation,
+      source_collector_project_count: Array.isArray(message?.projects)
+        ? message.projects.length
+        : 0,
+      forwarding_source: "unsolicited_content",
+      status: "ignored",
+      stage: "context_unsolicited_result_ignored",
+      target_tab_id: sender?.tab?.id
+    });
+    return;
+  }
   await completeContextRequest(message, pending);
 }
 
@@ -5968,6 +6503,9 @@ async function handleContextChangedFromContent(message, sender) {
     diagnostic("chatgpt.context current forwarded", {
       status: "ok",
       stage: "context_current_forwarded",
+      forwarding_source: "live_current",
+      forwarded_project_count: 0,
+      forwarded_chat_count: 0,
       target_tab_id: tabId
     });
     return true;

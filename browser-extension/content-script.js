@@ -190,6 +190,21 @@
       "main_candidate_without_project_id_count",
       "main_current_project_match_count",
       "main_project_mismatch_count",
+      "main_candidate_project_id_unique_count",
+      "main_mismatch_project_id_unique_count",
+      "main_current_project_id_occurrence_count",
+      "main_mismatch_all_same_project_id",
+      "main_mismatch_same_project_id_count",
+      "main_mismatch_project_id",
+      "project_id_source_chat_href_count",
+      "project_id_source_nested_href_count",
+      "project_id_source_data_attribute_count",
+      "project_id_source_ancestor_count",
+      "project_id_source_project_wrapper_count",
+      "project_id_source_unknown_count",
+      "project_chat_membership_inconsistent",
+      "current_project_identity_source",
+      "current_project_identity_discovery_index",
       "main_projectless_count",
       "main_custom_gpt_count",
       "main_candidate_from_verified_project_region_count",
@@ -351,16 +366,59 @@
     "row_project_url_found",
     "nested_project_url_found",
     "stable_identity_candidate_count",
+    "distinct_candidate_project_id_count",
+    "candidate_project_id_fingerprints",
+    "resolved_project_id_fingerprint",
+    "identity_candidate_consistent",
+    "discovery_key_present",
     "identity_source",
     "empty_project_candidate",
+    "sidebar_child_identity_unavailable",
     "navigation_fallback_attempted",
-    "navigation_fallback_success"
+    "navigation_fallback_success",
+    "relocation_attempted",
+    "relocation_success",
+    "fingerprint_match",
+    "fingerprint_match_component_count",
+    "fingerprint_mismatch_component_count",
+    "discovery_row_still_connected",
+    "discovery_row_reused",
+    "current_sidebar_candidate_count",
+    "exact_candidate_count",
+    "ambiguous_candidate_count",
+    "sidebar_dom_generation_changed",
+    "aria_controls_changed",
+    "row_position_changed",
+    "navigation_since_discovery",
+    "relocation_method",
+    "failure_reason",
+    "relocation_attempt",
+    "more_clicked",
+    "more_attempted",
+    "scroll_attempts",
+    "relocation_phase",
+    "catalog_entry_found",
+    "catalog_title_unique",
+    "catalog_title_match_count",
+    "visible_project_row_count",
+    "project_section_found",
+    "project_scroll_container_found",
+    "scroll_required",
+    "scroll_position_changed",
+    "more_available",
+    "rows_reenumerated_after_navigation",
+    "stale_discovery_row_discarded",
+    "identity_catalog_count",
+    "total_projects"
   ];
 
   const collectorProjectChatTelemetryKeys = [
     "project_index",
     "total_projects",
     "current_project_id",
+    "current_project_identity_source",
+    "current_project_identity_navigation_fallback_used",
+    "current_project_identity_discovery_index",
     "project_page_ready",
     "current_project_id_verified",
     "candidate_chat_link_count",
@@ -378,6 +436,19 @@
     "main_candidate_without_project_id_count",
     "main_current_project_match_count",
     "main_project_mismatch_count",
+    "main_candidate_project_id_unique_count",
+    "main_mismatch_project_id_unique_count",
+    "main_current_project_id_occurrence_count",
+    "main_mismatch_all_same_project_id",
+    "main_mismatch_same_project_id_count",
+    "main_mismatch_project_id",
+    "project_id_source_chat_href_count",
+    "project_id_source_nested_href_count",
+    "project_id_source_data_attribute_count",
+    "project_id_source_ancestor_count",
+    "project_id_source_project_wrapper_count",
+    "project_id_source_unknown_count",
+    "project_chat_membership_inconsistent",
     "main_projectless_count",
     "main_custom_gpt_count",
     "main_candidate_from_verified_project_region_count",
@@ -444,6 +515,16 @@
       if (typeof event[key] === "boolean") result[key] = event[key];
       else if (Number.isSafeInteger(event[key]) && event[key] >= 0) result[key] = event[key];
       else if (typeof event[key] === "string" && event[key].length <= 128) result[key] = event[key];
+    }
+    if (!Number.isSafeInteger(result.total_projects)) {
+      const fromMessage = Number.isSafeInteger(message?.totalProjects)
+        ? message.totalProjects
+        : (Array.isArray(message?.identityCatalog) ? message.identityCatalog.length : null);
+      if (Number.isSafeInteger(fromMessage) && fromMessage >= 0) result.total_projects = fromMessage;
+    }
+    if (!Number.isSafeInteger(result.identity_catalog_count)
+      && Array.isArray(message?.identityCatalog)) {
+      result.identity_catalog_count = message.identityCatalog.length;
     }
     return result;
   }
@@ -724,6 +805,20 @@
       "main_candidate_without_project_id_count",
       "main_current_project_match_count",
       "main_project_mismatch_count",
+      "main_candidate_project_id_unique_count",
+      "main_mismatch_project_id_unique_count",
+      "main_current_project_id_occurrence_count",
+      "main_mismatch_all_same_project_id",
+      "main_mismatch_same_project_id_count",
+      "main_mismatch_project_id",
+      "project_id_source_chat_href_count",
+      "project_id_source_nested_href_count",
+      "project_id_source_data_attribute_count",
+      "project_id_source_ancestor_count",
+      "project_id_source_project_wrapper_count",
+      "project_id_source_unknown_count",
+      "project_chat_membership_inconsistent",
+      "current_project_identity_discovery_index",
       "main_projectless_count",
       "main_custom_gpt_count",
       "main_candidate_from_verified_project_region_count",
@@ -756,6 +851,7 @@
       "sidebar_scroll_container_found",
       "project_page_ready",
       "current_project_id_verified",
+      "current_project_identity_navigation_fallback_used",
       "chat_container_found",
       "main_found",
       "main_region_found",
@@ -768,7 +864,10 @@
       "scroll_position_changed",
       "reached_end",
       "project_chat_hydration_completed",
-      "project_chat_hydration_timeout"
+      "project_chat_hydration_timeout",
+      "project_chat_membership_inconsistent",
+      "main_mismatch_all_same_project_id",
+      "current_project_identity_navigation_fallback_used"
     ]) {
       if (typeof data[key] === "boolean") result[key] = data[key];
     }
@@ -795,7 +894,9 @@
       "internal_reason",
       "exception_name",
       "exception_reason",
-      "project_chat_collection_error_reason"
+      "project_chat_collection_error_reason",
+      "current_project_identity_source",
+      "main_mismatch_project_id"
     ]) {
       if (typeof data[key] === "string" && data[key].length <= 128) result[key] = data[key];
     }
@@ -806,6 +907,7 @@
     "context_project_page_unavailable",
     "context_project_chat_dom_unavailable",
     "context_project_chats_incomplete",
+    "context_project_chat_membership_mismatch",
     "context_response_invalid",
     "context_response_correlation_failed",
     "context_extraction_failed"
@@ -1095,7 +1197,13 @@
           Array.isArray(message.projects) ? message.projects : [],
           {
             identityMode: message.identityMode || message.identity_mode,
+            identityCatalog: Array.isArray(message.identityCatalog)
+              ? message.identityCatalog
+              : (Array.isArray(message.identity_catalog) ? message.identity_catalog : []),
             navigationTimeoutMs: message.navigationTimeoutMs,
+            totalProjects: Number.isSafeInteger(message.totalProjects)
+              ? message.totalProjects
+              : (Array.isArray(message.identityCatalog) ? message.identityCatalog.length : undefined),
             onTelemetry: (event) => emitCollectorProjectIdentityTelemetry(message, event)
           });
       } else if (message?.collection === "project"

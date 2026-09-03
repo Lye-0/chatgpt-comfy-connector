@@ -904,11 +904,16 @@ public sealed class BrowserExtensionBridgeTests
         Assert.Contains("CanResendBootstrapHandoff", viewModel, StringComparison.Ordinal);
         Assert.Contains("TryGetResendableBootstrapPayload", viewModel, StringComparison.Ordinal);
         Assert.Contains("EnsureBootstrapResendAllowed", viewModel, StringComparison.Ordinal);
+        Assert.Contains("stage=ui_context_catalog", viewModel, StringComparison.Ordinal);
+        Assert.Contains("ui_real_project_count", viewModel, StringComparison.Ordinal);
+        Assert.Contains("IsProjectChatListLoading", viewModel, StringComparison.Ordinal);
 
         var xamlPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "ChatGPTComfyConnector.Desktop", "MainWindow.xaml");
         var xaml = File.ReadAllText(Path.GetFullPath(xamlPath));
         Assert.Contains("Content=\"{Binding SendToChatGptButtonText}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("IsEnabled=\"{Binding CanSendToChatGpt}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Chatを取得中…", xaml, StringComparison.Ordinal);
+        Assert.Contains("IsProjectChatListLoading", xaml, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -17,6 +17,7 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
     private const string ChatGptRootUrl = "https://chatgpt.com/";
     private readonly IBrowserExtensionBridge _bridge;
     private readonly LocalProjectChatProvider _legacyLocalProvider;
+    private readonly IPortableStore _store;
     private readonly IChatGptContextCacheStore? _cacheStore;
 
     public ChatGptProjectChatProvider(
@@ -24,6 +25,7 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         IPortableStore store)
     {
         _bridge = bridge;
+        _store = store;
         _legacyLocalProvider = new LocalProjectChatProvider(store);
         _cacheStore = store as IChatGptContextCacheStore;
     }
@@ -37,6 +39,12 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         var snapshot = NormalizeRootSnapshot(await LoadLiveSnapshotAsync(cancellationToken));
         var cached = await LoadCachedSnapshotAsync(cancellationToken);
         var normalizedCached = cached is null ? null : NormalizeCache(cached);
+        await LogCatalogCountsAsync(
+            "provider_live_snapshot",
+            snapshot.RequestId,
+            deserialized: snapshot.Projects.Count,
+            cached: normalizedCached?.Projects.Count,
+            cancellationToken: cancellationToken);
         if (snapshot.IsSuccess && snapshot.Projects.Count == 0)
         {
             // A full Collector refresh must prove that the Project sidebar was
@@ -61,7 +69,8 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         {
             if (normalizedCached is not null)
             {
-                if (string.Equals(snapshot.ErrorCode, "context_projects_incomplete", StringComparison.Ordinal))
+                if (string.Equals(snapshot.ErrorCode, "context_projects_incomplete", StringComparison.Ordinal)
+                    || string.Equals(snapshot.ErrorCode, "context_response_timeout", StringComparison.Ordinal))
                 {
                     return await BuildCatalogAsync(
                         CachedSnapshotWithError(normalizedCached, snapshot),
@@ -268,39 +277,56 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
             ErrorMessage = snapshot.Message,
         };
 
-        var projectById = new Dictionary<string, ProjectContextOption>(StringComparer.OrdinalIgnoreCase);
-        var projectByKey = new Dictionary<string, ProjectContextOption>(StringComparer.OrdinalIgnoreCase);
+        var projectById = new Dictionary<string, ProjectContextOption>(StringComparer.Ordinal);
+        var projectByKey = new Dictionary<string, ProjectContextOption>(StringComparer.Ordinal);
         var sequence = 0;
+        var skippedProjectCount = 0;
         foreach (var project in snapshot.Projects)
         {
             var identityKey = project.ProjectId ?? project.DiscoveryKey;
-            if (string.IsNullOrWhiteSpace(identityKey)) continue;
+            if (string.IsNullOrWhiteSpace(identityKey))
+            {
+                skippedProjectCount += 1;
+                continue;
+            }
 
             ProjectContextOption? option = null;
-            if (!string.IsNullOrWhiteSpace(project.ProjectId))
-                projectById.TryGetValue(project.ProjectId, out option);
-            if (option is null && projectByKey.TryGetValue(identityKey, out var keyedOption)) option = keyedOption;
-            if (option is null && !string.IsNullOrWhiteSpace(project.ProjectId))
+            if (!string.IsNullOrWhiteSpace(project.DiscoveryKey)
+                && projectByKey.TryGetValue(project.DiscoveryKey, out var discoveryOption))
             {
-                // A title-only row may have been emitted before the current
-                // route exposed its Project ID. Merge that unresolved display
-                // row only when it has no identity of its own.
+                option = discoveryOption;
+            }
+            else if (!string.IsNullOrWhiteSpace(project.ProjectId)
+                && string.IsNullOrWhiteSpace(project.DiscoveryKey)
+                && projectById.TryGetValue(project.ProjectId, out var idOnlyOption))
+            {
+                option = idOnlyOption;
+            }
+            else if (!string.IsNullOrWhiteSpace(project.ProjectId))
+            {
                 option = catalog.Projects.FirstOrDefault(item =>
                     !item.IsNoProject
                     && item.ExternalId is null
-                    && (string.Equals(item.DisplayName, project.Title, StringComparison.Ordinal)
-                        || string.Equals(FallbackProjectId(item.DisplayName), project.ProjectId, StringComparison.OrdinalIgnoreCase)));
+                    && string.Equals(FallbackProjectId(item.DisplayName), project.ProjectId, StringComparison.Ordinal));
             }
 
             if (option is null)
             {
-                option = ToProjectOption(project, sequence++);
+                var occupyCanonicalId = string.IsNullOrWhiteSpace(project.ProjectId)
+                    || !projectById.ContainsKey(project.ProjectId);
+                option = ToProjectOption(project, sequence++, occupyCanonicalId);
                 catalog.Projects.Add(option);
             }
             MergeProjectOption(option, project);
-            projectByKey[identityKey] = option;
-            if (!string.IsNullOrWhiteSpace(option.ExternalId)) projectById[option.ExternalId] = option;
-            if (!string.IsNullOrWhiteSpace(project.ProjectId)) projectById[project.ProjectId] = option;
+            projectByKey[option.Key] = option;
+            if (!string.IsNullOrWhiteSpace(identityKey)) projectByKey[identityKey] = option;
+            if (!string.IsNullOrWhiteSpace(project.DiscoveryKey)) projectByKey[project.DiscoveryKey] = option;
+            if (!string.IsNullOrWhiteSpace(option.ExternalId)
+                && (string.IsNullOrWhiteSpace(project.DiscoveryKey)
+                    || string.Equals(option.Key, option.ExternalId, StringComparison.Ordinal)))
+            {
+                projectById[option.ExternalId] = option;
+            }
         }
 
         var noProject = new ProjectContextOption
@@ -390,7 +416,56 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
 
         await MergeLegacyBindingsAsync(catalog, existingBindings, cancellationToken);
         EnsureReferencedExternalBindings(catalog, existingBindings);
+        var realProjectCount = catalog.Projects.Count(item => !item.IsCreateAction && !item.IsNoProject);
+        await LogCatalogCountsAsync(
+            "provider_catalog_built",
+            snapshot.RequestId,
+            deserialized: snapshot.Projects.Count,
+            normalized: realProjectCount,
+            skipped: skippedProjectCount,
+            cached: snapshot.Projects.Count,
+            persisted: snapshot.IsSuccess ? snapshot.Projects.Count : null,
+            detail: string.Join(
+                ", ",
+                $"viewmodel_source_project_count={snapshot.Projects.Count}",
+                $"viewmodel_catalog_project_count={realProjectCount}",
+                $"ui_real_project_count={realProjectCount}",
+                $"ui_project_option_count={catalog.Projects.Count(item => !item.IsCreateAction)}",
+                $"projectless_option_count={catalog.Projects.Count(item => item.IsNoProject)}"),
+            cancellationToken: cancellationToken);
         return catalog;
+    }
+
+    private async Task LogCatalogCountsAsync(
+        string stage,
+        string? requestId,
+        int? deserialized = null,
+        int? normalized = null,
+        int? skipped = null,
+        int? cached = null,
+        int? persisted = null,
+        string? detail = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var fields = new List<string> { $"stage={stage}" };
+            if (!string.IsNullOrWhiteSpace(requestId)) fields.Add($"request_id={requestId}");
+            if (deserialized is int live) fields.Add($"provider_deserialized_project_count={live}");
+            if (normalized is int kept) fields.Add($"provider_normalized_project_count={kept}");
+            if (skipped is int drop) fields.Add($"provider_skipped_project_count={drop}");
+            if (cached is int cacheCount) fields.Add($"provider_cached_project_count={cacheCount}");
+            if (persisted is int saved) fields.Add($"provider_persisted_project_count={saved}");
+            if (!string.IsNullOrWhiteSpace(detail)) fields.Add(detail);
+            await _store.LogAsync("context", string.Join(" ", fields), cancellationToken: cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+        }
     }
 
     public Task<ProjectContextOption> CreateProjectAsync(
@@ -548,11 +623,16 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         }
     }
 
-    private ProjectContextOption ToProjectOption(BrowserExtensionChatGptProjectEntry project, int sequence)
+    private ProjectContextOption ToProjectOption(
+        BrowserExtensionChatGptProjectEntry project,
+        int sequence,
+        bool occupyCanonicalId = true)
         => new()
         {
             ProviderId = ProviderId,
-            Key = project.ProjectId ?? project.DiscoveryKey ?? $"__chatgpt_project_{sequence}",
+            Key = occupyCanonicalId
+                ? project.ProjectId ?? project.DiscoveryKey ?? $"__chatgpt_project_{sequence}"
+                : project.DiscoveryKey ?? $"__chatgpt_project_{sequence}",
             DisplayName = project.Title,
             ExternalId = project.ProjectId,
             Url = project.Url,
@@ -566,8 +646,10 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
     {
         if (!string.IsNullOrWhiteSpace(source.ProjectId))
         {
+            var retargetKey = target.ExternalId is null
+                || string.Equals(target.Key, source.ProjectId, StringComparison.Ordinal);
             target.ExternalId = source.ProjectId;
-            target.Key = source.ProjectId;
+            if (retargetKey) target.Key = source.ProjectId;
         }
         if (!string.IsNullOrWhiteSpace(source.Title)
             && (string.IsNullOrWhiteSpace(target.DisplayName) || IsFallbackProjectLabel(target.DisplayName)))

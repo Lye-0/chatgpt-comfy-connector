@@ -70,6 +70,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // Project Chat lists are loaded on demand. A later Project selection must
     // own the result so a slower Collector response cannot overwrite it.
     private long _projectChatLoadVersion;
+    private bool _isProjectChatListLoading;
     private readonly ProjectContextOption _createProjectOption = new() { Key = "__create_project__", DisplayName = "＋ 新しいProjectを作成", IsCreateAction = true };
     private readonly ChatContextOption _createChatOption = new() { Key = "__create_chat__", DisplayName = "＋ 新しいChatを作成", IsCreateAction = true };
     private ProjectContextOption? _selectedProject;
@@ -179,6 +180,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 IsProjectCreateVisible = true;
                 NewProjectName = string.Empty;
                 ProjectValidationMessage = string.Empty;
+                IsProjectChatListLoading = false;
                 RefreshChatOptions();
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(HasSelectedProject));
@@ -193,20 +195,34 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _selectedProject = value;
             IsProjectCreateVisible = false;
             ProjectValidationMessage = string.Empty;
-            RefreshChatOptions();
+            ChatValidationMessage = string.Empty;
+            var loadProjectChats = value is not null
+                && string.Equals(value.ProviderId, ContextProviderIds.ChatGptExtension, StringComparison.OrdinalIgnoreCase)
+                && !value.IsNoProject
+                && _contextProvider is IProjectChatSelectionProvider;
+            if (loadProjectChats)
+            {
+                IsProjectChatListLoading = true;
+                ChatOptions.Clear();
+                _selectedChat = null;
+                OnPropertyChanged(nameof(SelectedChat));
+                OnPropertyChanged(nameof(HasSelectedChat));
+            }
+            else
+            {
+                IsProjectChatListLoading = false;
+                RefreshChatOptions();
+            }
             OnPropertyChanged();
             OnPropertyChanged(nameof(HasSelectedProject));
             OnPropertyChanged(nameof(CanSelectChat));
             OnPropertyChanged(nameof(CanCreateChat));
             OnPropertyChanged(nameof(CanStartNewCreation));
             NotifyContextSelectionChanged();
-            if (value is not null
-                && string.Equals(value.ProviderId, ContextProviderIds.ChatGptExtension, StringComparison.OrdinalIgnoreCase)
-                && !value.IsNoProject
-                && _contextProvider is IProjectChatSelectionProvider)
+            if (loadProjectChats)
             {
                 StatusMessage = "選択したChatGPT ProjectのChatを読み込んでいます。";
-                _ = LoadSelectedProjectChatsAsync(value);
+                _ = LoadSelectedProjectChatsAsync(value!);
             }
         }
     }
@@ -371,12 +387,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string ChatGptContextLoadStateText => ChatGptContextLoadState switch
     {
         ProjectChatCatalogLoadState.Loading => "取得中…",
-        ProjectChatCatalogLoadState.Loaded => "取得済み",
+        ProjectChatCatalogLoadState.Loaded => ChatGptContextProjectCount > 0
+            ? $"取得済み · {ChatGptContextProjectCount} Project"
+            : "取得済み",
         ProjectChatCatalogLoadState.Empty => "履歴なし",
         ProjectChatCatalogLoadState.Disconnected => "Extension未接続",
         ProjectChatCatalogLoadState.Error => "取得エラー",
         _ => "未取得",
     };
+    public int ChatGptContextProjectCount
+        => _contextCatalog.Projects.Count(item => !item.IsCreateAction && !item.IsNoProject);
+    public int ChatGptContextProjectOptionCount
+        => _contextCatalog.Projects.Count(item => !item.IsCreateAction);
     public string ChatGptContextErrorText => _contextCatalog.ErrorMessage ?? string.Empty;
     public bool CanRefreshChatGptContext
         => string.Equals(_contextProvider.ProviderId, ContextProviderIds.ChatGptExtension, StringComparison.OrdinalIgnoreCase)
@@ -519,7 +541,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         : "保留中のgenerateがあります。RESUMEで同じCommandを一度だけAPPLY・GENERATEします。";
     public string CurrentSessionContextText => CurrentSession is null ? "制作セッションなし" : $"{BlankFallback(CurrentSession.ProjectLabel, "Project未設定")}  ·  {BlankFallback(CurrentSession.ChatLabel, "Chat未設定")}";
     public string ProjectPlaceholderText => HasSelectedProject || IsProjectCreateVisible ? string.Empty : "Projectを選択…";
-    public string ChatPlaceholderText => !HasSelectedProject ? "先にProjectを選択してください" : HasSelectedChat || IsChatCreateVisible ? string.Empty : "Chatを選択…";
+    public string ChatPlaceholderText => !HasSelectedProject
+        ? "先にProjectを選択してください"
+        : IsProjectChatListLoading || HasChatValidationMessage || HasSelectedChat || IsChatCreateVisible
+            ? string.Empty
+            : "Chatを選択…";
     public string ContextReadinessText => string.Join(Environment.NewLine,
         $"{(HasSelectedWorkflow ? "✓" : "!")} Workflow  {SelectedWorkflowName}",
         $"{(SlotDiscoveryState == SlotDiscoveryState.Loaded ? "✓" : "!")} Slot Schema  {(SlotDiscoveryState == SlotDiscoveryState.Loaded ? $"{Slots.Count} slots" : "未取得")}",
@@ -544,7 +570,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasHandoffItems => HandoffItems.Count > 0;
     public bool HasSelectedProject => SelectedProject is { IsCreateAction: false };
     public bool HasSelectedChat => SelectedChat is { IsCreateAction: false };
-    public bool CanSelectChat => HasSelectedProject;
+    public bool IsProjectChatListLoading
+    {
+        get => _isProjectChatListLoading;
+        private set
+        {
+            if (_isProjectChatListLoading == value) return;
+            _isProjectChatListLoading = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(CanSelectChat));
+            OnPropertyChanged(nameof(ChatPlaceholderText));
+        }
+    }
+    public bool CanSelectChat => HasSelectedProject && !IsProjectChatListLoading;
     public bool CanCreateChat => HasSelectedProject
         && string.Equals(_contextProvider.ProviderId, ContextProviderIds.LocalJson, StringComparison.OrdinalIgnoreCase);
     public bool HasProjectValidationMessage => !string.IsNullOrWhiteSpace(ProjectValidationMessage);
@@ -3203,7 +3241,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         NotifyContextCatalogChanged();
+        _ = LogUiContextCountsAsync();
         return true;
+    }
+
+    private async Task LogUiContextCountsAsync()
+    {
+        try
+        {
+            await _store.LogAsync(
+                "context",
+                string.Join(
+                    " ",
+                    "stage=ui_context_catalog",
+                    $"ui_real_project_count={ChatGptContextProjectCount}",
+                    $"ui_project_option_count={ChatGptContextProjectOptionCount}",
+                    $"projectless_option_count={_contextCatalog.Projects.Count(item => item.IsNoProject)}",
+                    $"viewmodel_catalog_project_count={_contextCatalog.Projects.Count}"));
+        }
+        catch (Exception)
+        {
+        }
     }
 
     private void RefreshProjectOptions(string? preferredProjectKey = null, string? preferredChatKey = null)
@@ -3241,6 +3299,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         catch (OperationCanceledException)
         {
+            void ApplyCanceled()
+            {
+                if (Volatile.Read(ref _projectChatLoadVersion) != loadVersion
+                    || !ReferenceEquals(_selectedProject, project)) return;
+                IsProjectChatListLoading = false;
+            }
+
+            PostNotification(ApplyCanceled);
             return;
         }
         catch (Exception ex)
@@ -3249,7 +3315,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
             {
                 if (Volatile.Read(ref _projectChatLoadVersion) != loadVersion
                     || !ReferenceEquals(_selectedProject, project)) return;
+                IsProjectChatListLoading = false;
+                ChatOptions.Clear();
+                _selectedChat = null;
+                OnPropertyChanged(nameof(SelectedChat));
+                OnPropertyChanged(nameof(HasSelectedChat));
+                OnPropertyChanged(nameof(CanStartNewCreation));
                 ChatValidationMessage = ex.Message;
+                NotifyContextSelectionChanged();
             }
 
             PostNotification(ApplyError);
@@ -3260,6 +3333,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (Volatile.Read(ref _projectChatLoadVersion) != loadVersion
                 || !ReferenceEquals(_selectedProject, project)) return;
+            IsProjectChatListLoading = false;
             project.Chats = chats.ToList();
             RefreshChatOptions(project.Key);
             ChatValidationMessage = string.Empty;
@@ -4835,6 +4909,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (!string.IsNullOrWhiteSpace(diagnostic.Status)) fields.Add($"status={diagnostic.Status}");
             if (!string.IsNullOrWhiteSpace(diagnostic.ErrorCode)) fields.Add($"error_code={diagnostic.ErrorCode}");
             if (!string.IsNullOrWhiteSpace(diagnostic.Stage)) fields.Add($"stage={diagnostic.Stage}");
+            if (!string.IsNullOrWhiteSpace(diagnostic.Detail)) fields.Add(diagnostic.Detail);
             var suffix = fields.Count == 0 ? string.Empty : $" ({string.Join(", ", fields)})";
             await _store.LogAsync("bridge", $"Browser Extension {diagnostic.EventName}{suffix}");
         }
@@ -4995,6 +5070,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         OnPropertyChanged(nameof(ChatGptContextLoadState));
         OnPropertyChanged(nameof(ChatGptContextLoadStateText));
+        OnPropertyChanged(nameof(ChatGptContextProjectCount));
+        OnPropertyChanged(nameof(ChatGptContextProjectOptionCount));
         OnPropertyChanged(nameof(ChatGptContextErrorText));
         OnPropertyChanged(nameof(CanRefreshChatGptContext));
         OnPropertyChanged(nameof(ContextReadinessText));

@@ -62,6 +62,129 @@ public sealed class ChatGptContextProviderTests
     }
 
     [Fact]
+    public async Task KeepsTwentyEightDistinctProjectsIncludingDuplicateTitles()
+    {
+        var projects = Enumerable.Range(0, 28)
+            .Select(index => new BrowserExtensionChatGptProjectEntry(
+                $"g-p-full-{index}",
+                index % 14 == 0 ? "Shared name" : $"Project {index}",
+                $"https://chatgpt.com/g/g-p-full-{index}/project"))
+            .ToArray();
+        var snapshot = new BrowserExtensionChatGptContextSnapshot(
+            "context-28",
+            "ok",
+            projects,
+            []);
+        var store = new StubPortableStore
+        {
+            Cache = new BrowserExtensionChatGptContextCache(
+                Enumerable.Range(0, 20)
+                    .Select(index => new BrowserExtensionChatGptProjectEntry(
+                        $"g-p-stale-{index}",
+                        $"Stale {index}",
+                        $"https://chatgpt.com/g/g-p-stale-{index}/project"))
+                    .ToArray(),
+                [],
+                DateTimeOffset.UtcNow.AddHours(-1)),
+        };
+        var provider = new ChatGptProjectChatProvider(new StubBridge(snapshot), store);
+
+        var catalog = await provider.LoadAsync([]);
+
+        Assert.Equal(ProjectChatCatalogLoadState.Loaded, catalog.LoadState);
+        Assert.Equal(28, catalog.Projects.Count(item => !item.IsNoProject));
+        Assert.Equal(29, catalog.Projects.Count);
+        Assert.Equal(2, catalog.Projects.Count(item => item.DisplayName == "Shared name"));
+        Assert.Equal(28, store.Cache!.Projects.Count);
+        Assert.DoesNotContain(store.Cache.Projects, item => item.ProjectId?.StartsWith("g-p-stale-", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public async Task TimeoutDoesNotPresentStaleCacheAsLoadedSuccess()
+    {
+        var store = new StubPortableStore
+        {
+            Cache = new BrowserExtensionChatGptContextCache(
+                Enumerable.Range(0, 21)
+                    .Select(index => new BrowserExtensionChatGptProjectEntry(
+                        $"g-p-stale-{index}",
+                        $"Stale {index}",
+                        $"https://chatgpt.com/g/g-p-stale-{index}/project"))
+                    .ToArray(),
+                [],
+                DateTimeOffset.UtcNow.AddHours(-1)),
+        };
+        var provider = new ChatGptProjectChatProvider(
+            new StubBridge(new BrowserExtensionChatGptContextSnapshot(
+                "timeout-request",
+                "error",
+                [],
+                [],
+                ErrorCode: "context_response_timeout",
+                Message: "Browser ExtensionからChatGPT Contextが返りませんでした。",
+                Stage: "context_response_timeout")),
+            store);
+
+        var catalog = await provider.LoadAsync([]);
+
+        Assert.Equal(ProjectChatCatalogLoadState.Error, catalog.LoadState);
+        Assert.Equal("context_response_timeout", catalog.ErrorCode);
+        Assert.Equal(21, catalog.Projects.Count(item => !item.IsNoProject));
+        Assert.Equal(21, store.Cache!.Projects.Count);
+    }
+
+    [Fact]
+    public async Task KeepsChatlessAndUnfetchedProjectsInTheCatalog()
+    {
+        var projects = Enumerable.Range(0, 27)
+            .Select(index => new BrowserExtensionChatGptProjectEntry(
+                $"g-p-empty-{index}",
+                index < 6 ? "Shared empty name" : $"Empty {index}",
+                $"https://chatgpt.com/g/g-p-empty-{index}/project",
+                $"row-empty-{index}"))
+            .ToArray();
+        var provider = new ChatGptProjectChatProvider(
+            new StubBridge(new BrowserExtensionChatGptContextSnapshot("empty-chats", "ok", projects, [])),
+            new StubPortableStore());
+
+        var catalog = await provider.LoadAsync([]);
+
+        Assert.Equal(ProjectChatCatalogLoadState.Loaded, catalog.LoadState);
+        Assert.Equal(27, catalog.Projects.Count(item => !item.IsNoProject));
+        Assert.Equal(28, catalog.Projects.Count);
+        Assert.All(
+            catalog.Projects.Where(item => !item.IsNoProject),
+            project => Assert.DoesNotContain(project.Chats, item => !item.IsNewConversation));
+    }
+
+    [Fact]
+    public async Task KeepsDuplicateProjectIdsWhenDiscoveryKeysDiffer()
+    {
+        var snapshot = new BrowserExtensionChatGptContextSnapshot(
+            "dup-id",
+            "ok",
+            [
+                new BrowserExtensionChatGptProjectEntry(
+                    "g-p-shared-26",
+                    "Project 26",
+                    "https://chatgpt.com/g/g-p-shared-26/project",
+                    "row-26"),
+                new BrowserExtensionChatGptProjectEntry(
+                    "g-p-shared-26",
+                    "Project 27",
+                    "https://chatgpt.com/g/g-p-shared-26/project",
+                    "row-27"),
+            ],
+            []);
+        var provider = new ChatGptProjectChatProvider(new StubBridge(snapshot), new StubPortableStore());
+
+        var catalog = await provider.LoadAsync([]);
+
+        Assert.Equal(2, catalog.Projects.Count(item => !item.IsNoProject));
+        Assert.Equal(2, catalog.Projects.Count(item => item.ExternalId == "g-p-shared-26"));
+    }
+
+    [Fact]
     public async Task KeepsDisconnectedStateDistinctWhileOfferingSafeProjectlessNewChat()
     {
         var snapshot = new BrowserExtensionChatGptContextSnapshot(

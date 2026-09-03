@@ -187,6 +187,7 @@
             <Setter Property="Padding" Value="8,6" />
             <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
             <Setter Property="FontSize" Value="12" />
+            <Setter Property="MaxDropDownHeight" Value="640" />
             <Setter Property="FocusVisualStyle" Value="{StaticResource FocusVisualStyle}" />
             <Setter Property="Template">
                 <Setter.Value>
@@ -203,8 +204,8 @@
                                 <ToggleButton.Template><ControlTemplate TargetType="ToggleButton"><Border Background="Transparent" /></ControlTemplate></ToggleButton.Template>
                             </ToggleButton>
                             <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                                <Border MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" MaxHeight="320" Background="#0B1220" BorderBrush="{StaticResource LineStrongBrush}" BorderThickness="1" CornerRadius="8" Padding="2" Margin="0,3,0,0">
-                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="True">
+                                <Border MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" MaxHeight="{TemplateBinding MaxDropDownHeight}" Background="#0B1220" BorderBrush="{StaticResource LineStrongBrush}" BorderThickness="1" CornerRadius="8" Padding="2" Margin="0,3,0,0">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False">
                                         <ItemsPresenter />
                                     </ScrollViewer>
                                 </Border>

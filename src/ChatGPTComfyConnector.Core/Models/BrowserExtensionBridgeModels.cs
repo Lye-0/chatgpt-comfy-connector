@@ -393,7 +393,8 @@ public sealed record BrowserExtensionBridgeDiagnostic(
     int? Iteration = null,
     int? TargetTabId = null,
     string? SessionId = null,
-    string? BoundaryId = null);
+    string? BoundaryId = null,
+    string? Detail = null);
 
 public sealed class BrowserExtensionBridgeDiagnosticEventArgs(BrowserExtensionBridgeDiagnostic diagnostic) : EventArgs
 {

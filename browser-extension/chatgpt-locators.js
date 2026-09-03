@@ -568,10 +568,35 @@
     return matches[0] || root;
   }
 
-  function projectRowsInSidebar(sidebar, baseUrl = globalThis.location?.href) {
+  function projectRowCandidatesInSidebar(sidebar) {
     if (!sidebar?.querySelectorAll) return [];
     return sortInDocumentOrder(uniqueElements(projectRowSelectors, sidebar)
-      .filter((element) => isVisible(element) && !isMoreButton(element)));
+      .filter((element) => element?.isConnected !== false && !isMoreButton(element)));
+  }
+
+  function projectRowsInSidebar(sidebar, baseUrl = globalThis.location?.href) {
+    return projectRowCandidatesInSidebar(sidebar)
+      .filter((element) => isVisible(element));
+  }
+
+  function findIdentitySidebarRoot(root = globalThis.document) {
+    const matches = uniqueElements(sidebarRootSelectors, root)
+      .filter((element) => element !== root);
+    if (matches.length === 0) return root;
+    const ranked = matches.map((sidebar) => {
+      const visible = projectRowsInSidebar(sidebar).length;
+      const connected = projectRowCandidatesInSidebar(sidebar).length;
+      const section = uniqueElements(projectSectionSelectors, sidebar)
+        .filter((element) => isVisible(element)).length;
+      const scrollports = uniqueElements(sidebarScrollContainerSelectors, sidebar).length;
+      return { sidebar, visible, connected, section, scrollports };
+    });
+    ranked.sort((left, right) =>
+      (right.visible - left.visible)
+      || (right.connected - left.connected)
+      || (right.section - left.section)
+      || (right.scrollports - left.scrollports));
+    return ranked[0].sidebar;
   }
 
   function expandedProjectRowsInSidebar(sidebar) {
@@ -608,15 +633,26 @@
     return null;
   }
 
-  function projectChatHrefFromElement(element, baseUrl = globalThis.location?.href, boundary = null) {
-    const direct = metadataHrefFromElement(element, baseUrl);
-    if (direct && conversationIdFromUrl(direct)) return direct;
+  function conversationHrefFromElement(element, baseUrl = globalThis.location?.href) {
+    for (const attribute of [
+      "href",
+      "data-href",
+      "data-url",
+      "data-conversation-url",
+      "data-conversation-href",
+      "data-chat-url",
+      "data-chat-href"
+    ]) {
+      const value = chatGptMetadataUrl(attributeValue(element, attribute), baseUrl);
+      if (value && conversationIdFromUrl(value)) return value;
+    }
+    return null;
+  }
 
-    // A Chat row can be a DIV/BUTTON wrapped by an anchor. Resolve only an
-    // unambiguous conversation anchor and keep the search inside the selected
-    // Project-page region. This is deliberately separate from the root
-    // Project discovery path, where generic ancestors must never become
-    // Project candidates.
+  function projectChatHrefFromElement(element, baseUrl = globalThis.location?.href, boundary = null) {
+    const direct = conversationHrefFromElement(element, baseUrl);
+    if (direct) return direct;
+
     const descendantHrefs = [];
     try {
       for (const candidate of uniqueElements([
@@ -629,20 +665,37 @@
         "[data-chat-url]",
         "[data-chat-href]"
       ], element)) {
-        const href = metadataHrefFromElement(candidate, baseUrl);
-        if (href && conversationIdFromUrl(href)) descendantHrefs.push(href);
+        const href = conversationHrefFromElement(candidate, baseUrl);
+        if (href) descendantHrefs.push(href);
       }
     } catch (_) { }
     const uniqueDescendantHrefs = [...new Set(descendantHrefs)];
     if (uniqueDescendantHrefs.length === 1) return uniqueDescendantHrefs[0];
-
-    let ancestor = element?.parentElement || null;
-    for (let depth = 0; ancestor && depth < 8; depth += 1, ancestor = ancestor.parentElement) {
-      if (boundary && !isDescendantOf(ancestor, boundary)) break;
-      const href = metadataHrefFromElement(ancestor, baseUrl);
-      if (href && conversationIdFromUrl(href)) return href;
-    }
     return null;
+  }
+
+  function ownChatDataProjectId(element) {
+    return metadataIdentifier(attributeValue(element, "data-project-id"))
+      || metadataIdentifier(attributeValue(element, "data-project-id-value"))
+      || null;
+  }
+
+  function nestedConversationProjectIds(element, baseUrl) {
+    const ids = [];
+    try {
+      for (const candidate of uniqueElements([
+        "a[href]",
+        '[role="link"][href]',
+        "[data-href]",
+        "[data-conversation-url]",
+        "[data-chat-url]"
+      ], element)) {
+        const href = conversationHrefFromElement(candidate, baseUrl);
+        const projectId = projectIdFromUrl(href);
+        if (projectId) ids.push(projectId);
+      }
+    } catch (_) { }
+    return [...new Set(ids)];
   }
 
   function getChatGptCollectorViewport(root = globalThis.document) {
@@ -1015,6 +1068,51 @@
     return candidates.find((candidate) => containsProjectRow(candidate) && hasScrollMetrics(candidate)) || sidebar;
   }
 
+  function scrollContainerCanAdvance(container) {
+    if (!container || typeof container.scrollTop !== "number") return false;
+    const top = Number(container.scrollTop) || 0;
+    const height = Number(container.scrollHeight) || 0;
+    const client = Number(container.clientHeight) || 0;
+    return height > client && top < Math.max(0, height - client) - 1;
+  }
+
+  function findIdentityScrollContainer(root = globalThis.document, sidebarOverride = null) {
+    const sidebar = sidebarOverride || findIdentitySidebarRoot(root);
+    const connectedRows = projectRowCandidatesInSidebar(sidebar);
+    const visibleRows = projectRowsInSidebar(sidebar);
+    const membershipRows = visibleRows.length > 0 ? visibleRows : connectedRows;
+    const nested = uniqueElements(sidebarScrollContainerSelectors, sidebar);
+    const discovered = discoveredScrollContainerCandidates(sidebar);
+    const candidates = [];
+    const seen = new Set();
+    for (const candidate of [...nested, ...discovered, sidebar]) {
+      if (!candidate || seen.has(candidate)) continue;
+      seen.add(candidate);
+      candidates.push(candidate);
+    }
+    const hasScrollMetrics = (candidate) => candidate
+      && typeof candidate.scrollTop === "number"
+      && typeof candidate.scrollHeight === "number"
+      && typeof candidate.clientHeight === "number";
+    const containsRow = (candidate) => candidate === sidebar
+      || membershipRows.some((row) => candidate === row || candidate.contains?.(row));
+    const scrollableContaining = candidates.filter((candidate) =>
+      hasScrollMetrics(candidate)
+      && candidate.scrollHeight > candidate.clientHeight
+      && (membershipRows.length === 0 || containsRow(candidate)));
+    if (scrollableContaining.length > 0) {
+      return [...scrollableContaining].sort((left, right) =>
+        (Number(right.scrollHeight) || 0) - (Number(left.scrollHeight) || 0))[0];
+    }
+    const nestedScrollable = nested.filter((candidate) =>
+      hasScrollMetrics(candidate) && candidate.scrollHeight > candidate.clientHeight);
+    if (nestedScrollable.length > 0) {
+      return [...nestedScrollable].sort((left, right) =>
+        (Number(right.scrollHeight) || 0) - (Number(left.scrollHeight) || 0))[0];
+    }
+    return findSidebarScrollContainer(root, sidebar);
+  }
+
   function sidebarMoreControlKey(element) {
     if (!element) return null;
     for (const attribute of [
@@ -1030,8 +1128,9 @@
     return null;
   }
 
-  function isMoreButton(element) {
-    if (!element || !isVisible(element)) return false;
+  function isMoreButton(element, options = {}) {
+    if (!element) return false;
+    if (options.requireVisible !== false && !isVisible(element)) return false;
     const explicitlyMarked = attributeValue(element, "data-sidebar-more") === "true";
     if (!explicitlyMarked && conversationIdFromElement(element)) return false;
     const visible = visibleElementText(element);
@@ -1058,10 +1157,10 @@
     return hasDisclosureAttribute || /(?:more|load-more|show-more|see-more|all-project|project-list)/i.test(semanticMarker);
   }
 
-  function findMoreButtons(root = globalThis.document, sidebarOverride = null) {
+  function findMoreButtons(root = globalThis.document, sidebarOverride = null, options = {}) {
     const sidebar = sidebarOverride || findSidebarRoot(root);
     return sortInDocumentOrder(uniqueElements(moreButtonSelectors, sidebar)
-      .filter((element) => isMoreButton(element)));
+      .filter((element) => isMoreButton(element, options)));
   }
 
   function waitForSidebarMutation(root, timeoutMs = 150) {
@@ -1092,13 +1191,15 @@
   }
 
   async function expandSidebarMoreButtons(root, options = {}, sidebarOverride = null) {
-    const maxClicks = Math.max(0, Math.min(12, Number(options.maxMoreClicks) || 8));
+    const maxClicks = Math.max(0, Math.min(32, Number(options.maxMoreClicks) || 8));
     const clicked = options.clickedMoreControls instanceof Set
       ? options.clickedMoreControls
       : new Set();
     let clicks = 0;
     while (clicks < maxClicks) {
-      const button = findMoreButtons(root, sidebarOverride)
+      const button = findMoreButtons(root, sidebarOverride, {
+        requireVisible: options.includeHiddenMore !== true
+      })
         .find((candidate) => {
           const key = sidebarMoreControlKey(candidate);
           return !clicked.has(candidate) && (!key || !clicked.has(key));
@@ -1521,6 +1622,7 @@
   function projectDisclosureRegionForRow(row, root = row?.ownerDocument || globalThis.document) {
     const controls = attributeValue(row, "aria-controls").trim();
     if (!controls) return null;
+    const baseUrl = documentHref(root);
     // ARIA permits a space-separated list.  ChatGPT normally exposes one
     // controlled list, but accepting the first resolvable ID keeps this read
     // bounded and avoids treating arbitrary Sidebar nodes as a Project.
@@ -1530,9 +1632,37 @@
       const rowDocument = row?.ownerDocument;
       const regionDocument = region?.ownerDocument;
       if (rowDocument && regionDocument && rowDocument !== regionDocument) continue;
+      if (!projectDisclosureRegionIsExclusiveToRow(row, region, root, baseUrl)) continue;
       return region;
     }
     return null;
+  }
+
+  function projectRowsControllingDisclosureRegion(region, root, baseUrl) {
+    if (!region) return [];
+    const sidebar = findSidebarRoot(root);
+    return projectRowsInSidebar(sidebar, baseUrl).filter((candidate) => {
+      const controls = attributeValue(candidate, "aria-controls").trim();
+      if (!controls) return false;
+      return controls.split(/\s+/).slice(0, 4).some((controlId) =>
+        findElementByAriaControlId(root, controlId) === region);
+    });
+  }
+
+  function projectDisclosureRegionIsExclusiveToRow(row, region, root, baseUrl) {
+    if (!row || !region) return false;
+    // A controlled list that contains this row is the Sidebar/shell itself,
+    // not a Project-local chat list.
+    if (isDescendantOf(row, region)) return false;
+    const sidebar = findSidebarRoot(root);
+    const otherRows = projectRowsInSidebar(sidebar, baseUrl)
+      .filter((candidate) => candidate !== row);
+    if (otherRows.some((other) => other === region
+      || isDescendantOf(other, region)
+      || isDescendantOf(region, other))) {
+      return false;
+    }
+    return projectRowsControllingDisclosureRegion(region, root, baseUrl).length <= 1;
   }
 
   function projectDisclosureElements(region) {
@@ -1568,7 +1698,11 @@
       }
     }
     const identity = region
-      ? projectIdentityFromElement(region, baseUrl)
+      ? resolveProjectIdentityFromCandidates(
+        row,
+        projectDisclosureElements(region),
+        baseUrl,
+        true)
       : { reason: "controlled_region_not_found" };
     const ariaExpanded = safeAriaToken(row, "aria-expanded");
     return {
@@ -1615,11 +1749,20 @@
     let ancestor = row?.parentElement;
     for (let depth = 0; ancestor && depth < 5; depth += 1, ancestor = ancestor.parentElement) {
       if (isSidebarRootElement(ancestor, row?.ownerDocument)) break;
+      if (projectAncestorContainsOtherProjectRows(row, ancestor, baseUrl)) break;
       if (projectIdentityCarrier(ancestor, baseUrl)) {
         addProjectIdentityElement(elements, seen, ancestor);
       }
     }
     return elements;
+  }
+
+  function projectAncestorContainsOtherProjectRows(row, ancestor, baseUrl) {
+    if (!row || !ancestor) return false;
+    const sidebar = findSidebarRoot(row?.ownerDocument || globalThis.document);
+    return projectRowsInSidebar(sidebar, baseUrl).some((candidate) =>
+      candidate !== row
+      && (candidate === ancestor || isDescendantOf(candidate, ancestor)));
   }
 
   function projectIdentityShellElementsForRow(row, baseUrl = globalThis.location?.href) {
@@ -1732,7 +1875,7 @@
     }
     const uniqueIds = [...new Set(identities.map((item) => item.projectId))];
     if (uniqueIds.length === 1) return identities[0];
-    if (uniqueIds.length > 1) return { reason: "project_id_url_mismatch" };
+    if (uniqueIds.length > 1) return { reason: "ambiguous_project_identity" };
     return { reason: invalidReason || null };
   }
 
@@ -1744,7 +1887,8 @@
       baseUrl,
       true);
     if (primary?.projectId) return primary;
-    if (primary?.reason === "project_id_url_mismatch") return primary;
+    if (primary?.reason === "project_id_url_mismatch"
+      || primary?.reason === "ambiguous_project_identity") return primary;
     const shell = resolveProjectIdentityFromCandidates(
       row,
       projectIdentityShellElementsForRow(row, baseUrl),
@@ -1763,23 +1907,34 @@
     const shell = projectIdentityShellElementsForRow(row, baseUrl);
     let rowProjectUrlFound = false;
     let nestedProjectUrlFound = false;
-    let candidateCount = 0;
+    const candidateIds = [];
     for (const candidate of [...primary, ...shell]) {
       const allowConversation = primary.includes(candidate);
       const result = readProjectIdentityFromCandidate(row, candidate, baseUrl, allowConversation);
       if (!result?.projectId) continue;
-      candidateCount += 1;
+      candidateIds.push(result.projectId);
       if (candidate === row) rowProjectUrlFound = true;
       else nestedProjectUrlFound = true;
     }
+    const uniqueIds = [...new Set(candidateIds)];
+    const fingerprints = uniqueIds.map((_, index) => `pid-${index + 1}`);
     return {
       childChatCount: disclosure.controlledRegionProjectChatLinkCount || 0,
       childProjectUrlCount: disclosure.controlledRegionProjectHomeLinkCount || 0,
       rowProjectUrlFound,
       nestedProjectUrlFound,
       controlledRegionFound: disclosure.controlledRegionFound === true,
-      stableIdentityCandidateCount: candidateCount,
-      disclosureFound: disclosure.rowIsDisclosureControl === true
+      stableIdentityCandidateCount: candidateIds.length,
+      distinctCandidateProjectIdCount: uniqueIds.length,
+      candidateProjectIdFingerprints: fingerprints.join(","),
+      identityCandidateConsistent: uniqueIds.length <= 1,
+      disclosureFound: disclosure.rowIsDisclosureControl === true,
+      identityReason: disclosure.identity?.reason || null,
+      fingerprintFor(projectId) {
+        const index = uniqueIds.indexOf(projectId);
+        if (index >= 0) return `pid-${index + 1}`;
+        return projectId ? "pid-other" : "none";
+      }
     };
   }
 
@@ -2160,11 +2315,70 @@
     return { dispatched: eventCount > 0, eventCount };
   }
 
+  function catalogTitleMatchCount(catalog, title) {
+    const expectedTitle = metadataTextKey(metadataTitle(title, ""));
+    if (!expectedTitle || !Array.isArray(catalog) || catalog.length === 0) return 0;
+    return catalog.reduce((count, item) => count
+      + (metadataTextKey(metadataTitle(item?.title, "")) === expectedTitle ? 1 : 0), 0);
+  }
+
+  function projectRowRelocationTelemetryFields(relocation, extra = {}) {
+    return {
+      candidate_count: relocation.candidateCount,
+      row_found: relocation.rowFound === true,
+      match_method: relocation.matchMethod || "none",
+      section_verified: relocation.sectionVerified === true,
+      stale_element_reused: extra.staleElementReused === true,
+      relocation_attempted: extra.relocationAttempted !== false,
+      relocation_success: relocation.rowFound === true,
+      fingerprint_match: relocation.fingerprintMatch === true,
+      fingerprint_match_component_count: Number.isSafeInteger(relocation.fingerprintMatchComponentCount)
+        ? relocation.fingerprintMatchComponentCount
+        : 0,
+      fingerprint_mismatch_component_count: Number.isSafeInteger(relocation.fingerprintMismatchComponentCount)
+        ? relocation.fingerprintMismatchComponentCount
+        : 0,
+      discovery_row_still_connected: extra.discoveryRowStillConnected === true,
+      discovery_row_reused: extra.discoveryRowReused === true,
+      current_sidebar_candidate_count: relocation.candidateCount,
+      exact_candidate_count: Number.isSafeInteger(relocation.exactCandidateCount)
+        ? relocation.exactCandidateCount
+        : 0,
+      ambiguous_candidate_count: Number.isSafeInteger(relocation.ambiguousCandidateCount)
+        ? relocation.ambiguousCandidateCount
+        : 0,
+      sidebar_dom_generation_changed: extra.sidebarDomGenerationChanged === true,
+      aria_controls_changed: relocation.ariaControlsChanged === true,
+      row_position_changed: relocation.rowPositionChanged === true,
+      navigation_since_discovery: extra.navigationSinceDiscovery === true,
+      relocation_method: relocation.matchMethod || "none",
+      relocation_phase: extra.relocationPhase || "initial_fingerprint",
+      catalog_entry_found: extra.catalogEntryFound === true,
+      catalog_title_unique: relocation.catalogTitleUnique === true || extra.catalogTitleUnique === true,
+      catalog_title_match_count: Number.isSafeInteger(relocation.catalogTitleMatchCount)
+        ? relocation.catalogTitleMatchCount
+        : (Number.isSafeInteger(extra.catalogTitleMatchCount) ? extra.catalogTitleMatchCount : 0),
+      visible_project_row_count: Number.isSafeInteger(extra.visibleProjectRowCount)
+        ? extra.visibleProjectRowCount
+        : relocation.candidateCount,
+      project_section_found: extra.projectSectionFound === true,
+      project_scroll_container_found: extra.projectScrollContainerFound === true,
+      scroll_required: extra.scrollRequired === true,
+      scroll_position_changed: extra.scrollPositionChanged === true,
+      more_available: extra.moreAvailable === true,
+      rows_reenumerated_after_navigation: extra.rowsReenumeratedAfterNavigation !== false,
+      stale_discovery_row_discarded: extra.staleDiscoveryRowDiscarded !== false,
+      failure_reason: relocation.reason || "none",
+      unresolved_reason: relocation.reason || "none"
+    };
+  }
+
   function projectRowRelocationForIdentityDescriptor(
     sidebar,
     rows,
     descriptor,
-    baseUrl = globalThis.location?.href) {
+    baseUrl = globalThis.location?.href,
+    options = {}) {
     const candidateCount = Number.isSafeInteger(rows?.length) ? rows.length : 0;
     const projectIndex = Number.isSafeInteger(descriptor?.discovery_index)
       && descriptor.discovery_index >= 0
@@ -2195,6 +2409,14 @@
           visibleTitleFromElement(candidate, ""),
           candidateIndex) === expectedDiscoveryKey)
       : [];
+    const catalog = Array.isArray(options.catalog) ? options.catalog : [];
+    const catalogTitleCount = catalogTitleMatchCount(catalog, descriptor?.title);
+    const titleUniqueInCatalog = catalog.length > 0 ? catalogTitleCount === 1 : null;
+    const indexRow = Number.isSafeInteger(projectIndex) ? rows?.[projectIndex] || null : null;
+    const indexTitleMatches = Boolean(
+      indexRow
+      && expectedTitle
+      && metadataTextKey(visibleTitleFromElement(indexRow, "")) === expectedTitle);
     let row = null;
     // Keep the historical telemetry value for index-based relocation. A
     // discovery key is an additional disambiguator, not a new public match
@@ -2204,31 +2426,43 @@
       if (fingerprintRows.length === 1) {
         row = fingerprintRows[0];
         matchMethod = "discovery_fingerprint";
-      } else if (fingerprintRows.length === 0
-        && matchingRows.length === 1
-        && rows?.[projectIndex]
-        && metadataTextKey(visibleTitleFromElement(rows[projectIndex], "")) === expectedTitle) {
+      } else if (fingerprintRows.length === 0 && matchingRows.length === 1 && (
+        titleUniqueInCatalog === true
+        || (titleUniqueInCatalog === null && indexTitleMatches))) {
         // React may regenerate an aria-controls/id token after returning to
-        // the root. The original discovery index plus a unique title is a
-        // bounded relocation fallback; duplicate titles remain rejected.
-        row = rows[projectIndex];
-        matchMethod = "discovery_index_title";
+        // the root. A title that is unique in the discovered catalog is a
+        // safe locator even when the current visible window is shorter than
+        // the original discovery_index. Duplicate titles stay rejected.
+        row = matchingRows[0];
+        matchMethod = titleUniqueInCatalog === true
+          ? "unique_catalog_title"
+          : "discovery_index_title";
       } else {
+        const noVisibleMatch = matchingRows.length === 0;
         return {
           row: null,
           candidateCount,
           rowFound: false,
           matchMethod: fingerprintRows.length > 1
             ? "ambiguous_discovery_fingerprint"
-            : "discovery_fingerprint",
+            : (matchingRows.length > 1 ? "ambiguous_title_only_rejected" : "discovery_fingerprint"),
           sectionVerified,
-          reason: fingerprintRows.length > 1
+          fingerprintMatch: false,
+          fingerprintMatchComponentCount: 0,
+          fingerprintMismatchComponentCount: expectedTitle ? 2 : 1,
+          exactCandidateCount: fingerprintRows.length,
+          ambiguousCandidateCount: matchingRows.length > 1 ? matchingRows.length : 0,
+          ariaControlsChanged: fingerprintRows.length === 0 && matchingRows.length > 0,
+          rowPositionChanged: Boolean(matchingRows[0]) && matchingRows[0] !== indexRow,
+          catalogTitleUnique: titleUniqueInCatalog === true,
+          catalogTitleMatchCount: catalogTitleCount,
+          reason: fingerprintRows.length > 1 || matchingRows.length > 1
             ? "ambiguous_project_row_match"
-            : "project_row_fingerprint_mismatch"
+            : (noVisibleMatch ? "project_row_not_visible" : "project_row_fingerprint_mismatch")
         };
       }
     } else {
-      row = rows?.[projectIndex] || null;
+      row = indexRow;
     }
     if (!row) {
       return {
@@ -2237,6 +2471,9 @@
         rowFound: false,
         matchMethod: matchingRows.length > 1 ? "ambiguous_title_only_rejected" : matchMethod,
         sectionVerified,
+        fingerprintMatch: false,
+        exactCandidateCount: fingerprintRows.length,
+        ambiguousCandidateCount: matchingRows.length > 1 ? matchingRows.length : 0,
         reason: matchingRows.length > 1
           ? "ambiguous_project_row_match"
           : "project_row_not_found"
@@ -2250,6 +2487,9 @@
         rowFound: false,
         matchMethod: matchingRows.length > 1 ? "ambiguous_title_only_rejected" : matchMethod,
         sectionVerified,
+        fingerprintMatch: false,
+        exactCandidateCount: fingerprintRows.length,
+        ambiguousCandidateCount: matchingRows.length > 1 ? matchingRows.length : 0,
         reason: matchingRows.length > 1
           ? "ambiguous_project_row_match"
           : "project_row_fingerprint_mismatch"
@@ -2265,22 +2505,211 @@
           rowFound: false,
           matchMethod,
           sectionVerified,
+          fingerprintMatch: false,
+          exactCandidateCount: fingerprintRows.length,
           reason: "project_row_fingerprint_mismatch"
         };
       }
     }
+    const rowIndex = (rows || []).indexOf(row);
     return {
       row,
       candidateCount,
       rowFound: true,
       matchMethod,
       sectionVerified,
+      fingerprintMatch: fingerprintRows.length === 1 && fingerprintRows[0] === row,
+      fingerprintMatchComponentCount: fingerprintRows.length === 1 ? 1 : 0,
+      fingerprintMismatchComponentCount: fingerprintRows.length === 1 ? 0 : 1,
+      exactCandidateCount: matchMethod === "unique_catalog_title" ? matchingRows.length : fingerprintRows.length,
+      ambiguousCandidateCount: 0,
+      ariaControlsChanged: matchMethod === "unique_catalog_title" || matchMethod === "discovery_index_title",
+      rowPositionChanged: Number.isSafeInteger(projectIndex) && rowIndex >= 0 && rowIndex !== projectIndex,
+      catalogTitleUnique: titleUniqueInCatalog === true,
+      catalogTitleMatchCount: catalogTitleCount,
       reason: null
     };
   }
 
-  function projectRowForIdentityDescriptor(rows, descriptor, baseUrl = globalThis.location?.href) {
-    return projectRowRelocationForIdentityDescriptor(null, rows, descriptor, baseUrl).row;
+  function projectRowForIdentityDescriptor(rows, descriptor, baseUrl = globalThis.location?.href, options = {}) {
+    return projectRowRelocationForIdentityDescriptor(null, rows, descriptor, baseUrl, options).row;
+  }
+
+  async function relocateProjectRowForIdentityAsync(root, descriptor, options = {}) {
+    const catalog = Array.isArray(options.catalog) ? options.catalog : [];
+    const maxAttempts = Math.max(1, Math.min(80, Number(options.maxAttempts) || 48));
+    const clickedMoreControls = new Set();
+    const catalogTitleCount = catalogTitleMatchCount(catalog, descriptor?.title);
+    const catalogEntryFound = catalog.some((item) => {
+      const itemIndex = Number.isSafeInteger(item?.project_index)
+        ? item.project_index
+        : item?.discovery_index;
+      const descriptorIndex = Number.isSafeInteger(descriptor?.project_index)
+        ? descriptor.project_index
+        : descriptor?.discovery_index;
+      return Number.isSafeInteger(itemIndex)
+        && Number.isSafeInteger(descriptorIndex)
+        && itemIndex === descriptorIndex;
+    });
+    const catalogTitleUnique = catalog.length > 0 && catalogTitleCount === 1;
+    const emitRelocation = (relocation, extra = {}) => {
+      try {
+        options.telemetry?.("collector_project_identity_row_relocation", {
+          ...projectRowRelocationTelemetryFields(relocation, {
+            relocationAttempted: true,
+            navigationSinceDiscovery: options.navigationSinceDiscovery === true,
+            sidebarDomGenerationChanged: options.sidebarDomGenerationChanged === true,
+            discoveryRowStillConnected: false,
+            discoveryRowReused: false,
+            catalogTitleUnique,
+            catalogTitleMatchCount: catalogTitleCount,
+            staleDiscoveryRowDiscarded: true,
+            rowsReenumeratedAfterNavigation: true,
+            ...extra
+          }),
+          project_index: Number.isSafeInteger(descriptor?.project_index)
+            ? descriptor.project_index
+            : (Number.isSafeInteger(descriptor?.discovery_index) ? descriptor.discovery_index : 0),
+          catalog_entry_found: catalogEntryFound,
+          identity_catalog_count: catalog.length,
+          total_projects: catalog.length,
+          ...extra
+        });
+      } catch (_) { }
+    };
+    const snapshot = () => {
+      const sidebar = findIdentitySidebarRoot(root);
+      const visibleRows = projectRowsInSidebar(sidebar, options.baseUrl || globalThis.location?.href);
+      const connectedRows = projectRowCandidatesInSidebar(sidebar);
+      const section = projectSectionState(root, sidebar);
+      const scrollContainer = findIdentityScrollContainer(root, sidebar);
+      const moreAvailable = findMoreButtons(root, sidebar).length > 0;
+      return {
+        sidebar,
+        visibleRows,
+        connectedRows,
+        section,
+        scrollContainer,
+        moreAvailable
+      };
+    };
+    const matchFromSnapshot = (current) => projectRowRelocationForIdentityDescriptor(
+      current.sidebar,
+      current.visibleRows,
+      descriptor,
+      options.baseUrl || globalThis.location?.href,
+      { catalog });
+    const extraFromSnapshot = (current, phase, scrolled = false) => ({
+      relocationPhase: phase,
+      visibleProjectRowCount: current.visibleRows.length,
+      projectSectionFound: current.section.projectSectionFound === true,
+      projectScrollContainerFound: Boolean(current.scrollContainer),
+      scrollRequired: scrollContainerCanAdvance(current.scrollContainer)
+        || current.visibleRows.length === 0,
+      scrollPositionChanged: scrolled,
+      moreAvailable: current.moreAvailable,
+      catalogEntryFound
+    });
+
+    // Remounted Sidebars often paint an empty Project section first. Wait a
+    // bounded number of mutation passes before treating 0 rows as terminal.
+    for (let pass = 0; pass < 8; pass += 1) {
+      const current = snapshot();
+      if (current.visibleRows.length > 0 || current.connectedRows.length > 0) break;
+      await waitForSidebarMutation(root, options.settleMs === undefined ? 50 : options.settleMs);
+    }
+
+    let lastRelocation = {
+      row: null,
+      candidateCount: 0,
+      rowFound: false,
+      matchMethod: "none",
+      sectionVerified: false,
+      reason: "project_row_not_found"
+    };
+    let moreClicked = false;
+    let moreAttempted = false;
+    let scrollAttempts = 0;
+    let previousTop = null;
+    let phase = "initial_fingerprint";
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const current = snapshot();
+      lastRelocation = matchFromSnapshot(current);
+      if (attempt === 0) phase = "initial_fingerprint";
+      else if (lastRelocation.matchMethod === "unique_catalog_title") phase = "catalog_title_visible_scan";
+      else if (moreAttempted && scrollAttempts === 0) phase = "more_expand";
+      else if (scrollAttempts > 0) phase = "sidebar_scroll_scan";
+      else phase = "catalog_title_visible_scan";
+      emitRelocation(lastRelocation, {
+        ...extraFromSnapshot(current, phase, false),
+        relocation_attempt: attempt,
+        more_clicked: moreClicked,
+        more_attempted: moreAttempted,
+        more_available: current.moreAvailable,
+        scroll_attempts: scrollAttempts
+      });
+      if (lastRelocation.rowFound && lastRelocation.row) return lastRelocation;
+      if (lastRelocation.reason === "ambiguous_project_row_match") return lastRelocation;
+      if (lastRelocation.row?.isConnected === false) lastRelocation.row = null;
+
+      moreAttempted = true;
+      phase = "more_expand";
+      const moreClicks = await expandSidebarMoreButtons(root, {
+        maxMoreClicks: 1,
+        clickedMoreControls,
+        settleMs: options.settleMs
+      }, current.sidebar);
+      if (moreClicks > 0) moreClicked = true;
+      const afterMore = snapshot();
+      let scrolled = false;
+      const scrollContainer = afterMore.scrollContainer;
+      if (scrollContainerCanAdvance(scrollContainer)) {
+        phase = "sidebar_scroll_scan";
+        const beforeTop = Number(scrollContainer.scrollTop) || 0;
+        const clientHeight = Number(scrollContainer.clientHeight) || 240;
+        const scrollHeight = Number(scrollContainer.scrollHeight) || 0;
+        const maxTop = Math.max(0, scrollHeight - clientHeight);
+        try {
+          scrollContainer.scrollTop = Math.min(maxTop, beforeTop + Math.max(48, clientHeight));
+        } catch (_) { }
+        const afterTop = Number(scrollContainer.scrollTop) || 0;
+        if (afterTop !== beforeTop) {
+          scrolled = true;
+          scrollAttempts += 1;
+        }
+        previousTop = afterTop;
+      }
+      const afterScroll = snapshot();
+      const advanced = moreClicks > 0
+        || scrolled
+        || afterScroll.visibleRows.length !== current.visibleRows.length
+        || afterScroll.connectedRows.length !== current.connectedRows.length;
+      if (!advanced) {
+        lastRelocation = matchFromSnapshot(afterScroll);
+        emitRelocation(lastRelocation, {
+          ...extraFromSnapshot(afterScroll, "exhausted", scrolled),
+          relocation_attempt: attempt,
+          more_clicked: moreClicked,
+          more_attempted: moreAttempted,
+          more_available: afterScroll.moreAvailable,
+          scroll_attempts: scrollAttempts,
+          scroll_position_changed: scrolled
+        });
+        return lastRelocation;
+      }
+      await waitForSidebarMutation(root, options.settleMs === undefined ? 50 : options.settleMs);
+    }
+    const finalSnapshot = snapshot();
+    lastRelocation = matchFromSnapshot(finalSnapshot);
+    emitRelocation(lastRelocation, {
+      ...extraFromSnapshot(finalSnapshot, "exhausted", false),
+      relocation_attempt: maxAttempts - 1,
+      more_clicked: moreClicked,
+      more_attempted: moreAttempted,
+      more_available: finalSnapshot.moreAvailable,
+      scroll_attempts: scrollAttempts
+    });
+    return lastRelocation;
   }
 
   async function resolveProjectIdentityFromDisclosureAsync(
@@ -2341,6 +2770,10 @@
         lastReason = "project_id_url_mismatch";
         return null;
       }
+      if (identity?.reason === "ambiguous_project_identity") {
+        lastReason = "ambiguous_project_identity";
+        return null;
+      }
       if (identity) {
         lastReason = "none";
       } else if (urlChanged) {
@@ -2371,6 +2804,9 @@
 
     let identity = inspect();
     if (identity) return result(identity);
+    if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
+      return result(null, lastReason);
+    }
 
     // An expanded region may be present but still hydrating. Do not click it
     // again; the bounded wait below gives its metadata a chance to arrive.
@@ -2412,11 +2848,17 @@
     }
 
     if (identity) return result(identity);
+    if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
+      return result(null, lastReason);
+    }
     const deadline = startedAt + timeoutMs;
     while (Date.now() <= deadline) {
       await waitForLocatorDelay(Math.min(100, Math.max(0, deadline - Date.now())));
       identity = inspect();
       if (identity) return result(identity);
+      if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
+        return result(null, lastReason);
+      }
     }
     return result(
       null,
@@ -2486,7 +2928,7 @@
     return null;
   }
 
-  function identityProjectResult(project, projectIndex, identity, method, reason, navigationVerified) {
+  function identityProjectResult(project, projectIndex, identity, method, reason, navigationVerified, extras = {}) {
     const resolved = Boolean(
       metadataTitle(project?.title, "")
       && identity?.projectId
@@ -2499,6 +2941,18 @@
       project_index: projectIndex,
       ...(identity?.projectId ? { project_id: identity.projectId } : {}),
       ...(identity?.projectUrl ? { url: identity.projectUrl } : {}),
+      ...(identity?.source || extras.identity_source
+        ? { identity_source: extras.identity_source || identity.source }
+        : {}),
+      ...(typeof extras.navigation_fallback_attempted === "boolean"
+        ? { navigation_fallback_attempted: extras.navigation_fallback_attempted }
+        : {}),
+      ...(typeof extras.navigation_fallback_success === "boolean"
+        ? { navigation_fallback_success: extras.navigation_fallback_success }
+        : {}),
+      ...(typeof extras.identity_candidate_consistent === "boolean"
+        ? { identity_candidate_consistent: extras.identity_candidate_consistent }
+        : {}),
       resolution_method: method,
       navigation_target_verified: navigationVerified === true,
       project_url_pattern_valid: Boolean(identity?.projectId
@@ -2619,10 +3073,50 @@
       "row_project_url_found",
       "nested_project_url_found",
       "stable_identity_candidate_count",
+      "distinct_candidate_project_id_count",
+      "candidate_project_id_fingerprints",
+      "resolved_project_id_fingerprint",
+      "identity_candidate_consistent",
+      "discovery_key_present",
       "identity_source",
       "empty_project_candidate",
+      "sidebar_child_identity_unavailable",
       "navigation_fallback_attempted",
-      "navigation_fallback_success"
+      "navigation_fallback_success",
+      "relocation_attempted",
+      "relocation_success",
+      "fingerprint_match",
+      "fingerprint_match_component_count",
+      "fingerprint_mismatch_component_count",
+      "discovery_row_still_connected",
+      "discovery_row_reused",
+      "current_sidebar_candidate_count",
+      "exact_candidate_count",
+      "ambiguous_candidate_count",
+      "sidebar_dom_generation_changed",
+      "aria_controls_changed",
+      "row_position_changed",
+      "navigation_since_discovery",
+      "relocation_method",
+      "failure_reason",
+      "relocation_attempt",
+      "more_clicked",
+      "more_attempted",
+      "more_available",
+      "scroll_attempts",
+      "relocation_phase",
+      "catalog_entry_found",
+      "catalog_title_unique",
+      "catalog_title_match_count",
+      "visible_project_row_count",
+      "project_section_found",
+      "project_scroll_container_found",
+      "scroll_required",
+      "scroll_position_changed",
+      "rows_reenumerated_after_navigation",
+      "stale_discovery_row_discarded",
+      "identity_catalog_count",
+      "total_projects"
     ];
     const navigationTelemetry = [];
     const emitNavigationTelemetry = (stage, fields = {}) => {
@@ -2683,43 +3177,39 @@
       let targetInfo = null;
       let identitySource = identity ? "navigation_url" : "none";
       let emptyProjectCandidate = false;
+      let sidebarChildIdentityUnavailable = false;
       let navigationFallbackAttempted = false;
       let navigationFallbackSuccess = false;
       let classificationRow = null;
       let sourceStats = null;
+      const identityCatalog = Array.isArray(options.identityCatalog)
+        ? options.identityCatalog
+        : [];
       navigationInternalReason = reason || "none";
       if (!identity) {
-        const sidebar = findSidebarRoot(root);
-        const rows = projectRowsInSidebar(sidebar, baseUrl);
         emitNavigationTelemetry("collector_project_identity_row_relocation_start", {
           project_index: currentProjectIndex
         });
-        const relocation = projectRowRelocationForIdentityDescriptor(
-          sidebar,
-          rows,
-          descriptor,
-          baseUrl);
-        emitNavigationTelemetry("collector_project_identity_row_relocation", {
-          project_index: currentProjectIndex,
-          candidate_count: relocation.candidateCount,
-          row_found: relocation.rowFound,
-          match_method: relocation.matchMethod,
-          section_verified: relocation.sectionVerified,
-          stale_element_reused: false,
-          unresolved_reason: relocation.reason || "none"
+        const relocation = await relocateProjectRowForIdentityAsync(root, descriptor, {
+          catalog: identityCatalog,
+          baseUrl,
+          navigationSinceDiscovery: true,
+          sidebarDomGenerationChanged: true,
+          telemetry: (event, fields) => emitNavigationTelemetry(event, fields)
         });
         const row = relocation.row;
         classificationRow = row;
         let disclosureResult = null;
         if (row) {
           const relocateRow = () => {
-            const currentSidebar = findSidebarRoot(root);
+            const currentSidebar = findIdentitySidebarRoot(root);
             const currentRows = projectRowsInSidebar(currentSidebar, baseUrl);
             return projectRowRelocationForIdentityDescriptor(
               currentSidebar,
               currentRows,
               descriptor,
-              baseUrl).row;
+              baseUrl,
+              { catalog: identityCatalog }).row;
           };
           disclosureResult = await resolveProjectIdentityFromDisclosureAsync(
             root,
@@ -2908,6 +3398,11 @@
               reason = null;
               break;
             }
+            if (candidateIdentity?.reason === "ambiguous_project_identity"
+              || candidateIdentity?.reason === "project_id_url_mismatch") {
+              identityCandidateReason = candidateIdentity.reason;
+              break;
+            }
             if (candidateIdentity?.reason && candidateIdentity.reason !== "missing_stable_identity") {
               identityCandidateReason = identityCandidateReason || candidateIdentity.reason;
             }
@@ -2925,7 +3420,8 @@
               click_target_is_project_row: targetInfo.targetInsideProjectRow,
               click_target_section_verified: relocation.sectionVerified
             });
-          } else if (identityCandidateReason === "project_id_url_mismatch") {
+          } else if (identityCandidateReason === "project_id_url_mismatch"
+            || identityCandidateReason === "ambiguous_project_identity") {
             emitNavigationTelemetry("collector_project_identity_click", {
               project_index: currentProjectIndex,
               clickable_element_found: Boolean(targetInfo.target),
@@ -2940,12 +3436,19 @@
             navigationInternalReason = reason;
           } else {
             const afterDisclosure = disclosureResult?.after || {};
-            emptyProjectCandidate = Boolean(
-              disclosureResult?.isDisclosure
-              && (afterDisclosure.controlledRegionProjectChatLinkCount || 0) === 0
-              && (afterDisclosure.controlledRegionProjectHomeLinkCount || 0) === 0
-              && afterDisclosure.controlledRegionProjectIdentityPresent !== true);
-            const fallbackTarget = emptyProjectCandidate
+            const childChatCount = Number.isSafeInteger(afterDisclosure.controlledRegionProjectChatLinkCount)
+              ? afterDisclosure.controlledRegionProjectChatLinkCount
+              : 0;
+            sidebarChildIdentityUnavailable = Boolean(
+              !identity
+              && (
+                (disclosureResult?.isDisclosure && childChatCount === 0)
+                || (!disclosureResult?.isDisclosure && childChatCount === 0)));
+            // Compatibility alias: this is NOT "the Project has zero chats".
+            // It only means the Sidebar did not expose a child Chat URL that
+            // can be used as a stable identity source.
+            emptyProjectCandidate = sidebarChildIdentityUnavailable;
+            const fallbackTarget = !identity
               ? projectIdentityNavigationTargetForRow(row, baseUrl)
               : { target: null };
             const distinctFallback = Boolean(
@@ -3183,7 +3686,36 @@
       if (classificationRow) {
         sourceStats = projectIdentityCandidateStats(classificationRow, root, baseUrl);
       }
+      if (sourceStats && sourceStats.identityCandidateConsistent === false) {
+        identity = null;
+        observedIdentity = null;
+        identitySource = "none";
+        reason = reason || "ambiguous_project_identity";
+        navigationInternalReason = reason;
+      }
       if (identity?.source) identitySource = identity.source;
+      const resolvedFingerprint = sourceStats?.fingerprintFor
+        ? sourceStats.fingerprintFor(identity?.projectId)
+        : (identity?.projectId ? "pid-1" : "none");
+      emitNavigationTelemetry("collector_project_identity_candidate_consistency", {
+        project_index: currentProjectIndex,
+        discovery_key_present: Boolean(metadataIdentifier(descriptor?.discovery_key || descriptor?.discoveryKey)),
+        identity_source: identity ? (identitySource || identity.source || "other") : "none",
+        stable_identity_candidate_count: sourceStats?.stableIdentityCandidateCount || 0,
+        distinct_candidate_project_id_count: sourceStats?.distinctCandidateProjectIdCount || 0,
+        candidate_project_id_fingerprints: sourceStats?.candidateProjectIdFingerprints || "",
+        resolved_project_id_fingerprint: resolvedFingerprint,
+        identity_candidate_consistent: sourceStats ? sourceStats.identityCandidateConsistent === true : true,
+        child_chat_count: sourceStats?.childChatCount || 0,
+        child_project_url_count: sourceStats?.childProjectUrlCount || 0,
+        row_found: Boolean(classificationRow),
+        disclosure_found: sourceStats?.disclosureFound === true,
+        controlled_region_found: sourceStats?.controlledRegionFound === true,
+        navigation_fallback_attempted: navigationFallbackAttempted,
+        navigation_fallback_success: navigationFallbackSuccess,
+        navigation_target_verified: Boolean(observedIdentity),
+        resolution_success: Boolean(identity)
+      });
       emitNavigationTelemetry("collector_project_identity_source_classification", {
         project_index: currentProjectIndex,
         row_found: Boolean(classificationRow),
@@ -3194,8 +3726,14 @@
         nested_project_url_found: sourceStats?.nestedProjectUrlFound === true,
         controlled_region_found: sourceStats?.controlledRegionFound === true,
         stable_identity_candidate_count: sourceStats?.stableIdentityCandidateCount || 0,
+        distinct_candidate_project_id_count: sourceStats?.distinctCandidateProjectIdCount || 0,
+        candidate_project_id_fingerprints: sourceStats?.candidateProjectIdFingerprints || "",
+        resolved_project_id_fingerprint: resolvedFingerprint,
+        identity_candidate_consistent: sourceStats ? sourceStats.identityCandidateConsistent === true : true,
+        discovery_key_present: Boolean(metadataIdentifier(descriptor?.discovery_key || descriptor?.discoveryKey)),
         identity_source: identity ? (identitySource || identity.source || "other") : "none",
         empty_project_candidate: emptyProjectCandidate,
+        sidebar_child_identity_unavailable: sidebarChildIdentityUnavailable,
         navigation_fallback_attempted: navigationFallbackAttempted,
         navigation_fallback_success: navigationFallbackSuccess,
         project_id_extracted: Boolean(identity?.projectId),
@@ -3229,7 +3767,15 @@
         identity,
         navigationResolved ? "navigation" : "dom",
         reason,
-        navigationResolved);
+        navigationResolved,
+        {
+          navigation_fallback_attempted: navigationFallbackAttempted === true,
+          navigation_fallback_success: navigationFallbackSuccess === true,
+          identity_candidate_consistent: sourceStats
+            ? sourceStats.identityCandidateConsistent === true
+            : true,
+          identity_source: identity ? (identitySource || identity.source || "other") : undefined
+        });
       if (identity) {
         if (navigationResolved) navigationResolvedCount = 1;
         else nonNavigationResolvedCount = 1;
@@ -3328,14 +3874,14 @@
     // Resolve the Sidebar and its scroll container exactly once for the root
     // Project scan. Do not let virtualized DOM updates or final telemetry
     // replace either object while the monotonic scan is in progress.
-    const sidebar = findSidebarRoot(root);
-    const scrollContainer = findSidebarScrollContainer(root, sidebar);
+    const sidebar = findIdentitySidebarRoot(root);
+    const scrollContainer = findIdentityScrollContainer(root, sidebar);
     const canScroll = scrollContainer && typeof scrollContainer.scrollTop === "number"
       && typeof scrollContainer.scrollHeight === "number"
       && typeof scrollContainer.clientHeight === "number";
     const originalScrollTop = canScroll ? scrollContainer.scrollTop : null;
-    const maxScrolls = Math.max(1, Math.min(64, Number(options.maxScrolls) || 32));
-    const maxMoreClicks = Math.max(0, Math.min(12, Number(options.maxMoreClicks) || 8));
+    const maxScrolls = Math.max(1, Math.min(128, Number(options.maxScrolls) || 32));
+    const maxMoreClicks = Math.max(0, Math.min(32, Number(options.maxMoreClicks) || 8));
     const deadline = Date.now() + Math.max(1000, Math.min(120000, Number(options.timeoutMs) || 30000));
     const initialSettleMs = options.initialSettleMs === undefined
       ? 250
@@ -3367,7 +3913,8 @@
       const clicks = await expandSidebarMoreButtons(root, {
         ...options,
         maxMoreClicks: maxMoreClicks - moreControlClicks,
-        clickedMoreControls
+        clickedMoreControls,
+        includeHiddenMore: true
       }, sidebar);
       moreControlClicks += clicks;
       const controlsAfter = findMoreButtons(root, sidebar);
@@ -3394,10 +3941,20 @@
         mergeContextProjectCatalog(merged, snapshot);
         mergeContextConversationCatalog(merged, snapshot);
         const added = merged.projects.length + merged.conversations.length - beforeCount;
-        if (!canScroll) break;
+        const moreRemainingUnclicked = findMoreButtons(root, sidebar, { requireVisible: false })
+          .some((candidate) => {
+            const key = sidebarMoreControlKey(candidate);
+            return !clickedMoreControls.has(candidate)
+              && (!key || !clickedMoreControls.has(key));
+          });
+        if (!canScroll) {
+          if (expandedBeforeScan > 0 || moreRemainingUnclicked) continue;
+          break;
+        }
 
         const maxTop = Math.max(0, beforeHeight - clientHeight);
         if (beforeTop >= maxTop) {
+          if (expandedBeforeScan > 0 || moreRemainingUnclicked) continue;
           sidebarScrollComplete = true;
           break;
         }
@@ -3421,16 +3978,29 @@
         }
         // Keep the old scan order: the next pass collects the rows exposed by
         // this scroll, including the final viewport at the bottom.
-        if (stagnantPasses >= 2) {
+        if (stagnantPasses >= 2 && !moreRemainingUnclicked) {
           sidebarScrollComplete = true;
           break;
         }
       }
+      const trailingMoreClicks = await expandAvailableMoreButtons();
+      if (trailingMoreClicks > 0) {
+        const trailing = collectContextEntries(root, url, sidebar);
+        mergeContextProjectCatalog(merged, trailing);
+        mergeContextConversationCatalog(merged, trailing);
+      }
+      const finalMoreUnclicked = findMoreButtons(root, sidebar, { requireVisible: false })
+        .some((candidate) => {
+          const key = sidebarMoreControlKey(candidate);
+          return !clickedMoreControls.has(candidate)
+            && (!key || !clickedMoreControls.has(key));
+        });
       const finalMetrics = scrollMetricsFor(scrollContainer);
-      sidebarScrollComplete = sidebarScrollComplete
+      sidebarScrollComplete = (sidebarScrollComplete
         || Boolean(finalMetrics && (!finalMetrics.canScroll
           || finalMetrics.atBottom
-          || stagnantPasses >= 2));
+          || stagnantPasses >= 2)))
+        && !finalMoreUnclicked;
       result = {
         // Project discovery is deliberately kept metadata-only. The
         // Collector receives these established Project URLs and performs the
@@ -4250,20 +4820,91 @@
       selected_scroll_container_found: Boolean(structure.selectedScrollCandidate),
       selected_scroll_client_height: structure.selectedScrollInfo?.metrics.clientHeight,
       selected_scroll_height: structure.selectedScrollInfo?.metrics.scrollHeight,
-      selected_scroll_distance_from_chat_list: structure.selectedScrollInfo?.distanceFromChatList
+      selected_scroll_distance_from_chat_list: structure.selectedScrollInfo?.distanceFromChatList,
+      main_candidate_project_id_unique_count: 0,
+      main_mismatch_project_id_unique_count: 0,
+      main_current_project_id_occurrence_count: 0,
+      main_mismatch_all_same_project_id: false,
+      main_mismatch_same_project_id_count: 0,
+      project_id_source_chat_href_count: 0,
+      project_id_source_nested_href_count: 0,
+      project_id_source_data_attribute_count: 0,
+      project_id_source_ancestor_count: 0,
+      project_id_source_project_wrapper_count: 0,
+      project_id_source_unknown_count: 0,
+      project_chat_membership_inconsistent: false
     };
+    const mainCandidateProjectIds = [];
+    const mainMismatchProjectIds = [];
 
     const projectIdFromLocalAncestorChain = (element, stopAt) => {
       let current = element;
       for (let depth = 0; current && depth < 32; depth += 1, current = current.parentElement) {
-        // The selected main region is a broad container, not a Project
-        // membership boundary. Do not let metadata on that container classify
-        // every plain /c link as belonging to another Project.
         if (stopAt && current === stopAt) break;
         const projectIdFromMetadata = projectIdFromElement(current, baseUrl);
         if (projectIdFromMetadata) return projectIdFromMetadata;
       }
       return null;
+    };
+
+    const recordProjectIdSource = (source) => {
+      if (source === "chat_href") collectionTelemetry.project_id_source_chat_href_count += 1;
+      else if (source === "nested_href") collectionTelemetry.project_id_source_nested_href_count += 1;
+      else if (source === "data_attribute") collectionTelemetry.project_id_source_data_attribute_count += 1;
+      else if (source === "ancestor") collectionTelemetry.project_id_source_ancestor_count += 1;
+      else if (source === "verified_main_region") collectionTelemetry.project_id_source_project_wrapper_count += 1;
+      else collectionTelemetry.project_id_source_unknown_count += 1;
+    };
+
+    const classifyMainMembership = (candidate) => {
+      const { element } = candidate;
+      const ownHref = conversationHrefFromElement(element, baseUrl);
+      const ownConversationProjectId = projectIdFromUrl(ownHref);
+      const nestedIds = nestedConversationProjectIds(element, baseUrl)
+        .filter((projectId) => projectId !== ownConversationProjectId);
+      const distinctIds = [
+        ...new Set([
+          ...(ownConversationProjectId ? [ownConversationProjectId] : []),
+          ...nestedIds
+        ])
+      ];
+      if (distinctIds.length > 1) {
+        return {
+          status: "ambiguous",
+          projectId: null,
+          source: "unknown"
+        };
+      }
+      if (ownConversationProjectId) {
+        return {
+          status: ownConversationProjectId === normalizedProjectId ? "current" : "other",
+          projectId: ownConversationProjectId,
+          source: "chat_href"
+        };
+      }
+      if (nestedIds.length === 1) {
+        return {
+          status: nestedIds[0] === normalizedProjectId ? "current" : "other",
+          projectId: nestedIds[0],
+          source: "nested_href"
+        };
+      }
+      const ownDataId = ownChatDataProjectId(element);
+      if (ownDataId) {
+        return {
+          status: ownDataId === normalizedProjectId ? "current" : "other",
+          projectId: ownDataId,
+          source: "data_attribute"
+        };
+      }
+      if (currentProjectIdVerified) {
+        return {
+          status: "current",
+          projectId: normalizedProjectId,
+          source: "verified_main_region"
+        };
+      }
+      return { status: "projectless", projectId: null, source: "unknown" };
     };
 
     for (const candidate of candidateElements) {
@@ -4274,27 +4915,66 @@
         continue;
       }
       const isInSidebar = sourceRegion === "sidebar";
-      const relationProjectId = sourceRegion === "main" || sourceRegion === "sidebar"
-        ? projectIdFromLocalAncestorChain(
-          element,
-          sourceRegion === "main" ? structure.mainRegion : sidebar)
-        : null;
-      const candidateProjectId = explicitProjectId || relationProjectId;
       if (sourceRegion === "main") {
-        if (candidateProjectId) {
+        if (currentProjectIdVerified) {
+          collectionTelemetry.main_candidate_from_verified_project_region_count += 1;
+        }
+        const membership = classifyMainMembership(candidate);
+        recordProjectIdSource(membership.source);
+        if (membership.projectId) {
           collectionTelemetry.main_candidate_with_project_id_count += 1;
-          if (candidateProjectId === normalizedProjectId) {
-            collectionTelemetry.main_current_project_match_count += 1;
-          } else {
-            collectionTelemetry.main_project_mismatch_count += 1;
+          mainCandidateProjectIds.push(membership.projectId);
+          if (membership.projectId === normalizedProjectId) {
+            collectionTelemetry.main_current_project_id_occurrence_count += 1;
           }
         } else {
           collectionTelemetry.main_candidate_without_project_id_count += 1;
         }
-        if (currentProjectIdVerified) {
-          collectionTelemetry.main_candidate_from_verified_project_region_count += 1;
+        if (membership.status === "current") {
+          collectionTelemetry.main_current_project_match_count += 1;
+        } else if (membership.status === "other") {
+          collectionTelemetry.main_project_mismatch_count += 1;
+          if (membership.projectId) mainMismatchProjectIds.push(membership.projectId);
+          collectionTelemetry.rejected_other_project_chat_count += 1;
+          continue;
+        } else if (membership.status === "ambiguous") {
+          collectionTelemetry.rejected_other_project_chat_count += 1;
+          continue;
+        } else {
+          collectionTelemetry.main_projectless_count += 1;
+          collectionTelemetry.rejected_projectless_chat_count += 1;
+          continue;
         }
+        const ownHref = conversationHrefFromElement(element, baseUrl);
+        const conversationUrl = projectIdFromUrl(ownHref) === normalizedProjectId
+          ? ownHref
+          : (explicitProjectId === normalizedProjectId
+            ? href
+            : `https://chatgpt.com/g/${encodeURIComponent(normalizedProjectId)}/c/${encodeURIComponent(conversationId)}`);
+        collectionTelemetry.matching_project_chat_link_count += 1;
+        collectionTelemetry.matching_project_chat_count += 1;
+        const entry = {
+          conversation_id: conversationId,
+          title: conversationTitleFromAnchor(element, conversationId),
+          url: conversationUrl,
+          project_id: normalizedProjectId,
+          project_title: projectTitle
+        };
+        const existing = conversationById.get(conversationId);
+        if (!existing) {
+          conversationById.set(conversationId, entry);
+          conversations.push(entry);
+        } else {
+          if (entry.title && (!existing.title || existing.title === conversationId)) existing.title = entry.title;
+          if (entry.url && !existing.url) existing.url = entry.url;
+        }
+        continue;
       }
+
+      const relationProjectId = isInSidebar
+        ? projectIdFromLocalAncestorChain(element, sidebar)
+        : null;
+      const candidateProjectId = explicitProjectId || relationProjectId;
       const scopedSidebarMatch = isInSidebar
         && !explicitProjectId
         && sidebarConversationBelongsToProject(
@@ -4310,23 +4990,7 @@
         collectionTelemetry.rejected_other_project_chat_count += 1;
         continue;
       }
-      // A Project page can render a row as a button/div or a plain /c link
-      // without an explicit Project id. Once the central Project region and
-      // current Project route are verified, that region is the ownership
-      // boundary for both forms. The fallback is deliberately unavailable
-      // when the current route is not verified.
-      const currentProjectMainMetadataMatch = sourceRegion === "main"
-        && currentProjectIdVerified
-        && !candidateProjectId;
-      if (currentProjectMainMetadataMatch) {
-        collectionTelemetry.main_current_project_match_count += 1;
-      }
-      const effectiveMatchedProjectId = matchedProjectId || (
-        currentProjectMainMetadataMatch ? normalizedProjectId : null);
-      if (effectiveMatchedProjectId !== normalizedProjectId) {
-        if (sourceRegion === "main" && !candidateProjectId) {
-          collectionTelemetry.main_projectless_count += 1;
-        }
+      if (matchedProjectId !== normalizedProjectId) {
         collectionTelemetry.rejected_projectless_chat_count += 1;
         continue;
       }
@@ -4351,6 +5015,25 @@
         if (entry.url && !existing.url) existing.url = entry.url;
       }
     }
+
+    const uniqueMainIds = [...new Set(mainCandidateProjectIds)];
+    const uniqueMismatchIds = [...new Set(mainMismatchProjectIds)];
+    collectionTelemetry.main_candidate_project_id_unique_count = uniqueMainIds.length;
+    collectionTelemetry.main_mismatch_project_id_unique_count = uniqueMismatchIds.length;
+    collectionTelemetry.main_mismatch_all_same_project_id = uniqueMismatchIds.length === 1
+      && mainMismatchProjectIds.length > 1;
+    collectionTelemetry.main_mismatch_same_project_id_count = uniqueMismatchIds.length === 1
+      ? mainMismatchProjectIds.length
+      : 0;
+    if (uniqueMismatchIds.length === 1) {
+      collectionTelemetry.main_mismatch_project_id = uniqueMismatchIds[0];
+    }
+    collectionTelemetry.project_chat_membership_inconsistent = currentProjectIdVerified
+      && collectionTelemetry.main_candidate_from_verified_project_region_count > 0
+      && collectionTelemetry.main_current_project_match_count === 0
+      && collectionTelemetry.main_project_mismatch_count > 0
+      && conversations.length === 0;
+
     return {
       projects,
       conversations,
@@ -4722,7 +5405,8 @@
       || scrollMetricsFor(containers.at(-1));
     const projectChatCollectionComplete = projectPageReady
       && chatContainerFound
-      && sidebarScrollComplete;
+      && sidebarScrollComplete
+      && latestSnapshot.project_chat_membership_inconsistent !== true;
     const finalRelevantRegion = latestSnapshot.main_region_found === true
       || latestSnapshot.chat_list_found === true
       || containers.length > 0;
@@ -4730,7 +5414,52 @@
       projectChatCollectionComplete
         || containers.every((container) => scrollMetricsFor(container)?.atBottom !== false),
       true);
-    if (projectChatCollectionComplete) {
+    const membershipFields = {
+      main_candidate_project_id_unique_count:
+        latestSnapshot.main_candidate_project_id_unique_count || 0,
+      main_mismatch_project_id_unique_count:
+        latestSnapshot.main_mismatch_project_id_unique_count || 0,
+      main_current_project_id_occurrence_count:
+        latestSnapshot.main_current_project_id_occurrence_count || 0,
+      main_mismatch_all_same_project_id:
+        latestSnapshot.main_mismatch_all_same_project_id === true,
+      main_mismatch_same_project_id_count:
+        latestSnapshot.main_mismatch_same_project_id_count || 0,
+      main_mismatch_project_id: latestSnapshot.main_mismatch_project_id || null,
+      project_id_source_chat_href_count:
+        latestSnapshot.project_id_source_chat_href_count || 0,
+      project_id_source_nested_href_count:
+        latestSnapshot.project_id_source_nested_href_count || 0,
+      project_id_source_data_attribute_count:
+        latestSnapshot.project_id_source_data_attribute_count || 0,
+      project_id_source_ancestor_count:
+        latestSnapshot.project_id_source_ancestor_count || 0,
+      project_id_source_project_wrapper_count:
+        latestSnapshot.project_id_source_project_wrapper_count || 0,
+      project_id_source_unknown_count:
+        latestSnapshot.project_id_source_unknown_count || 0,
+      project_chat_membership_inconsistent:
+        latestSnapshot.project_chat_membership_inconsistent === true
+    };
+    if (latestSnapshot.project_chat_membership_inconsistent === true) {
+      emitTelemetry({
+        current_project_id: normalizedProjectId,
+        project_page_ready: projectPageReady,
+        current_project_id_verified: currentProjectId === normalizedProjectId,
+        chat_container_found: chatContainerFound,
+        candidate_chat_count: latestSnapshot.candidate_chat_count || 0,
+        candidate_from_main_count: latestSnapshot.candidate_from_main_count || 0,
+        matching_project_chat_count: latestSnapshot.matching_project_chat_count || 0,
+        rejected_other_project_chat_count: latestSnapshot.rejected_other_project_chat_count || 0,
+        main_current_project_match_count: latestSnapshot.main_current_project_match_count || 0,
+        main_project_mismatch_count: latestSnapshot.main_project_mismatch_count || 0,
+        ...membershipFields,
+        project_chat_collection_complete: false,
+        status: "error",
+        error_code: "context_project_chat_membership_mismatch",
+        stage: "collector_project_chat_collection_failed"
+      });
+    } else if (projectChatCollectionComplete) {
       emitTelemetry({
         current_project_id: normalizedProjectId,
         project_page_ready: projectPageReady,
@@ -4760,6 +5489,7 @@
         scroll_complete: true,
         discovered_chat_count: merged.conversations.length,
         deduped_chat_count: merged.conversations.length,
+        ...membershipFields,
         project_chat_collection_complete: true,
         status: "completed",
         stage: "collector_project_chat_collection_complete"
@@ -4804,6 +5534,34 @@
       main_custom_gpt_count: latestSnapshot.main_custom_gpt_count || 0,
       main_candidate_from_verified_project_region_count:
         latestSnapshot.main_candidate_from_verified_project_region_count || 0,
+      main_candidate_project_id_unique_count:
+        latestSnapshot.main_candidate_project_id_unique_count || 0,
+      main_mismatch_project_id_unique_count:
+        latestSnapshot.main_mismatch_project_id_unique_count || 0,
+      main_current_project_id_occurrence_count:
+        latestSnapshot.main_current_project_id_occurrence_count || 0,
+      main_mismatch_all_same_project_id:
+        latestSnapshot.main_mismatch_all_same_project_id === true,
+      main_mismatch_same_project_id_count:
+        latestSnapshot.main_mismatch_same_project_id_count || 0,
+      main_mismatch_project_id: latestSnapshot.main_mismatch_project_id || null,
+      project_id_source_chat_href_count:
+        latestSnapshot.project_id_source_chat_href_count || 0,
+      project_id_source_nested_href_count:
+        latestSnapshot.project_id_source_nested_href_count || 0,
+      project_id_source_data_attribute_count:
+        latestSnapshot.project_id_source_data_attribute_count || 0,
+      project_id_source_ancestor_count:
+        latestSnapshot.project_id_source_ancestor_count || 0,
+      project_id_source_project_wrapper_count:
+        latestSnapshot.project_id_source_project_wrapper_count || 0,
+      project_id_source_unknown_count:
+        latestSnapshot.project_id_source_unknown_count || 0,
+      project_chat_membership_inconsistent:
+        latestSnapshot.project_chat_membership_inconsistent === true,
+      errorCode: latestSnapshot.project_chat_membership_inconsistent === true
+        ? "context_project_chat_membership_mismatch"
+        : undefined,
       chat_scroll_container_count: containers.length,
       relevant_region_present: finalRelevantRegion,
       main_found: latestSnapshot.main_found === true,

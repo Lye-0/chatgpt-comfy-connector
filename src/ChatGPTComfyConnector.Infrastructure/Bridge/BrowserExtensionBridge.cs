@@ -49,7 +49,10 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
     // accepted result may arrive on the next authenticated socket.
     private static readonly TimeSpan BridgeReconnectGrace = TimeSpan.FromSeconds(7);
     private static readonly TimeSpan MediaAttachResponseTimeout = TimeSpan.FromMinutes(3);
-    private static readonly TimeSpan ChatGptContextResponseTimeout = TimeSpan.FromSeconds(20);
+    // Root Project discovery plus identity resolution is bounded by the
+    // Extension Collector at 150s. A shorter Desktop wait returns
+    // context_response_timeout and then presents a stale cache as "取得済み".
+    private static readonly TimeSpan ChatGptContextResponseTimeout = TimeSpan.FromSeconds(180);
     private static readonly TimeSpan MediaRegistrationLifetime = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(3);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -375,7 +378,13 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         catch (TimeoutException)
         {
             var result = ContextError(requestId, "context_response_timeout", "Browser ExtensionからChatGPT Contextが返りませんでした。", "context_response_timeout");
-            PublishDiagnostic("chatgpt.context result", requestId: requestId, status: result.Status, errorCode: result.ErrorCode, stage: result.Stage);
+            PublishDiagnostic(
+                "chatgpt.context result",
+                requestId: requestId,
+                status: result.Status,
+                errorCode: result.ErrorCode,
+                stage: result.Stage,
+                detail: "provider_deserialized_project_count=0");
             return result;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -1467,12 +1476,24 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                         var completed = pending.CurrentOnly == currentOnly
                             ? context
                             : ContextError(context.RequestId, "context_response_mode_mismatch", "ChatGPT Context responseの種別が一致しません。", "context_response_validation");
-                        PublishDiagnostic("chatgpt.context result", requestId: completed.RequestId, status: completed.Status, errorCode: completed.ErrorCode, stage: completed.Stage);
+                        PublishDiagnostic(
+                            "chatgpt.context result",
+                            requestId: completed.RequestId,
+                            status: completed.Status,
+                            errorCode: completed.ErrorCode,
+                            stage: completed.Stage,
+                            detail: ContextCountDetail(completed, "bridge_received"));
                         pending.Completion.TrySetResult(completed);
                     }
                     else
                     {
-                        PublishDiagnostic("chatgpt.context result", requestId: context.RequestId, status: context.Status, errorCode: context.ErrorCode, stage: context.Stage);
+                        PublishDiagnostic(
+                            "chatgpt.context result",
+                            requestId: context.RequestId,
+                            status: context.Status,
+                            errorCode: context.ErrorCode ?? "context_response_unsolicited",
+                            stage: "context_response_unsolicited",
+                            detail: ContextCountDetail(context, "late_or_unsolicited"));
                     }
                 }
                 else if (type is "chatgpt.context.current" or "chatgpt.context.changed")
@@ -1865,6 +1886,14 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         catch (Exception) { }
     }
 
+    private static string ContextCountDetail(BrowserExtensionChatGptContextSnapshot snapshot, string source)
+        => string.Join(
+            ", ",
+            $"forwarding_source={source}",
+            $"extension_response_project_count={snapshot.Projects.Count}",
+            $"provider_deserialized_project_count={snapshot.Projects.Count}",
+            $"extension_response_chat_count={snapshot.Conversations.Count}");
+
     private void PublishDiagnostic(
         string eventName,
         string? requestId = null,
@@ -1876,7 +1905,8 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         int? iteration = null,
         int? targetTabId = null,
         string? sessionId = null,
-        string? boundaryId = null)
+        string? boundaryId = null,
+        string? detail = null)
     {
         var diagnostic = new BrowserExtensionBridgeDiagnostic(
             eventName,
@@ -1889,7 +1919,8 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             iteration,
             targetTabId,
             sessionId,
-            boundaryId);
+            boundaryId,
+            detail);
         try { Diagnostic?.Invoke(this, new BrowserExtensionBridgeDiagnosticEventArgs(diagnostic)); }
         catch (Exception) { }
     }

@@ -194,6 +194,32 @@
     '[data-conversation-title]',
     '[data-project-title]'
   ];
+  const conversationTitleSelectors = [
+    '[data-conversation-title]',
+    '[data-chat-title]',
+    '[data-thread-title]',
+    '[data-sidebar-item-title]',
+    '[data-marquee-text="true"]',
+    '[data-marquee-text]',
+    '[role="heading"]',
+    "h1",
+    "h2",
+    "h3",
+    "h4"
+  ];
+  const conversationTitleAttributeNames = [
+    "data-conversation-title",
+    "data-chat-title",
+    "data-thread-title",
+    "data-title"
+  ];
+  const conversationPreviewAttributeNames = [
+    "data-conversation-preview",
+    "data-chat-preview",
+    "data-preview",
+    "data-snippet",
+    "data-excerpt"
+  ];
   const projectPageMainSelectors = [
     "main",
     '[role="main"]',
@@ -572,20 +598,218 @@
     return metadataTitle(direct, fallback);
   }
 
+  function conversationElementMarker(element) {
+    return [
+      attributeValue(element, "data-testid"),
+      attributeValue(element, "data-item-type"),
+      attributeValue(element, "data-entity-type"),
+      attributeValue(element, "class"),
+      attributeValue(element, "role"),
+      attributeValue(element, "aria-label")
+    ].join(" ").toLowerCase();
+  }
+
+  function isConversationPreviewElement(element) {
+    if (!element || !isVisible(element)) return false;
+    const tagName = element.tagName?.toUpperCase();
+    if (tagName === "TIME") return true;
+    const explicitPreview = conversationPreviewAttributeNames.some((name) =>
+      hasAttribute(element, name));
+    if (explicitPreview) return true;
+    const marker = conversationElementMarker(element);
+    return /(?:^|[\s:_-])(?:preview|snippet|excerpt|summary|description)(?:$|[\s:_-])/i
+      .test(marker)
+      || /(?:^|[\s:_-])line-clamp-[2-9](?:$|[\s:_-])/i.test(marker)
+      || /(?:^|[\s:_-])(?:text-token-text-secondary|text-secondary|muted)(?:$|[\s:_-])/i
+        .test(marker);
+  }
+
+  function isConversationTitleElement(element) {
+    if (!element || !isVisible(element)) return false;
+    const tagName = element.tagName?.toUpperCase();
+    if (["BUTTON", "TIME", "SVG", "SCRIPT", "STYLE"].includes(tagName)) return false;
+    if (hasAttribute(element, "aria-hidden")
+      && attributeValue(element, "aria-hidden").toLowerCase() === "true") return false;
+    if (hasAttribute(element, "data-project-title")
+      || hasAttribute(element, "data-project-name")) return false;
+    const marker = conversationElementMarker(element);
+    if (/(?:^|[\s:_-])(?:menu|more|pin|archive|rename|delete|action)(?:$|[\s:_-])/i
+      .test(marker)) return false;
+    if (conversationTitleAttributeNames.some((name) => hasAttribute(element, name))) {
+      return true;
+    }
+    if (attributeValue(element, "role").toLowerCase() === "heading") return true;
+    return /(?:^|[\s:_-])(?:conversation|chat|thread)?[\s:_-]*(?:title|name)(?:$|[\s:_-])/i
+      .test(marker)
+      || /(?:^|[\s:_-])(?:truncate|line-clamp-1)(?:$|[\s:_-])/i.test(marker);
+  }
+
+  function conversationTitleDetailsFromElement(element) {
+    const nodes = element
+      ? [element, ...descendantElementsOf(element)]
+        .filter((candidate, index, all) => all.indexOf(candidate) === index)
+        .filter((candidate) => isVisible(candidate))
+      : [];
+    const previewElements = nodes.filter((candidate) => isConversationPreviewElement(candidate));
+    const rowText = normalizeText(visibleElementText(element))
+      .replace(/\s+/g, " ")
+      .trim();
+    const details = (title, source, titleElementFound, fallbackUsed, candidateCount) => {
+      const normalizedTitle = metadataTitle(title, "");
+      return {
+        title: normalizedTitle,
+        chat_title_source: source,
+        title_element_found: titleElementFound === true,
+        preview_element_found: previewElements.length > 0,
+        title_extraction_success: normalizedTitle.length > 0,
+        title_candidate_count: Math.max(0, Number(candidateCount) || 0),
+        title_character_count: normalizedTitle.length,
+        row_text_character_count: rowText.length,
+        title_differs_from_row_text: normalizedTitle.length > 0 && normalizedTitle !== rowText,
+        title_fallback_used: fallbackUsed === true
+      };
+    };
+    if (nodes.length === 0) return details("", "none", false, false, 0);
+
+    // Explicit title metadata wins and is read from the attribute itself.
+    // This avoids accidentally including preview descendants of a broad row.
+    for (const candidate of nodes) {
+      if (isConversationPreviewElement(candidate)) continue;
+      for (const name of conversationTitleAttributeNames) {
+        if (name === "data-title"
+          && candidate !== element
+          && (candidate.tagName?.toUpperCase() === "BUTTON"
+            || attributeValue(candidate, "role").toLowerCase() === "button")) {
+          continue;
+        }
+        const value = attributeValue(candidate, name);
+        if (value.trim().length > 0) {
+          return details(value, "title_attribute", true, false, 1);
+        }
+      }
+      const tooltipTitle = attributeValue(candidate, "title");
+      if (tooltipTitle.trim().length > 0 && candidate === element) {
+        return details(tooltipTitle, "title_attribute", true, false, 1);
+      }
+    }
+
+    const selectorCandidates = uniqueElements(conversationTitleSelectors, element);
+    const semanticCandidates = nodes.filter((candidate) =>
+      isConversationTitleElement(candidate));
+    const titleCandidates = [...selectorCandidates, ...semanticCandidates]
+      .filter((candidate, index, all) => all.indexOf(candidate) === index)
+      .filter((candidate) => isConversationTitleElement(candidate))
+      .filter((candidate) => !isConversationPreviewElement(candidate))
+      .filter((candidate) => !descendantElementsOf(candidate)
+        .some((descendant) => isConversationPreviewElement(descendant)));
+    for (const candidate of titleCandidates) {
+      const title = metadataTitle(visibleElementText(candidate), "");
+      if (title) return details(title, "title_element", true, false, titleCandidates.length);
+    }
+
+    // A row with exactly one non-preview text leaf is structurally safe.
+    // Multiple leaves are intentionally rejected instead of guessing which
+    // one is the title.
+    const textBearing = nodes.filter((candidate) => {
+      const tagName = candidate.tagName?.toUpperCase();
+      return !["BUTTON", "TIME", "SVG", "SCRIPT", "STYLE"].includes(tagName)
+        && !isConversationPreviewElement(candidate)
+        && visibleElementText(candidate).trim().length > 0;
+    });
+    const leaves = textBearing.filter((candidate) => !textBearing.some((other) =>
+      other !== candidate && isDescendantOf(other, candidate)));
+    if (leaves.length === 1) {
+      return details(
+        visibleElementText(leaves[0]),
+        "single_text_leaf",
+        false,
+        true,
+        1);
+    }
+
+    // Some renderers keep the title as a direct text node next to icon
+    // elements. Use it only when no other non-preview text source exists.
+    const directText = childNodesOf(element)
+      .filter((node) => node?.nodeType === 3 || node?.nodeType === 4)
+      .map((node) => node.nodeValue || "")
+      .join(" ")
+      .trim();
+    if (directText && leaves.length === 0) {
+      return details(directText, "direct_text", false, true, 1);
+    }
+    return details("", "none", false, false, titleCandidates.length);
+  }
+
+  function extractChatTitle(row, conversationElement = row) {
+    return conversationTitleDetailsFromElement(conversationElement || row);
+  }
+
+  function createChatTitleTelemetry() {
+    const observed = new Map();
+    return {
+      record(conversationId, details) {
+        if (!conversationId || !details || typeof details !== "object") return;
+        const prior = observed.get(conversationId);
+        if (!prior || (prior.title_extraction_success !== true
+          && details.title_extraction_success === true)) {
+          observed.set(conversationId, details);
+        }
+      },
+      fields() {
+        const entries = [...observed.values()];
+        const sourceCounts = entries.reduce((counts, entry) => {
+          const source = typeof entry.chat_title_source === "string"
+            ? entry.chat_title_source
+            : "none";
+          counts.set(source, (counts.get(source) || 0) + 1);
+          return counts;
+        }, new Map());
+        const sources = [...sourceCounts.entries()]
+          .sort((left, right) => right[1] - left[1]);
+        const titleElementFoundCount = entries.filter((entry) =>
+          entry.title_element_found === true).length;
+        const previewElementFoundCount = entries.filter((entry) =>
+          entry.preview_element_found === true).length;
+        const titleExtractionSuccessCount = entries.filter((entry) =>
+          entry.title_extraction_success === true).length;
+        const titleFallbackUsedCount = entries.filter((entry) =>
+          entry.title_fallback_used === true).length;
+        return {
+          chat_title_source: sources.length === 0
+            ? "none"
+            : (sources.length === 1 ? sources[0][0] : "mixed"),
+          title_element_found: entries.length > 0
+            && titleElementFoundCount === entries.length,
+          preview_element_found: previewElementFoundCount > 0,
+          title_extraction_success: entries.length > 0
+            && titleExtractionSuccessCount === entries.length,
+          title_candidate_count: entries.reduce((sum, entry) =>
+            sum + (Number.isSafeInteger(entry.title_candidate_count)
+              ? entry.title_candidate_count
+              : 0), 0),
+          title_character_count: entries.reduce((sum, entry) =>
+            sum + (Number.isSafeInteger(entry.title_character_count)
+              ? entry.title_character_count
+              : 0), 0),
+          row_text_character_count: entries.reduce((sum, entry) =>
+            sum + (Number.isSafeInteger(entry.row_text_character_count)
+              ? entry.row_text_character_count
+              : 0), 0),
+          title_differs_from_row_text: entries.some((entry) =>
+            entry.title_differs_from_row_text === true),
+          title_fallback_used: titleFallbackUsedCount > 0,
+          title_element_found_count: titleElementFoundCount,
+          preview_element_found_count: previewElementFoundCount,
+          title_extraction_success_count: titleExtractionSuccessCount,
+          title_fallback_used_count: titleFallbackUsedCount,
+          title_observed_chat_count: entries.length
+        };
+      }
+    };
+  }
+
   function conversationTitleFromAnchor(anchor, conversationId) {
-    const visible = visibleTitleFromElement(anchor);
-    if (visible) return visible;
-
-    const explicit = [
-      attributeValue(anchor, "data-title"),
-      attributeValue(anchor, "data-conversation-title"),
-      attributeValue(anchor, "title")
-    ].find((value) => value.trim().length > 0);
-    if (explicit) return metadataTitle(stripMetadataDescriptionSuffix(explicit), conversationId);
-
-    // Do not use aria-label as the title. It is an accessible description on
-    // ChatGPT and commonly contains Project/Pinned suffixes.
-    return metadataTitle(stripMetadataDescriptionSuffix(visibleElementText(anchor)), conversationId);
+    return extractChatTitle(anchor, anchor).title;
   }
 
   function projectTitleFromAnchor(anchor, projectId) {
@@ -5086,9 +5310,11 @@
   function collectProjectContextEntries(
     root = globalThis.document,
     url = globalThis.location?.href,
-    projectId) {
+    projectId,
+    options = {}) {
     const normalizedProjectId = stableProjectIdFromValue(projectId);
     if (!normalizedProjectId) return { projects: [], conversations: [] };
+    const titleTelemetry = options?.titleTelemetry || null;
 
     const sidebar = findSidebarRoot(root);
     const baseUrl = documentHref(root, url);
@@ -5309,9 +5535,11 @@
             : `https://chatgpt.com/g/${encodeURIComponent(normalizedProjectId)}/c/${encodeURIComponent(conversationId)}`);
         collectionTelemetry.matching_project_chat_link_count += 1;
         collectionTelemetry.matching_project_chat_count += 1;
+        const titleDetails = extractChatTitle(element, element);
+        titleTelemetry?.record(conversationId, titleDetails);
         const entry = {
           conversation_id: conversationId,
-          title: conversationTitleFromAnchor(element, conversationId),
+          title: titleDetails.title,
           url: conversationUrl,
           project_id: normalizedProjectId,
           project_title: projectTitle
@@ -5355,9 +5583,11 @@
         : `https://chatgpt.com/g/${encodeURIComponent(normalizedProjectId)}/c/${encodeURIComponent(conversationId)}`;
       collectionTelemetry.matching_project_chat_link_count += 1;
       collectionTelemetry.matching_project_chat_count += 1;
+      const titleDetails = extractChatTitle(element, element);
+      titleTelemetry?.record(conversationId, titleDetails);
       const entry = {
         conversation_id: conversationId,
-        title: conversationTitleFromAnchor(element, conversationId),
+        title: titleDetails.title,
         url: conversationUrl,
         project_id: normalizedProjectId,
         project_title: projectTitle
@@ -5418,6 +5648,7 @@
     if (!normalizedProjectId) return { projects: [], conversations: [], current: getCurrentChatGptContext(root, url) };
 
     const merged = { projects: [], conversations: [] };
+    const titleTelemetry = createChatTitleTelemetry();
     const currentUrl = documentHref(root, url);
     const currentProjectId = projectIdFromUrl(currentUrl);
     const projectPageReady = isProjectHomeUrl(currentUrl)
@@ -5461,9 +5692,12 @@
       scroll_candidate_count: hydration.scroll_candidate_count,
       scrollable_chat_candidate_count: hydration.scrollable_chat_candidate_count
     };
-    const hydrationSnapshot = collectProjectContextEntries(root, url, normalizedProjectId);
+    const hydrationSnapshot = collectProjectContextEntries(root, url, normalizedProjectId, {
+      titleTelemetry
+    });
     const hydrationStructure = {
       ...hydrationTelemetry,
+      ...titleTelemetry.fields(),
       candidate_chat_link_count: hydrationSnapshot.candidate_chat_link_count,
       candidate_chat_count: hydrationSnapshot.candidate_chat_count,
       candidate_from_main_count: hydrationSnapshot.candidate_from_main_count,
@@ -5560,6 +5794,7 @@
         projects: hydrationSnapshot.projects,
         conversations: [],
         current: getCurrentChatGptContextFromEntries(hydrationSnapshot, root, url),
+        ...titleTelemetry.fields(),
         project_page_ready: projectPageReady,
         current_project_id_verified: currentProjectId === normalizedProjectId,
         chat_container_found: false,
@@ -5649,7 +5884,9 @@
       }
       if (Date.now() >= deadline) return false;
       const beforeCount = merged.conversations.length;
-      const snapshot = collectProjectContextEntries(root, url, normalizedProjectId);
+      const snapshot = collectProjectContextEntries(root, url, normalizedProjectId, {
+        titleTelemetry
+      });
       latestSnapshot = snapshot;
       mergeContextProjectCatalog(merged, snapshot);
       mergeContextConversationCatalog(merged, snapshot);
@@ -5780,6 +6017,7 @@
       projectChatCollectionComplete
         || containers.every((container) => scrollMetricsFor(container)?.atBottom !== false),
       true);
+    const titleFields = titleTelemetry.fields();
     const membershipFields = {
       main_candidate_project_id_unique_count:
         latestSnapshot.main_candidate_project_id_unique_count || 0,
@@ -5829,6 +6067,7 @@
         rejected_other_project_chat_count: latestSnapshot.rejected_other_project_chat_count || 0,
         main_current_project_match_count: latestSnapshot.main_current_project_match_count || 0,
         main_project_mismatch_count: latestSnapshot.main_project_mismatch_count || 0,
+        ...titleFields,
         ...membershipFields,
         project_chat_collection_complete: false,
         status: "error",
@@ -5865,6 +6104,7 @@
         scroll_complete: true,
         discovered_chat_count: merged.conversations.length,
         deduped_chat_count: merged.conversations.length,
+        ...titleFields,
         ...membershipFields,
         project_chat_collection_complete: true,
         status: "completed",
@@ -5876,6 +6116,7 @@
       projects: merged.projects,
       conversations: merged.conversations,
       current: getCurrentChatGptContextFromEntries(merged, root, url),
+      ...titleFields,
       project_page_ready: projectPageReady,
       current_project_id_verified: currentProjectId === normalizedProjectId,
       chat_container_found: chatContainerFound,
@@ -6934,6 +7175,7 @@
     findProjectRows,
     findMoreButtons,
     visibleTitleFromElement,
+    extractChatTitle,
     stripMetadataDescriptionSuffix,
     fallbackProjectIdFromTitle,
     projectDisclosureStructureForRow,

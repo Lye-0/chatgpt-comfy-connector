@@ -698,6 +698,11 @@ test("sidebar metadata keeps same-title conversations distinct and classifies pr
     "conversation-02",
     "conversation-03"
   ]);
+  assert.deepEqual(Array.from(snapshot.conversations, (item) => item.title), [
+    "同じChat",
+    "同じChat",
+    "Project外Chat"
+  ]);
   assert.equal(snapshot.conversations[0].project_id, "g-p-project-a");
   assert.equal(snapshot.conversations[1].project_id, "g-p-project-b");
   assert.equal(snapshot.conversations[2].project_id, undefined);
@@ -958,6 +963,75 @@ test("sidebar metadata uses visible title nodes and excludes aria descriptions",
 
   assert.equal(snapshot.conversations[0].title, "2週目以降の自走");
   assert.equal(locators.stripMetadataDescriptionSuffix("OpenAIアップデート情報(Tasks)、ピン留めされた会話"), "OpenAIアップデート情報(Tasks)");
+});
+
+test("conversation title extraction keeps title and preview structurally separate", () => {
+  const document = new FakeDocument("https://chatgpt.com/c/current");
+  const row = new FakeMetadataNode(document, "A", "", {
+    href: "/c/title-preview",
+    "aria-label": "全プロジェクト取得 プロンプトをください"
+  });
+  row.appendChild(new FakeMetadataNode(document, "DIV", "全プロジェクト取得", {
+    class: "truncate"
+  }));
+  row.appendChild(new FakeMetadataNode(document, "DIV", "プロンプトをください", {
+    class: "line-clamp-2 text-token-text-secondary"
+  }));
+
+  const locators = loadLocators(document);
+  const extracted = locators.extractChatTitle(row);
+
+  assert.equal(extracted.title, "全プロジェクト取得");
+  assert.equal(extracted.title.includes("プロンプトをください"), false);
+  assert.equal(extracted.chat_title_source, "title_element");
+  assert.equal(extracted.title_element_found, true);
+  assert.equal(extracted.preview_element_found, true);
+  assert.equal(extracted.title_differs_from_row_text, true);
+  assert.equal(extracted.title_fallback_used, false);
+});
+
+test("conversation title extraction supports long Japanese previews, title-only rows, and repeated titles", () => {
+  const document = new FakeDocument("https://chatgpt.com/c/current");
+  const makeRow = (id, title, preview = null) => {
+    const row = new FakeMetadataNode(document, "A", "", {
+      href: `/c/${id}`
+    });
+    row.appendChild(new FakeMetadataNode(document, "DIV", title, {
+      class: "conversation-title"
+    }));
+    if (preview !== null) {
+      row.appendChild(new FakeMetadataNode(document, "DIV", preview, {
+        class: "conversation-preview"
+      }));
+    }
+    return row;
+  };
+  const rows = [
+    makeRow(
+      "same-one",
+      "追加実装",
+      "一度、codex自身に判断してもらいながら、この、以前はできていたプロジェクト全取得が..."),
+    makeRow("same-two", "追加実装"),
+    makeRow("japanese-symbols", "日本語 Chat — v2!?"),
+  ];
+  const locators = loadLocators(document);
+
+  assert.deepEqual(rows.map((row) => locators.extractChatTitle(row).title), [
+    "追加実装",
+    "追加実装",
+    "日本語 Chat — v2!?"
+  ]);
+  assert.deepEqual(rows.map((row) => locators.extractChatTitle(row).preview_element_found), [
+    true,
+    false,
+    false
+  ]);
+  const ambiguousRow = new FakeMetadataNode(document, "A", "", { href: "/c/ambiguous" });
+  ambiguousRow.appendChild(new FakeMetadataNode(document, "DIV", "Title without marker"));
+  ambiguousRow.appendChild(new FakeMetadataNode(document, "DIV", "Preview without marker"));
+  const ambiguous = locators.extractChatTitle(ambiguousRow);
+  assert.equal(ambiguous.title, "");
+  assert.equal(ambiguous.title_extraction_success, false);
 });
 
 test("async sidebar discovery expands more, scans virtualized rows, deduplicates, and restores scroll", async () => {
@@ -2837,11 +2911,18 @@ test("Project page collection scans conversation metadata outside the sidebar an
   const alphaChat = new FakeMetadataNode(null, "A", "", {
     href: "/g/g-p-alpha/c/conversation-alpha"
   });
-  alphaChat.appendChild(new FakeMetadataNode(null, "SPAN", "Alpha chat", { "data-marquee-text": "true" }));
+  alphaChat.appendChild(new FakeMetadataNode(null, "DIV", "Alpha chat", {
+    class: "conversation-title"
+  }));
+  alphaChat.appendChild(new FakeMetadataNode(null, "DIV", "Alpha preview", {
+    class: "conversation-preview"
+  }));
   const secondAlphaChat = new FakeMetadataNode(null, "A", "", {
     href: "/g/g-p-alpha/c/conversation-second"
   });
-  secondAlphaChat.appendChild(new FakeMetadataNode(null, "SPAN", "Second alpha chat", { "data-marquee-text": "true" }));
+  secondAlphaChat.appendChild(new FakeMetadataNode(null, "DIV", "Second alpha chat", {
+    class: "conversation-title"
+  }));
   const otherProjectChat = new FakeMetadataNode(null, "A", "Other", {
     href: "/g/g-p-beta/c/conversation-other"
   });
@@ -2862,6 +2943,10 @@ test("Project page collection scans conversation metadata outside the sidebar an
     "conversation-alpha",
     "conversation-second"
   ]);
+  assert.deepEqual(Array.from(snapshot.conversations, (conversation) => conversation.title), [
+    "Alpha chat",
+    "Second alpha chat"
+  ]);
   assert.ok(snapshot.conversations.every((conversation) => conversation.project_id === "g-p-alpha"));
   assert.equal(snapshot.project_page_ready, true);
   assert.equal(snapshot.current_project_id_verified, true);
@@ -2876,6 +2961,10 @@ test("Project page collection scans conversation metadata outside the sidebar an
   assert.equal(structure.matching_project_chat_link_count, 2);
   assert.equal(structure.rejected_other_project_chat_count, 1);
   assert.equal(structure.rejected_projectless_chat_count, 0);
+  assert.equal(structure.title_element_found, true);
+  assert.equal(structure.preview_element_found, true);
+  assert.equal(structure.title_extraction_success, true);
+  assert.equal(structure.title_differs_from_row_text, true);
   assert.equal(telemetry.some((event) => event.stage === "collector_project_chat_collection_failed"), false);
 });
 

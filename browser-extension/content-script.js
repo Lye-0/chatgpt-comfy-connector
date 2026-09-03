@@ -245,7 +245,21 @@
       "exception_reason",
       "project_chat_collection_error_reason",
       "project_chat_hydration_completed",
-      "project_chat_hydration_timeout"
+      "project_chat_hydration_timeout",
+      "chat_title_source",
+      "title_element_found",
+      "preview_element_found",
+      "title_extraction_success",
+      "title_differs_from_row_text",
+      "title_fallback_used",
+      "title_candidate_count",
+      "title_character_count",
+      "row_text_character_count",
+      "title_element_found_count",
+      "preview_element_found_count",
+      "title_extraction_success_count",
+      "title_fallback_used_count",
+      "title_observed_chat_count"
     ]) {
       if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
       if (typeof fields[key] === "boolean") safe[key] = fields[key];
@@ -531,6 +545,15 @@
     "project_chat_collection_complete",
     "project_chat_hydration_completed",
     "project_chat_hydration_timeout",
+    "chat_title_source",
+    "title_candidate_count",
+    "title_character_count",
+    "row_text_character_count",
+    "title_element_found_count",
+    "preview_element_found_count",
+    "title_extraction_success_count",
+    "title_fallback_used_count",
+    "title_observed_chat_count",
     "error_code",
     "failure_stage",
     "internal_reason",
@@ -893,7 +916,15 @@
       "selected_scroll_distance_from_chat_list",
       "mutation_count",
       "mutation_quiet_ms",
-      "scan_iteration"
+      "scan_iteration",
+      "title_candidate_count",
+      "title_character_count",
+      "row_text_character_count",
+      "title_element_found_count",
+      "preview_element_found_count",
+      "title_extraction_success_count",
+      "title_fallback_used_count",
+      "title_observed_chat_count"
     ]) {
       if (Number.isSafeInteger(data[key])) result[key] = data[key];
     }
@@ -917,6 +948,11 @@
       "relevant_region_present",
       "scroll_position_changed",
       "reached_end",
+      "title_element_found",
+      "preview_element_found",
+      "title_extraction_success",
+      "title_differs_from_row_text",
+      "title_fallback_used",
       "project_chat_hydration_completed",
       "project_chat_hydration_timeout",
       "project_chat_membership_inconsistent",
@@ -956,7 +992,8 @@
       "project_chat_collection_error_reason",
       "current_project_identity_source",
       "main_mismatch_project_id",
-      "project_id_normalization_source"
+      "project_id_normalization_source",
+      "chat_title_source"
     ]) {
       if (typeof data[key] === "string" && data[key].length <= 128) result[key] = data[key];
     }

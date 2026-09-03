@@ -407,6 +407,7 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
   constructor(document, projectNames, {
     itemWindow = 8,
     projectIds = [],
+    stableRowIds = [],
     nestedScroll = false,
     emptyUntilScroll = false
   } = {}) {
@@ -417,6 +418,7 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
     this.emptyUntilScroll = emptyUntilScroll;
     this.projectNames = projectNames;
     this.projectIds = projectIds;
+    this.stableRowIds = stableRowIds;
     this.generation = 0;
     this.projectRows = [];
     this.scrollHistory = [];
@@ -463,12 +465,15 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
   rebuildRows() {
     this.generation += 1;
     this.projectRows = this.projectNames.map((name, index) => {
-      const row = new FakeMetadataNode(this.ownerDocument, "DIV", "", {
+      const attributes = {
         role: "button",
         "data-sidebar-item": "true",
         "aria-expanded": "false",
         "aria-controls": `virt-${this.generation}-${index}`
-      });
+      };
+      const stableRowId = this.stableRowIds[index];
+      if (stableRowId) attributes["data-sidebar-item-id"] = stableRowId;
+      const row = new FakeMetadataNode(this.ownerDocument, "DIV", "", attributes);
       row.appendChild(new FakeMetadataNode(this.ownerDocument, "SPAN", name, {
         "data-marquee-text": "true"
       }));
@@ -483,9 +488,11 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
     });
   }
 
-  remount(projectIds = this.projectIds) {
+  remount(projectIds = this.projectIds, projectNames = this.projectNames, stableRowIds = this.stableRowIds) {
     this.projectRows.forEach((row) => { row.isConnected = false; });
     this.projectIds = projectIds;
+    this.projectNames = projectNames;
+    this.stableRowIds = stableRowIds;
     this.scrollTop = 0;
     this.rebuildRows();
   }
@@ -655,6 +662,21 @@ test("conversation and project identities are extracted from ChatGPT URLs", () =
   assert.equal(
     locators.conversationIdFromUrl("https://example.invalid/c/not-chatgpt"),
     null);
+
+  const stable = "g-p-6a623bd670d881918ce24d063b799b30";
+  const slugged = `${stable}-chatgpt-comfy-connector-comfyui-x-chatgpt`;
+  assert.equal(
+    locators.projectIdFromUrl(`https://chatgpt.com/g/${stable}/project`),
+    stable);
+  assert.equal(
+    locators.projectIdFromUrl(`https://chatgpt.com/g/${slugged}/c/chat1`),
+    stable);
+  assert.equal(
+    locators.projectIdFromUrl(`https://chatgpt.com/g/${slugged}/project`),
+    stable);
+  assert.equal(locators.stableProjectIdFromValue(slugged), stable);
+  assert.equal(locators.stableProjectIdFromValue("g-p-project-a"), "g-p-project-a");
+  assert.equal(locators.projectIdFromUrl("https://chatgpt.com/c/chat1"), null);
 });
 
 test("sidebar metadata keeps same-title conversations distinct and classifies projectless chats", () => {
@@ -1081,6 +1103,26 @@ test("async sidebar discovery keeps all 28 Projects when the first page only sho
   assert.equal(snapshot.sidebar_scroll_complete, true);
 });
 
+test("async sidebar discovery keeps all 36 Projects when the first page only shows 20 and さらに表示 is below the nested fold", async () => {
+  const href = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new FirstPageNestedMoreSidebar(document, 36, 20);
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 32,
+    maxMoreClicks: 4,
+    initialSettleMs: 0
+  });
+
+  assert.equal(snapshot.projects.length, 36);
+  assert.equal(snapshot.discovered_project_count, 36);
+  assert.deepEqual(
+    Array.from(snapshot.projects, (project) => project.project_id),
+    Array.from({ length: 36 }, (_, index) => `g-p-page-${index}`));
+});
+
 test("async sidebar discovery ranks the Project-bearing Sidebar over an empty first nav", async () => {
   const href = "https://chatgpt.com/";
   const document = new FakeMetadataDocument(href, null);
@@ -1347,13 +1389,54 @@ test("Project identity navigation fallback clicks only the confirmed row and ver
     exit_reason: "resolved",
     internal_reason: "none",
     navigation_failure_reason: "none",
+    navigation_generation_match: false,
+    navigation_started_for_project: true,
+    navigation_completed_for_project: true,
+    navigation_target_verified_for_project: true,
+    navigation_owned_by_current_project: false,
+    current_url_used_as_identity: false,
     navigation_target_verified: true,
     project_url_pattern_valid: true,
     project_id_extracted: true,
     project_id_url_match: true,
     resolution_success: true,
+    stale_navigation_result_rejected: false,
     unresolved_reason: "none"
   });
+});
+
+test("Project identity never adopts a prior Project URL without owned navigation evidence", async () => {
+  const staleProjectUrl = "https://chatgpt.com/g/g-p-prior/project";
+  const document = new FakeMetadataDocument(staleProjectUrl, null);
+  document.sidebar = null;
+  const locators = loadLocators(document);
+  const telemetry = [];
+
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    staleProjectUrl,
+    [{ project_index: 21, discovery_index: 21, title: "Next Project" }],
+    {
+      identityMode: "navigation",
+      requestId: "identity-isolation-fixture",
+      refreshGeneration: 4,
+      navigationGeneration: "refresh-4-identity-20",
+      navigationStartedForProject: true,
+      navigationOwnerProjectIndex: 20,
+      navigationOwnerRequestId: "identity-isolation-fixture",
+      navigationOwnerRefreshGeneration: 4,
+      navigationTimeoutMs: 250,
+      onTelemetry: (event) => telemetry.push(event)
+    });
+
+  assert.equal(result.projects[0].project_id, undefined);
+  assert.equal(result.unresolved_count, 1);
+  const evidence = telemetry.find((event) =>
+    event.stage === "collector_project_identity_navigation_evidence");
+  assert.equal(evidence.navigation_generation_match, false);
+  assert.equal(evidence.navigation_owned_by_current_project, false);
+  assert.equal(evidence.current_url_used_as_identity, false);
+  assert.equal(evidence.stale_navigation_result_rejected, true);
 });
 
 test("Project-scoped conversation href reuses the historical metadata identity path without navigation", async () => {
@@ -1643,16 +1726,22 @@ test("Multiple empty Projects resolve to distinct Stable IDs from their own shel
   });
 
   const locators = loadLocators(document);
+  const discovered = locators.collectChatGptContext(document, rootHref);
+  const catalog = discovered.projects.map((project, index) => ({
+    ...project,
+    project_index: index,
+    discovery_index: index
+  }));
   const first = await locators.resolveChatGptProjectIdentitiesAsync(
     document,
     rootHref,
-    [{ project_index: 0, discovery_index: 0, title: "ネットワーク" }],
-    { identityMode: "navigation", navigationTimeoutMs: 250 });
+    [catalog[0]],
+    { identityMode: "navigation", identityCatalog: catalog, navigationTimeoutMs: 250 });
   const second = await locators.resolveChatGptProjectIdentitiesAsync(
     document,
     rootHref,
-    [{ project_index: 1, discovery_index: 1, title: "ネットワーク" }],
-    { identityMode: "navigation", navigationTimeoutMs: 250 });
+    [catalog[1]],
+    { identityMode: "navigation", identityCatalog: catalog, navigationTimeoutMs: 250 });
 
   assert.equal(first.projects[0].project_id, "g-p-empty-one");
   assert.equal(second.projects[0].project_id, "g-p-empty-two");
@@ -2019,6 +2108,204 @@ test("Duplicate Project titles stay unresolved after fingerprint regeneration", 
   assert.equal(result.projects[0].project_id, undefined);
   assert.equal(result.projects[0].unresolved_reason, "ambiguous_project_row_match");
   assert.equal(result.unresolved_count, 1);
+});
+
+test("Same-title Projects rematch by discovery-time Stable ID after Sidebar remount", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const names = ["ネットワーク", "ネットワーク", "Other"];
+  const projectIds = ["g-p-dup-a", "g-p-dup-b", "g-p-other"];
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 8,
+    projectIds,
+    stableRowIds: ["row-identity-a", "row-identity-b", "row-identity-other"]
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const discovered = locators.collectChatGptContext(document, rootHref);
+  assert.equal(discovered.projects.length, 3);
+  assert.deepEqual(
+    Array.from(discovered.projects, (project) => project.project_id),
+    projectIds);
+  assert.notEqual(discovered.projects[0].discovery_key, discovered.projects[1].discovery_key);
+  assert.ok(discovered.projects[0].stable_locator_key);
+  assert.notEqual(discovered.projects[0].stable_locator_key, discovered.projects[1].stable_locator_key);
+
+  sidebar.projectRows.forEach((row) => { row.isConnected = false; });
+  sidebar.remount(projectIds);
+  const catalog = discovered.projects.map((project, index) => ({
+    ...project,
+    project_index: index,
+    discovery_index: index
+  }));
+
+  const first = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [catalog[0]],
+    { identityMode: "navigation", identityCatalog: catalog, navigationTimeoutMs: 250 });
+  const second = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [catalog[1]],
+    { identityMode: "navigation", identityCatalog: catalog, navigationTimeoutMs: 250 });
+
+  assert.equal(first.projects[0].project_id, "g-p-dup-a");
+  assert.equal(second.projects[0].project_id, "g-p-dup-b");
+  assert.equal(first.unresolved_count, 0);
+  assert.equal(second.unresolved_count, 0);
+});
+
+test("Identity does not adopt the first same-title row by title or index", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const names = ["ネットワーク", "ネットワーク", "Other"];
+  const projectIds = ["g-p-dup-a", "g-p-dup-b", "g-p-other"];
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, { itemWindow: 8, projectIds });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const discovered = locators.collectChatGptContext(document, rootHref);
+  sidebar.remount(projectIds);
+  const catalog = discovered.projects.map((project, index) => ({
+    ...project,
+    project_index: index,
+    discovery_index: index
+  }));
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [catalog[1]],
+    { identityMode: "navigation", identityCatalog: catalog, navigationTimeoutMs: 250 });
+  assert.equal(result.projects[0].project_id, "g-p-dup-b");
+  assert.notEqual(result.projects[0].project_id, "g-p-dup-a");
+});
+
+test("Reordered same-title Sidebar rows still bind by Stable ID", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const names = ["ネットワーク", "ネットワーク", "Other"];
+  const projectIds = ["g-p-dup-a", "g-p-dup-b", "g-p-other"];
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, { itemWindow: 8, projectIds });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const discovered = locators.collectChatGptContext(document, rootHref);
+  sidebar.remount(
+    ["g-p-dup-b", "g-p-dup-a", "g-p-other"],
+    ["ネットワーク", "ネットワーク", "Other"]);
+  const catalog = discovered.projects.map((project, index) => ({
+    ...project,
+    project_index: index,
+    discovery_index: index
+  }));
+  const first = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [catalog[0]],
+    { identityMode: "navigation", identityCatalog: catalog, navigationTimeoutMs: 250 });
+  assert.equal(first.projects[0].project_id, "g-p-dup-a");
+});
+
+test("Same-title rows with only regenerated aria-controls stay unresolved", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const names = ["ネットワーク", "ネットワーク"];
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, { itemWindow: 8 });
+  document.sidebar = sidebar;
+  sidebar.projectRows.forEach((row, index) => {
+    row.attributes.set("aria-controls", `old-region-${index}`);
+  });
+  const locators = loadLocators(document);
+  const discovered = locators.collectChatGptContext(document, rootHref);
+  assert.equal(discovered.projects.length, 2);
+  assert.equal(discovered.projects[0].project_id, undefined);
+  sidebar.remount();
+  const catalog = discovered.projects.map((project, index) => ({
+    ...project,
+    project_index: index,
+    discovery_index: index
+  }));
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [catalog[0]],
+    { identityMode: "navigation", identityCatalog: catalog, navigationTimeoutMs: 250 });
+  assert.equal(result.projects[0].project_id, undefined);
+  assert.ok(
+    result.projects[0].unresolved_reason === "ambiguous_project_row_match"
+    || result.projects[0].unresolved_reason === "project_row_fingerprint_mismatch");
+});
+
+test("Unchanged relocation candidate set stops extra Sidebar scroll retries", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => (
+    index === 20 || index === 21 ? "ネットワーク" : `Project ${index}`));
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, { itemWindow: 28 });
+  document.sidebar = sidebar;
+  sidebar.clientHeight = 400;
+  sidebar.scrollHeight = 400;
+  sidebar.scrollport.clientHeight = 400;
+  sidebar.scrollport.scrollHeight = 400;
+  const locators = loadLocators(document);
+  const telemetry = [];
+  await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{
+      project_index: 20,
+      discovery_index: 20,
+      title: "ネットワーク",
+      discovery_key: "stale-fingerprint-20"
+    }],
+    {
+      identityMode: "navigation",
+      identityCatalog: names.map((title, index) => ({
+        project_index: index,
+        discovery_index: index,
+        title,
+        discovery_key: `stale-fingerprint-${index}`
+      })),
+      navigationTimeoutMs: 250,
+      onTelemetry: (event) => telemetry.push(event)
+    });
+  const relocations = telemetry.filter((event) => event.stage === "collector_project_identity_row_relocation");
+  assert.ok(relocations.length > 0);
+  assert.ok(relocations.length <= 6);
+  assert.ok((relocations.at(-1).scroll_attempts || 0) <= 2);
+  const fingerprint = telemetry.find((event) => event.stage === "collector_project_identity_row_fingerprint");
+  assert.ok(fingerprint);
+  assert.equal(fingerprint.title_duplicate_count, 2);
+  const candidates = telemetry.find((event) => event.stage === "collector_project_identity_relocation_candidates");
+  assert.ok(candidates);
+  assert.equal(candidates.selected_candidate_found, false);
+});
+
+test("36 unique Projects complete identity after Sidebar remount", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const names = Array.from({ length: 36 }, (_, index) => `Project ${index}`);
+  const projectIds = Array.from({ length: 36 }, (_, index) => `g-p-virt-${index}`);
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, { itemWindow: 36 });
+  document.sidebar = sidebar;
+  const catalog = names.map((title, index) => ({
+    project_index: index,
+    discovery_index: index,
+    title,
+    discovery_key: `stale-fingerprint-${index}`
+  }));
+  const locators = loadLocators(document);
+  document.location.href = rootHref;
+  sidebar.remount(projectIds);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    catalog,
+    { identityMode: "dom", identityCatalog: catalog });
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(result.projects.length, 36);
+  assert.deepEqual(
+    Array.from(result.projects, (project) => project.project_id),
+    projectIds);
 });
 
 test("Identity relocation does not adopt another visible Project when the target row is absent", async () => {
@@ -2762,6 +3049,75 @@ test("Project page collection adopts a verified Project chat route in main", asy
   assert.equal(snapshot.project_id_source_chat_href_count, 1);
   assert.equal(snapshot.project_chat_collection_complete, true);
   assert.equal(snapshot.project_chat_membership_inconsistent, false);
+});
+
+test("Project Chat href slugs normalize to the same Stable ID as the Project page", async () => {
+  const stable = "g-p-6a623bd670d881918ce24d063b799b30";
+  const currentSlug = `${stable}-chatgpt-comfy-connector-comfyui-x-chatgpt`;
+  const otherSlug = "g-p-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-other-project-name";
+  const href = `https://chatgpt.com/g/${stable}/project`;
+  const sidebar = new FakeMetadataNode(null, "NAV");
+  const content = new FakeMetadataNode(null, "MAIN");
+  const currentChats = [
+    new FakeMetadataNode(null, "A", "Current slug", { href: `/g/${currentSlug}/c/chat-slug` }),
+    new FakeMetadataNode(null, "A", "Current plain", { href: `/g/${stable}/c/chat-plain` })
+  ];
+  const otherChat = new FakeMetadataNode(null, "A", "Other", {
+    href: `/g/${otherSlug}/c/chat-other`
+  });
+  const customGpt = new FakeMetadataNode(null, "A", "Custom GPT", {
+    href: "/g/g-custom/c/custom-chat"
+  });
+  for (const node of [...currentChats, otherChat, customGpt]) content.appendChild(node);
+  const document = new FakeProjectDocument(href, sidebar, content, "Connector | ChatGPT");
+  for (const node of [sidebar, content, ...content.children]) node.ownerDocument = document;
+
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptProjectContextAsync(document, href, stable, {
+    timeoutMs: 5000
+  });
+
+  assert.equal(snapshot.current_project_id_verified, true);
+  assert.equal(snapshot.project_id_source_chat_href_count, 3);
+  assert.equal(snapshot.main_current_project_match_count, 2);
+  assert.equal(snapshot.main_project_mismatch_count, 1);
+  assert.equal(snapshot.matching_project_chat_count, 2);
+  assert.equal(snapshot.rejected_other_project_chat_count, 2);
+  assert.equal(snapshot.main_custom_gpt_count, 1);
+  assert.deepEqual(
+    Array.from(snapshot.conversations, (item) => item.conversation_id).sort(),
+    ["chat-plain", "chat-slug"]);
+  assert.equal(snapshot.conversations.every((item) => item.project_id === stable), true);
+  assert.equal(snapshot.project_chat_membership_inconsistent, false);
+  assert.equal(snapshot.project_chat_collection_complete, true);
+  assert.equal(snapshot.project_id_normalization_applied_count >= 1, true);
+});
+
+test("Identity resolution and navigation URLs share the slug-aware Stable ID", async () => {
+  const stable = "g-p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const slugged = `${stable}-multi-hyphen-project-slug`;
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["Slug Project"], [], null, null, []);
+  document.sidebar = sidebar;
+  attachExclusiveChildChats(document, sidebar.projectRows[0], "slug-list", slugged, 1);
+
+  const locators = loadLocators(document);
+  const identity = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "Slug Project", discovery_key: "slug-0" }],
+    { identityMode: "dom" });
+  assert.equal(identity.projects[0].project_id, stable);
+
+  document.location.href = `https://chatgpt.com/g/${slugged}/project`;
+  const navigation = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    document.location.href,
+    [{ project_index: 0, discovery_index: 0, title: "Slug Project", discovery_key: "slug-0" }],
+    { identityMode: "navigation" });
+  assert.equal(navigation.projects[0].project_id, stable);
+  assert.equal(navigation.projects[0].url, `https://chatgpt.com/g/${stable}/project`);
 });
 
 test("Project page collection does not complete empty when every main chat belongs to another Project", async () => {

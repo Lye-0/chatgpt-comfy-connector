@@ -203,12 +203,39 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         BrowserExtensionChatGptConversationEntry conversation,
         string projectId)
     {
-        if (!string.IsNullOrWhiteSpace(conversation.ProjectId)
-            && !string.Equals(conversation.ProjectId, projectId, StringComparison.OrdinalIgnoreCase)) return false;
+        var normalizedProjectId = NormalizeStableProjectId(projectId) ?? projectId;
+        if (!string.IsNullOrWhiteSpace(conversation.ProjectId))
+        {
+            var conversationProjectId = NormalizeStableProjectId(conversation.ProjectId)
+                ?? conversation.ProjectId;
+            if (!string.Equals(conversationProjectId, normalizedProjectId, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
 
-        return string.Equals(conversation.ProjectId, projectId, StringComparison.OrdinalIgnoreCase)
+        var storedProjectId = NormalizeStableProjectId(conversation.ProjectId) ?? conversation.ProjectId;
+        return string.Equals(storedProjectId, normalizedProjectId, StringComparison.OrdinalIgnoreCase)
             || TryGetProjectIdFromUrl(conversation.Url, out var urlProjectId)
-                && string.Equals(urlProjectId, projectId, StringComparison.OrdinalIgnoreCase);
+                && string.Equals(urlProjectId, normalizedProjectId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? NormalizeStableProjectId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var id = value.Trim();
+        if (!id.StartsWith("g-p-", StringComparison.OrdinalIgnoreCase)) return null;
+        var rest = id[4..];
+        var separator = rest.IndexOf('-');
+        if (separator <= 0) return id;
+        var token = rest[..separator];
+        if (token.Length == 0) return id;
+        foreach (var character in token)
+        {
+            if (!Uri.IsHexDigit(character)) return id;
+        }
+
+        return id[..(4 + separator)];
     }
 
     private static bool TryGetProjectIdFromUrl(string? value, out string projectId)
@@ -223,9 +250,10 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
             .ToArray();
         for (var index = 0; index + 1 < segments.Length; index++)
         {
-            if (!string.Equals(segments[index], "g", StringComparison.OrdinalIgnoreCase)
-                || !segments[index + 1].StartsWith("g-p-", StringComparison.OrdinalIgnoreCase)) continue;
-            projectId = segments[index + 1];
+            if (!string.Equals(segments[index], "g", StringComparison.OrdinalIgnoreCase)) continue;
+            var normalized = NormalizeStableProjectId(segments[index + 1]);
+            if (normalized is null) continue;
+            projectId = normalized;
             return true;
         }
 

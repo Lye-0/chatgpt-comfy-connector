@@ -280,6 +280,39 @@
     return metadataIdentifierPattern.test(text) ? text : null;
   }
 
+  // ChatGPT Project routes use `/g/<segment>` where `<segment>` is either the
+  // opaque Stable ID (`g-p-<hex>`) or that ID plus a display slug
+  // (`g-p-<hex>-<slug-with-hyphens>`). Project page URLs in this connector
+  // have been observed without the slug; conversation hrefs include it.
+  // The first hyphen-separated token after `g-p-` is the Stable ID when that
+  // token is hexadecimal. Non-hex tokens (including fixtures such as
+  // `g-p-project-a`) keep the full identifier. This is not a hyphen-count rule.
+  function stableProjectIdFromValue(value) {
+    const id = metadataIdentifier(value);
+    if (!id || !id.toLowerCase().startsWith("g-p-")) return null;
+    const rest = id.slice(4);
+    const separator = rest.indexOf("-");
+    if (separator <= 0) return id;
+    const token = rest.slice(0, separator);
+    if (!/^[0-9a-f]+$/i.test(token)) return id;
+    return id.slice(0, 4 + separator);
+  }
+
+  function projectRouteSegmentFromUrl(value, baseUrl = globalThis.location?.href) {
+    const segments = decodedPathSegments(value, baseUrl);
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      if (segments[index].toLowerCase() !== "g") continue;
+      const segment = segments[index + 1];
+      if (String(segment || "").toLowerCase().startsWith("g-p-")) return segment;
+    }
+    if (segments.length >= 2
+      && segments[0].toLowerCase() === "g"
+      && String(segments[1] || "").toLowerCase().startsWith("g-p-")) {
+      return segments[1];
+    }
+    return null;
+  }
+
   function metadataTitle(value, fallback = "") {
     const text = String(value ?? "")
       .replace(/[\u200b\u200c\u200d\u2060\ufeff]/g, "")
@@ -328,7 +361,7 @@
       const parsed = new URL(value || "", globalThis.location?.href);
       if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com" || parsed.port !== "") return null;
       for (const name of ["project_id", "projectId"]) {
-        const fromQuery = metadataIdentifier(parsed.searchParams.get(name));
+        const fromQuery = stableProjectIdFromValue(parsed.searchParams.get(name));
         if (fromQuery) return fromQuery;
       }
     } catch (_) { }
@@ -336,11 +369,11 @@
     const segments = decodedPathSegments(value);
     for (let index = 0; index < segments.length - 1; index += 1) {
       if (segments[index].toLowerCase() !== "g") continue;
-      const projectId = metadataIdentifier(segments[index + 1]);
+      const projectId = stableProjectIdFromValue(segments[index + 1]);
       // /g/g-... is also used by custom GPTs.  Project routes observed in
       // ChatGPT use the g-p-* identity; do not misclassify a GPT as a
       // Project merely because it contains a conversation link.
-      if (projectId?.toLowerCase().startsWith("g-p-")) return projectId;
+      if (projectId) return projectId;
     }
 
     return null;
@@ -375,7 +408,7 @@
     // g-p-* identity check in projectIdFromUrl().
     for (let index = 0; index < segments.length - 1; index += 1) {
       if (segments[index].toLowerCase() === "g"
-        && segments[index + 1] === projectId
+        && stableProjectIdFromValue(segments[index + 1]) === projectId
         && segments.length === index + 2) return true;
     }
     return false;
@@ -387,8 +420,11 @@
     try {
       const parsed = new URL(canonical);
       const segments = decodedPathSegments(canonical);
-      const projectSegmentIndex = segments.findIndex((segment) => segment === projectId);
-      if (projectSegmentIndex >= 1 && segments[projectSegmentIndex - 1].toLowerCase() === "g") {
+      const projectSegmentIndex = segments.findIndex((segment, segmentIndex) =>
+        segmentIndex >= 1
+        && segments[segmentIndex - 1].toLowerCase() === "g"
+        && stableProjectIdFromValue(segment) === projectId);
+      if (projectSegmentIndex >= 1) {
         const prefix = segments.slice(0, projectSegmentIndex + 1).map((segment) => encodeURIComponent(segment)).join("/");
         return `${parsed.origin}/${prefix}/project`;
       }
@@ -408,34 +444,89 @@
     return `${prefix}-${(hash >>> 0).toString(16)}`;
   }
 
-  function projectDiscoveryKeyForRow(row, title, discoveryIndex) {
-    // A title is not an identity: two Projects may deliberately have the same
-    // name. Prefer a row-local DOM token that remains stable while the
-    // virtualized Sidebar is rescanned. `aria-controls` is the usual token for
-    // the current disclosure row; the other attributes cover older ChatGPT
-    // layouts. The value is hashed before it leaves this module and is never
-    // emitted as telemetry.
-    const rowToken = [
-      "aria-controls",
-      "id",
-      "data-project-key",
-      "data-sidebar-item-id",
-      "data-item-id",
-      "data-key",
-      "data-index",
-      "data-item-index",
-      "aria-posinset"
-    ].map((name) => attributeValue(row, name).trim())
-      .find((value) => value.length > 0);
+  const PROJECT_ROW_FINGERPRINT_VERSION = 2;
+  const STABLE_PROJECT_ROW_ATTRIBUTE_NAMES = [
+    "data-project-id",
+    "data-project-id-value",
+    "data-project-key",
+    "data-sidebar-item-id",
+    "data-item-id"
+  ];
+  const VOLATILE_PROJECT_ROW_ATTRIBUTE_NAMES = [
+    "aria-controls",
+    "id",
+    "data-index",
+    "data-item-index",
+    "aria-posinset"
+  ];
+
+  function firstNamedAttributeToken(element, names, accept = null) {
+    if (!element) return null;
+    for (const name of names) {
+      const value = attributeValue(element, name).trim();
+      if (!value) continue;
+      if (accept && !accept(name, value)) continue;
+      return { name, value };
+    }
+    return null;
+  }
+
+  function isRemountStableRowAttribute(_name, value) {
+    if (stableProjectIdFromValue(value)) return true;
+    if (/^g-p-/i.test(value)) return true;
+    if (/^\d{1,6}$/.test(value)) return false;
+    if (/^:r[\w-]+:$/i.test(value)) return false;
+    return value.length >= 8;
+  }
+
+  function projectRowFingerprint(row, title, discoveryIndex, baseUrl = globalThis.location?.href) {
+    // Title is never an identity. `aria-controls` / React `id` / positional
+    // attributes are locators for the current mount only: ChatGPT regenerates
+    // them after Sidebar remount. Remount-stable locators are exclusive
+    // Stable IDs already present on the row and opaque data-* item keys.
+    const titleKey = metadataTextKey(title);
+    const stableAttr = firstNamedAttributeToken(
+      row,
+      STABLE_PROJECT_ROW_ATTRIBUTE_NAMES,
+      isRemountStableRowAttribute);
+    const volatileAttr = firstNamedAttributeToken(row, VOLATILE_PROJECT_ROW_ATTRIBUTE_NAMES);
+    const locatorProjectId = projectIdentityFromElement(row, baseUrl)?.projectId
+      || (stableAttr ? stableProjectIdFromValue(stableAttr.value) : null)
+      || null;
+    const stableParts = [];
+    if (locatorProjectId) stableParts.push(`id:${locatorProjectId}`);
+    if (stableAttr) stableParts.push(`attr:${stableAttr.name}:${stableAttr.value}`);
+    const volatileParts = [];
+    if (volatileAttr) volatileParts.push(`attr:${volatileAttr.name}:${volatileAttr.value}`);
     const position = Number.isSafeInteger(discoveryIndex) && discoveryIndex >= 0
       ? discoveryIndex
       : "unknown";
-    const identityToken = rowToken
-      ? `token:${rowToken}`
-      : `position:${position}`;
-    return stableMetadataKey(
-      "project",
-      `${identityToken}:${metadataTextKey(title)}`);
+    const identityToken = stableParts.length > 0
+      ? `stable:${stableParts.join("|")}`
+      : (volatileParts.length > 0 ? `volatile:${volatileParts.join("|")}` : `position:${position}`);
+    const discoveryKey = stableMetadataKey("project", `${identityToken}:${titleKey}`);
+    const stableLocatorKey = stableParts.length > 0
+      ? stableMetadataKey("stable", `${stableParts.join("|")}:${titleKey}`)
+      : null;
+    const volatileLocatorKey = volatileParts.length > 0
+      ? stableMetadataKey("volatile", `${volatileParts.join("|")}:${titleKey}`)
+      : null;
+    return {
+      fingerprint_version: PROJECT_ROW_FINGERPRINT_VERSION,
+      discovery_key: discoveryKey,
+      stable_locator_key: stableLocatorKey,
+      volatile_locator_key: volatileLocatorKey,
+      locator_project_id: locatorProjectId,
+      stable_component_count: stableParts.length,
+      volatile_component_count: volatileParts.length,
+      fingerprint_component_count: stableParts.length + volatileParts.length,
+      aria_controls_present: Boolean(attributeValue(row, "aria-controls").trim()),
+      volatile_token_name: volatileAttr?.name || "none"
+    };
+  }
+
+  function projectDiscoveryKeyForRow(row, title, discoveryIndex, baseUrl = globalThis.location?.href) {
+    return projectRowFingerprint(row, title, discoveryIndex, baseUrl).discovery_key;
   }
 
   function metadataTextKey(value) {
@@ -514,7 +605,7 @@
     const explicit = [
       attributeValue(element, "data-project-id"),
       attributeValue(element, "data-project-id-value")
-    ].map((value) => metadataIdentifier(value)).find(Boolean);
+    ].map((value) => stableProjectIdFromValue(value)).find(Boolean);
     if (explicit) return explicit;
     const href = chatGptMetadataUrl(attributeValue(element, "href"), baseUrl);
     return projectIdFromUrl(href);
@@ -675,8 +766,8 @@
   }
 
   function ownChatDataProjectId(element) {
-    return metadataIdentifier(attributeValue(element, "data-project-id"))
-      || metadataIdentifier(attributeValue(element, "data-project-id-value"))
+    return stableProjectIdFromValue(attributeValue(element, "data-project-id"))
+      || stableProjectIdFromValue(attributeValue(element, "data-project-id-value"))
       || null;
   }
 
@@ -1243,10 +1334,11 @@
 
   function upsertContextProject(projects, item) {
     if (!item || typeof item !== "object") return null;
-    const projectId = metadataIdentifier(item.project_id || item.projectId);
+    const projectId = stableProjectIdFromValue(item.project_id || item.projectId);
     const title = metadataTitle(item.title);
     const url = chatGptMetadataUrl(item.url);
     const discoveryKey = metadataIdentifier(item.discovery_key || item.discoveryKey);
+    const stableLocatorKey = metadataIdentifier(item.stable_locator_key || item.stableLocatorKey);
     const discoveryIndex = Number.isSafeInteger(item.discovery_index)
       && item.discovery_index >= 0
       ? item.discovery_index
@@ -1291,6 +1383,7 @@
       if (title && (!existing.title || projectFallbackTitlePattern.test(existing.title))) existing.title = title;
       if (url && !existing.url) existing.url = url;
       if (discoveryKey && !existing.discovery_key) existing.discovery_key = discoveryKey;
+      if (stableLocatorKey && !existing.stable_locator_key) existing.stable_locator_key = stableLocatorKey;
       if (discoveryIndex !== null && existing.discovery_index === undefined) {
         existing.discovery_index = discoveryIndex;
       }
@@ -1302,6 +1395,7 @@
       title,
       ...(url ? { url } : {}),
       ...(discoveryKey ? { discovery_key: discoveryKey } : {}),
+      ...(stableLocatorKey ? { stable_locator_key: stableLocatorKey } : {}),
       ...(discoveryIndex !== null ? { discovery_index: discoveryIndex } : {})
     };
     projects.push(entry);
@@ -1343,12 +1437,13 @@
     const projectRows = projectRowsInSidebar(sidebarRoot, documentHref(root));
     const currentProjectId = projectIdFromUrl(url);
 
-    const upsertProject = (projectId, title, projectUrl, discoveryKey, discoveryIndex = null) => {
+    const upsertProject = (projectId, title, projectUrl, discoveryKey, discoveryIndex = null, extras = {}) => {
       const entry = upsertContextProject(projects, {
         ...(projectId ? { project_id: projectId } : {}),
         title,
         ...(projectUrl ? { url: projectUrl } : {}),
         ...(discoveryKey ? { discovery_key: discoveryKey } : {}),
+        ...(extras?.stable_locator_key ? { stable_locator_key: extras.stable_locator_key } : {}),
         ...(Number.isSafeInteger(discoveryIndex) && discoveryIndex >= 0
           ? { discovery_index: discoveryIndex }
           : {})
@@ -1371,13 +1466,14 @@
       const rowIdentity = projectIdentityFromElement(row, url);
       const projectId = rowIdentity.projectId || projectIdFromElement(row, url);
       const projectUrl = rowIdentity.projectUrl || projectUrlFromElement(row, url);
-      const discoveryKey = projectDiscoveryKeyForRow(row, title, discoveryIndex);
+      const fingerprint = projectRowFingerprint(row, title, discoveryIndex, url);
       upsertProject(
         projectId,
         title,
         projectUrl,
-        discoveryKey,
-        discoveryIndex);
+        fingerprint.discovery_key,
+        discoveryIndex,
+        { stable_locator_key: fingerprint.stable_locator_key });
     }
 
     // Current ChatGPT Project rows are rendered as expandable buttons and do
@@ -1395,15 +1491,18 @@
         const currentProjectUrl = isProjectHomeUrl(url)
           ? chatGptMetadataUrl(url, url)
           : projectUrlFromConversationUrl(url, currentProjectId);
+        const expandedFingerprint = projectRowFingerprint(
+          expandedProjectRow,
+          currentProjectTitle,
+          expandedProjectIndex,
+          url);
         upsertProject(
           currentProjectId,
           currentProjectTitle,
           currentProjectUrl,
-          projectDiscoveryKeyForRow(
-            expandedProjectRow,
-            currentProjectTitle,
-            expandedProjectIndex),
-          expandedProjectIndex);
+          expandedFingerprint.discovery_key,
+          expandedProjectIndex,
+          { stable_locator_key: expandedFingerprint.stable_locator_key });
       }
     }
 
@@ -1457,10 +1556,9 @@
   }
 
   function canonicalProjectUrl(projectId, value = null, baseUrl = globalThis.location?.href) {
-    const id = metadataIdentifier(projectId);
-    if (!id || !id.toLowerCase().startsWith("g-p-")) return null;
+    const id = stableProjectIdFromValue(projectId);
+    if (!id) return null;
     const supplied = chatGptMetadataUrl(value, baseUrl);
-    if (supplied && isProjectHomeUrl(supplied)) return supplied;
     try {
       const base = new URL(supplied || baseUrl || "https://chatgpt.com/");
       if (base.protocol !== "https:" || base.hostname !== "chatgpt.com" || base.port !== "") return null;
@@ -1480,18 +1578,14 @@
     // conversation links rendered inside the Project row.  Those links use
     // `/g/g-p-.../c/...`, not the Project home route.  Normalize that
     // metadata-only carrier to the canonical Project URL without navigating.
-    const projectUrl = isProjectRouteUrl(canonical)
-      ? canonicalProjectUrl(projectId, canonical, baseUrl)
-      : conversationIdFromUrl(canonical)
-        ? projectUrlFromConversationUrl(canonical, projectId)
-        : null;
+    const projectUrl = canonicalProjectUrl(projectId, canonical, baseUrl);
     if (!projectId || !projectUrl) return null;
     return { projectId, projectUrl };
   }
 
   function projectIdentityFromProjectMetadata(project, baseUrl = globalThis.location?.href) {
     const rawProjectId = project?.project_id || project?.projectId;
-    const explicitProjectId = metadataIdentifier(rawProjectId);
+    const explicitProjectId = stableProjectIdFromValue(rawProjectId);
     if (rawProjectId !== undefined
       && rawProjectId !== null
       && String(rawProjectId).trim().length > 0
@@ -1528,11 +1622,6 @@
     "data-url",
     "data-conversation-url"
   ];
-
-  function stableProjectIdFromValue(value) {
-    const id = metadataIdentifier(value);
-    return id && id.toLowerCase().startsWith("g-p-") ? id : null;
-  }
 
   function projectHomeIdentityFromUrlCandidate(value, baseUrl = globalThis.location?.href) {
     const canonical = chatGptMetadataUrl(value, baseUrl);
@@ -2358,6 +2447,26 @@
       catalog_title_match_count: Number.isSafeInteger(relocation.catalogTitleMatchCount)
         ? relocation.catalogTitleMatchCount
         : (Number.isSafeInteger(extra.catalogTitleMatchCount) ? extra.catalogTitleMatchCount : 0),
+      title_match_count: Number.isSafeInteger(relocation.titleMatchCount)
+        ? relocation.titleMatchCount
+        : 0,
+      discovery_key_match_count: Number.isSafeInteger(relocation.discoveryKeyMatchCount)
+        ? relocation.discoveryKeyMatchCount
+        : 0,
+      stable_locator_match_count: Number.isSafeInteger(relocation.stableLocatorMatchCount)
+        ? relocation.stableLocatorMatchCount
+        : 0,
+      volatile_locator_match_count: Number.isSafeInteger(relocation.volatileLocatorMatchCount)
+        ? relocation.volatileLocatorMatchCount
+        : 0,
+      stable_fingerprint_match_count: Number.isSafeInteger(relocation.stableFingerprintMatchCount)
+        ? relocation.stableFingerprintMatchCount
+        : 0,
+      partial_match_count: Number.isSafeInteger(relocation.partialMatchCount)
+        ? relocation.partialMatchCount
+        : 0,
+      selected_match_method: relocation.selectedMatchMethod || relocation.matchMethod || "none",
+      selected_candidate_found: relocation.rowFound === true,
       visible_project_row_count: Number.isSafeInteger(extra.visibleProjectRowCount)
         ? extra.visibleProjectRowCount
         : relocation.candidateCount,
@@ -2402,12 +2511,26 @@
       ? (rows || []).filter((candidate) => metadataTextKey(visibleTitleFromElement(candidate, "")) === expectedTitle)
       : [];
     const expectedDiscoveryKey = metadataIdentifier(descriptor?.discovery_key || descriptor?.discoveryKey);
+    const expectedStableLocatorKey = metadataIdentifier(
+      descriptor?.stable_locator_key || descriptor?.stableLocatorKey);
+    const expectedLocatorProjectId = stableProjectIdFromValue(descriptor?.project_id || descriptor?.projectId);
+    const candidateFingerprints = (rows || []).map((candidate, candidateIndex) =>
+      projectRowFingerprint(
+        candidate,
+        visibleTitleFromElement(candidate, ""),
+        candidateIndex,
+        baseUrl));
     const fingerprintRows = expectedDiscoveryKey
       ? (rows || []).filter((candidate, candidateIndex) =>
-        projectDiscoveryKeyForRow(
-          candidate,
-          visibleTitleFromElement(candidate, ""),
-          candidateIndex) === expectedDiscoveryKey)
+        candidateFingerprints[candidateIndex]?.discovery_key === expectedDiscoveryKey)
+      : [];
+    const stableLocatorRows = expectedStableLocatorKey
+      ? (rows || []).filter((candidate, candidateIndex) =>
+        candidateFingerprints[candidateIndex]?.stable_locator_key === expectedStableLocatorKey)
+      : [];
+    const identityRows = expectedLocatorProjectId
+      ? (rows || []).filter((candidate, candidateIndex) =>
+        candidateFingerprints[candidateIndex]?.locator_project_id === expectedLocatorProjectId)
       : [];
     const catalog = Array.isArray(options.catalog) ? options.catalog : [];
     const catalogTitleCount = catalogTitleMatchCount(catalog, descriptor?.title);
@@ -2417,52 +2540,68 @@
       indexRow
       && expectedTitle
       && metadataTextKey(visibleTitleFromElement(indexRow, "")) === expectedTitle);
+    const titleMatchCount = matchingRows.length;
+    const discoveryKeyMatchCount = fingerprintRows.length;
+    const stableLocatorMatchCount = stableLocatorRows.length;
+    const volatileLocatorMatchCount = expectedDiscoveryKey
+      ? fingerprintRows.length
+      : 0;
     let row = null;
-    // Keep the historical telemetry value for index-based relocation. A
-    // discovery key is an additional disambiguator, not a new public match
-    // category for callers that already consume discovery_fingerprint.
-    let matchMethod = "discovery_fingerprint";
-    if (expectedDiscoveryKey) {
-      if (fingerprintRows.length === 1) {
-        row = fingerprintRows[0];
-        matchMethod = "discovery_fingerprint";
-      } else if (fingerprintRows.length === 0 && matchingRows.length === 1 && (
-        titleUniqueInCatalog === true
-        || (titleUniqueInCatalog === null && indexTitleMatches))) {
-        // React may regenerate an aria-controls/id token after returning to
-        // the root. A title that is unique in the discovered catalog is a
-        // safe locator even when the current visible window is shorter than
-        // the original discovery_index. Duplicate titles stay rejected.
-        row = matchingRows[0];
-        matchMethod = titleUniqueInCatalog === true
-          ? "unique_catalog_title"
-          : "discovery_index_title";
-      } else {
-        const noVisibleMatch = matchingRows.length === 0;
-        return {
-          row: null,
-          candidateCount,
-          rowFound: false,
-          matchMethod: fingerprintRows.length > 1
-            ? "ambiguous_discovery_fingerprint"
-            : (matchingRows.length > 1 ? "ambiguous_title_only_rejected" : "discovery_fingerprint"),
-          sectionVerified,
-          fingerprintMatch: false,
-          fingerprintMatchComponentCount: 0,
-          fingerprintMismatchComponentCount: expectedTitle ? 2 : 1,
-          exactCandidateCount: fingerprintRows.length,
-          ambiguousCandidateCount: matchingRows.length > 1 ? matchingRows.length : 0,
-          ariaControlsChanged: fingerprintRows.length === 0 && matchingRows.length > 0,
-          rowPositionChanged: Boolean(matchingRows[0]) && matchingRows[0] !== indexRow,
-          catalogTitleUnique: titleUniqueInCatalog === true,
-          catalogTitleMatchCount: catalogTitleCount,
-          reason: fingerprintRows.length > 1 || matchingRows.length > 1
-            ? "ambiguous_project_row_match"
-            : (noVisibleMatch ? "project_row_not_visible" : "project_row_fingerprint_mismatch")
-        };
-      }
+    let matchMethod = "none";
+    const uniqueVisibleTitle = matchingRows.length === 1 && titleUniqueInCatalog !== false;
+    if (fingerprintRows.length === 1) {
+      row = fingerprintRows[0];
+      matchMethod = "discovery_fingerprint";
+    } else if (identityRows.length === 1) {
+      row = identityRows[0];
+      matchMethod = "discovery_stable_identity";
+    } else if (stableLocatorRows.length === 1) {
+      row = stableLocatorRows[0];
+      matchMethod = "stable_row_locator";
+    } else if (uniqueVisibleTitle) {
+      row = matchingRows[0];
+      matchMethod = titleUniqueInCatalog === true
+        ? "unique_catalog_title"
+        : (expectedDiscoveryKey ? "discovery_index_title" : "discovery_fingerprint");
     } else {
-      row = indexRow;
+      const ambiguousIdentity = identityRows.length > 1;
+      const ambiguousStable = stableLocatorRows.length > 1;
+      const ambiguousFingerprint = fingerprintRows.length > 1;
+      const ambiguousTitle = matchingRows.length > 1;
+      const noVisibleMatch = matchingRows.length === 0;
+      const ambiguous = ambiguousIdentity || ambiguousStable || ambiguousFingerprint || ambiguousTitle;
+      return {
+        row: null,
+        candidateCount,
+        rowFound: false,
+        matchMethod: ambiguousFingerprint
+          ? "ambiguous_discovery_fingerprint"
+          : (ambiguousIdentity
+            ? "ambiguous_stable_identity"
+            : (ambiguousStable
+              ? "ambiguous_stable_locator"
+              : (ambiguousTitle ? "ambiguous_title_only_rejected" : "discovery_fingerprint"))),
+        sectionVerified,
+        fingerprintMatch: false,
+        fingerprintMatchComponentCount: 0,
+        fingerprintMismatchComponentCount: expectedTitle ? 2 : 1,
+          exactCandidateCount: fingerprintRows.length,
+        ambiguousCandidateCount: ambiguousTitle ? matchingRows.length : 0,
+        ariaControlsChanged: fingerprintRows.length === 0 && matchingRows.length > 0,
+        rowPositionChanged: Boolean(matchingRows[0]) && matchingRows[0] !== indexRow,
+        catalogTitleUnique: titleUniqueInCatalog === true,
+        catalogTitleMatchCount: catalogTitleCount,
+        titleMatchCount,
+        discoveryKeyMatchCount,
+        stableLocatorMatchCount,
+        volatileLocatorMatchCount,
+        stableFingerprintMatchCount: identityRows.length === 1 || stableLocatorRows.length === 1 ? 1 : 0,
+        partialMatchCount: matchingRows.length > 0 && fingerprintRows.length === 0 ? matchingRows.length : 0,
+        selectedMatchMethod: "none",
+        reason: ambiguous
+          ? "ambiguous_project_row_match"
+          : (noVisibleMatch ? "project_row_not_visible" : "project_row_fingerprint_mismatch")
+      };
     }
     if (!row) {
       return {
@@ -2474,6 +2613,9 @@
         fingerprintMatch: false,
         exactCandidateCount: fingerprintRows.length,
         ambiguousCandidateCount: matchingRows.length > 1 ? matchingRows.length : 0,
+        titleMatchCount,
+        discoveryKeyMatchCount,
+        stableLocatorMatchCount,
         reason: matchingRows.length > 1
           ? "ambiguous_project_row_match"
           : "project_row_not_found"
@@ -2495,7 +2637,7 @@
           : "project_row_fingerprint_mismatch"
       };
     }
-    const expectedProjectId = metadataIdentifier(descriptor?.project_id || descriptor?.projectId);
+    const expectedProjectId = stableProjectIdFromValue(descriptor?.project_id || descriptor?.projectId);
     if (expectedProjectId) {
       const rowIdentity = projectIdentityFromElement(row, baseUrl);
       if (rowIdentity.projectId && rowIdentity.projectId !== expectedProjectId) {
@@ -2519,14 +2661,21 @@
       matchMethod,
       sectionVerified,
       fingerprintMatch: fingerprintRows.length === 1 && fingerprintRows[0] === row,
-      fingerprintMatchComponentCount: fingerprintRows.length === 1 ? 1 : 0,
+      fingerprintMatchComponentCount: fingerprintRows.length === 1 ? 1 : (matchMethod === "discovery_stable_identity" || matchMethod === "stable_row_locator" ? 1 : 0),
       fingerprintMismatchComponentCount: fingerprintRows.length === 1 ? 0 : 1,
       exactCandidateCount: matchMethod === "unique_catalog_title" ? matchingRows.length : fingerprintRows.length,
       ambiguousCandidateCount: 0,
-      ariaControlsChanged: matchMethod === "unique_catalog_title" || matchMethod === "discovery_index_title",
+      ariaControlsChanged: matchMethod !== "discovery_fingerprint",
       rowPositionChanged: Number.isSafeInteger(projectIndex) && rowIndex >= 0 && rowIndex !== projectIndex,
       catalogTitleUnique: titleUniqueInCatalog === true,
       catalogTitleMatchCount: catalogTitleCount,
+      titleMatchCount,
+      discoveryKeyMatchCount,
+      stableLocatorMatchCount,
+      volatileLocatorMatchCount,
+      stableFingerprintMatchCount: matchMethod === "discovery_stable_identity" || matchMethod === "stable_row_locator" ? 1 : 0,
+      partialMatchCount: matchMethod === "unique_catalog_title" || matchMethod === "discovery_index_title" ? 1 : 0,
+      selectedMatchMethod: matchMethod,
       reason: null
     };
   }
@@ -2552,8 +2701,23 @@
         && itemIndex === descriptorIndex;
     });
     const catalogTitleUnique = catalog.length > 0 && catalogTitleCount === 1;
+    const descriptorProjectIndex = Number.isSafeInteger(descriptor?.project_index)
+      ? descriptor.project_index
+      : (Number.isSafeInteger(descriptor?.discovery_index) ? descriptor.discovery_index : 0);
+    const relocationCandidateKey = (current) => {
+      const baseUrl = options.baseUrl || globalThis.location?.href;
+      const keys = (current.visibleRows || []).map((row, index) =>
+        projectDiscoveryKeyForRow(row, visibleTitleFromElement(row, ""), index, baseUrl) || `i${index}`);
+      return [
+        current.visibleRows.length,
+        current.connectedRows.length,
+        current.moreAvailable ? 1 : 0,
+        keys.join(",")
+      ].join("|");
+    };
     const emitRelocation = (relocation, extra = {}) => {
       try {
+        const projectIndex = descriptorProjectIndex;
         options.telemetry?.("collector_project_identity_row_relocation", {
           ...projectRowRelocationTelemetryFields(relocation, {
             relocationAttempted: true,
@@ -2567,13 +2731,69 @@
             rowsReenumeratedAfterNavigation: true,
             ...extra
           }),
-          project_index: Number.isSafeInteger(descriptor?.project_index)
-            ? descriptor.project_index
-            : (Number.isSafeInteger(descriptor?.discovery_index) ? descriptor.discovery_index : 0),
+          project_index: projectIndex,
           catalog_entry_found: catalogEntryFound,
           identity_catalog_count: catalog.length,
           total_projects: catalog.length,
+          candidate_search_attempted: true,
+          scroll_search_attempted: scrollAttempts > 0,
+          scroll_search_stagnated: extra.scrollSearchStagnated === true
+            || extra.relocationStagnated === true,
           ...extra
+        });
+        const sampleRow = relocation.row || extra.sampleRow || null;
+        const sample = sampleRow
+          ? projectRowFingerprint(
+            sampleRow,
+            visibleTitleFromElement(sampleRow, ""),
+            0,
+            options.baseUrl || globalThis.location?.href)
+          : null;
+        options.telemetry?.("collector_project_identity_row_fingerprint", {
+          project_index: projectIndex,
+          fingerprint_version: sample?.fingerprint_version || PROJECT_ROW_FINGERPRINT_VERSION,
+          fingerprint_component_count: sample?.fingerprint_component_count || 0,
+          stable_component_count: sample?.stable_component_count || 0,
+          volatile_component_count: sample?.volatile_component_count || 0,
+          title_duplicate_count: catalogTitleCount,
+          aria_controls_present: sample?.aria_controls_present === true,
+          aria_controls_changed: relocation.ariaControlsChanged === true,
+          discovery_key_present: Boolean(metadataIdentifier(descriptor?.discovery_key || descriptor?.discoveryKey)),
+          discovery_key_match_count: Number.isSafeInteger(relocation.discoveryKeyMatchCount)
+            ? relocation.discoveryKeyMatchCount
+            : 0,
+          stable_locator_match_count: Number.isSafeInteger(relocation.stableLocatorMatchCount)
+            ? relocation.stableLocatorMatchCount
+            : 0,
+          volatile_locator_match_count: Number.isSafeInteger(relocation.volatileLocatorMatchCount)
+            ? relocation.volatileLocatorMatchCount
+            : 0
+        });
+        options.telemetry?.("collector_project_identity_relocation_candidates", {
+          project_index: projectIndex,
+          candidate_count: relocation.candidateCount,
+          title_match_count: Number.isSafeInteger(relocation.titleMatchCount)
+            ? relocation.titleMatchCount
+            : 0,
+          stable_fingerprint_match_count: Number.isSafeInteger(relocation.stableFingerprintMatchCount)
+            ? relocation.stableFingerprintMatchCount
+            : 0,
+          partial_match_count: Number.isSafeInteger(relocation.partialMatchCount)
+            ? relocation.partialMatchCount
+            : 0,
+          ambiguous_count: Number.isSafeInteger(relocation.ambiguousCandidateCount)
+            ? relocation.ambiguousCandidateCount
+            : 0,
+          remount_detected: options.sidebarDomGenerationChanged === true
+            || options.navigationSinceDiscovery === true,
+          sidebar_dom_generation_changed: options.sidebarDomGenerationChanged === true,
+          candidate_set_changed: extra.candidateSetChanged === true,
+          selected_candidate_found: relocation.rowFound === true,
+          selected_match_method: relocation.matchMethod || "none",
+          candidate_search_attempted: true,
+          scroll_search_attempted: scrollAttempts > 0,
+          scroll_search_stagnated: extra.relocationStagnated === true
+            || extra.scrollSearchStagnated === true
         });
       } catch (_) { }
     };
@@ -2630,18 +2850,23 @@
     let moreClicked = false;
     let moreAttempted = false;
     let scrollAttempts = 0;
+    let stagnantCandidatePasses = 0;
     let previousTop = null;
     let phase = "initial_fingerprint";
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const current = snapshot();
       lastRelocation = matchFromSnapshot(current);
       if (attempt === 0) phase = "initial_fingerprint";
-      else if (lastRelocation.matchMethod === "unique_catalog_title") phase = "catalog_title_visible_scan";
+      else if (lastRelocation.matchMethod === "unique_catalog_title"
+        || lastRelocation.matchMethod === "discovery_stable_identity"
+        || lastRelocation.matchMethod === "stable_row_locator") phase = "catalog_title_visible_scan";
       else if (moreAttempted && scrollAttempts === 0) phase = "more_expand";
       else if (scrollAttempts > 0) phase = "sidebar_scroll_scan";
       else phase = "catalog_title_visible_scan";
       emitRelocation(lastRelocation, {
         ...extraFromSnapshot(current, phase, false),
+        sampleRow: lastRelocation.row || current.visibleRows[0] || null,
+        candidateSetChanged: false,
         relocation_attempt: attempt,
         more_clicked: moreClicked,
         more_attempted: moreAttempted,
@@ -2654,6 +2879,7 @@
 
       moreAttempted = true;
       phase = "more_expand";
+      const beforeCandidateKey = relocationCandidateKey(current);
       const moreClicks = await expandSidebarMoreButtons(root, {
         maxMoreClicks: 1,
         clickedMoreControls,
@@ -2680,20 +2906,26 @@
         previousTop = afterTop;
       }
       const afterScroll = snapshot();
+      const afterCandidateKey = relocationCandidateKey(afterScroll);
+      const candidateSetChanged = afterCandidateKey !== beforeCandidateKey;
+      if (candidateSetChanged) stagnantCandidatePasses = 0;
+      else stagnantCandidatePasses += 1;
       const advanced = moreClicks > 0
         || scrolled
-        || afterScroll.visibleRows.length !== current.visibleRows.length
-        || afterScroll.connectedRows.length !== current.connectedRows.length;
-      if (!advanced) {
+        || candidateSetChanged;
+      if (!advanced || stagnantCandidatePasses >= 2) {
         lastRelocation = matchFromSnapshot(afterScroll);
         emitRelocation(lastRelocation, {
           ...extraFromSnapshot(afterScroll, "exhausted", scrolled),
+          sampleRow: lastRelocation.row || afterScroll.visibleRows[0] || null,
+          candidateSetChanged,
           relocation_attempt: attempt,
           more_clicked: moreClicked,
           more_attempted: moreAttempted,
           more_available: afterScroll.moreAvailable,
           scroll_attempts: scrollAttempts,
-          scroll_position_changed: scrolled
+          scroll_position_changed: scrolled,
+          relocation_stagnated: true
         });
         return lastRelocation;
       }
@@ -2738,7 +2970,7 @@
       ? before.controlledRegionIdentityReason
       : "controlled_region_not_found";
 
-    const expectedProjectId = metadataIdentifier(descriptor?.project_id || descriptor?.projectId);
+    const expectedProjectId = stableProjectIdFromValue(descriptor?.project_id || descriptor?.projectId);
     const currentRow = () => {
       try {
         const relocated = options.relocateRow?.();
@@ -2900,7 +3132,7 @@
         });
       }
       const identity = projectIdentityFromUrlCandidate(currentUrl, currentUrl);
-      if (identity) {
+      if (urlChanged && identity) {
         emit("collector_project_identity_navigation_wait", {
           project_index: projectIndex,
           navigation_wait_started: true,
@@ -3061,6 +3293,14 @@
       "tab_update_observed",
       "navigation_wait_ms",
       "navigation_timeout",
+      "navigation_generation_match",
+      "navigation_started_for_project",
+      "navigation_completed_for_project",
+      "navigation_target_verified_for_project",
+      "navigation_owned_by_current_project",
+      "navigation_owner_project_index",
+      "stale_navigation_result_rejected",
+      "current_url_used_as_identity",
       "navigation_target_verified",
       "project_url_pattern_valid",
       "project_id_extracted",
@@ -3100,6 +3340,10 @@
       "relocation_method",
       "failure_reason",
       "relocation_attempt",
+      "relocation_skip_reason",
+      "candidate_search_attempted",
+      "scroll_search_attempted",
+      "scroll_search_stagnated",
       "more_clicked",
       "more_attempted",
       "more_available",
@@ -3108,6 +3352,24 @@
       "catalog_entry_found",
       "catalog_title_unique",
       "catalog_title_match_count",
+      "title_match_count",
+      "discovery_key_match_count",
+      "stable_locator_match_count",
+      "volatile_locator_match_count",
+      "fingerprint_version",
+      "fingerprint_component_count",
+      "stable_component_count",
+      "volatile_component_count",
+      "title_duplicate_count",
+      "aria_controls_present",
+      "stable_fingerprint_match_count",
+      "partial_match_count",
+      "ambiguous_count",
+      "remount_detected",
+      "candidate_set_changed",
+      "selected_candidate_found",
+      "selected_match_method",
+      "relocation_stagnated",
       "visible_project_row_count",
       "project_section_found",
       "project_scroll_container_found",
@@ -3144,7 +3406,11 @@
         let identity = existing.projectId ? existing : null;
         let reason = existing.reason;
         if (!identity) {
-          const row = projectRowForIdentityDescriptor(rows, descriptor, baseUrl);
+          const row = projectRowForIdentityDescriptor(rows, descriptor, baseUrl, {
+            catalog: Array.isArray(options.identityCatalog) && options.identityCatalog.length > 0
+              ? options.identityCatalog
+              : output
+          });
           const fromRow = row ? projectIdentityFromElement(row, baseUrl) : { reason: "project_row_not_found" };
           identity = fromRow.projectId ? fromRow : null;
           reason = fromRow.reason || reason;
@@ -3165,15 +3431,29 @@
         : 0;
       const currentUrl = documentHref(root, globalThis.location?.href);
       const currentIdentity = projectIdentityFromUrlCandidate(currentUrl, currentUrl);
-      const expectedProjectId = metadataIdentifier(descriptor.project_id || descriptor.projectId);
-      let identity = currentIdentity
-        && (!expectedProjectId || expectedProjectId === currentIdentity.projectId)
-        ? currentIdentity
+      const expectedProjectId = stableProjectIdFromValue(descriptor.project_id || descriptor.projectId);
+      const navigationOwnerProjectIndex = Number.isSafeInteger(options.navigationOwnerProjectIndex)
+        ? options.navigationOwnerProjectIndex
         : null;
-      let reason = currentIdentity && expectedProjectId !== currentIdentity.projectId
-        ? "project_id_url_mismatch"
-        : null;
-      let observedIdentity = currentIdentity;
+      const navigationGenerationMatch = typeof options.navigationGeneration === "string"
+        && options.navigationGeneration.length > 0
+        && options.navigationGeneration === `refresh-${options.navigationOwnerRefreshGeneration
+          ?? "unknown"}-identity-${currentProjectIndex}`;
+      const navigationOwnedByCurrentProject = options.navigationStartedForProject === true
+        && options.navigationOwnerRequestId === options.requestId
+        && Number.isSafeInteger(navigationOwnerProjectIndex)
+        && navigationOwnerProjectIndex === currentProjectIndex
+        && Number.isSafeInteger(options.navigationOwnerRefreshGeneration)
+        && options.navigationOwnerRefreshGeneration === options.refreshGeneration
+        && navigationGenerationMatch;
+      // A Project URL that predates this resolver invocation is never an
+      // identity result. The Background normally restores Root first, but
+      // this guard also makes a stale SPA URL harmless if that restoration
+      // races with a tab update.
+      let identity = null;
+      const currentUrlUsedAsIdentity = false;
+      let reason = currentIdentity ? "navigation_identity_not_owned" : null;
+      let observedIdentity = null;
       let targetInfo = null;
       let identitySource = identity ? "navigation_url" : "none";
       let emptyProjectCandidate = false;
@@ -3185,6 +3465,14 @@
       const identityCatalog = Array.isArray(options.identityCatalog)
         ? options.identityCatalog
         : [];
+      emitNavigationTelemetry("collector_project_identity_navigation_evidence", {
+        project_index: currentProjectIndex,
+        navigation_generation_match: navigationGenerationMatch,
+        navigation_started_for_project: false,
+        navigation_owned_by_current_project: false,
+        current_url_used_as_identity: false,
+        stale_navigation_result_rejected: Boolean(currentIdentity)
+      });
       navigationInternalReason = reason || "none";
       if (!identity) {
         emitNavigationTelemetry("collector_project_identity_row_relocation_start", {
@@ -3714,6 +4002,18 @@
         navigation_fallback_attempted: navigationFallbackAttempted,
         navigation_fallback_success: navigationFallbackSuccess,
         navigation_target_verified: Boolean(observedIdentity),
+        navigation_completed_for_project: Boolean(observedIdentity),
+        navigation_target_verified_for_project: Boolean(observedIdentity),
+        navigation_generation_match: navigationGenerationMatch,
+        navigation_started_for_project: navigationFallbackAttempted || Boolean(observedIdentity),
+        navigation_owned_by_current_project: (navigationFallbackAttempted || Boolean(observedIdentity))
+          && navigationOwnedByCurrentProject,
+        navigation_owner_project_index: (navigationFallbackAttempted || Boolean(observedIdentity))
+          && navigationOwnedByCurrentProject
+          ? navigationOwnerProjectIndex
+          : null,
+        stale_navigation_result_rejected: Boolean(currentIdentity && !identity),
+        current_url_used_as_identity: currentUrlUsedAsIdentity,
         resolution_success: Boolean(identity)
       });
       emitNavigationTelemetry("collector_project_identity_source_classification", {
@@ -3737,6 +4037,18 @@
         navigation_fallback_attempted: navigationFallbackAttempted,
         navigation_fallback_success: navigationFallbackSuccess,
         project_id_extracted: Boolean(identity?.projectId),
+        navigation_completed_for_project: Boolean(observedIdentity),
+        navigation_target_verified_for_project: Boolean(observedIdentity),
+        navigation_generation_match: navigationGenerationMatch,
+        navigation_started_for_project: navigationFallbackAttempted || Boolean(observedIdentity),
+        navigation_owned_by_current_project: (navigationFallbackAttempted || Boolean(observedIdentity))
+          && navigationOwnedByCurrentProject,
+        navigation_owner_project_index: (navigationFallbackAttempted || Boolean(observedIdentity))
+          && navigationOwnedByCurrentProject
+          ? navigationOwnerProjectIndex
+          : null,
+        stale_navigation_result_rejected: Boolean(currentIdentity && !identity),
+        current_url_used_as_identity: currentUrlUsedAsIdentity,
         resolution_success: Boolean(identity),
         unresolved_reason: identity ? "none" : (reason || "missing_stable_identity")
       });
@@ -3745,6 +4057,18 @@
       emitNavigationTelemetry("collector_project_identity_navigation_result", {
         project_index: currentProjectIndex,
         navigation_target_verified: navigationResolved,
+        navigation_completed_for_project: navigationResolved,
+        navigation_target_verified_for_project: navigationResolved,
+        navigation_generation_match: navigationGenerationMatch,
+        navigation_started_for_project: navigationFallbackAttempted || navigationResolved,
+        navigation_owned_by_current_project: (navigationFallbackAttempted || navigationResolved)
+          && navigationOwnedByCurrentProject,
+        navigation_owner_project_index: (navigationFallbackAttempted || navigationResolved)
+          && navigationOwnedByCurrentProject
+          ? navigationOwnerProjectIndex
+          : null,
+        stale_navigation_result_rejected: Boolean(currentIdentity && !identity),
+        current_url_used_as_identity: currentUrlUsedAsIdentity,
         project_url_pattern_valid: Boolean(
           navigationResultIdentity?.projectUrl
           && isProjectHomeUrl(navigationResultIdentity.projectUrl)),
@@ -4165,7 +4489,7 @@
 
   function projectPageMainRegionInfo(root, sidebar, projectId = null, url = globalThis.location?.href) {
     const sidebarElement = sidebar && sidebar !== root ? sidebar : null;
-    const normalizedProjectId = metadataIdentifier(projectId);
+    const normalizedProjectId = stableProjectIdFromValue(projectId);
     const baseUrl = documentHref(root, url);
     const isDocumentRoot = (element) => element === root
       || element === root?.body
@@ -4393,7 +4717,7 @@
     projectId = null,
     url = globalThis.location?.href,
     sidebarOverride = null) {
-    const normalizedProjectId = metadataIdentifier(projectId);
+    const normalizedProjectId = stableProjectIdFromValue(projectId);
     const baseUrl = documentHref(root, url);
     const sidebarRoot = sidebarOverride || findSidebarRoot(root);
     const sidebar = sidebarRoot && sidebarRoot !== root ? sidebarRoot : null;
@@ -4569,7 +4893,7 @@
 
   function projectPageHydrationState(root, projectId, sidebarOverride = null) {
     const currentUrl = documentHref(root);
-    const normalizedProjectId = metadataIdentifier(projectId);
+    const normalizedProjectId = stableProjectIdFromValue(projectId);
     const currentProjectId = projectIdFromUrl(currentUrl);
     const projectPageReady = isProjectHomeUrl(currentUrl)
       && currentProjectId === normalizedProjectId;
@@ -4735,7 +5059,7 @@
     let current = element;
     for (let depth = 0; current && depth < 32; depth += 1, current = current.parentElement) {
       if (projectIdFromElement(current, url) === normalizedProjectId) return true;
-      if (metadataIdentifier(attributeValue(current, "data-project-id")) === normalizedProjectId) return true;
+      if (stableProjectIdFromValue(attributeValue(current, "data-project-id")) === normalizedProjectId) return true;
       if (projectRows.includes(current)
         && attributeValue(current, "aria-expanded").toLowerCase() === "true"
         && currentProjectId === normalizedProjectId) return true;
@@ -4763,7 +5087,7 @@
     root = globalThis.document,
     url = globalThis.location?.href,
     projectId) {
-    const normalizedProjectId = metadataIdentifier(projectId);
+    const normalizedProjectId = stableProjectIdFromValue(projectId);
     if (!normalizedProjectId) return { projects: [], conversations: [] };
 
     const sidebar = findSidebarRoot(root);
@@ -4832,7 +5156,38 @@
       project_id_source_ancestor_count: 0,
       project_id_source_project_wrapper_count: 0,
       project_id_source_unknown_count: 0,
-      project_chat_membership_inconsistent: false
+      project_chat_membership_inconsistent: false,
+      project_route_segment_detected: false,
+      project_route_has_slug: false,
+      project_id_normalization_applied: false,
+      project_id_normalization_source: "none",
+      raw_route_project_id_matches_normalized: false,
+      normalized_project_id_match: currentProjectIdVerified,
+      project_id_parse_failure_count: 0,
+      project_id_normalization_applied_count: 0
+    };
+    const currentRouteSegment = projectRouteSegmentFromUrl(baseUrl, baseUrl);
+    const currentStableFromRoute = stableProjectIdFromValue(currentRouteSegment);
+    collectionTelemetry.project_route_segment_detected = Boolean(currentRouteSegment);
+    collectionTelemetry.project_route_has_slug = Boolean(
+      currentRouteSegment && currentStableFromRoute && currentRouteSegment !== currentStableFromRoute);
+    collectionTelemetry.project_id_normalization_applied = collectionTelemetry.project_route_has_slug;
+    collectionTelemetry.project_id_normalization_source = currentRouteSegment
+      ? "url_route_segment"
+      : "none";
+    collectionTelemetry.raw_route_project_id_matches_normalized = Boolean(
+      currentRouteSegment && currentStableFromRoute && currentRouteSegment === currentStableFromRoute);
+
+    const recordProjectRouteParse = (href) => {
+      const segment = projectRouteSegmentFromUrl(href, baseUrl);
+      if (!segment) return;
+      if (!metadataIdentifier(segment) || !stableProjectIdFromValue(segment)) {
+        collectionTelemetry.project_id_parse_failure_count += 1;
+        return;
+      }
+      if (segment !== stableProjectIdFromValue(segment)) {
+        collectionTelemetry.project_id_normalization_applied_count += 1;
+      }
     };
     const mainCandidateProjectIds = [];
     const mainMismatchProjectIds = [];
@@ -4909,6 +5264,7 @@
 
     for (const candidate of candidateElements) {
       const { element, href, conversationId, explicitProjectId, sourceRegion } = candidate;
+      recordProjectRouteParse(href);
       if (nonProjectGptIdFromUrl(href)) {
         if (sourceRegion === "main") collectionTelemetry.main_custom_gpt_count += 1;
         collectionTelemetry.rejected_other_project_chat_count += 1;
@@ -5047,7 +5403,7 @@
   function findProjectPageScrollContainers(root, sidebar, projectId = null) {
     const structure = projectPageStructureFor(
       root,
-      metadataIdentifier(projectId),
+      stableProjectIdFromValue(projectId),
       documentHref(root),
       sidebar);
     return structure.selectedScrollCandidate ? [structure.selectedScrollCandidate] : [];
@@ -5058,7 +5414,7 @@
     url = globalThis.location?.href,
     projectId,
     options = {}) {
-    const normalizedProjectId = metadataIdentifier(projectId);
+    const normalizedProjectId = stableProjectIdFromValue(projectId);
     if (!normalizedProjectId) return { projects: [], conversations: [], current: getCurrentChatGptContext(root, url) };
 
     const merged = { projects: [], conversations: [] };
@@ -5168,6 +5524,16 @@
       main_custom_gpt_count: hydrationSnapshot.main_custom_gpt_count,
       main_candidate_from_verified_project_region_count:
         hydrationSnapshot.main_candidate_from_verified_project_region_count,
+      project_route_segment_detected: hydrationSnapshot.project_route_segment_detected === true,
+      project_route_has_slug: hydrationSnapshot.project_route_has_slug === true,
+      project_id_normalization_applied: hydrationSnapshot.project_id_normalization_applied === true,
+      project_id_normalization_source: hydrationSnapshot.project_id_normalization_source || "none",
+      raw_route_project_id_matches_normalized:
+        hydrationSnapshot.raw_route_project_id_matches_normalized === true,
+      normalized_project_id_match: hydrationSnapshot.normalized_project_id_match === true,
+      project_id_parse_failure_count: hydrationSnapshot.project_id_parse_failure_count || 0,
+      project_id_normalization_applied_count:
+        hydrationSnapshot.project_id_normalization_applied_count || 0,
       stage: "collector_project_chat_source_classification"
     });
     emitTelemetry({
@@ -5439,7 +5805,17 @@
       project_id_source_unknown_count:
         latestSnapshot.project_id_source_unknown_count || 0,
       project_chat_membership_inconsistent:
-        latestSnapshot.project_chat_membership_inconsistent === true
+        latestSnapshot.project_chat_membership_inconsistent === true,
+      project_route_segment_detected: latestSnapshot.project_route_segment_detected === true,
+      project_route_has_slug: latestSnapshot.project_route_has_slug === true,
+      project_id_normalization_applied: latestSnapshot.project_id_normalization_applied === true,
+      project_id_normalization_source: latestSnapshot.project_id_normalization_source || "none",
+      raw_route_project_id_matches_normalized:
+        latestSnapshot.raw_route_project_id_matches_normalized === true,
+      normalized_project_id_match: latestSnapshot.normalized_project_id_match === true,
+      project_id_parse_failure_count: latestSnapshot.project_id_parse_failure_count || 0,
+      project_id_normalization_applied_count:
+        latestSnapshot.project_id_normalization_applied_count || 0
     };
     if (latestSnapshot.project_chat_membership_inconsistent === true) {
       emitTelemetry({
@@ -5559,6 +5935,16 @@
         latestSnapshot.project_id_source_unknown_count || 0,
       project_chat_membership_inconsistent:
         latestSnapshot.project_chat_membership_inconsistent === true,
+      project_route_segment_detected: latestSnapshot.project_route_segment_detected === true,
+      project_route_has_slug: latestSnapshot.project_route_has_slug === true,
+      project_id_normalization_applied: latestSnapshot.project_id_normalization_applied === true,
+      project_id_normalization_source: latestSnapshot.project_id_normalization_source || "none",
+      raw_route_project_id_matches_normalized:
+        latestSnapshot.raw_route_project_id_matches_normalized === true,
+      normalized_project_id_match: latestSnapshot.normalized_project_id_match === true,
+      project_id_parse_failure_count: latestSnapshot.project_id_parse_failure_count || 0,
+      project_id_normalization_applied_count:
+        latestSnapshot.project_id_normalization_applied_count || 0,
       errorCode: latestSnapshot.project_chat_membership_inconsistent === true
         ? "context_project_chat_membership_mismatch"
         : undefined,
@@ -6532,6 +6918,7 @@
     isChatGptPage,
     conversationIdFromUrl,
     projectIdFromUrl,
+    stableProjectIdFromValue,
     collectChatGptContext,
     collectChatGptContextAsync,
     collectProjectContextEntries,

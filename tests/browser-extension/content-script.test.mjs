@@ -726,8 +726,8 @@ test("Content Script preserves Project identity navigation stages in its safe ru
   assert.equal(target.safe_candidate_count, 0);
   assert.equal(target.selection_reason, "no_safe_project_navigation_target");
   assert.equal(Object.hasOwn(target, "project_title"), false);
-  assert.equal(result.navigation_failure_reason, "project_row_fingerprint_mismatch");
-  assert.equal(result.internal_reason, "project_row_fingerprint_mismatch");
+  assert.equal(result.navigation_failure_reason, "project_row_not_visible");
+  assert.equal(result.internal_reason, "project_row_not_visible");
 });
 
 test("Content Script preserves safe diagnostics when Project Chat collection throws", async () => {

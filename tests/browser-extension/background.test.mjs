@@ -3053,29 +3053,11 @@ test("Background resolves only the discovered Projects with navigation fallback,
     (message) => message.type === "chatgpt.context.list.response");
 
   assert.equal(response.status, "ok");
-  assert.deepEqual(identityMessages, [
-    {
-      mode: "dom",
-      projectIndex: 0,
-      refreshGeneration: 1,
-      navigationGeneration: undefined,
-      collectorTabId: 100
-    },
-    {
-      mode: "navigation",
-      projectIndex: 0,
-      refreshGeneration: 1,
-      navigationGeneration: "refresh-1-identity-0",
-      collectorTabId: 100
-    },
-    {
-      mode: "navigation",
-      projectIndex: 1,
-      refreshGeneration: 1,
-      navigationGeneration: "refresh-1-identity-1",
-      collectorTabId: 100
-    }
-  ]);
+  assert.equal(identityMessages[0].mode, "dom");
+  assert.deepEqual(
+    identityMessages.filter((item) => item.mode === "navigation").map((item) => item.projectIndex),
+    [0, 1]);
+  assert.ok(identityMessages.filter((item) => item.mode === "dom").length >= 2);
   assert.deepEqual(response.projects.map((project) => project.project_id), [
     "g-p-nav-0",
     "g-p-nav-1"
@@ -3450,6 +3432,121 @@ test("Background records navigation fallback project index and identity source c
   assert.ok(Array.isArray(summary.slow_identity_project_indices));
   assert.equal(summary.slow_identity_project_indices.length, 1);
   assert.equal(summary.slow_identity_project_indices[0], 20);
+});
+
+test("Background retries remaining identities from fresh Root DOM after one navigation fallback", async () => {
+  const harness = await createHarness();
+  const discoveredProjects = Array.from({ length: 28 }, (_, index) => ({
+    project_index: index,
+    discovery_index: index,
+    title: `Project ${index}`,
+    discovery_key: `post-nav-${index}`
+  }));
+  const identityMessages = [];
+  let domPasses = 0;
+  harness.setContentHandler(async (message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    if (message.collection === "root") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: discoveredProjects,
+        conversations: [],
+        current: null
+      };
+    }
+    if (message.collection === "project_identity") {
+      identityMessages.push({
+        mode: message.identityMode,
+        projectIndex: message.projects[0]?.project_index,
+        projectCount: message.projects.length,
+        resetSidebarCatalog: message.resetSidebarCatalog === true
+      });
+      if (message.identityMode === "dom") {
+        domPasses += 1;
+        return {
+          type: "CHATGPT_CONTEXT_RESULT",
+          requestId: message.requestId,
+          mode: "list",
+          status: "ok",
+          projects: message.projects.map((project) => {
+            if (domPasses === 1 && project.project_index >= 20) return project;
+            return {
+              ...project,
+              project_id: `g-p-fresh-${project.project_index}`,
+              url: `https://chatgpt.com/g/g-p-fresh-${project.project_index}/project`
+            };
+          }),
+          conversations: [],
+          current: null
+        };
+      }
+      const projectIndex = message.projects[0].project_index;
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [{
+          ...message.projects[0],
+          project_id: `g-p-fresh-${projectIndex}`,
+          url: `https://chatgpt.com/g/g-p-fresh-${projectIndex}/project`,
+          project_index: projectIndex
+        }],
+        conversations: [],
+        current: null,
+        navigation_target_verified: true,
+        project_url_pattern_valid: true,
+        project_id_url_match: true
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [{
+        project_id: message.projectId,
+        title: "Collected",
+        url: `https://chatgpt.com/g/${message.projectId}/project`
+      }],
+      conversations: [],
+      current: null
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-identity-post-nav-dom"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(response.status, "ok");
+  assert.equal(response.projects.length, 28);
+  const navigationMessages = identityMessages.filter((item) => item.mode === "navigation");
+  assert.equal(navigationMessages.length, 1);
+  assert.equal(navigationMessages[0].projectIndex, 20);
+  const domMessages = identityMessages.filter((item) => item.mode === "dom");
+  assert.ok(domMessages.length >= 2);
+  assert.equal(domMessages[0].resetSidebarCatalog, false);
+  assert.equal(domMessages.at(-1).resetSidebarCatalog, true);
+  const readyAfterReturn = harness.diagnostics
+    .map(([, fields]) => fields)
+    .some((fields) => fields?.stage === "collector_project_identity_dom_after_root_return");
+  assert.equal(readyAfterReturn, true);
+  const summary = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_discovery_efficiency_summary");
+  assert.ok(summary.post_navigation_identity_count >= 1);
+  assert.ok(summary.root_return_dom_refresh_count >= 1);
+  assert.ok(summary.root_return_cache_invalidation_count >= 1);
+  assert.equal((summary.slow_identity_after_navigation_indices || []).length, 0);
 });
 
 test("Unsolicited 20-project Content result does not replace a 28-project Collector catalog", async () => {

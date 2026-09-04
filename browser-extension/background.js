@@ -452,6 +452,36 @@ function createCollectorProjectDiscoveryEfficiencyState(pending) {
     moreEnabledAtHydrationComplete: false,
     moreClickableAtHydrationComplete: false,
     hydrationStopReason: null,
+    hydrationLoopCount: 0,
+    hydrationProgressCount: 0,
+    hydrationNoProgressCount: 0,
+    hydrationConsecutiveStagnationMax: 0,
+    hydrationStagnationBreakCount: 0,
+    hydrationSameLogicalStateCount: 0,
+    hydrationCatalogUnchangedCount: 0,
+    hydrationSnapshotUnchangedCount: 0,
+    hydrationProgressProjectCountIncrease: 0,
+    hydrationProgressProvisionalCountIncrease: 0,
+    hydrationProgressScrollPositionChange: 0,
+    hydrationProgressScrollHeightIncrease: 0,
+    hydrationProgressMorePagination: 0,
+    hydrationStagnationResetCount: 0,
+    hydrationStagnationResetReasonCounts: {
+      project_count: 0,
+      provisional_count: 0,
+      scroll_position: 0,
+      scroll_height: 0,
+      more_pagination: 0
+    },
+    postNavigationIdentityCount: 0,
+    postNavigationIdentityWaitMs: 0,
+    postNavigationChildRegionWaitMs: 0,
+    postNavigationRelocationWaitMs: 0,
+    postNavigationIdentityActive: false,
+    rootReturnRevalidationMs: 0,
+    rootReturnDomRefreshCount: 0,
+    rootReturnCacheInvalidationCount: 0,
+    identityElapsedBeforeNavigationMs: new Map(),
     projectCandidateRejectedChildChatCount: 0,
     projectCandidateRejectedNonProjectCount: 0,
     finalCatalogIndexCount: 0,
@@ -744,14 +774,20 @@ function recordCollectorProjectDiscoveryEfficiencyEvent(fields = {}, options = {
     if (Number.isSafeInteger(fields.identity_disclosure_wait_ms)) {
       efficiency.identityDisclosureWaitMs += fields.identity_disclosure_wait_ms;
     }
+    if (Number.isSafeInteger(fields.identity_relocation_wait_ms)) {
+      efficiency.identityRelocationWaitMs += fields.identity_relocation_wait_ms;
+      if (efficiency.postNavigationIdentityActive === true) {
+        efficiency.postNavigationRelocationWaitMs += fields.identity_relocation_wait_ms;
+      }
+    }
     if (Number.isSafeInteger(fields.identity_child_region_wait_ms)) {
       efficiency.identityChildRegionWaitMs += fields.identity_child_region_wait_ms;
+      if (efficiency.postNavigationIdentityActive === true) {
+        efficiency.postNavigationChildRegionWaitMs += fields.identity_child_region_wait_ms;
+      }
     }
     if (Number.isSafeInteger(fields.identity_candidate_search_ms)) {
       efficiency.identityCandidateSearchMs += fields.identity_candidate_search_ms;
-    }
-    if (Number.isSafeInteger(fields.identity_relocation_wait_ms)) {
-      efficiency.identityRelocationWaitMs += fields.identity_relocation_wait_ms;
     }
     if (Number.isSafeInteger(fields.identity_elapsed_ms) && projectKey !== null) {
       const previous = efficiency.identityProjectElapsedMs.get(projectKey) || 0;
@@ -963,6 +999,28 @@ function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, 
     more_enabled_at_hydration_complete: efficiency.moreEnabledAtHydrationComplete === true,
     more_clickable_at_hydration_complete: efficiency.moreClickableAtHydrationComplete === true,
     hydration_stop_reason: efficiency.hydrationStopReason,
+    hydration_loop_count: efficiency.hydrationLoopCount,
+    hydration_progress_count: efficiency.hydrationProgressCount,
+    hydration_no_progress_count: efficiency.hydrationNoProgressCount,
+    hydration_consecutive_stagnation_max: efficiency.hydrationConsecutiveStagnationMax,
+    hydration_stagnation_break_count: efficiency.hydrationStagnationBreakCount,
+    hydration_same_logical_state_count: efficiency.hydrationSameLogicalStateCount,
+    hydration_catalog_unchanged_count: efficiency.hydrationCatalogUnchangedCount,
+    hydration_snapshot_unchanged_count: efficiency.hydrationSnapshotUnchangedCount,
+    hydration_progress_project_count_increase: efficiency.hydrationProgressProjectCountIncrease,
+    hydration_progress_provisional_count_increase:
+      efficiency.hydrationProgressProvisionalCountIncrease,
+    hydration_progress_scroll_position_change: efficiency.hydrationProgressScrollPositionChange,
+    hydration_progress_scroll_height_increase: efficiency.hydrationProgressScrollHeightIncrease,
+    hydration_progress_more_pagination: efficiency.hydrationProgressMorePagination,
+    hydration_stagnation_reset_count: efficiency.hydrationStagnationResetCount,
+    hydration_stagnation_reset_reason_counts: {
+      project_count: efficiency.hydrationStagnationResetReasonCounts.project_count,
+      provisional_count: efficiency.hydrationStagnationResetReasonCounts.provisional_count,
+      scroll_position: efficiency.hydrationStagnationResetReasonCounts.scroll_position,
+      scroll_height: efficiency.hydrationStagnationResetReasonCounts.scroll_height,
+      more_pagination: efficiency.hydrationStagnationResetReasonCounts.more_pagination
+    },
     project_candidate_rejected_child_chat_count:
       efficiency.projectCandidateRejectedChildChatCount,
     project_candidate_rejected_non_project_count:
@@ -1023,6 +1081,28 @@ function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, 
     average_identity_ms: averageIdentityMs,
     max_identity_ms: maxIdentityMs,
     slow_identity_project_indices: slowIdentityProjectIndices,
+    slow_identity_before_navigation_indices: [...efficiency.identityElapsedBeforeNavigationMs.entries()]
+      .map(([key, value]) => ({ index: Number(key), value }))
+      .filter((item) => Number.isSafeInteger(item.index) && item.index >= 0
+        && item.value >= COLLECTOR_SLOW_IDENTITY_MS)
+      .map((item) => item.index)
+      .sort((left, right) => left - right),
+    slow_identity_after_navigation_indices: identityElapsedValues
+      .filter((item) => {
+        const before = efficiency.identityElapsedBeforeNavigationMs.get(String(item.index))
+          || efficiency.identityElapsedBeforeNavigationMs.get(item.index)
+          || 0;
+        return (item.value - before) >= COLLECTOR_SLOW_IDENTITY_MS;
+      })
+      .map((item) => item.index)
+      .sort((left, right) => left - right),
+    post_navigation_identity_count: efficiency.postNavigationIdentityCount,
+    post_navigation_identity_wait_ms: efficiency.postNavigationIdentityWaitMs,
+    post_navigation_child_region_wait_ms: efficiency.postNavigationChildRegionWaitMs,
+    post_navigation_relocation_wait_ms: efficiency.postNavigationRelocationWaitMs,
+    root_return_revalidation_ms: efficiency.rootReturnRevalidationMs,
+    root_return_dom_refresh_count: efficiency.rootReturnDomRefreshCount,
+    root_return_cache_invalidation_count: efficiency.rootReturnCacheInvalidationCount,
     navigation_fallback_project_indices: efficiency.navigationFallbackProjectIndices,
     navigation_fallback_success_project_indices: efficiency.navigationFallbackSuccessProjectIndices,
     navigation_fallback_failure_project_indices: efficiency.navigationFallbackFailureProjectIndices,
@@ -1536,6 +1616,27 @@ function diagnostic(eventName, fields = {}) {
     "more_enabled_at_hydration_complete",
     "more_clickable_at_hydration_complete",
     "hydration_stop_reason",
+    "hydration_loop_count",
+    "hydration_progress_count",
+    "hydration_no_progress_count",
+    "hydration_consecutive_stagnation_max",
+    "hydration_stagnation_break_count",
+    "hydration_same_logical_state_count",
+    "hydration_catalog_unchanged_count",
+    "hydration_snapshot_unchanged_count",
+    "hydration_progress_project_count_increase",
+    "hydration_progress_provisional_count_increase",
+    "hydration_progress_scroll_position_change",
+    "hydration_progress_scroll_height_increase",
+    "hydration_progress_more_pagination",
+    "hydration_stagnation_reset_count",
+    "post_navigation_identity_count",
+    "post_navigation_identity_wait_ms",
+    "post_navigation_child_region_wait_ms",
+    "post_navigation_relocation_wait_ms",
+    "root_return_revalidation_ms",
+    "root_return_dom_refresh_count",
+    "root_return_cache_invalidation_count",
     "project_candidate_rejected_child_chat_count",
     "project_candidate_rejected_non_project_count",
     "final_catalog_index_count",
@@ -1648,6 +1749,8 @@ function diagnostic(eventName, fields = {}) {
     "navigation_fallback_success_project_indices",
     "navigation_fallback_failure_project_indices",
     "slow_identity_project_indices",
+    "slow_identity_before_navigation_indices",
+    "slow_identity_after_navigation_indices",
     "final_catalog_indices",
     "descriptor_added_after_first_snapshot_indices"
   ]) {
@@ -1655,6 +1758,21 @@ function diagnostic(eventName, fields = {}) {
     safe[key] = fields[key]
       .filter((value) => Number.isSafeInteger(value) && value >= 0)
       .slice(0, 5000);
+  }
+  if (fields.hydration_stagnation_reset_reason_counts
+    && typeof fields.hydration_stagnation_reset_reason_counts === "object") {
+    const counts = {};
+    for (const key of [
+      "project_count",
+      "provisional_count",
+      "scroll_position",
+      "scroll_height",
+      "more_pagination"
+    ]) {
+      const value = fields.hydration_stagnation_reset_reason_counts[key];
+      if (Number.isSafeInteger(value) && value >= 0) counts[key] = value;
+    }
+    safe.hydration_stagnation_reset_reason_counts = counts;
   }
   if (Array.isArray(fields.failures)) {
     const failureKeys = new Set([
@@ -3372,6 +3490,43 @@ function recordCollectorProjectDiscoveryResult(source, pending) {
       "timeout",
       "stagnation"
     ]);
+    assignIntegrityMetric("hydrationLoopCount", "hydration_loop_count");
+    assignIntegrityMetric("hydrationProgressCount", "hydration_progress_count");
+    assignIntegrityMetric("hydrationNoProgressCount", "hydration_no_progress_count");
+    assignIntegrityMetric("hydrationConsecutiveStagnationMax", "hydration_consecutive_stagnation_max");
+    assignIntegrityMetric("hydrationStagnationBreakCount", "hydration_stagnation_break_count");
+    assignIntegrityMetric("hydrationSameLogicalStateCount", "hydration_same_logical_state_count");
+    assignIntegrityMetric("hydrationCatalogUnchangedCount", "hydration_catalog_unchanged_count");
+    assignIntegrityMetric("hydrationSnapshotUnchangedCount", "hydration_snapshot_unchanged_count");
+    assignIntegrityMetric(
+      "hydrationProgressProjectCountIncrease",
+      "hydration_progress_project_count_increase");
+    assignIntegrityMetric(
+      "hydrationProgressProvisionalCountIncrease",
+      "hydration_progress_provisional_count_increase");
+    assignIntegrityMetric(
+      "hydrationProgressScrollPositionChange",
+      "hydration_progress_scroll_position_change");
+    assignIntegrityMetric(
+      "hydrationProgressScrollHeightIncrease",
+      "hydration_progress_scroll_height_increase");
+    assignIntegrityMetric("hydrationProgressMorePagination", "hydration_progress_more_pagination");
+    assignIntegrityMetric("hydrationStagnationResetCount", "hydration_stagnation_reset_count");
+    const resetReasons = source?.hydration_stagnation_reset_reason_counts;
+    if (resetReasons && typeof resetReasons === "object") {
+      for (const key of [
+        "project_count",
+        "provisional_count",
+        "scroll_position",
+        "scroll_height",
+        "more_pagination"
+      ]) {
+        const normalized = nonNegativeInteger(resetReasons[key]);
+        if (normalized !== null) {
+          efficiency.hydrationStagnationResetReasonCounts[key] = normalized;
+        }
+      }
+    }
     if (moreStopReasons.has(source?.hydration_stop_reason)) {
       efficiency.hydrationStopReason = source.hydration_stop_reason;
     }
@@ -6340,6 +6495,56 @@ function finalizeCollectorIdentityProjects(identityProjects) {
   return { projects: logical, stats };
 }
 
+async function applyCollectorDomIdentityPass(
+  tab,
+  pending,
+  request,
+  rootResult,
+  projects,
+  { resetSidebarCatalog = false, afterNavigation = false } = {}) {
+  const efficiency = collectorProjectDiscoveryEfficiencyFor(pending);
+  const startedAt = Date.now();
+  pending.identityTelemetryActive = true;
+  let domResult;
+  try {
+    domResult = await dispatchToContentScript(tab.id, {
+      type: "GET_CHATGPT_CONTEXT",
+      requestId: pending.requestId,
+      refreshGeneration: pending.generation,
+      collectorTabId: tab.id,
+      mode: "list",
+      collection: "project_identity",
+      identityMode: "dom",
+      projects,
+      identityCatalog: projects,
+      totalProjects: projects.length,
+      resetSidebarCatalog: resetSidebarCatalog === true,
+      navigationTimeoutMs: 10000
+    }, request, {
+      timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
+      timeoutStage: "collector_project_identity_dom_timeout"
+    });
+  } finally {
+    pending.identityTelemetryActive = false;
+  }
+  throwIfCollectorRequestSuperseded(pending);
+  validateCollectorProjectIdentityResponse(domResult, pending);
+  const beforeDom = projects;
+  const merged = mergeCollectorProjectIdentityResponse(projects, domResult);
+  const newlyResolved = merged.reduce((count, project, index) =>
+    count + (!collectorProjectTarget(beforeDom[index]) && collectorProjectTarget(project) ? 1 : 0), 0);
+  pending.projectIdentityResult = {
+    ...rootResult,
+    projects: merged,
+    unresolved_project_count: collectProjectMetadataResolution({ projects: merged }).unresolvedCount
+  };
+  if (efficiency && afterNavigation) {
+    efficiency.postNavigationIdentityCount += 1;
+    efficiency.postNavigationIdentityWaitMs += Math.max(0, Date.now() - startedAt);
+  }
+  return { projects: merged, newlyResolved };
+}
+
 async function resolveCollectorProjectIdentities(tab, pending, request, rootResult) {
   throwIfCollectorRequestSuperseded(pending);
   pending.identityResolutionAttempted = true;
@@ -6391,40 +6596,20 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
   let navigationResolvedCount = 0;
   let domChecked = initialResolution.resolvedCount > 0;
   if (initialUnresolvedIndexes.length > 0) {
-    pending.identityTelemetryActive = true;
-    let domResult;
-    try {
-      domResult = await dispatchToContentScript(tab.id, {
-        type: "GET_CHATGPT_CONTEXT",
-        requestId: pending.requestId,
-        refreshGeneration: pending.generation,
-        collectorTabId: tab.id,
-        mode: "list",
-        collection: "project_identity",
-        identityMode: "dom",
-        projects,
-        identityCatalog: projects,
-        totalProjects: projects.length,
-        navigationTimeoutMs: 10000
-      }, request, {
-        timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
-        timeoutStage: "collector_project_identity_dom_timeout"
-      });
-    } finally {
-      pending.identityTelemetryActive = false;
-    }
-    throwIfCollectorRequestSuperseded(pending);
-    validateCollectorProjectIdentityResponse(domResult, pending);
-    const beforeDom = projects;
-    projects = mergeCollectorProjectIdentityResponse(projects, domResult);
-    nonNavigationResolvedCount += projects.reduce((count, project, index) =>
-      count + (!collectorProjectTarget(beforeDom[index]) && collectorProjectTarget(project) ? 1 : 0), 0);
+    const domPass = await applyCollectorDomIdentityPass(
+      tab,
+      pending,
+      request,
+      rootResult,
+      projects);
+    projects = domPass.projects;
+    nonNavigationResolvedCount += domPass.newlyResolved;
     domChecked = true;
-    pending.projectIdentityResult = {
-      ...rootResult,
-      projects,
-      unresolved_project_count: collectProjectMetadataResolution({ projects }).unresolvedCount
-    };
+    const efficiencyAfterDom = collectorProjectDiscoveryEfficiencyFor(pending);
+    if (efficiencyAfterDom) {
+      efficiencyAfterDom.identityElapsedBeforeNavigationMs = new Map(
+        efficiencyAfterDom.identityProjectElapsedMs);
+    }
     recordCollectorProjectIdentityResolution(
       "collector project identity DOM resolution observed",
       pending,
@@ -6444,10 +6629,14 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
       });
   }
 
-  let unresolvedIndexes = collectProjectMetadataResolution({ projects }).items
-    .filter((item) => !item.resolved)
-    .map((item) => item.projectIndex);
-  for (const projectIndex of unresolvedIndexes) {
+  const navigatedIdentityIndexes = new Set();
+  while (true) {
+    const unresolvedIndexes = collectProjectMetadataResolution({ projects }).items
+      .filter((item) => !item.resolved)
+      .map((item) => item.projectIndex);
+    const projectIndex = unresolvedIndexes.find((index) => !navigatedIdentityIndexes.has(index));
+    if (projectIndex === undefined) break;
+    navigatedIdentityIndexes.add(projectIndex);
     const identityNavigationGeneration = `refresh-${pending.generation}-identity-${projectIndex}`;
     const targetProject = projects[projectIndex];
     const descriptor = collectorProjectIdentityDescriptor(targetProject, projectIndex);
@@ -6839,19 +7028,34 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
         stage: "collector_project_identity_navigation_resolved"
       });
     pending.identityNavigationActive = false;
-    // Always return to the discovery/root page before attempting the next
-    // confirmed Project row. This is identity resolution only; Project
-    // discovery itself is not re-entered.
-    tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
+    const alreadyOnRoot = isCollectorRootUrl(tab?.url) === true;
+    if (!resolvedWithoutNavigation || !alreadyOnRoot) {
+      tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
+        request_id: pending.requestId,
+        project_index: projectIndex,
+        total_projects: projects.length,
+        project_discovery_completed: false,
+        project_discovery_scan_completed: true,
+        project_discovery_run_id: discovery.runId,
+        stage: "collector_project_identity_root_restore"
+      });
+      pending.tabId = tab.id;
+    }
+    const revalidationStartedAt = Date.now();
+    tab = await ensureCollectorReady(tab, {
       request_id: pending.requestId,
       project_index: projectIndex,
       total_projects: projects.length,
-      project_discovery_completed: false,
-      project_discovery_scan_completed: true,
-      project_discovery_run_id: discovery.runId,
-      stage: "collector_project_identity_root_restore"
+      stage: "collector_project_identity_root_return_ready"
     });
     pending.tabId = tab.id;
+    const efficiency = collectorProjectDiscoveryEfficiencyFor(pending);
+    if (efficiency) {
+      efficiency.rootReturnRevalidationMs += Math.max(0, Date.now() - revalidationStartedAt);
+      efficiency.rootReturnDomRefreshCount += 1;
+      efficiency.rootReturnCacheInvalidationCount += 1;
+      efficiency.postNavigationIdentityActive = true;
+    }
     emitNavigationExit(true, "resolved", {
       navigation_target_verified: true,
       project_url_pattern_valid: true,
@@ -6861,9 +7065,37 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
     pending.identityNavigationProjectIndex = null;
     pending.identityNavigationTotalProjects = null;
     pending.identityNavigationGeneration = null;
-    unresolvedIndexes = collectProjectMetadataResolution({ projects }).items
+    const remainingAfterReturn = collectProjectMetadataResolution({ projects }).items
       .filter((item) => !item.resolved)
       .map((item) => item.projectIndex);
+    if (remainingAfterReturn.length > 0) {
+      const retry = await applyCollectorDomIdentityPass(
+        tab,
+        pending,
+        request,
+        rootResult,
+        projects,
+        { resetSidebarCatalog: true, afterNavigation: true });
+      projects = retry.projects;
+      nonNavigationResolvedCount += retry.newlyResolved;
+      recordCollectorProjectIdentityResolution(
+        "collector project identity DOM resolution observed",
+        pending,
+        projects,
+        {
+          project_identity_resolution_started: true,
+          project_identity_resolution_completed: false,
+          non_navigation_resolved_count: nonNavigationResolvedCount,
+          navigation_resolved_count: navigationResolvedCount,
+          current_project_index: -1,
+          resolution_method: "dom",
+          navigation_target_verified: false,
+          project_url_pattern_valid: false,
+          project_id_url_match: false,
+          status: "observed",
+          stage: "collector_project_identity_dom_after_root_return"
+        });
+    }
     } catch (error) {
       if (!isCurrentCollectorRequest(pending)) throw error;
       const exitReason = navigationFailureReason

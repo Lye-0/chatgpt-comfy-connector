@@ -927,7 +927,20 @@
       "more_project_count_after_click_total",
       "more_scroll_height_increased_count",
       "more_candidate_count_increased_count",
-      "more_descriptor_count_increased_count",
+      "hydration_loop_count",
+      "hydration_progress_count",
+      "hydration_no_progress_count",
+      "hydration_consecutive_stagnation_max",
+      "hydration_stagnation_break_count",
+      "hydration_same_logical_state_count",
+      "hydration_catalog_unchanged_count",
+      "hydration_snapshot_unchanged_count",
+      "hydration_progress_project_count_increase",
+      "hydration_progress_provisional_count_increase",
+      "hydration_progress_scroll_position_change",
+      "hydration_progress_scroll_height_increase",
+      "hydration_progress_more_pagination",
+      "hydration_stagnation_reset_count",
       "project_candidate_rejected_child_chat_count",
       "project_candidate_rejected_non_project_count",
       "title_only_reconcile_attempt_count",
@@ -1417,6 +1430,8 @@
             identityCatalog: Array.isArray(message.identityCatalog)
               ? message.identityCatalog
               : (Array.isArray(message.identity_catalog) ? message.identity_catalog : []),
+            resetSidebarCatalog: message.resetSidebarCatalog === true
+              || message.reset_sidebar_catalog === true,
             navigationTimeoutMs: message.navigationTimeoutMs,
             totalProjects: Number.isSafeInteger(message.totalProjects)
               ? message.totalProjects

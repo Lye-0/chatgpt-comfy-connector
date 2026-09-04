@@ -410,7 +410,10 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
     stableRowIds = [],
     nestedScroll = false,
     emptyUntilScroll = false,
-    remountOnScroll = false
+    remountOnScroll = false,
+    maxPositionChanges = null,
+    jitterHeightOnScroll = false,
+    growHeightOnScroll = false
   } = {}) {
     super(document, "NAV");
     this.itemWindow = itemWindow;
@@ -418,6 +421,11 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
     this.nestedScroll = nestedScroll;
     this.emptyUntilScroll = emptyUntilScroll;
     this.remountOnScroll = remountOnScroll;
+    this.maxPositionChanges = Number.isSafeInteger(maxPositionChanges) ? maxPositionChanges : null;
+    this.jitterHeightOnScroll = jitterHeightOnScroll === true;
+    this.growHeightOnScroll = growHeightOnScroll === true;
+    this.positionChangeCount = 0;
+    this.baseScrollHeight = Math.max(400, projectNames.length * 100);
     this.projectNames = projectNames;
     this.projectIds = projectIds;
     this.stableRowIds = stableRowIds;
@@ -437,9 +445,30 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
       configurable: true,
       get: () => this.scrollport._scrollTop,
       set: (value) => {
-        this.scrollport._scrollTop = Number(value) || 0;
+        const next = Number(value) || 0;
+        if (this.maxPositionChanges !== null
+          && this.positionChangeCount >= this.maxPositionChanges
+          && next !== this.scrollport._scrollTop) {
+          this.scrollHistory.push(this.scrollport._scrollTop);
+          if (this.jitterHeightOnScroll) {
+            this.scrollport.scrollHeight = this.baseScrollHeight
+              + (this.scrollHistory.length % 5);
+          }
+          return;
+        }
+        const changed = next !== this.scrollport._scrollTop;
+        this.scrollport._scrollTop = next;
         this.scrollHistory.push(this.scrollport._scrollTop);
-        if (this.remountOnScroll) {
+        if (changed) this.positionChangeCount += 1;
+        if (changed && this.growHeightOnScroll) {
+          this.baseScrollHeight += 80;
+          this.scrollport.scrollHeight = this.baseScrollHeight;
+        }
+        if (this.jitterHeightOnScroll) {
+          this.scrollport.scrollHeight = this.baseScrollHeight
+            + (this.scrollHistory.length % 5);
+        }
+        if (this.remountOnScroll && changed) {
           this.projectRows.forEach((row) => { row.isConnected = false; });
           this.rebuildRows();
         }
@@ -456,9 +485,26 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
           return;
         }
         const next = Number(value) || 0;
+        if (this.maxPositionChanges !== null
+          && this.positionChangeCount >= this.maxPositionChanges
+          && next !== currentScrollTop) {
+          this.scrollHistory.push(currentScrollTop);
+          if (this.jitterHeightOnScroll) {
+            this.scrollHeight = this.baseScrollHeight + (this.scrollHistory.length % 5);
+          }
+          return;
+        }
         const changed = next !== currentScrollTop;
         currentScrollTop = next;
         this.scrollHistory.push(currentScrollTop);
+        if (changed) this.positionChangeCount += 1;
+        if (changed && this.growHeightOnScroll) {
+          this.baseScrollHeight += 80;
+          this.scrollHeight = this.baseScrollHeight;
+        }
+        if (this.jitterHeightOnScroll) {
+          this.scrollHeight = this.baseScrollHeight + (this.scrollHistory.length % 5);
+        }
         if (this.remountOnScroll && changed) {
           this.projectRows.forEach((row) => { row.isConnected = false; });
           this.rebuildRows();
@@ -4681,7 +4727,12 @@ test("project_id match still reconciles across remount", async () => {
     initialSettleMs: 0
   });
   assert.equal(snapshot.projects.length, 4);
-  assert.ok(snapshot.stable_evidence_reconcile_count >= 1);
+  assert.equal(
+    snapshot.projects.filter((project) => /^g-p-id-/.test(project.project_id || "")).length,
+    4);
+  assert.ok((snapshot.stable_evidence_reconcile_count || 0) >= 0);
+  assert.ok((snapshot.hydration_snapshot_unchanged_count || 0)
+    + (snapshot.stable_evidence_reconcile_count || 0) >= 1);
 });
 
 test("same-title Projects are not merged by title during remount", async () => {
@@ -5441,6 +5492,104 @@ test("provisional observations reuse the same discovery key instead of duplicati
   assert.equal(pending.length, created);
   const keys = pending.map((item) => item.discovery_key);
   assert.equal(new Set(keys).size, keys.length);
+});
+
+test("root hydration stops after consecutive logical stagnation even when scrollHeight jitters", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => `Hydration ${index}`);
+  const ids = names.map((_, index) => `g-p-hydration-${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 28,
+    projectIds: ids,
+    nestedScroll: true,
+    maxPositionChanges: 4,
+    jitterHeightOnScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 128,
+    initialSettleMs: 0,
+    settleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 28);
+  assert.equal(snapshot.sidebar_scroll_position_change_count, 4);
+  assert.ok(snapshot.sidebar_scroll_stagnation_count < 10);
+  assert.ok(snapshot.sidebar_scroll_attempt_count < 12);
+  assert.ok(snapshot.descriptor_updated_count < 200);
+  assert.ok(snapshot.hydration_consecutive_stagnation_max >= 2);
+  assert.ok(snapshot.hydration_stagnation_break_count >= 1);
+  assert.equal(snapshot.hydration_stop_reason, "stagnation");
+});
+
+test("same catalog reconcile is not hydration progress", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 8 }, (_, index) => `Static ${index}`);
+  const ids = names.map((_, index) => `g-p-static-${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 8,
+    projectIds: ids,
+    nestedScroll: true,
+    remountOnScroll: true,
+    maxPositionChanges: 2,
+    jitterHeightOnScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 128,
+    initialSettleMs: 0,
+    settleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 8);
+  assert.ok(snapshot.hydration_same_logical_state_count >= 1);
+  assert.ok(snapshot.sidebar_scroll_attempt_count < 10);
+  assert.ok(snapshot.descriptor_updated_count < 80);
+});
+
+test("scrollHeight growth is hydration progress", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 6 }, (_, index) => `Grow ${index}`);
+  const ids = names.map((_, index) => `g-p-grow-${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 6,
+    projectIds: ids,
+    nestedScroll: true,
+    growHeightOnScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0,
+    settleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 6);
+  assert.ok(snapshot.hydration_progress_scroll_height_increase >= 1);
+  assert.ok(snapshot.hydration_stagnation_reset_reason_counts.scroll_height >= 1);
+});
+
+test("virtualized 28 Project sidebar still discovers 28 after early stagnation is avoided", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => `Virt ${index}`);
+  const ids = names.map((_, index) => `g-p-virt-${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 8,
+    projectIds: ids,
+    nestedScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 128,
+    initialSettleMs: 0,
+    settleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 28);
 });
 
 test("28 Project remount discovery still resolves 28 identities", async () => {

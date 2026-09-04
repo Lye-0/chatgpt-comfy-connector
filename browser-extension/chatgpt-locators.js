@@ -1837,6 +1837,27 @@
       moreDescriptorCountIncreasedCount: 0,
       moreLastClickHadProgress: false,
       morePaginationStates: new Map(),
+      hydrationLoopCount: 0,
+      hydrationProgressCount: 0,
+      hydrationNoProgressCount: 0,
+      hydrationConsecutiveStagnationMax: 0,
+      hydrationStagnationBreakCount: 0,
+      hydrationSameLogicalStateCount: 0,
+      hydrationCatalogUnchangedCount: 0,
+      hydrationSnapshotUnchangedCount: 0,
+      hydrationProgressProjectCountIncrease: 0,
+      hydrationProgressProvisionalCountIncrease: 0,
+      hydrationProgressScrollPositionChange: 0,
+      hydrationProgressScrollHeightIncrease: 0,
+      hydrationProgressMorePagination: 0,
+      hydrationStagnationResetCount: 0,
+      hydrationStagnationResetReasonCounts: {
+        project_count: 0,
+        provisional_count: 0,
+        scroll_position: 0,
+        scroll_height: 0,
+        more_pagination: 0
+      },
       projectCandidateRejectedChildChatCount: 0,
       projectCandidateRejectedNonProjectCount: 0,
       descriptorAddedAfterFirstSnapshotIndices: [],
@@ -2254,6 +2275,30 @@
       more_scroll_height_increased_count: Number(stats?.moreScrollHeightIncreasedCount) || 0,
       more_candidate_count_increased_count: Number(stats?.moreCandidateCountIncreasedCount) || 0,
       more_descriptor_count_increased_count: Number(stats?.moreDescriptorCountIncreasedCount) || 0,
+      hydration_loop_count: Number(stats?.hydrationLoopCount) || 0,
+      hydration_progress_count: Number(stats?.hydrationProgressCount) || 0,
+      hydration_no_progress_count: Number(stats?.hydrationNoProgressCount) || 0,
+      hydration_consecutive_stagnation_max: Number(stats?.hydrationConsecutiveStagnationMax) || 0,
+      hydration_stagnation_break_count: Number(stats?.hydrationStagnationBreakCount) || 0,
+      hydration_same_logical_state_count: Number(stats?.hydrationSameLogicalStateCount) || 0,
+      hydration_catalog_unchanged_count: Number(stats?.hydrationCatalogUnchangedCount) || 0,
+      hydration_snapshot_unchanged_count: Number(stats?.hydrationSnapshotUnchangedCount) || 0,
+      hydration_progress_project_count_increase: Number(stats?.hydrationProgressProjectCountIncrease) || 0,
+      hydration_progress_provisional_count_increase:
+        Number(stats?.hydrationProgressProvisionalCountIncrease) || 0,
+      hydration_progress_scroll_position_change:
+        Number(stats?.hydrationProgressScrollPositionChange) || 0,
+      hydration_progress_scroll_height_increase:
+        Number(stats?.hydrationProgressScrollHeightIncrease) || 0,
+      hydration_progress_more_pagination: Number(stats?.hydrationProgressMorePagination) || 0,
+      hydration_stagnation_reset_count: Number(stats?.hydrationStagnationResetCount) || 0,
+      hydration_stagnation_reset_reason_counts: {
+        project_count: Number(stats?.hydrationStagnationResetReasonCounts?.project_count) || 0,
+        provisional_count: Number(stats?.hydrationStagnationResetReasonCounts?.provisional_count) || 0,
+        scroll_position: Number(stats?.hydrationStagnationResetReasonCounts?.scroll_position) || 0,
+        scroll_height: Number(stats?.hydrationStagnationResetReasonCounts?.scroll_height) || 0,
+        more_pagination: Number(stats?.hydrationStagnationResetReasonCounts?.more_pagination) || 0
+      },
       project_candidate_rejected_child_chat_count:
         Number(stats?.projectCandidateRejectedChildChatCount) || 0,
       project_candidate_rejected_non_project_count:
@@ -3606,8 +3651,35 @@
     };
   }
 
-  function connectedRowStillMatchesDescriptor(row, descriptor) {
+  function connectedRowStillMatchesDescriptor(row, descriptor, baseUrl = globalThis.location?.href) {
     if (!row || row.isConnected === false) return false;
+    const expectedId = stableProjectIdFromValue(descriptor?.project_id || descriptor?.projectId);
+    if (expectedId) {
+      const rowIdentity = projectIdentityFromElement(row, baseUrl);
+      if (rowIdentity?.projectId) return rowIdentity.projectId === expectedId;
+      return false;
+    }
+    const expectedLocator = metadataIdentifier(
+      descriptor?.stable_locator_key || descriptor?.stableLocatorKey);
+    if (expectedLocator) {
+      const fingerprint = projectRowFingerprint(row, visibleTitleFromElement(row, ""), 0, baseUrl);
+      if (fingerprint?.stable_locator_key) {
+        return fingerprint.stable_locator_key === expectedLocator;
+      }
+      return false;
+    }
+    const expectedDiscoveryKey = metadataIdentifier(descriptor?.discovery_key || descriptor?.discoveryKey);
+    if (expectedDiscoveryKey) {
+      const discoveryIndex = Number.isSafeInteger(descriptor?.discovery_index)
+        ? descriptor.discovery_index
+        : (Number.isSafeInteger(descriptor?.project_index) ? descriptor.project_index : 0);
+      const fingerprint = projectRowFingerprint(
+        row,
+        visibleTitleFromElement(row, ""),
+        discoveryIndex,
+        baseUrl);
+      return fingerprint?.discovery_key === expectedDiscoveryKey;
+    }
     const expectedTitle = metadataTextKey(metadataTitle(descriptor?.title));
     if (!expectedTitle) return false;
     return metadataTextKey(visibleTitleFromElement(row, "")) === expectedTitle;
@@ -4114,7 +4186,7 @@
     const expectedProjectId = stableProjectIdFromValue(descriptor?.project_id || descriptor?.projectId);
     const currentRow = () => {
       try {
-        if (connectedRowStillMatchesDescriptor(row, descriptor)) return row;
+        if (connectedRowStillMatchesDescriptor(row, descriptor, baseUrl)) return row;
         const relocated = options.relocateRow?.();
         if (relocated) row = relocated;
       } catch (_) { }
@@ -4564,6 +4636,7 @@
         ? options.identityCatalog
         : output;
       const sidebarCatalog = createIdentitySidebarCatalog(root, baseUrl);
+      if (options.resetSidebarCatalog === true) sidebarCatalog.snapshot(true);
       for (let index = 0; index < output.length; index += 1) {
         const descriptor = output[index];
         const projectIndex = Number.isSafeInteger(descriptor.project_index)
@@ -4638,7 +4711,7 @@
               {
                 navigationTimeoutMs: options.navigationTimeoutMs,
                 relocateRow: () => {
-                  if (connectedRowStillMatchesDescriptor(row, descriptor)) return row;
+                  if (connectedRowStillMatchesDescriptor(row, descriptor, baseUrl)) return row;
                   sidebarCatalog.snapshot(true);
                   const relocated = sidebarCatalog.relocate(descriptor, identityCatalog);
                   row = relocated.row;
@@ -4848,7 +4921,7 @@
         let disclosureResult = null;
         if (row) {
           const relocateRow = () => {
-            if (connectedRowStillMatchesDescriptor(row, descriptor)) return row;
+            if (connectedRowStillMatchesDescriptor(row, descriptor, baseUrl)) return row;
             sidebarCatalog.snapshot(true);
             const relocated = sidebarCatalog.relocate(descriptor, identityCatalog);
             row = relocated.row;
@@ -5551,6 +5624,74 @@
     return getCurrentChatGptContextFromEntries(collectContextEntries(root, url), root, url);
   }
 
+  function discoveryLogicalStateKey(catalog) {
+    const rows = [];
+    const push = (role, item) => {
+      rows.push([
+        role,
+        stableProjectIdFromValue(item?.project_id || item?.projectId) || "",
+        metadataIdentifier(item?.discovery_key || item?.discoveryKey) || "",
+        metadataIdentifier(item?.stable_locator_key || item?.stableLocatorKey) || "",
+        metadataTextKey(metadataTitle(item?.title)) || ""
+      ].join(":"));
+    };
+    for (const item of catalog?.projects || []) push("c", item);
+    for (const item of catalog?.provisional_observations || []) push("p", item);
+    rows.sort();
+    return rows.join("|");
+  }
+
+  function discoveryProgressRows(catalog) {
+    const rows = new Set();
+    const push = (role, item) => {
+      rows.add([
+        role,
+        stableProjectIdFromValue(item?.project_id || item?.projectId) || "",
+        metadataIdentifier(item?.stable_locator_key || item?.stableLocatorKey) || "",
+        metadataTextKey(metadataTitle(item?.title)) || ""
+      ].join(":"));
+    };
+    for (const item of catalog?.projects || []) push("c", item);
+    for (const item of catalog?.provisional_observations || []) push("p", item);
+    return rows;
+  }
+
+  function discoveryProgressStateKey(catalog) {
+    return `${catalog?.projects?.length || 0}:${catalog?.provisional_observations?.length || 0}|${
+      [...discoveryProgressRows(catalog)].sort().join("|")
+    }`;
+  }
+
+  function catalogAlreadyCoversSnapshot(merged, snapshot) {
+    const knownIds = new Set();
+    const knownLocators = new Set();
+    const knownDiscoveryKeys = new Set();
+    const remember = (item) => {
+      const projectId = stableProjectIdFromValue(item?.project_id || item?.projectId);
+      const locator = metadataIdentifier(item?.stable_locator_key || item?.stableLocatorKey);
+      const discoveryKey = metadataIdentifier(item?.discovery_key || item?.discoveryKey);
+      if (projectId) knownIds.add(projectId);
+      if (locator) knownLocators.add(locator);
+      if (discoveryKey) knownDiscoveryKeys.add(discoveryKey);
+    };
+    for (const item of merged?.projects || []) remember(item);
+    for (const item of merged?.provisional_observations || []) remember(item);
+    const incoming = [
+      ...(snapshot?.projects || []),
+      ...(snapshot?.provisional_observations || [])
+    ];
+    if (incoming.length === 0) return false;
+    return incoming.every((item) => {
+      const projectId = stableProjectIdFromValue(item?.project_id || item?.projectId);
+      if (projectId && knownIds.has(projectId)) return true;
+      const locator = metadataIdentifier(item?.stable_locator_key || item?.stableLocatorKey);
+      if (locator && knownLocators.has(locator)) return true;
+      const discoveryKey = metadataIdentifier(item?.discovery_key || item?.discoveryKey);
+      if (discoveryKey && knownDiscoveryKeys.has(discoveryKey)) return true;
+      return false;
+    });
+  }
+
   function collectChatGptContext(root = globalThis.document, url = globalThis.location?.href) {
     const entries = collectContextEntries(root, url);
     return {
@@ -5685,7 +5826,7 @@
     };
     let result = null;
     let latestSnapshot = null;
-    let snapshotNeedsCollect = true;
+    let collectAfterProgress = true;
     let disconnectedContainerObserved = false;
     const refreshRootContainers = () => {
       const sidebarWasDisconnected = sidebar?.isConnected === false;
@@ -5727,34 +5868,107 @@
       latestSnapshot = initial;
       mergeContextProjectCatalog(merged, initial, discoveryStats);
       mergeContextConversationCatalog(merged, initial);
+      let lastProgressStateKey = discoveryProgressStateKey(merged);
+      let lastSnapshotProgressKey = discoveryLogicalStateKey({
+        projects: initial.projects || [],
+        provisional_observations: initial.provisional_observations || []
+      });
+      let maxScrollHeightSeen = canScroll ? (Number(scrollContainer.scrollHeight) || 0) : 0;
       const initialMoreClicks = await expandAvailableMoreButtons();
       noteMoreRepaintGrace();
-      snapshotNeedsCollect = initialMoreClicks > 0;
+      collectAfterProgress = initialMoreClicks > 0
+        || discoveryStats.moreLastClickHadProgress === true;
+      const absorbSnapshot = (snapshot, { forceMerge = false } = {}) => {
+        latestSnapshot = snapshot;
+        const snapshotKey = discoveryLogicalStateKey({
+          projects: snapshot.projects || [],
+          provisional_observations: snapshot.provisional_observations || []
+        });
+        if (!forceMerge && (snapshotKey === lastSnapshotProgressKey
+          || catalogAlreadyCoversSnapshot(merged, snapshot))) {
+          discoveryStats.hydrationSnapshotUnchangedCount += 1;
+          discoveryStats.hydrationSameLogicalStateCount += 1;
+          lastSnapshotProgressKey = snapshotKey;
+          return { projectDelta: 0, provisionalDelta: 0, evidenceChanged: false };
+        }
+        lastSnapshotProgressKey = snapshotKey;
+        const beforeProjects = merged.projects.length;
+        const beforeProvisionals = merged.provisional_observations?.length || 0;
+        const beforeEvidence = lastProgressStateKey;
+        mergeContextProjectCatalog(merged, snapshot, discoveryStats);
+        mergeContextConversationCatalog(merged, snapshot);
+        const afterKey = discoveryProgressStateKey(merged);
+        const projectDelta = merged.projects.length - beforeProjects;
+        const provisionalDelta = (merged.provisional_observations?.length || 0) - beforeProvisionals;
+        const evidenceChanged = afterKey !== beforeEvidence
+          && (projectDelta > 0 || provisionalDelta > 0
+            || afterKey.replace(/^\d+:\d+\|/, "") !== beforeEvidence.replace(/^\d+:\d+\|/, ""));
+        if (afterKey === beforeEvidence) {
+          discoveryStats.hydrationCatalogUnchangedCount += 1;
+          discoveryStats.hydrationSameLogicalStateCount += 1;
+        }
+        lastProgressStateKey = afterKey;
+        return { projectDelta, provisionalDelta, evidenceChanged };
+      };
+      const noteHydrationProgress = (reasons) => {
+        if (reasons.length === 0) {
+          discoveryStats.hydrationNoProgressCount += 1;
+          stagnantPasses += 1;
+          discoveryStats.hydrationConsecutiveStagnationMax = Math.max(
+            discoveryStats.hydrationConsecutiveStagnationMax,
+            stagnantPasses);
+          return false;
+        }
+        discoveryStats.hydrationProgressCount += 1;
+        if (stagnantPasses > 0) discoveryStats.hydrationStagnationResetCount += 1;
+        stagnantPasses = 0;
+        for (const reason of reasons) {
+          if (reason in discoveryStats.hydrationStagnationResetReasonCounts) {
+            discoveryStats.hydrationStagnationResetReasonCounts[reason] += 1;
+          }
+        }
+        return true;
+      };
       for (let pass = 0; pass < maxScrolls; pass += 1) {
         if (!ensureCollectionActive()) break;
+        discoveryStats.hydrationLoopCount += 1;
+        const beforeProjects = merged.projects.length;
+        const beforeProvisionals = merged.provisional_observations?.length || 0;
         const expandedBeforeScan = await expandAvailableMoreButtons();
         noteMoreRepaintGrace();
-        const catalogOccupancy = () => merged.projects.length
-          + (merged.provisional_observations?.length || 0)
-          + merged.conversations.length;
-        const beforeCount = catalogOccupancy();
+        const moreProgressThisPass = expandedBeforeScan > 0
+          && discoveryStats.moreLastClickHadProgress === true;
+        refreshRootContainers();
         const beforeTop = canScroll ? Number(scrollContainer.scrollTop) || 0 : 0;
         const beforeHeight = canScroll ? Number(scrollContainer.scrollHeight) || 0 : 0;
         const clientHeight = canScroll ? Number(scrollContainer.clientHeight) || 0 : 0;
-        if (snapshotNeedsCollect || expandedBeforeScan > 0 || !latestSnapshot) {
-          latestSnapshot = collectSnapshot();
-          mergeContextProjectCatalog(merged, latestSnapshot, discoveryStats);
-          mergeContextConversationCatalog(merged, latestSnapshot);
-          snapshotNeedsCollect = false;
+        let snapshotDelta = { projectDelta: 0, provisionalDelta: 0, evidenceChanged: false };
+        if (collectAfterProgress || moreProgressThisPass || !latestSnapshot) {
+          snapshotDelta = absorbSnapshot(collectSnapshot(), { forceMerge: moreProgressThisPass });
+          collectAfterProgress = false;
         }
-        const added = catalogOccupancy() - beforeCount;
         const moreRemainingClickable = moreClickableRemaining();
         if (!canScroll) {
+          const reasons = [];
+          if (merged.projects.length > beforeProjects) {
+            reasons.push("project_count");
+            discoveryStats.hydrationProgressProjectCountIncrease += 1;
+          }
+          if ((merged.provisional_observations?.length || 0) > beforeProvisionals) {
+            reasons.push("provisional_count");
+            discoveryStats.hydrationProgressProvisionalCountIncrease += 1;
+          }
+          if (moreProgressThisPass) {
+            reasons.push("more_pagination");
+            discoveryStats.hydrationProgressMorePagination += 1;
+          }
+          noteHydrationProgress(reasons);
           if (expandedBeforeScan > 0 || moreRemainingClickable || moreRepaintGracePasses > 0) {
             if (moreRepaintGracePasses > 0 && !moreRemainingClickable) {
               moreRepaintGracePasses -= 1;
               await waitForMorePaginationSettle(root, options);
             }
+            collectAfterProgress = moreProgressThisPass || moreRemainingClickable;
             continue;
           }
           break;
@@ -5762,11 +5976,26 @@
 
         const maxTop = Math.max(0, beforeHeight - clientHeight);
         if (beforeTop >= maxTop) {
+          const reasons = [];
+          if (merged.projects.length > beforeProjects) {
+            reasons.push("project_count");
+            discoveryStats.hydrationProgressProjectCountIncrease += 1;
+          }
+          if ((merged.provisional_observations?.length || 0) > beforeProvisionals) {
+            reasons.push("provisional_count");
+            discoveryStats.hydrationProgressProvisionalCountIncrease += 1;
+          }
+          if (moreProgressThisPass) {
+            reasons.push("more_pagination");
+            discoveryStats.hydrationProgressMorePagination += 1;
+          }
+          noteHydrationProgress(reasons);
           if (expandedBeforeScan > 0 || moreRemainingClickable || moreRepaintGracePasses > 0) {
             if (moreRepaintGracePasses > 0 && !moreRemainingClickable) {
               moreRepaintGracePasses -= 1;
               await waitForMorePaginationSettle(root, options);
             }
+            collectAfterProgress = moreProgressThisPass || moreRemainingClickable;
             continue;
           }
           sidebarScrollComplete = true;
@@ -5788,23 +6017,44 @@
         if (!ensureCollectionActive()) break;
         const expandedAfterScroll = await expandAvailableMoreButtons();
         noteMoreRepaintGrace();
+        refreshRootContainers();
         const afterTop = Number(scrollContainer.scrollTop) || 0;
         const afterHeight = Number(scrollContainer.scrollHeight) || 0;
-        if (afterTop !== beforeTop) sidebarScrollPositionChangeCount += 1;
-        if (added === 0
-          && expandedBeforeScan === 0
-          && expandedAfterScroll === 0
-          && afterTop === beforeTop
-          && afterHeight === beforeHeight) {
-          stagnantPasses += 1;
-          sidebarScrollStagnationCount += 1;
-        } else {
-          stagnantPasses = 0;
+        const positionChanged = afterTop !== beforeTop;
+        if (positionChanged) sidebarScrollPositionChangeCount += 1;
+        else sidebarScrollStagnationCount += 1;
+        const heightGrew = afterHeight > maxScrollHeightSeen;
+        if (heightGrew) maxScrollHeightSeen = afterHeight;
+        const moreAfterProgress = expandedAfterScroll > 0
+          && discoveryStats.moreLastClickHadProgress === true;
+        const reasons = [];
+        if (merged.projects.length > beforeProjects || snapshotDelta.projectDelta > 0) {
+          reasons.push("project_count");
+          discoveryStats.hydrationProgressProjectCountIncrease += 1;
         }
-        snapshotNeedsCollect = true;
-        // Keep the old scan order: the next pass collects the rows exposed by
-        // this scroll, including the final viewport at the bottom.
+        if ((merged.provisional_observations?.length || 0) > beforeProvisionals
+          || snapshotDelta.provisionalDelta > 0) {
+          reasons.push("provisional_count");
+          discoveryStats.hydrationProgressProvisionalCountIncrease += 1;
+        }
+        if (positionChanged) {
+          reasons.push("scroll_position");
+          discoveryStats.hydrationProgressScrollPositionChange += 1;
+        }
+        if (heightGrew) {
+          reasons.push("scroll_height");
+          discoveryStats.hydrationProgressScrollHeightIncrease += 1;
+        }
+        if (moreProgressThisPass || moreAfterProgress) {
+          reasons.push("more_pagination");
+          discoveryStats.hydrationProgressMorePagination += 1;
+        }
+        noteHydrationProgress(reasons);
+        collectAfterProgress = positionChanged || heightGrew || moreAfterProgress
+          || snapshotDelta.projectDelta > 0
+          || snapshotDelta.provisionalDelta > 0;
         if (stagnantPasses >= 2 && !moreClickableRemaining() && moreRepaintGracePasses <= 0) {
+          discoveryStats.hydrationStagnationBreakCount += 1;
           sidebarScrollComplete = true;
           break;
         }
@@ -5883,6 +6133,31 @@
           discoveryStats,
           merged.provisional_observations),
         hydration_stop_reason: hydrationStopReason,
+        hydration_loop_count: discoveryStats.hydrationLoopCount,
+        hydration_progress_count: discoveryStats.hydrationProgressCount,
+        hydration_no_progress_count: discoveryStats.hydrationNoProgressCount,
+        hydration_consecutive_stagnation_max: discoveryStats.hydrationConsecutiveStagnationMax,
+        hydration_stagnation_break_count: discoveryStats.hydrationStagnationBreakCount,
+        hydration_same_logical_state_count: discoveryStats.hydrationSameLogicalStateCount,
+        hydration_catalog_unchanged_count: discoveryStats.hydrationCatalogUnchangedCount,
+        hydration_snapshot_unchanged_count: discoveryStats.hydrationSnapshotUnchangedCount,
+        hydration_progress_project_count_increase:
+          discoveryStats.hydrationProgressProjectCountIncrease,
+        hydration_progress_provisional_count_increase:
+          discoveryStats.hydrationProgressProvisionalCountIncrease,
+        hydration_progress_scroll_position_change:
+          discoveryStats.hydrationProgressScrollPositionChange,
+        hydration_progress_scroll_height_increase:
+          discoveryStats.hydrationProgressScrollHeightIncrease,
+        hydration_progress_more_pagination: discoveryStats.hydrationProgressMorePagination,
+        hydration_stagnation_reset_count: discoveryStats.hydrationStagnationResetCount,
+        hydration_stagnation_reset_reason_counts: {
+          project_count: discoveryStats.hydrationStagnationResetReasonCounts.project_count,
+          provisional_count: discoveryStats.hydrationStagnationResetReasonCounts.provisional_count,
+          scroll_position: discoveryStats.hydrationStagnationResetReasonCounts.scroll_position,
+          scroll_height: discoveryStats.hydrationStagnationResetReasonCounts.scroll_height,
+          more_pagination: discoveryStats.hydrationStagnationResetReasonCounts.more_pagination
+        },
         hydration_completed_with_more_visible: moreAtComplete.visible === true,
         hydration_completed_after_more_no_progress: hydrationStopReason === "no_progress",
         more_visible_at_hydration_complete: moreAtComplete.visible === true,

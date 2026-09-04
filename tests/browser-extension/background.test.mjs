@@ -2837,7 +2837,8 @@ test("Background emits one request-scoped Project discovery efficiency summary",
   const previousCount = harness.socket.sent.length;
   harness.context.handleBridgeMessage({
     type: "chatgpt.context.list.request",
-    request_id: "collector-efficiency-summary"
+    request_id: "collector-efficiency-summary",
+    collection_trigger: "manual_refresh"
   }, harness.socket);
   const response = await harness.waitForSocketMessage(
     previousCount,
@@ -2864,6 +2865,7 @@ test("Background emits one request-scoped Project discovery efficiency summary",
   assert.equal(summary.discovery_logical_project_count_final, 3);
   assert.equal(summary.descriptor_added_count, 3);
   assert.equal(summary.more_control_logical_unique_count, 1);
+  assert.equal(summary.collection_trigger_source, "manual_refresh");
   assert.equal(summary.navigation_fallback_attempt_count, 0);
   assert.equal(summary.project_navigation_count, 0);
   assert.equal(summary.root_return_navigation_count, 0);

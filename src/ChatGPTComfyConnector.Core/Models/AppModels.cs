@@ -105,6 +105,7 @@ public static class ContextProviderIds
 
 public enum ProjectChatCatalogLoadState
 {
+    NotLoaded,
     Loading,
     Loaded,
     Empty,

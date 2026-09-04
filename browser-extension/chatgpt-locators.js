@@ -1685,7 +1685,12 @@
       projectCandidateRejectedNonProjectCount: 0,
       descriptorAddedAfterFirstSnapshotIndices: [],
       observedTitleMaxConcurrent: new Map(),
-      seenMoreLogicalKeys: new Set()
+      seenMoreLogicalKeys: new Set(),
+      titleOnlyReconcileAttemptCount: 0,
+      titleOnlyReconcileRejectedCount: 0,
+      titleHintUsedCount: 0,
+      stableEvidenceReconcileCount: 0,
+      ambiguousSameTitleReconcileCount: 0
     };
   }
 
@@ -1866,25 +1871,28 @@
       }
     }
     const snapshotTitleCount = titleKey ? (snapshotTitleCounts.get(titleKey) || 0) : 0;
-    const observedMax = titleKey ? (observedTitleMaxConcurrent.get(titleKey) || snapshotTitleCount) : 0;
-    if (!existing && !projectId && titleKey && snapshotTitleCount === 1 && observedMax === 1) {
-      const titleCandidates = available().filter((candidate) =>
-        metadataTextKey(candidate.title) === titleKey
-        && (!candidate.project_id || !projectId || candidate.project_id === projectId));
-      if (titleCandidates.length === 1) {
-        existing = titleCandidates[0];
-        remounted = Boolean(discoveryKey
-          && existing.discovery_key
-          && existing.discovery_key !== discoveryKey);
+    const catalogTitleCount = titleKey
+      ? projects.filter((candidate) => metadataTextKey(candidate.title) === titleKey).length
+      : 0;
+    const hasStableEvidence = Boolean(projectId || stableLocatorKey);
+    if (titleKey && stats) stats.titleHintUsedCount += 1;
+    if (!existing && !hasStableEvidence && titleKey && snapshotTitleCount === 1 && catalogTitleCount === 1) {
+      // Title may narrow candidates, but it is never proof that a remounted
+      // unique-looking row is the same logical Project. Virtualized Sidebars
+      // can show same-title siblings one at a time. Keep the existing
+      // descriptor unchanged and do not append a title-only duplicate.
+      if (stats) {
+        stats.titleOnlyReconcileAttemptCount += 1;
+        stats.titleOnlyReconcileRejectedCount += 1;
       }
+      return null;
     }
-    if (!existing && !projectId && titleKey && snapshotTitleCount > 1) {
-      const catalogSameTitle = projects.filter((candidate) =>
-        metadataTextKey(candidate.title) === titleKey).length;
-      if (catalogSameTitle >= snapshotTitleCount) {
+    if (!existing && !hasStableEvidence && titleKey && snapshotTitleCount > 1) {
+      if (catalogTitleCount >= snapshotTitleCount) {
         if (stats) {
           stats.descriptorDuplicateRejectedCount += 1;
           stats.descriptorAmbiguousReconcileCount += 1;
+          stats.ambiguousSameTitleReconcileCount += 1;
         }
         return null;
       }
@@ -1901,6 +1909,7 @@
       });
       if (stats) {
         stats.descriptorUpdatedCount += 1;
+        stats.stableEvidenceReconcileCount += 1;
         if (remounted || applied.discoveryKeyChanged) {
           stats.descriptorRemountReconciledCount += 1;
           stats.descriptorReplacedCount += 1;
@@ -1996,6 +2005,11 @@
         Number(stats?.projectCandidateRejectedChildChatCount) || 0,
       project_candidate_rejected_non_project_count:
         Number(stats?.projectCandidateRejectedNonProjectCount) || 0,
+      title_only_reconcile_attempt_count: Number(stats?.titleOnlyReconcileAttemptCount) || 0,
+      title_only_reconcile_rejected_count: Number(stats?.titleOnlyReconcileRejectedCount) || 0,
+      title_hint_used_count: Number(stats?.titleHintUsedCount) || 0,
+      stable_evidence_reconcile_count: Number(stats?.stableEvidenceReconcileCount) || 0,
+      ambiguous_same_title_reconcile_count: Number(stats?.ambiguousSameTitleReconcileCount) || 0,
       final_catalog_index_count: catalog.length,
       final_catalog_indices: indices,
       descriptor_added_after_first_snapshot_indices:

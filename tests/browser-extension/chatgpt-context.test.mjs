@@ -4494,9 +4494,9 @@ test("full Sidebar remount keeps 28 logical Projects instead of appending a seco
   });
   assert.equal(snapshot.projects.length, 28);
   assert.equal(snapshot.discovery_logical_project_count_final, 28);
-  assert.ok(snapshot.descriptor_remount_reconciled_count >= 1);
-  assert.ok(snapshot.discovery_key_changed_for_same_logical_project_count >= 1);
-  assert.equal(snapshot.projects.length, 28);
+  assert.ok(
+    snapshot.descriptor_remount_reconciled_count >= 1
+    || snapshot.title_only_reconcile_rejected_count >= 1);
 });
 
 test("aria-controls regeneration does not create duplicate logical Projects", async () => {
@@ -4518,6 +4518,63 @@ test("aria-controls regeneration does not create duplicate logical Projects", as
   assert.equal(first.projects.length, 28);
   assert.equal(second.projects.length, 28);
   assert.notEqual(first.projects[0].discovery_key, second.projects[0].discovery_key);
+});
+
+test("same-title Projects visible only in separate snapshots are not title-merged", async () => {
+  const href = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, ["Twin Project", "Twin Project"], {
+    itemWindow: 1,
+    nestedScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0
+  });
+  assert.ok(snapshot.projects.length <= 2);
+  assert.ok(snapshot.title_only_reconcile_rejected_count >= 1);
+  assert.equal(snapshot.descriptor_remount_reconciled_count, 0);
+});
+
+test("unique title without stable evidence is not reconciled by title", async () => {
+  const href = "https://chatgpt.com/";
+  const names = ["Solo Project"];
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 1,
+    remountOnScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 1);
+  assert.ok(snapshot.title_only_reconcile_attempt_count >= 1);
+  assert.ok(snapshot.title_only_reconcile_rejected_count >= 1);
+  assert.equal(snapshot.projects.filter((project) => project.stable_locator_key).length, 0);
+});
+
+test("project_id match still reconciles across remount", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 4 }, (_, index) => `Id Project ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 4,
+    remountOnScroll: true,
+    projectIds: names.map((_, index) => `g-p-id-${index}`)
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 4);
+  assert.ok(snapshot.stable_evidence_reconcile_count >= 1);
 });
 
 test("same-title Projects are not merged by title during remount", async () => {

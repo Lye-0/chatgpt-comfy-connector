@@ -933,6 +933,31 @@ public sealed class BrowserExtensionBridgeTests
     }
 
     [Fact]
+    public void ConnectorStartupDoesNotStartLiveChatGptProjectDiscovery()
+    {
+        var viewModelPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "ChatGPTComfyConnector.Desktop", "ViewModels", "MainViewModel.cs");
+        var source = File.ReadAllText(Path.GetFullPath(viewModelPath));
+        var initializeStart = source.IndexOf("private async Task InitializeContextProviderAsync()", StringComparison.Ordinal);
+        var initializeEnd = source.IndexOf("private async Task ReloadContextOptionsAsync(", initializeStart, StringComparison.Ordinal);
+        Assert.True(initializeStart >= 0);
+        Assert.True(initializeEnd > initializeStart);
+        var initialize = source[initializeStart..initializeEnd];
+        Assert.Contains("LoadCachedContextCatalogAsync", initialize, StringComparison.Ordinal);
+        Assert.Contains("startup_collection_suppressed", initialize, StringComparison.Ordinal);
+        Assert.DoesNotContain("LoadContextCatalogAsync", initialize, StringComparison.Ordinal);
+        Assert.DoesNotContain("GetChatGptContextAsync", initialize, StringComparison.Ordinal);
+
+        var refreshStart = source.IndexOf("public async Task RefreshChatGptContextAsync", StringComparison.Ordinal);
+        var refreshEnd = source.IndexOf("public async Task CreateChatAsync()", refreshStart, StringComparison.Ordinal);
+        Assert.True(refreshStart >= 0);
+        Assert.True(refreshEnd > refreshStart);
+        var refresh = source[refreshStart..refreshEnd];
+        Assert.Contains("ReloadContextOptionsAsync", refresh, StringComparison.Ordinal);
+        Assert.Contains("manual_refresh", refresh, StringComparison.Ordinal);
+        Assert.Contains("manual_refresh_started", refresh, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task WebPageCannotPairEvenWhenItKnowsThePairingCode()
     {
         await using var bridge = new BrowserExtensionBridge(0);

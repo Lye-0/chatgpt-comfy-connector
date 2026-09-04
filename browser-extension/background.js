@@ -398,6 +398,16 @@ function createCollectorProjectDiscoveryEfficiencyState(pending) {
     descriptorDuplicateRejectedCount: 0,
     descriptorRemountReconciledCount: 0,
     descriptorAmbiguousReconcileCount: 0,
+    titleOnlyReconcileAttemptCount: 0,
+    titleOnlyReconcileRejectedCount: 0,
+    titleHintUsedCount: 0,
+    stableEvidenceReconcileCount: 0,
+    ambiguousSameTitleReconcileCount: 0,
+    collectionTriggerSource: null,
+    collectorWindowCreated: false,
+    collectorTabCreated: false,
+    collectorTabReused: false,
+    collectorCreationReason: null,
     duplicateDiscoveryKeyCount: 0,
     discoveryKeyChangedForSameLogicalProjectCount: 0,
     moreControlSeenCount: 0,
@@ -848,6 +858,16 @@ function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, 
     descriptor_duplicate_rejected_count: efficiency.descriptorDuplicateRejectedCount,
     descriptor_remount_reconciled_count: efficiency.descriptorRemountReconciledCount,
     descriptor_ambiguous_reconcile_count: efficiency.descriptorAmbiguousReconcileCount,
+    title_only_reconcile_attempt_count: efficiency.titleOnlyReconcileAttemptCount,
+    title_only_reconcile_rejected_count: efficiency.titleOnlyReconcileRejectedCount,
+    title_hint_used_count: efficiency.titleHintUsedCount,
+    stable_evidence_reconcile_count: efficiency.stableEvidenceReconcileCount,
+    ambiguous_same_title_reconcile_count: efficiency.ambiguousSameTitleReconcileCount,
+    collection_trigger_source: efficiency.collectionTriggerSource,
+    collector_window_created: efficiency.collectorWindowCreated,
+    collector_tab_created: efficiency.collectorTabCreated,
+    collector_tab_reused: efficiency.collectorTabReused,
+    collector_creation_reason: efficiency.collectorCreationReason,
     duplicate_discovery_key_count: efficiency.duplicateDiscoveryKeyCount,
     discovery_key_changed_for_same_logical_project_count:
       efficiency.discoveryKeyChangedForSameLogicalProjectCount,
@@ -1370,6 +1390,19 @@ function diagnostic(eventName, fields = {}) {
     "descriptor_duplicate_rejected_count",
     "descriptor_remount_reconciled_count",
     "descriptor_ambiguous_reconcile_count",
+    "title_only_reconcile_attempt_count",
+    "title_only_reconcile_rejected_count",
+    "title_hint_used_count",
+    "stable_evidence_reconcile_count",
+    "ambiguous_same_title_reconcile_count",
+    "collection_trigger_source",
+    "collector_creation_reason",
+    "collector_window_created",
+    "collector_tab_created",
+    "collector_tab_reused",
+    "startup_collection_suppressed",
+    "manual_refresh_started",
+    "manual_refresh_completed",
     "duplicate_discovery_key_count",
     "discovery_key_changed_for_same_logical_project_count",
     "more_control_seen_count",
@@ -3170,6 +3203,11 @@ function recordCollectorProjectDiscoveryResult(source, pending) {
     assignIntegrityMetric("descriptorDuplicateRejectedCount", "descriptor_duplicate_rejected_count");
     assignIntegrityMetric("descriptorRemountReconciledCount", "descriptor_remount_reconciled_count");
     assignIntegrityMetric("descriptorAmbiguousReconcileCount", "descriptor_ambiguous_reconcile_count");
+    assignIntegrityMetric("titleOnlyReconcileAttemptCount", "title_only_reconcile_attempt_count");
+    assignIntegrityMetric("titleOnlyReconcileRejectedCount", "title_only_reconcile_rejected_count");
+    assignIntegrityMetric("titleHintUsedCount", "title_hint_used_count");
+    assignIntegrityMetric("stableEvidenceReconcileCount", "stable_evidence_reconcile_count");
+    assignIntegrityMetric("ambiguousSameTitleReconcileCount", "ambiguous_same_title_reconcile_count");
     assignIntegrityMetric("duplicateDiscoveryKeyCount", "duplicate_discovery_key_count");
     assignIntegrityMetric(
       "discoveryKeyChangedForSameLogicalProjectCount",
@@ -3452,6 +3490,8 @@ async function createCollectorTabInWindow(windowId, url, trace = {}) {
 async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
   await collectorWindowStateReady;
   let rootNavigationCreated = false;
+  let windowCreated = false;
+  let tabCreated = false;
   let window = await getCollectorWindow();
   if (!window) {
     if (Number.isSafeInteger(collectorWindowState.windowId)) {
@@ -3487,6 +3527,7 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
       throw bridgeError("ChatGPT Context収集用Windowを作成できません。", 0, "collector_window_create_failed");
     }
     window = await makeCollectorWindowUsable({ ...created, state: created.state || "normal" }, trace);
+    windowCreated = true;
     if (isCollectorRootUrl(safeChatGptContextUrl(url))) {
       rootNavigationCreated = true;
       recordCollectorProjectDiscoveryEfficiencyNavigation(
@@ -3530,6 +3571,7 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
   }
   if (!tab) {
     tab = await createCollectorTabInWindow(window.id, url, trace);
+    tabCreated = true;
     if (!rootNavigationCreated && isCollectorRootUrl(safeChatGptContextUrl(url))) {
       recordCollectorProjectDiscoveryEfficiencyNavigation(
         trace.request_id,
@@ -3569,6 +3611,21 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
       "collector_tab_navigation_timeout");
   }
   collectorWindowLifecycle("WaitingContentScript", { windowId: window.id, tabId: tab.id });
+  const efficiency = collectorProjectDiscoveryEfficiencyForRequest(trace.request_id);
+  if (efficiency) {
+    if (windowCreated) {
+      efficiency.collectorWindowCreated = true;
+      efficiency.collectorTabCreated = true;
+      efficiency.collectorCreationReason = "missing_collector_window";
+    } else if (tabCreated) {
+      efficiency.collectorTabCreated = true;
+      if (!efficiency.collectorCreationReason) {
+        efficiency.collectorCreationReason = "missing_collector_tab";
+      }
+    } else {
+      efficiency.collectorTabReused = true;
+    }
+  }
   return tab;
 }
 
@@ -7795,6 +7852,20 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
       generation
     };
     collectorProjectDiscoveryEfficiencyFor(pending);
+    const allowedCollectionTriggers = new Set([
+      "manual_refresh",
+      "startup",
+      "recovery",
+      "project_selection"
+    ]);
+    const collectionTrigger = allowedCollectionTriggers.has(request.collection_trigger)
+      ? request.collection_trigger
+      : (allowedCollectionTriggers.has(request.collectionTrigger)
+        ? request.collectionTrigger
+        : null);
+    if (collectionTrigger && pending.projectDiscoveryEfficiency) {
+      pending.projectDiscoveryEfficiency.collectionTriggerSource = collectionTrigger;
+    }
     const projectDiscovery = currentOnly || projectOnly ? null : projectDiscoveryStateFor(pending);
     try {
       throwIfCollectorRequestSuperseded(pending);

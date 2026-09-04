@@ -536,12 +536,16 @@ public sealed class ChatGptContextProviderTests
         public bool RevokeMedia(string mediaId) => false;
         public Task<BrowserExtensionMediaAttachResult> SendMediaAttachAsync(BrowserExtensionMediaAttachRequest request, CancellationToken cancellationToken = default)
             => Task.FromException<BrowserExtensionMediaAttachResult>(new NotSupportedException());
-        public Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextAsync(bool currentOnly = false, CancellationToken cancellationToken = default)
+        public Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextAsync(
+            bool currentOnly = false,
+            CancellationToken cancellationToken = default,
+            string? collectionTrigger = null)
             => Task.FromResult(snapshot);
         public Task<BrowserExtensionChatGptContextSnapshot> GetChatGptProjectChatsAsync(
             string projectId,
             string projectUrl,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            string? collectionTrigger = null)
             => Task.FromResult(projectSnapshot ?? snapshot);
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

@@ -34,9 +34,10 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
 
     public async Task<ProjectChatCatalog> LoadAsync(
         IReadOnlyCollection<ProjectChatBindingSnapshot> existingBindings,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? collectionTrigger = null)
     {
-        var snapshot = NormalizeRootSnapshot(await LoadLiveSnapshotAsync(cancellationToken));
+        var snapshot = NormalizeRootSnapshot(await LoadLiveSnapshotAsync(cancellationToken, collectionTrigger));
         var cached = await LoadCachedSnapshotAsync(cancellationToken);
         var normalizedCached = cached is null ? null : NormalizeCache(cached);
         await LogCatalogCountsAsync(
@@ -99,11 +100,14 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
     }
 
     private async Task<BrowserExtensionChatGptContextSnapshot> LoadLiveSnapshotAsync(
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? collectionTrigger = null)
     {
         try
         {
-            return await _bridge.GetChatGptContextAsync(cancellationToken: cancellationToken);
+            return await _bridge.GetChatGptContextAsync(
+                cancellationToken: cancellationToken,
+                collectionTrigger: collectionTrigger);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -530,7 +534,8 @@ public sealed class ChatGptProjectChatProvider : IProjectChatProvider, IProjectC
         var snapshot = await _bridge.GetChatGptProjectChatsAsync(
             project.ExternalId,
             project.Url,
-            cancellationToken);
+            cancellationToken,
+            "project_selection");
         if (!snapshot.IsSuccess)
         {
             throw new InvalidOperationException(

@@ -293,13 +293,15 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
 
     public Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextAsync(
         bool currentOnly = false,
-        CancellationToken cancellationToken = default)
-        => GetChatGptContextCoreAsync(currentOnly, null, null, cancellationToken);
+        CancellationToken cancellationToken = default,
+        string? collectionTrigger = null)
+        => GetChatGptContextCoreAsync(currentOnly, null, null, cancellationToken, collectionTrigger);
 
     public Task<BrowserExtensionChatGptContextSnapshot> GetChatGptProjectChatsAsync(
         string projectId,
         string projectUrl,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? collectionTrigger = null)
     {
         if (!IsSafeIdentifier(projectId)
             || !IsChatGptProjectUrl(projectId, projectUrl))
@@ -311,14 +313,15 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 "context_project_target_validation"));
         }
 
-        return GetChatGptContextCoreAsync(false, projectId, projectUrl, cancellationToken);
+        return GetChatGptContextCoreAsync(false, projectId, projectUrl, cancellationToken, collectionTrigger);
     }
 
     private async Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextCoreAsync(
         bool currentOnly,
         string? projectId,
         string? projectUrl,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? collectionTrigger = null)
     {
         ThrowIfDisposed();
         var requestId = Guid.NewGuid().ToString("N");
@@ -364,6 +367,8 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
                 envelope["project_id"] = projectId;
                 envelope["project_url"] = projectUrl;
             }
+            if (collectionTrigger is "manual_refresh" or "startup" or "recovery" or "project_selection")
+                envelope["collection_trigger"] = collectionTrigger;
 
             await SendJsonAsync(socket, envelope, cancellationToken);
             PublishDiagnostic(

@@ -62,7 +62,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _isWorkflowRenameVisible;
     private string _workflowRenameText = string.Empty;
     private readonly IProjectChatProvider _contextProvider;
-    private ProjectChatCatalog _contextCatalog = new();
+    private ProjectChatCatalog _contextCatalog = new() { LoadState = ProjectChatCatalogLoadState.NotLoaded };
     // Context refreshes are replaceable.  The latest refresh owns the
     // observable catalog; a slower Collector response must not restore an
     // older Project/Chat snapshot after a newer refresh has started.
@@ -386,6 +386,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ProjectChatCatalogLoadState ChatGptContextLoadState => _contextCatalog.LoadState;
     public string ChatGptContextLoadStateText => ChatGptContextLoadState switch
     {
+        ProjectChatCatalogLoadState.NotLoaded => "未取得",
         ProjectChatCatalogLoadState.Loading => "取得中…",
         ProjectChatCatalogLoadState.Loaded => ChatGptContextProjectCount > 0
             ? $"取得済み · {ChatGptContextProjectCount} Project"
@@ -784,7 +785,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(HasHandoffItems));
         RefreshWorkflowTree();
         await RefreshComfyUiStatusAsync();
-        StatusMessage = IsSetupVisible ? "接続先を確認して保存してください。" : "準備完了。ComfyUIの状態を確認できます。";
+        StatusMessage = IsSetupVisible
+            ? "接続先を確認して保存してください。"
+            : "準備完了。ChatGPTのProject一覧は「再取得」で読み込めます。";
         OnPropertyChanged(nameof(HasIterations));
         NotifyPipelineStateChanged();
         NotifyConnectionStateChanged();
@@ -1114,9 +1117,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         var preferredProjectKey = _selectedProject?.Key;
         var preferredChatKey = _selectedChat?.Key;
-        await ReloadContextOptionsAsync(preferredProjectKey, preferredChatKey, cancellationToken);
+        await LogCollectionTriggerAsync("manual_refresh_started", "manual_refresh");
+        await ReloadContextOptionsAsync(
+            preferredProjectKey,
+            preferredChatKey,
+            cancellationToken,
+            collectionTrigger: "manual_refresh");
+        await LogCollectionTriggerAsync("manual_refresh_completed", "manual_refresh");
         StatusMessage = ChatGptContextLoadState switch
         {
+            ProjectChatCatalogLoadState.NotLoaded => "ChatGPTのProject / Chat履歴は未取得です。再取得してください。",
             ProjectChatCatalogLoadState.Loaded => "ChatGPTのProject / Chat履歴を更新しました。",
             ProjectChatCatalogLoadState.Empty => "ChatGPTのProject / Chat履歴は空です。",
             ProjectChatCatalogLoadState.Disconnected => "Extension未接続のためChatGPT履歴を取得できません。",
@@ -3148,8 +3158,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
             NotifyContextCatalogChanged();
             RefreshProjectOptions(CurrentSession?.EffectiveProjectContextKey, CurrentSession?.EffectiveChatContextKey);
         }
+        else
+        {
+            _contextCatalog = new ProjectChatCatalog
+            {
+                ProviderId = _contextProvider.ProviderId,
+                LoadState = ProjectChatCatalogLoadState.NotLoaded,
+            };
+            NotifyContextCatalogChanged();
+        }
 
-        await LoadContextCatalogAsync(preserveExistingCatalog: cached is not null);
+        await LogCollectionTriggerAsync("startup_collection_suppressed", "startup");
+
         if (CurrentSession is not null)
         {
             var project = FindProjectForSession(CurrentSession);
@@ -3169,9 +3189,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private async Task ReloadContextOptionsAsync(
         string? preferredProjectKey = null,
         string? preferredChatKey = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? collectionTrigger = null)
     {
-        var applied = await LoadContextCatalogAsync(preserveExistingCatalog: true, cancellationToken: cancellationToken);
+        var applied = await LoadContextCatalogAsync(
+            preserveExistingCatalog: true,
+            cancellationToken: cancellationToken,
+            collectionTrigger: collectionTrigger ?? "manual_refresh");
         if (applied)
             RefreshProjectOptions(preferredProjectKey ?? CurrentSession?.EffectiveProjectContextKey, preferredChatKey ?? CurrentSession?.EffectiveChatContextKey);
     }
@@ -3197,7 +3221,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private async Task<bool> LoadContextCatalogAsync(
         bool preserveExistingCatalog = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? collectionTrigger = null)
     {
         var loadVersion = Interlocked.Increment(ref _contextLoadVersion);
         if (preserveExistingCatalog && _contextCatalog.Projects.Count > 0)
@@ -3220,7 +3245,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             var catalog = await _contextProvider.LoadAsync(
                 Sessions.Select(session => session.ToProjectChatBindingSnapshot()).ToArray(),
-                cancellationToken);
+                cancellationToken,
+                collectionTrigger);
             if (Volatile.Read(ref _contextLoadVersion) != loadVersion) return false;
             _contextCatalog = catalog;
         }
@@ -3243,6 +3269,25 @@ public sealed class MainViewModel : INotifyPropertyChanged
         NotifyContextCatalogChanged();
         _ = LogUiContextCountsAsync();
         return true;
+    }
+
+    private async Task LogCollectionTriggerAsync(string stage, string trigger)
+    {
+        try
+        {
+            await _store.LogAsync(
+                "context",
+                string.Join(
+                    " ",
+                    $"stage={stage}",
+                    $"collection_trigger_source={trigger}",
+                    stage == "startup_collection_suppressed"
+                        ? "startup_collection_suppressed=true collector_window_created=false collector_tab_created=false"
+                        : $"manual_refresh={(stage.Contains("manual_refresh", StringComparison.Ordinal) ? "true" : "false")}"));
+        }
+        catch (Exception)
+        {
+        }
     }
 
     private async Task LogUiContextCountsAsync()

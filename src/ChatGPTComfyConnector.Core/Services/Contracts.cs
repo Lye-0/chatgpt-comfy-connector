@@ -57,7 +57,10 @@ public interface IProjectChatCacheProvider
 public interface IProjectChatProvider
 {
     string ProviderId { get; }
-    Task<ProjectChatCatalog> LoadAsync(IReadOnlyCollection<ProjectChatBindingSnapshot> existingBindings, CancellationToken cancellationToken = default);
+    Task<ProjectChatCatalog> LoadAsync(
+        IReadOnlyCollection<ProjectChatBindingSnapshot> existingBindings,
+        CancellationToken cancellationToken = default,
+        string? collectionTrigger = null);
     Task<ProjectContextOption> CreateProjectAsync(string displayName, CancellationToken cancellationToken = default);
     Task<ChatContextOption> CreateChatAsync(ProjectContextOption project, string displayName, CancellationToken cancellationToken = default);
 }
@@ -120,11 +123,13 @@ public interface IBrowserExtensionBridge : IAsyncDisposable
         CancellationToken cancellationToken = default);
     Task<BrowserExtensionChatGptContextSnapshot> GetChatGptContextAsync(
         bool currentOnly = false,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        string? collectionTrigger = null);
     Task<BrowserExtensionChatGptContextSnapshot> GetChatGptProjectChatsAsync(
         string projectId,
         string projectUrl,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        string? collectionTrigger = null);
 }
 
 public interface IClipboardService

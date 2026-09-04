@@ -509,7 +509,12 @@ candidate is not eligible until that assistant message contains a
 
 Response failures use `status: "error"` with a safe `error_code` and `stage`,
 including `assistant_response_not_found`, `response_timeout`,
-`response_stream_interrupted`, and `response_extraction_failed`. The
+`response_stream_interrupted`, `response_extraction_failed`, `tab_closed`,
+and `content_script_unavailable`. Streaming is a watcher state, not an error
+stage: `assistant_response_streaming` is observational. Watch failures that
+occur while ChatGPT is still generating use `timeout_kind` values such as
+`inactivity_timeout` or `hard_timeout` rather than treating a healthy stream
+as `response_stream_interrupted`. The
 Background relays this envelope without inspecting its DOM or parsing its
 payload. The Desktop then matches all durable IDs and the latest send
 attempt, requires the outgoing Handoff to be `SENT`, and invokes the existing

@@ -38,8 +38,15 @@
   const attachmentControlTimeoutMs = 1500;
   const attachmentVerificationTimeoutMs = 15000;
   const maxMediaBytes = 512 * 1024 * 1024;
+  const collectorIdentityStorageKey = "chatgptComfyConnector.collectorIdentity";
   const maxMediaChunkBase64Length = 96 * 1024;
+  // Inactivity / pre-response watchdog. Healthy generation (progress or
+  // generation-alive) extends this window; it is not an absolute wall clock
+  // for the whole assistant turn.
   const responseTimeoutMs = 120000;
+  // Safety ceiling from send/anchor confirmation, not from watch-arm.
+  const responseHardTimeoutMs = 1200000;
+  const responseDomLostGraceMs = 8000;
   const responseStabilityMs = 900;
   const responsePollIntervalMs = 100;
   // Lifecycle telemetry is intentionally sparse.  The watcher itself still
@@ -57,6 +64,133 @@
   // verified during the current content-script lifetime; the DOM check below
   // is still required immediately before every Review send.
   const verifiedReviewAttachments = new Map();
+
+  function readPageCollectorIdentity() {
+    try {
+      const raw = globalThis.sessionStorage?.getItem?.(collectorIdentityStorageKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || parsed.collector_role !== "collector") return null;
+      if (typeof parsed.collector_instance_id !== "string" || parsed.collector_instance_id.length === 0) {
+        return null;
+      }
+      return {
+        collector_role: "collector",
+        collector_instance_id: parsed.collector_instance_id.slice(0, 128),
+        collector_managed_generation: Number.isSafeInteger(parsed.collector_managed_generation)
+          ? parsed.collector_managed_generation
+          : 0,
+        collector_managed_at: Number.isSafeInteger(parsed.collector_managed_at)
+          ? parsed.collector_managed_at
+          : 0
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function writePageCollectorIdentity(message) {
+    const identity = {
+      collector_role: "collector",
+      collector_instance_id: String(message?.collector_instance_id || "").slice(0, 128),
+      collector_managed_generation: Number.isSafeInteger(message?.collector_managed_generation)
+        ? message.collector_managed_generation
+        : 0,
+      collector_managed_at: Number.isSafeInteger(message?.collector_managed_at)
+        ? message.collector_managed_at
+        : Date.now()
+    };
+    if (!identity.collector_instance_id) {
+      return { ok: false, collector_role: "none" };
+    }
+    try {
+      globalThis.sessionStorage?.setItem?.(collectorIdentityStorageKey, JSON.stringify(identity));
+    } catch (_) { }
+    return { ok: true, ...identity };
+  }
+
+  let collectorVisibilitySession = null;
+
+  function collectorDocumentVisibilityState() {
+    const value = typeof document.visibilityState === "string" ? document.visibilityState : "";
+    if (value === "visible" || value === "hidden" || value === "prerender") return value;
+    if (document.hidden === true) return "hidden";
+    if (document.hidden === false) return "visible";
+    return "unknown";
+  }
+
+  function beginCollectorVisibilitySession(requestId) {
+    const id = typeof requestId === "string" && requestId.length > 0 ? requestId : "none";
+    if (collectorVisibilitySession?.requestId === id) return collectorVisibilitySession;
+    const now = Date.now();
+    const state = collectorDocumentVisibilityState();
+    collectorVisibilitySession = {
+      requestId: id,
+      startedAt: now,
+      lastSampleAt: now,
+      startState: state,
+      currentState: state,
+      changeCount: 0,
+      hiddenObserved: state === "hidden",
+      hiddenDurationMs: 0,
+      visibleDurationMs: 0,
+      becameVisible: false,
+      becameHidden: false
+    };
+    return collectorVisibilitySession;
+  }
+
+  function sampleCollectorVisibility() {
+    const session = collectorVisibilitySession;
+    if (!session) return;
+    const now = Date.now();
+    const delta = Math.max(0, now - session.lastSampleAt);
+    if (session.currentState === "hidden") session.hiddenDurationMs += delta;
+    else if (session.currentState === "visible") session.visibleDurationMs += delta;
+    session.lastSampleAt = now;
+  }
+
+  function noteCollectorVisibilityChange() {
+    if (!collectorVisibilitySession) return;
+    sampleCollectorVisibility();
+    const next = collectorDocumentVisibilityState();
+    if (next === collectorVisibilitySession.currentState) return;
+    collectorVisibilitySession.changeCount += 1;
+    collectorVisibilitySession.currentState = next;
+    if (next === "hidden") {
+      collectorVisibilitySession.hiddenObserved = true;
+      collectorVisibilitySession.becameHidden = true;
+    }
+    if (next === "visible") collectorVisibilitySession.becameVisible = true;
+  }
+
+  function collectorVisibilitySnapshot() {
+    sampleCollectorVisibility();
+    const session = collectorVisibilitySession;
+    const state = collectorDocumentVisibilityState();
+    if (!session) {
+      return {
+        document_visibility_state_at_collection_start: state,
+        document_visibility_state_at_collection_end: state,
+        document_visibility_change_count: 0,
+        document_hidden_observed: state === "hidden",
+        document_hidden_duration_ms: 0,
+        document_visible_duration_ms: 0,
+        document_became_visible_during_collection: false,
+        document_became_hidden_during_collection: false
+      };
+    }
+    return {
+      document_visibility_state_at_collection_start: session.startState,
+      document_visibility_state_at_collection_end: session.currentState,
+      document_visibility_change_count: session.changeCount,
+      document_hidden_observed: session.hiddenObserved === true,
+      document_hidden_duration_ms: session.hiddenDurationMs,
+      document_visible_duration_ms: session.visibleDurationMs,
+      document_became_visible_during_collection: session.becameVisible === true,
+      document_became_hidden_during_collection: session.becameHidden === true
+    };
+  }
 
   // Keep page diagnostics limited to request identity, stage, and the
   // outcome. The session token and Handoff body are never logged by the
@@ -276,7 +410,36 @@
       "preview_element_found_count",
       "title_extraction_success_count",
       "title_fallback_used_count",
-      "title_observed_chat_count"
+      "title_observed_chat_count",
+      "target_tab_fingerprint",
+      "watch_started_at_relative_ms",
+      "send_confirmed_at_relative_ms",
+      "assistant_observed_at_relative_ms",
+      "streaming_started_at_relative_ms",
+      "completion_observed_at_relative_ms",
+      "total_watch_ms",
+      "absolute_timeout_ms",
+      "inactivity_timeout_ms",
+      "hard_timeout_ms",
+      "poll_count",
+      "meaningful_progress_count",
+      "last_progress_age_ms",
+      "text_growth_event_count",
+      "response_remount_count",
+      "streaming_state_change_count",
+      "thinking_state_observed",
+      "generation_alive_observation_count",
+      "document_visibility_state_at_start",
+      "document_hidden_observed",
+      "tab_active_at_start",
+      "window_focused_at_start",
+      "timeout_triggered",
+      "timeout_kind",
+      "assistant_streaming_at_failure",
+      "assistant_generation_alive_at_failure",
+      "response_node_present_at_failure",
+      "completion_detected",
+      "final_status"
     ]) {
       if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
       if (typeof fields[key] === "boolean") safe[key] = fields[key];
@@ -714,9 +877,206 @@
 
   function assistantStateForResult(watcher, result) {
     if (result?.status === "received") return "completed";
-    if (result?.errorCode === "response_stream_interrupted") return "streaming";
+    if (result?.timeoutKind === "explicit_abort") return "aborted";
+    if (result?.errorCode === "response_stream_interrupted") return "interrupted";
+    if (result?.stage === "assistant_response_stalled") return "stalled";
+    if (watcher?.sawGenerating || result?.timeoutKind === "hard_timeout") return "streaming";
     if (watcher?.candidate && watcher.candidateText?.trim()) return "stable_wait";
     return "not_detected";
+  }
+
+  function noteMeaningfulProgress(watcher, now) {
+    if (!watcher) return;
+    watcher.lastMeaningfulProgressAt = now;
+    watcher.meaningfulProgressCount = (watcher.meaningfulProgressCount || 0) + 1;
+  }
+
+  function documentIsHidden() {
+    return document.hidden === true || document.visibilityState === "hidden";
+  }
+
+  function generationSignals(watcher, now) {
+    const generating = Boolean(locators.isGenerating?.(document));
+    const generationAlive = Boolean(locators.isGenerationAlive?.(document) || generating);
+    if (generationAlive) {
+      watcher.generationAliveObservationCount = (watcher.generationAliveObservationCount || 0) + 1;
+      if (!generating) watcher.thinkingStateObserved = true;
+      if (!watcher.assistantObservedAt) watcher.assistantObservedAt = now;
+    }
+    if (generating) {
+      if (!watcher.streamingStartedAt) watcher.streamingStartedAt = now;
+      if (!watcher.sawGenerating) {
+        diagnostic("assistant response streaming", responseLifecycleTrace(watcher, {
+          stage: "assistant_response_streaming",
+          assistant_state: "streaming",
+          target_tab_id: watcher.targetTabId
+        }));
+      }
+      watcher.sawGenerating = true;
+      emitResponseLifecycleTelemetry(watcher, "streaming", "assistant_response_streaming");
+    }
+    if (watcher.lastStreamingState !== generating) {
+      if (watcher.lastStreamingState !== undefined) {
+        watcher.streamingStateChangeCount = (watcher.streamingStateChangeCount || 0) + 1;
+        noteMeaningfulProgress(watcher, now);
+      }
+      watcher.lastStreamingState = generating;
+    }
+    if (generationAlive) watcher.lastMeaningfulProgressAt = now;
+    return { generating, generationAlive };
+  }
+
+  function recoverDisconnectedAnchor(watcher) {
+    if (!watcher?.anchor || watcher.anchor.isConnected !== false) return;
+    try {
+      const relocated = locators.findUserMessageWithCorrelation?.(document, {
+        protocol: watcher.protocol,
+        handoffId: watcher.handoffId,
+        boundaryId: watcher.boundaryId
+      }) || null;
+      if (relocated) watcher.anchor = relocated;
+    } catch (_) { }
+  }
+
+  function watchRelativeMs(watcher, timestamp) {
+    if (!Number.isSafeInteger(timestamp) || !Number.isSafeInteger(watcher?.watchStartedAt)) return 0;
+    return Math.max(0, timestamp - watcher.watchStartedAt);
+  }
+
+  function emitAssistantResponseWatchSummary(watcher, result) {
+    if (!watcher || watcher.watchSummaryEmitted) return;
+    watcher.watchSummaryEmitted = true;
+    const now = Date.now();
+    const timeoutKind = result?.timeoutKind || watcher.timeoutKind || "none";
+    const generating = Boolean(locators.isGenerating?.(document));
+    const generationAlive = Boolean(locators.isGenerationAlive?.(document) || generating);
+    const nodePresent = Boolean(watcher.candidate && watcher.candidate.isConnected !== false);
+    const fields = {
+      request_id: watcher.requestId,
+      session_id: watcher.sessionId,
+      handoff_id: watcher.handoffId,
+      boundary_id: watcher.boundaryId,
+      target_tab_id: watcher.targetTabId,
+      target_tab_fingerprint: Number.isSafeInteger(watcher.targetTabId) ? `t:${watcher.targetTabId}` : "none",
+      watch_started_at_relative_ms: 0,
+      send_confirmed_at_relative_ms: watchRelativeMs(watcher, watcher.sendConfirmedAt),
+      assistant_observed_at_relative_ms: watchRelativeMs(watcher, watcher.assistantObservedAt),
+      streaming_started_at_relative_ms: watchRelativeMs(watcher, watcher.streamingStartedAt),
+      completion_observed_at_relative_ms: watchRelativeMs(watcher, watcher.completionObservedAt),
+      total_watch_ms: watchRelativeMs(watcher, now),
+      absolute_timeout_ms: responseTimeoutMs,
+      inactivity_timeout_ms: responseTimeoutMs,
+      hard_timeout_ms: responseHardTimeoutMs,
+      poll_count: watcher.pollCount || 0,
+      meaningful_progress_count: watcher.meaningfulProgressCount || 0,
+      last_progress_age_ms: Math.max(0, now - (watcher.lastMeaningfulProgressAt || watcher.watchStartedAt || now)),
+      text_growth_event_count: watcher.textGrowthEventCount || 0,
+      response_remount_count: watcher.responseRemountCount || 0,
+      streaming_state_change_count: watcher.streamingStateChangeCount || 0,
+      thinking_state_observed: watcher.thinkingStateObserved === true,
+      generation_alive_observation_count: watcher.generationAliveObservationCount || 0,
+      document_visibility_state_at_start: watcher.documentVisibilityStateAtStart || "unknown",
+      document_hidden_observed: watcher.documentHiddenObserved === true,
+      tab_active_at_start: watcher.tabActiveAtStart,
+      window_focused_at_start: watcher.windowFocusedAtStart,
+      timeout_triggered: timeoutKind === "pre_response_timeout"
+        || timeoutKind === "inactivity_timeout"
+        || timeoutKind === "hard_timeout",
+      timeout_kind: timeoutKind,
+      assistant_streaming_at_failure: generating,
+      assistant_generation_alive_at_failure: generationAlive,
+      response_node_present_at_failure: nodePresent,
+      completion_detected: result?.status === "received",
+      final_status: result?.status === "received" ? "received" : "error",
+      error_code: result?.errorCode,
+      status: result?.status === "received" ? "received" : "error",
+      stage: result?.status === "received"
+        ? "assistant_response_watch_summary"
+        : "assistant_response_watch_failure_summary",
+      content_script_alive: true
+    };
+    diagnostic(
+      result?.status === "received" ? "assistant response watch summary" : "assistant response watch failure summary",
+      fields);
+    void sendRuntimeMessage({
+      type: "ASSISTANT_RESPONSE_WATCH_TELEMETRY",
+      requestId: watcher.requestId,
+      sessionId: watcher.sessionId,
+      handoffId: watcher.handoffId,
+      boundaryId: watcher.boundaryId,
+      ...fields
+    });
+  }
+
+  function createAssistantResponseWatcher(message, extra = {}) {
+    const now = Date.now();
+    const visibility = typeof document.visibilityState === "string" ? document.visibilityState : "unknown";
+    return {
+      key: extra.key,
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      handoffId: message.handoffId,
+      boundaryId: message.boundaryId,
+      protocol: message.protocol,
+      review: message?.review === true,
+      targetTabId: message?.targetTabId || message?.target_tab_id,
+      anchor: extra.anchor || null,
+      awaitingUserAnchor: extra.awaitingUserAnchor === true,
+      baselineAssistantElements: extra.baselineAssistantElements instanceof Set
+        ? extra.baselineAssistantElements
+        : new Set(),
+      deadline: null,
+      lastChangedAt: now,
+      candidate: null,
+      candidateText: "",
+      sawAssistantMessage: false,
+      sawGenerating: false,
+      extractionWasEmpty: false,
+      sawNonConnectorAssistant: false,
+      observedAssistantElements: new Set(),
+      ignoredAssistantElements: new Set(),
+      connectorCandidateDetected: false,
+      textStableReported: false,
+      generationFinishedReported: false,
+      hasCompletionActions: false,
+      lifecycleTelemetryAt: 0,
+      lifecycleTelemetryState: null,
+      domChangeTelemetryAt: 0,
+      observer: null,
+      timer: null,
+      finished: false,
+      watchStartedAt: now,
+      sendConfirmedAt: extra.sendConfirmedAt || null,
+      anchorFoundAt: extra.anchor ? now : null,
+      assistantObservedAt: null,
+      streamingStartedAt: null,
+      completionObservedAt: null,
+      lastMeaningfulProgressAt: now,
+      lastTextLength: 0,
+      lastStreamingState: undefined,
+      timeoutKind: "none",
+      pollCount: 0,
+      meaningfulProgressCount: 0,
+      textGrowthEventCount: 0,
+      responseRemountCount: 0,
+      streamingStateChangeCount: 0,
+      thinkingStateObserved: false,
+      generationAliveObservationCount: 0,
+      documentVisibilityStateAtStart: visibility,
+      documentHiddenObserved: documentIsHidden(),
+      tabActiveAtStart: typeof message?.tabActive === "boolean"
+        ? message.tabActive
+        : typeof message?.tab_active === "boolean"
+          ? message.tab_active
+          : !documentIsHidden(),
+      windowFocusedAtStart: typeof message?.windowFocused === "boolean"
+        ? message.windowFocused
+        : typeof message?.window_focused === "boolean"
+          ? message.window_focused
+          : true,
+      watchSummaryEmitted: false,
+      domMissingAt: null
+    };
   }
 
   function resultFor(message, status, errorCode, text, stage) {
@@ -748,6 +1108,11 @@
   }
 
   function notifyHandoffSendConfirmed(message, result) {
+    const watcher = responseWatchers.get(responseCorrelationKey(message));
+    if (watcher && !watcher.sendConfirmedAt) {
+      watcher.sendConfirmedAt = Date.now();
+      noteMeaningfulProgress(watcher, watcher.sendConfirmedAt);
+    }
     // This is a metadata-only lifecycle signal. It is intentionally separate
     // from the tabs.sendMessage response because a ChatGPT navigation can
     // destroy that response channel after the user message was accepted.
@@ -881,6 +1246,25 @@
     ].includes(data.hydration_stop_reason)) {
       result.hydration_stop_reason = data.hydration_stop_reason;
     }
+    for (const key of [
+      "document_visibility_state_at_collection_start",
+      "document_visibility_state_at_collection_end"
+    ]) {
+      if (["visible", "hidden", "prerender", "unknown"].includes(data[key])) result[key] = data[key];
+    }
+    for (const key of [
+      "document_hidden_observed",
+      "document_became_visible_during_collection",
+      "document_became_hidden_during_collection"
+    ]) {
+      if (typeof data[key] === "boolean") result[key] = data[key];
+    }
+    for (const key of ["slow_identity_indices_while_hidden", "slow_identity_indices_while_visible"]) {
+      if (!Array.isArray(data[key])) continue;
+      result[key] = data[key]
+        .filter((value) => Number.isSafeInteger(value) && value >= 0)
+        .slice(0, 5000);
+    }
     for (const key of ["exit_reason", "internal_reason", "navigation_failure_reason"]) {
       if (typeof data[key] === "string" && data[key].length <= 128) result[key] = data[key];
     }
@@ -932,6 +1316,21 @@
       "hydration_no_progress_count",
       "hydration_consecutive_stagnation_max",
       "hydration_stagnation_break_count",
+      "hydration_loops_while_document_hidden",
+      "hydration_loops_while_document_visible",
+      "scroll_attempts_while_hidden",
+      "scroll_attempts_while_visible",
+      "mutation_count_while_hidden",
+      "mutation_count_while_visible",
+      "poll_wait_ms_while_hidden",
+      "poll_wait_ms_while_visible",
+      "identity_attempts_while_hidden",
+      "identity_attempts_while_visible",
+      "identity_wait_ms_while_hidden",
+      "identity_wait_ms_while_visible",
+      "document_visibility_change_count",
+      "document_hidden_duration_ms",
+      "document_visible_duration_ms",
       "hydration_same_logical_state_count",
       "hydration_catalog_unchanged_count",
       "hydration_snapshot_unchanged_count",
@@ -1312,6 +1711,14 @@
       sidebar_shell_present: data.sidebar_shell_present === true,
       sidebar_sections_stable: data.sidebar_sections_stable === true,
       mutation_count: Number.isSafeInteger(data.mutation_count) ? data.mutation_count : 0,
+      mutation_count_while_hidden: Number.isSafeInteger(data.mutation_count_while_hidden)
+        ? data.mutation_count_while_hidden : 0,
+      mutation_count_while_visible: Number.isSafeInteger(data.mutation_count_while_visible)
+        ? data.mutation_count_while_visible : 0,
+      poll_wait_ms_while_hidden: Number.isSafeInteger(data.poll_wait_ms_while_hidden)
+        ? data.poll_wait_ms_while_hidden : 0,
+      poll_wait_ms_while_visible: Number.isSafeInteger(data.poll_wait_ms_while_visible)
+        ? data.poll_wait_ms_while_visible : 0,
       mutation_quiet_ms: Number.isSafeInteger(data.mutation_quiet_ms)
         ? data.mutation_quiet_ms : 0,
       root_url_verified: data.root_url_verified === true
@@ -1332,6 +1739,7 @@
         "collector_root_hydration_page_check");
     }
     try {
+      beginCollectorVisibilitySession(message?.requestId || message?.request_id);
       const state = await locators.waitForChatGptRootSidebarHydrationAsync?.(
         document,
         message?.expectedRootUrl || "https://chatgpt.com/",
@@ -1357,6 +1765,7 @@
           ? "collector_root_hydration_completed"
           : "collector_root_hydration_timeout",
         state);
+      Object.assign(result, collectorVisibilitySnapshot());
       diagnostic("collector root hydration", {
         request_id: message?.requestId,
         refresh_generation: message?.refreshGeneration,
@@ -1403,6 +1812,7 @@
     }
 
     const isProjectChatCollection = message?.collection === "project";
+    beginCollectorVisibilitySession(message?.requestId || message?.request_id);
     try {
       const currentOnly = message?.mode === "current";
       let value;
@@ -1488,8 +1898,8 @@
         });
       }
       return contextResultFor(message, "ok", null, null, "context_extracted", currentOnly
-        ? { current: value }
-        : value);
+        ? { current: value, ...collectorVisibilitySnapshot() }
+        : { ...value, ...collectorVisibilitySnapshot() });
     } catch (error) {
       if (isProjectChatCollection) {
         return projectChatFailureResult(message, error, {
@@ -1573,6 +1983,7 @@
       || typeof document.addEventListener !== "function") return;
     globalThis.__chatgptComfyLifecycleTelemetryInstalled = true;
     document.addEventListener("visibilitychange", () => {
+      noteCollectorVisibilityChange();
       const watcher = watcherForLifecycleTelemetry();
       diagnostic("document visibility changed", contentLifecycleTrace(watcher, {
         status: "observed",
@@ -2294,6 +2705,7 @@
     if (result.errorCode) message.errorCode = result.errorCode;
     if (result.message) message.message = result.message;
     if (result.stage) message.stage = result.stage;
+    if (result.timeoutKind) message.timeoutKind = result.timeoutKind;
     if (currentContext?.conversation_id) message.targetConversationId = currentContext.conversation_id;
     if (currentContext?.url) message.targetConversationUrl = currentContext.url;
 
@@ -2323,6 +2735,9 @@
   function finishAssistantResponseWatcher(watcher, result) {
     if (watcher.finished) return;
     watcher.finished = true;
+    if (result?.status === "received") watcher.completionObservedAt = Date.now();
+    watcher.timeoutKind = result?.timeoutKind || watcher.timeoutKind || "none";
+    emitAssistantResponseWatchSummary(watcher, result);
     emitResponseLifecycleTelemetry(
       watcher,
       assistantStateForResult(watcher, result),
@@ -2373,10 +2788,12 @@
       watcher.timer = null;
     }
     const now = Date.now();
+    watcher.pollCount = (watcher.pollCount || 0) + 1;
+    if (documentIsHidden()) watcher.documentHiddenObserved = true;
 
     // A pre-send watcher is deliberately armed before the Handoff is posted.
-    // It must not use an older anchor and must not start its response timeout
-    // until the marker-bearing user message for this exact request exists.
+    // It must not use an older anchor and must not start response-phase
+    // timeouts until the marker-bearing user message for this exact request exists.
     if (!watcher.anchor) {
       const anchor = locators.findUserMessageWithCorrelation?.(document, {
         protocol: watcher.protocol,
@@ -2390,7 +2807,9 @@
       }
       watcher.anchor = anchor;
       watcher.awaitingUserAnchor = false;
-      watcher.deadline = now + responseTimeoutMs;
+      watcher.anchorFoundAt = now;
+      if (!watcher.sendConfirmedAt) watcher.sendConfirmedAt = now;
+      noteMeaningfulProgress(watcher, now);
       responseAnchors.set(watcher.key, {
         anchor,
         assistantElements: watcher.baselineAssistantElements,
@@ -2408,6 +2827,15 @@
       emitResponseLifecycleTelemetry(watcher, "not_detected", "response_anchor_found", true);
     }
 
+    recoverDisconnectedAnchor(watcher);
+    if (watcher.candidate && watcher.candidate.isConnected === false) {
+      watcher.responseRemountCount = (watcher.responseRemountCount || 0) + 1;
+      watcher.candidate = null;
+      if (!watcher.domMissingAt) watcher.domMissingAt = now;
+    }
+
+    const { generating, generationAlive } = generationSignals(watcher, now);
+
     const candidates = assistantCandidatesFor(watcher);
     // A visible assistant/status node is not by itself a Connector response.
     // Only the newest post-anchor assistant message whose own content has a
@@ -2419,6 +2847,7 @@
     // identity. A later status/tool container must not hide a valid response
     // that is still streaming in an earlier assistant turn.
     const candidate = connectorCandidates.at(-1) || null;
+    if (latestCandidate && !watcher.assistantObservedAt) watcher.assistantObservedAt = now;
     if (latestCandidate && !candidate) {
       watcher.sawAssistantMessage = true;
       watcher.sawNonConnectorAssistant = true;
@@ -2435,7 +2864,9 @@
       }
     }
     if (candidate) {
+      watcher.domMissingAt = null;
       watcher.sawAssistantMessage = true;
+      if (!watcher.assistantObservedAt) watcher.assistantObservedAt = now;
       if (!watcher.connectorCandidateDetected) {
         watcher.connectorCandidateDetected = true;
         diagnostic("connector candidate detected", {
@@ -2464,6 +2895,17 @@
         text = locators.readAssistantResponseText(candidate, responseContextFor(watcher));
       }
       catch (_) { text = ""; }
+      if (candidate !== watcher.candidate) {
+        if (watcher.candidate) {
+          watcher.responseRemountCount = (watcher.responseRemountCount || 0) + 1;
+          noteMeaningfulProgress(watcher, now);
+        }
+      }
+      if (text.length > (watcher.lastTextLength || 0)) {
+        watcher.textGrowthEventCount = (watcher.textGrowthEventCount || 0) + 1;
+        noteMeaningfulProgress(watcher, now);
+      }
+      watcher.lastTextLength = Math.max(watcher.lastTextLength || 0, text.length);
       if (candidate !== watcher.candidate || text !== watcher.candidateText) {
         watcher.candidate = candidate;
         watcher.candidateText = text;
@@ -2502,19 +2944,6 @@
       watcher.hasCompletionActions = Boolean(locators.hasAssistantCompletionActions?.(candidate));
     }
 
-    const generating = Boolean(locators.isGenerating?.(document));
-    if (generating) {
-      if (!watcher.sawGenerating) {
-        diagnostic("assistant response streaming", responseLifecycleTrace(watcher, {
-          stage: "assistant_response_streaming",
-          assistant_state: "streaming",
-          target_tab_id: watcher.targetTabId
-        }));
-      }
-      watcher.sawGenerating = true;
-      emitResponseLifecycleTelemetry(watcher, "streaming", "assistant_response_streaming");
-    }
-
     const textStable = Boolean(candidate
       && watcher.candidateText.trim()
       && now - watcher.lastChangedAt >= responseStabilityMs);
@@ -2537,7 +2966,7 @@
 
     const assistantState = candidate && textStable && assistantGenerationFinished
       ? "completed"
-      : generating
+      : generating || generationAlive
         ? "streaming"
         : candidate && watcher.candidateText.trim()
           ? "stable_wait"
@@ -2567,35 +2996,70 @@
       finishAssistantResponseWatcher(watcher, {
         status: "received",
         payload: watcher.candidateText,
-        stage: "assistant_response_complete"
+        stage: "assistant_response_complete",
+        timeoutKind: "none"
       });
       return;
     }
 
-    if (watcher.deadline !== null && now >= watcher.deadline) {
-      const errorCode = !watcher.sawAssistantMessage
-        ? "assistant_response_not_found"
-        : watcher.sawGenerating || generating
-          ? "response_stream_interrupted"
-          : watcher.extractionWasEmpty
-            ? "response_extraction_failed"
-            : "response_timeout";
-      const stage = !watcher.sawAssistantMessage
-        ? "assistant_message_not_found"
-        : watcher.sawGenerating || generating
-          ? "assistant_response_streaming"
-          : watcher.sawNonConnectorAssistant
-            ? "assistant_response_non_connector"
-          : watcher.extractionWasEmpty
-            ? "assistant_response_empty"
-            : "assistant_response_stability_timeout";
+    const hardStart = watcher.sendConfirmedAt || watcher.anchorFoundAt;
+    if (Number.isSafeInteger(hardStart) && now - hardStart >= responseHardTimeoutMs) {
       finishAssistantResponseWatcher(watcher, {
         status: "error",
-        errorCode,
-        message: "ChatGPTのassistant応答を完了状態で取得できませんでした。",
-        stage
+        errorCode: "response_timeout",
+        message: "ChatGPTのassistant応答監視が安全上限時間に達しました。",
+        stage: "assistant_response_hard_timeout",
+        timeoutKind: "hard_timeout"
       });
       return;
+    }
+
+    // Hidden Execution Tabs can throttle timers; do not treat that as a stall.
+    // Hard timeout above remains the runaway ceiling.
+    if (!documentIsHidden()) {
+      const idleMs = now - (watcher.lastMeaningfulProgressAt || watcher.anchorFoundAt || now);
+      const responseObserved = Boolean(watcher.assistantObservedAt || generationAlive);
+      if (!responseObserved && idleMs >= responseTimeoutMs) {
+        finishAssistantResponseWatcher(watcher, {
+          status: "error",
+          errorCode: "assistant_response_not_found",
+          message: "ChatGPTのassistant応答を完了状態で取得できませんでした。",
+          stage: "assistant_message_not_found",
+          timeoutKind: "pre_response_timeout"
+        });
+        return;
+      }
+      if (responseObserved && !generationAlive && idleMs >= responseTimeoutMs) {
+        const nodeLost = Boolean(watcher.domMissingAt)
+          && now - watcher.domMissingAt >= responseDomLostGraceMs
+          && !candidate;
+        if (nodeLost) {
+          finishAssistantResponseWatcher(watcher, {
+            status: "error",
+            errorCode: "response_stream_interrupted",
+            message: "ChatGPTのassistant応答DOMが消失したため監視を中断しました。",
+            stage: "assistant_response_dom_lost",
+            timeoutKind: "dom_lost"
+          });
+          return;
+        }
+        const errorCode = watcher.extractionWasEmpty && watcher.sawAssistantMessage
+          ? "response_extraction_failed"
+          : "response_timeout";
+        const stage = watcher.sawNonConnectorAssistant && !candidate
+          ? "assistant_response_non_connector"
+          : watcher.extractionWasEmpty
+            ? "assistant_response_empty"
+            : "assistant_response_stalled";
+        finishAssistantResponseWatcher(watcher, {
+          status: "error",
+          errorCode,
+          message: "ChatGPTのassistant応答の進捗が停止したため監視を終了しました。",
+          stage,
+          timeoutKind: "inactivity_timeout"
+        });
+        return;
+      }
     }
 
     watcher.timer = setTimeout(() => evaluateAssistantResponseWatcher(watcher), responsePollIntervalMs);
@@ -2611,7 +3075,7 @@
         subtree: true,
         characterData: true,
         attributes: true,
-        attributeFilter: ["aria-label", "data-testid", "aria-disabled", "disabled"]
+        attributeFilter: ["aria-label", "data-testid", "aria-disabled", "disabled", "aria-busy"]
       });
     }
     evaluateAssistantResponseWatcher(watcher);
@@ -2643,39 +3107,11 @@
     if (message?.prepare === true) {
       const beforeAssistantMessages = locators.captureAssistantMessageSnapshot?.(document)
         || { count: 0, elements: new Set() };
-      const watcher = {
+      const watcher = createAssistantResponseWatcher(message, {
         key,
-        requestId: message.requestId,
-        sessionId: message.sessionId,
-        handoffId: message.handoffId,
-        boundaryId: message.boundaryId,
-        protocol: message.protocol,
-        review: message.review === true,
-        targetTabId: message?.targetTabId || message?.target_tab_id,
-        anchor: null,
         awaitingUserAnchor: true,
-        baselineAssistantElements: beforeAssistantMessages.elements,
-        deadline: null,
-        lastChangedAt: Date.now(),
-        candidate: null,
-        candidateText: "",
-        sawAssistantMessage: false,
-        sawGenerating: false,
-        extractionWasEmpty: false,
-        sawNonConnectorAssistant: false,
-        observedAssistantElements: new Set(),
-        ignoredAssistantElements: new Set(),
-        connectorCandidateDetected: false,
-        textStableReported: false,
-        generationFinishedReported: false,
-        hasCompletionActions: false,
-        lifecycleTelemetryAt: 0,
-        lifecycleTelemetryState: null,
-        domChangeTelemetryAt: 0,
-        observer: null,
-        timer: null,
-        finished: false
-      };
+        baselineAssistantElements: beforeAssistantMessages.elements
+      });
       responseWatchers.set(key, watcher);
       diagnostic("response watch armed", contentLifecycleTrace(watcher, {
         status: "watching",
@@ -2719,40 +3155,14 @@
       stage: message?.review === true ? "review_anchor_found" : "response_anchor_found"
     });
 
-    const watcher = {
+    const watcher = createAssistantResponseWatcher(message, {
       key,
-      requestId: message.requestId,
-      sessionId: message.sessionId,
-      handoffId: message.handoffId,
-      boundaryId: message.boundaryId,
-      protocol: message.protocol,
-      review: message?.review === true,
-      targetTabId: message?.targetTabId || message?.target_tab_id,
       anchor,
+      sendConfirmedAt: Date.now(),
       baselineAssistantElements: savedAnchor?.assistantElements instanceof Set
         ? savedAnchor.assistantElements
-        : new Set(),
-      deadline: Date.now() + responseTimeoutMs,
-      lastChangedAt: Date.now(),
-      candidate: null,
-      candidateText: "",
-      sawAssistantMessage: false,
-      sawGenerating: false,
-      extractionWasEmpty: false,
-      sawNonConnectorAssistant: false,
-      observedAssistantElements: new Set(),
-      ignoredAssistantElements: new Set(),
-      connectorCandidateDetected: false,
-      textStableReported: false,
-      generationFinishedReported: false,
-      hasCompletionActions: false,
-      lifecycleTelemetryAt: 0,
-      lifecycleTelemetryState: null,
-      domChangeTelemetryAt: 0,
-      observer: null,
-      timer: null,
-      finished: false
-    };
+        : new Set()
+    });
     responseWatchers.set(key, watcher);
     diagnostic("response watch armed", contentLifecycleTrace(watcher, {
       status: "watching",
@@ -2772,11 +3182,13 @@
     const key = responseCorrelationKey(message);
     const watcher = responseWatchers.get(key);
     if (watcher) {
-      watcher.finished = true;
-      watcher.observer?.disconnect?.();
-      if (watcher.timer !== null) clearTimeout(watcher.timer);
-      responseWatchers.delete(key);
-      responseAnchors.delete(key);
+      finishAssistantResponseWatcher(watcher, {
+        status: "error",
+        errorCode: "response_timeout",
+        message: "assistant応答監視がキャンセルされました。",
+        stage: "assistant_response_aborted",
+        timeoutKind: "explicit_abort"
+      });
     }
     diagnostic("response watch cancelled", contentLifecycleTrace(watcher, {
       ...traceForMessage(message),
@@ -3011,6 +3423,14 @@
       window.dispatchEvent(new CustomEvent(statusEventName, { detail: message.state }));
       return false;
     }
+    if (message?.type === "GET_COLLECTOR_IDENTITY") {
+      sendResponse(readPageCollectorIdentity() || { collector_role: "none" });
+      return false;
+    }
+    if (message?.type === "SET_COLLECTOR_IDENTITY") {
+      sendResponse(writePageCollectorIdentity(message));
+      return false;
+    }
     if (message?.type === contextRequestMessageType) {
       if (sender?.id && sender.id !== chrome.runtime.id) return false;
       handleGetChatGptContext(message)
@@ -3102,7 +3522,8 @@
   }));
   void sendRuntimeMessage({
     type: "CONTENT_SCRIPT_READY",
-    context: readCurrentContextSnapshot()
+    context: readCurrentContextSnapshot(),
+    ...(readPageCollectorIdentity() || { collector_role: "none" })
   });
   installLifecycleTelemetry();
   installContextMonitor();

@@ -4,6 +4,27 @@
 (() => {
   "use strict";
 
+  const collectorSlowIdentityMs = 2000;
+
+  function documentVisibilityStateOf(root = globalThis.document) {
+    const doc = root?.ownerDocument && root.nodeType !== 9 ? root.ownerDocument : root;
+    const value = typeof doc?.visibilityState === "string" ? doc.visibilityState : "";
+    if (value === "visible" || value === "hidden" || value === "prerender") return value;
+    if (doc?.hidden === true) return "hidden";
+    if (doc?.hidden === false) return "visible";
+    return "unknown";
+  }
+
+  function documentIsHidden(root = globalThis.document) {
+    return documentVisibilityStateOf(root) === "hidden";
+  }
+
+  function addVisibilitySplit(stats, hiddenKey, visibleKey, root, amount = 1) {
+    if (!stats || !(amount > 0)) return;
+    const key = documentIsHidden(root) ? hiddenKey : visibleKey;
+    stats[key] = (Number(stats[key]) || 0) + amount;
+  }
+
   const composerSelectors = [
     'textarea[data-testid*="prompt"]',
     'textarea[aria-label]',
@@ -1196,11 +1217,15 @@
 
     return await new Promise((resolve) => {
       let mutationCount = 0;
+      let mutationCountWhileHidden = 0;
+      let mutationCountWhileVisible = 0;
       let lastMutationAt = startedAt;
       let lastFingerprint = null;
       let fingerprintStableAt = startedAt;
       let hydrationPollCount = 0;
       let hydrationPollWaitMs = 0;
+      let pollWaitMsWhileHidden = 0;
+      let pollWaitMsWhileVisible = 0;
       let observer = null;
       let pollTimer = null;
       let timeoutTimer = null;
@@ -1223,6 +1248,10 @@
           hydration_poll_wait_ms: hydrationPollWaitMs,
           hydration_poll_interval_ms: pollMs,
           mutation_count: mutationCount,
+          mutation_count_while_hidden: mutationCountWhileHidden,
+          mutation_count_while_visible: mutationCountWhileVisible,
+          poll_wait_ms_while_hidden: pollWaitMsWhileHidden,
+          poll_wait_ms_while_visible: pollWaitMsWhileVisible,
           mutation_quiet_ms: Math.max(0, now - lastMutationAt),
           sidebar_sections_stable: completed || state.sidebar_sections_stable === true,
           ...state,
@@ -1287,9 +1316,13 @@
           return;
         }
         const pollScheduledAt = Date.now();
+        const pollWhileHidden = documentIsHidden(root);
         pollTimer = setTimer(() => {
           hydrationPollCount += 1;
-          hydrationPollWaitMs += Math.max(0, Date.now() - pollScheduledAt);
+          const waited = Math.max(0, Date.now() - pollScheduledAt);
+          hydrationPollWaitMs += waited;
+          if (pollWhileHidden) pollWaitMsWhileHidden += waited;
+          else pollWaitMsWhileVisible += waited;
           inspect();
         }, pollMs);
       };
@@ -1300,6 +1333,8 @@
             const relevantMutationCount = mutationAffectsSidebar(records);
             if (relevantMutationCount <= 0) return;
             mutationCount += relevantMutationCount;
+            if (documentIsHidden(root)) mutationCountWhileHidden += relevantMutationCount;
+            else mutationCountWhileVisible += relevantMutationCount;
             lastMutationAt = Date.now();
           });
           const observationTarget = root?.documentElement || root;
@@ -1858,6 +1893,14 @@
         scroll_height: 0,
         more_pagination: 0
       },
+      hydrationLoopsWhileDocumentHidden: 0,
+      hydrationLoopsWhileDocumentVisible: 0,
+      scrollAttemptsWhileHidden: 0,
+      scrollAttemptsWhileVisible: 0,
+      mutationCountWhileHidden: 0,
+      mutationCountWhileVisible: 0,
+      pollWaitMsWhileHidden: 0,
+      pollWaitMsWhileVisible: 0,
       projectCandidateRejectedChildChatCount: 0,
       projectCandidateRejectedNonProjectCount: 0,
       descriptorAddedAfterFirstSnapshotIndices: [],
@@ -2299,6 +2342,14 @@
         scroll_height: Number(stats?.hydrationStagnationResetReasonCounts?.scroll_height) || 0,
         more_pagination: Number(stats?.hydrationStagnationResetReasonCounts?.more_pagination) || 0
       },
+      hydration_loops_while_document_hidden: Number(stats?.hydrationLoopsWhileDocumentHidden) || 0,
+      hydration_loops_while_document_visible: Number(stats?.hydrationLoopsWhileDocumentVisible) || 0,
+      scroll_attempts_while_hidden: Number(stats?.scrollAttemptsWhileHidden) || 0,
+      scroll_attempts_while_visible: Number(stats?.scrollAttemptsWhileVisible) || 0,
+      mutation_count_while_hidden: Number(stats?.mutationCountWhileHidden) || 0,
+      mutation_count_while_visible: Number(stats?.mutationCountWhileVisible) || 0,
+      poll_wait_ms_while_hidden: Number(stats?.pollWaitMsWhileHidden) || 0,
+      poll_wait_ms_while_visible: Number(stats?.pollWaitMsWhileVisible) || 0,
       project_candidate_rejected_child_chat_count:
         Number(stats?.projectCandidateRejectedChildChatCount) || 0,
       project_candidate_rejected_non_project_count:
@@ -4438,6 +4489,30 @@
         ? project.project_index
         : index
     }));
+    const identityVisibility = {
+      identityAttemptsWhileHidden: 0,
+      identityAttemptsWhileVisible: 0,
+      identityWaitMsWhileHidden: 0,
+      identityWaitMsWhileVisible: 0,
+      slowIdentityIndicesWhileHidden: [],
+      slowIdentityIndicesWhileVisible: []
+    };
+    const noteIdentityVisibility = (hidden, projectIndex, startedAt) => {
+      const elapsed = Math.max(0, Date.now() - startedAt);
+      if (hidden) {
+        identityVisibility.identityAttemptsWhileHidden += 1;
+        identityVisibility.identityWaitMsWhileHidden += elapsed;
+        if (elapsed >= collectorSlowIdentityMs) {
+          identityVisibility.slowIdentityIndicesWhileHidden.push(projectIndex);
+        }
+        return;
+      }
+      identityVisibility.identityAttemptsWhileVisible += 1;
+      identityVisibility.identityWaitMsWhileVisible += elapsed;
+      if (elapsed >= collectorSlowIdentityMs) {
+        identityVisibility.slowIdentityIndicesWhileVisible.push(projectIndex);
+      }
+    };
     let nonNavigationResolvedCount = 0;
     let navigationResolvedCount = 0;
     let currentProjectIndex = -1;
@@ -4643,6 +4718,7 @@
           ? descriptor.project_index
           : index;
         const projectStartedAt = Date.now();
+        const identityAttemptHidden = documentIsHidden(root);
         const existing = projectIdentityFromProjectMetadata(descriptor, baseUrl);
         let identity = existing.projectId ? existing : null;
         let reason = existing.reason;
@@ -4812,6 +4888,7 @@
               : undefined
           });
         if (identity) nonNavigationResolvedCount += 1;
+        noteIdentityVisibility(identityAttemptHidden, projectIndex, projectStartedAt);
       }
     } else if (output.length > 0) {
       const descriptor = output[0];
@@ -5550,6 +5627,7 @@
         projectUrlPatternValid = isProjectHomeUrl(identity.projectUrl);
         projectIdUrlMatch = projectIdFromUrl(identity.projectUrl) === identity.projectId;
       }
+      noteIdentityVisibility(documentIsHidden(root), currentProjectIndex, identityStartedAt);
     }
 
     const unresolvedCount = output.reduce((count, project) => {
@@ -5574,7 +5652,13 @@
       internal_reason: output.find((project) => project?.unresolved_reason)
         ? (navigationInternalReason || "missing_stable_identity")
         : "none",
-      navigation_telemetry: navigationTelemetry
+      navigation_telemetry: navigationTelemetry,
+      identity_attempts_while_hidden: identityVisibility.identityAttemptsWhileHidden,
+      identity_attempts_while_visible: identityVisibility.identityAttemptsWhileVisible,
+      identity_wait_ms_while_hidden: identityVisibility.identityWaitMsWhileHidden,
+      identity_wait_ms_while_visible: identityVisibility.identityWaitMsWhileVisible,
+      slow_identity_indices_while_hidden: [...identityVisibility.slowIdentityIndicesWhileHidden],
+      slow_identity_indices_while_visible: [...identityVisibility.slowIdentityIndicesWhileVisible]
     };
   }
 
@@ -5706,6 +5790,7 @@
     url = globalThis.location?.href,
     options = {}) {
     const merged = { projects: [], conversations: [], provisional_observations: [] };
+    const visibilityAtStart = documentVisibilityStateOf(root);
     let rootCatalogBuildCount = 0;
     let rootCatalogReuseCount = 0;
     let sidebarScrollAttemptCount = 0;
@@ -5932,6 +6017,11 @@
       for (let pass = 0; pass < maxScrolls; pass += 1) {
         if (!ensureCollectionActive()) break;
         discoveryStats.hydrationLoopCount += 1;
+        addVisibilitySplit(
+          discoveryStats,
+          "hydrationLoopsWhileDocumentHidden",
+          "hydrationLoopsWhileDocumentVisible",
+          root);
         const beforeProjects = merged.projects.length;
         const beforeProvisionals = merged.provisional_observations?.length || 0;
         const expandedBeforeScan = await expandAvailableMoreButtons();
@@ -6005,13 +6095,21 @@
         const nextTop = Math.min(maxTop, beforeTop + step);
         if (nextTop <= beforeTop) break;
         sidebarScrollAttemptCount += 1;
+        addVisibilitySplit(
+          discoveryStats,
+          "scrollAttemptsWhileHidden",
+          "scrollAttemptsWhileVisible",
+          root);
         try { scrollContainer.scrollTop = nextTop; } catch (_) {
           sidebarScrollStagnationCount += 1;
           break;
         }
         const scrollWaitStartedAt = Date.now();
+        const waitWhileHidden = documentIsHidden(root);
         await waitForSidebarMutation(root, options.settleMs);
         const scrollWaitMs = Math.max(0, Date.now() - scrollWaitStartedAt);
+        if (waitWhileHidden) discoveryStats.pollWaitMsWhileHidden += scrollWaitMs;
+        else discoveryStats.pollWaitMsWhileVisible += scrollWaitMs;
         rootHydrationScrollWaitMs += scrollWaitMs;
         totalDomWaitMs += scrollWaitMs;
         if (!ensureCollectionActive()) break;
@@ -6162,7 +6260,11 @@
         hydration_completed_after_more_no_progress: hydrationStopReason === "no_progress",
         more_visible_at_hydration_complete: moreAtComplete.visible === true,
         more_enabled_at_hydration_complete: moreAtComplete.enabled === true,
-        more_clickable_at_hydration_complete: moreAtComplete.clickable === true
+        more_clickable_at_hydration_complete: moreAtComplete.clickable === true,
+        document_visibility_state_at_collection_start: visibilityAtStart,
+        document_visibility_state_at_collection_end: documentVisibilityStateOf(root),
+        document_hidden_observed: visibilityAtStart === "hidden"
+          || documentVisibilityStateOf(root) === "hidden"
       };
     } finally {
       const restoreScrollContainer = scrollContainer?.isConnected === false
@@ -8744,6 +8846,35 @@
     return uniqueElements(stopButtonSelectors, root).some((element) => isVisible(element) && !isDisabled(element));
   }
 
+  const generationThinkingSelectors = [
+    '[data-testid*="thinking"]',
+    '[data-testid*="reasoning"]',
+    '[aria-label*="thinking" i]',
+    '[aria-label*="思考" i]'
+  ];
+
+  function isAriaBusyGeneration(root = globalThis.document) {
+    if (!root?.querySelectorAll) return false;
+    return uniqueElements(['[aria-busy="true"]'], root).some((element) => {
+      if (!isVisible(element) || isDisabled(element)) return false;
+      const testId = (element.getAttribute?.("data-testid") || "").toLowerCase();
+      if (testId.includes("file") || testId.includes("attachment") || testId.includes("upload")) return false;
+      return true;
+    });
+  }
+
+  function isThinkingIndicatorVisible(root = globalThis.document) {
+    if (!root?.querySelectorAll) return false;
+    return uniqueElements(generationThinkingSelectors, root).some((element) => isVisible(element));
+  }
+
+  // Stop-button visibility is the strongest ChatGPT generation signal, but
+  // long thinking turns can keep that control while visible assistant text
+  // does not grow. aria-busy / thinking indicators are additional liveness.
+  function isGenerationAlive(root = globalThis.document) {
+    return isGenerating(root) || isAriaBusyGeneration(root) || isThinkingIndicatorVisible(root);
+  }
+
   globalThis.ChatGptComfyConnectorLocators = Object.freeze({
     composerSelectors: Object.freeze([...composerSelectors]),
     sendButtonSelectors: Object.freeze([...sendButtonSelectors]),
@@ -8817,6 +8948,7 @@
     findAssistantMessagesAfterAnchor,
     findAssistantMessageWithCorrelation,
     hasAssistantCompletionActions,
-    isGenerating
+    isGenerating,
+    isGenerationAlive
   });
 })();

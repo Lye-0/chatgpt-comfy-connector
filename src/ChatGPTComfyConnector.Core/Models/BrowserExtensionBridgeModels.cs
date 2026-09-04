@@ -140,6 +140,7 @@ public static class BrowserExtensionAssistantResponseErrorCodes
     public const string ResponseExtractionFailed = "response_extraction_failed";
     public const string ResponseAnchorNotFound = "response_anchor_not_found";
     public const string ContentScriptUnavailable = "content_script_unavailable";
+    public const string TabClosed = "tab_closed";
     public const string BridgeDisconnected = "bridge_disconnected";
     public const string ResponseNotCorrelated = "response_not_correlated";
     public const string ConnectorResponseInvalid = "connector_response_invalid";

@@ -594,6 +594,8 @@ class FakeMetadataDocument extends FakeMetadataNode {
     this.title = "ChatGPT";
     this.sidebar = sidebar;
     this.elementsById = new Map();
+    this.hidden = false;
+    this.visibilityState = "visible";
   }
 
   registerElementById(element, id = element?.getAttribute?.("id")) {
@@ -5625,6 +5627,55 @@ test("28 Project remount discovery still resolves 28 identities", async () => {
   assert.equal(result.unresolved_count, 0);
   assert.equal(result.non_navigation_resolved_count, 28);
 });
+
+test("hydration loops while document is hidden increment the hidden counter", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 6 }, (_, index) => `Hidden ${index}`);
+  const ids = names.map((_, index) => `g-p-hidden-${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  document.hidden = true;
+  document.visibilityState = "hidden";
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 6,
+    projectIds: ids,
+    nestedScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0,
+    settleMs: 0
+  });
+  assert.equal(snapshot.document_visibility_state_at_collection_start, "hidden");
+  assert.ok(snapshot.hydration_loops_while_document_hidden >= 1);
+  assert.equal(snapshot.hydration_loops_while_document_visible, 0);
+});
+
+test("hydration loops while document is visible increment the visible counter", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 6 }, (_, index) => `Visible ${index}`);
+  const ids = names.map((_, index) => `g-p-visible-${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  document.hidden = false;
+  document.visibilityState = "visible";
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 6,
+    projectIds: ids,
+    nestedScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0,
+    settleMs: 0
+  });
+  assert.equal(snapshot.document_visibility_state_at_collection_start, "visible");
+  assert.ok(snapshot.hydration_loops_while_document_visible >= 1);
+  assert.equal(snapshot.hydration_loops_while_document_hidden, 0);
+});
+
 
 function assertProject(projects, projectId) {
   const project = projects.find((item) => item.project_id === projectId);

@@ -481,6 +481,21 @@ class FakeDocument {
     return button;
   }
 
+  addThinkingIndicator() {
+    const indicator = new FakeElement(this, "div", {
+      "data-testid": "thinking",
+      "aria-label": "Thinking"
+    });
+    this.body.appendChild(indicator);
+    return indicator;
+  }
+
+  removeAssistantMessage(message) {
+    this.body.removeChild(message);
+    this.assistantMessages = this.assistantMessages.filter((candidate) => candidate !== message);
+    return message;
+  }
+
   removeButton(button) {
     this.body.removeChild(button);
     this.buttons = this.buttons.filter((candidate) => candidate !== button);
@@ -517,6 +532,19 @@ class FakeDocument {
           || ariaLabel.includes("ファイル")
           || ariaLabel.includes("アップロード")
           || element.getAttribute("role") === "progressbar";
+      });
+    }
+    if (selector.includes("aria-busy")) {
+      return this.allElements().filter((element) => element.getAttribute("aria-busy") === "true");
+    }
+    if (selector.includes("thinking") || selector.includes("reasoning") || selector.includes("思考")) {
+      return this.allElements().filter((element) => {
+        const testId = (element.getAttribute("data-testid") || "").toLowerCase();
+        const label = (element.getAttribute("aria-label") || "").toLowerCase();
+        return testId.includes("thinking")
+          || testId.includes("reasoning")
+          || label.includes("thinking")
+          || label.includes("思考");
       });
     }
     if (selector.includes("assistant")) return this.assistantMessages;
@@ -646,7 +674,13 @@ async function createHarness(options) {
     "const reviewComposerStateTimeoutMs = 150;"
   ).replace(
     "const responseTimeoutMs = 120000;",
-    "const responseTimeoutMs = 300;"
+    `const responseTimeoutMs = ${options?.responseTimeoutMs ?? 300};`
+  ).replace(
+    "const responseHardTimeoutMs = 1200000;",
+    `const responseHardTimeoutMs = ${options?.responseHardTimeoutMs ?? 20000};`
+  ).replace(
+    "const responseDomLostGraceMs = 8000;",
+    `const responseDomLostGraceMs = ${options?.responseDomLostGraceMs ?? 40};`
   ).replace(
     "const responseStabilityMs = 900;",
     "const responseStabilityMs = 20;"
@@ -674,7 +708,7 @@ async function createHarness(options) {
     },
     messages: runtimeMessages,
     async waitForRuntimeMessage(predicate = () => true) {
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      for (let attempt = 0; attempt < 250; attempt += 1) {
         const message = runtimeMessages.find(predicate);
         if (message) return message;
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -1416,7 +1450,7 @@ test("Content Script reports an explicit timeout when no post-anchor assistant r
   assert.equal(result.stage, "assistant_message_not_found");
 });
 
-test("Content Script records visibility and the final watcher state when response waiting times out", async () => {
+test("Content Script records hidden visibility without treating a live generation as interrupted", async () => {
   const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
   assert.equal((await harness.send(handoff)).status, "sent");
   assert.equal((await harness.send({
@@ -1425,15 +1459,34 @@ test("Content Script records visibility and the final watcher state when respons
     sessionId: handoff.sessionId,
     handoffId: handoff.handoffId,
     boundaryId: handoff.boundaryId,
-    protocol: handoff.protocol
+    protocol: handoff.protocol,
+    tabActive: false,
+    windowFocused: false
   })).status, "watching");
 
+  const stopButton = harness.document.addStopButton();
   harness.document.visibilityState = "hidden";
   harness.document.hidden = true;
   harness.document.wasDiscarded = true;
   harness.document.dispatchEvent(new FakeEvent("visibilitychange"));
-  const result = await harness.waitForRuntimeMessage((message) => message.type === "ASSISTANT_RESPONSE_RESULT");
-  assert.equal(result.status, "error");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(harness.messages.some((message) => message.type === "ASSISTANT_RESPONSE_RESULT"), false);
+
+  const command = JSON.stringify({
+    protocol: "comfy-connector/1",
+    action: "complete",
+    handoff_id: handoff.handoffId,
+    session_id: handoff.sessionId,
+    reason: "approved"
+  });
+  harness.document.appendAssistantCodeMessage({
+    codeText: command,
+    classLanguage: "connector-command"
+  });
+  harness.document.removeButton(stopButton);
+  const result = await harness.waitForRuntimeMessage((message) =>
+    message.type === "ASSISTANT_RESPONSE_RESULT" && message.status === "received");
+  assert.equal(result.stage, "assistant_response_complete");
 
   const lifecycleEntries = harness.diagnostics
     .map(([, fields]) => fields)
@@ -1443,11 +1496,11 @@ test("Content Script records visibility and the final watcher state when respons
   assert.equal(visibility.document_hidden, true);
   assert.equal(visibility.document_was_discarded, true);
   assert.equal(visibility.content_script_alive, true);
-  assert.equal(visibility.watcher_state, "armed");
   assert.equal(visibility.request_id, handoff.requestId);
-  const finalState = lifecycleEntries.find((fields) =>
-    fields.stage === "assistant_message_not_found" && fields.watcher_state === "idle");
-  assert.equal(finalState.assistant_state, "not_detected");
+  const summary = lifecycleEntries.find((fields) => fields.stage === "assistant_response_watch_summary");
+  assert.equal(summary.document_hidden_observed, true);
+  assert.equal(summary.timeout_kind, "none");
+  assert.equal(summary.completion_detected, true);
 });
 
 const mediaBegin = {
@@ -1704,4 +1757,325 @@ test("Content Script rejects an incomplete media transfer before touching the fi
   });
   assert.equal(result.error_code, "attachment_upload_failed");
   assert.equal(harness.document.fileInput.files.length, 0);
+});
+
+test("Content Script collector visibility snapshot records a hidden document", async () => {
+  const harness = await createHarness({ url: "https://chatgpt.com/" });
+  harness.document.hidden = true;
+  harness.document.visibilityState = "hidden";
+  const result = await harness.send({
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: "collector-visibility-hidden",
+    mode: "current"
+  });
+  assert.equal(result.document_visibility_state_at_collection_start, "hidden");
+  assert.equal(result.document_hidden_observed, true);
+});
+
+test("Content Script collector visibility snapshot records a visible document", async () => {
+  const harness = await createHarness({ url: "https://chatgpt.com/" });
+  harness.document.hidden = false;
+  harness.document.visibilityState = "visible";
+  const result = await harness.send({
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: "collector-visibility-visible",
+    mode: "current"
+  });
+  assert.equal(result.document_visibility_state_at_collection_start, "visible");
+  assert.equal(result.document_hidden_observed, false);
+});
+
+test("Content Script collector visibility change count updates from hidden to visible", async () => {
+  const harness = await createHarness({ url: "https://chatgpt.com/" });
+  harness.document.hidden = true;
+  harness.document.visibilityState = "hidden";
+  await harness.send({
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: "collector-visibility-flip",
+    mode: "current"
+  });
+  harness.document.hidden = false;
+  harness.document.visibilityState = "visible";
+  harness.document.dispatchEvent(new FakeEvent("visibilitychange"));
+  const result = await harness.send({
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: "collector-visibility-flip",
+    mode: "current"
+  });
+  assert.ok(result.document_visibility_change_count >= 1);
+  assert.equal(result.document_became_visible_during_collection, true);
+});
+
+test("Content Script collector visibility change count updates from visible to hidden", async () => {
+  const harness = await createHarness({ url: "https://chatgpt.com/" });
+  harness.document.hidden = false;
+  harness.document.visibilityState = "visible";
+  await harness.send({
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: "collector-visibility-hide",
+    mode: "current"
+  });
+  harness.document.hidden = true;
+  harness.document.visibilityState = "hidden";
+  harness.document.dispatchEvent(new FakeEvent("visibilitychange"));
+  const result = await harness.send({
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: "collector-visibility-hide",
+    mode: "current"
+  });
+  assert.ok(result.document_visibility_change_count >= 1);
+  assert.equal(result.document_became_hidden_during_collection, true);
+  assert.equal(result.document_hidden_observed, true);
+});
+
+function watchMessage(extra = {}) {
+  return {
+    type: "WATCH_ASSISTANT_RESPONSE",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol,
+    ...extra
+  };
+}
+
+function completeCommandJson() {
+  return JSON.stringify({
+    protocol: "comfy-connector/1",
+    action: "complete",
+    handoff_id: handoff.handoffId,
+    session_id: handoff.sessionId,
+    reason: "approved"
+  });
+}
+
+function diagnosticStage(harness, stage) {
+  return harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === stage);
+}
+
+test("Content Script keeps watching a long streaming response while generation stays alive", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage())).status, "watching");
+  const stopButton = harness.document.addStopButton();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(harness.messages.some((message) => message.type === "ASSISTANT_RESPONSE_RESULT"), false);
+  harness.document.appendAssistantCodeMessage({
+    codeText: completeCommandJson(),
+    classLanguage: "connector-command"
+  });
+  harness.document.removeButton(stopButton);
+  const result = await harness.waitForRuntimeMessage((message) =>
+    message.type === "ASSISTANT_RESPONSE_RESULT" && message.status === "received");
+  assert.equal(result.stage, "assistant_response_complete");
+});
+
+test("Content Script treats long thinking as live generation rather than a stall", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage())).status, "watching");
+  const thinking = harness.document.addThinkingIndicator();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(harness.messages.some((message) => message.type === "ASSISTANT_RESPONSE_RESULT"), false);
+  harness.document.body.removeChild(thinking);
+  harness.document.appendAssistantCodeMessage({
+    codeText: completeCommandJson(),
+    classLanguage: "connector-command"
+  });
+  const result = await harness.waitForRuntimeMessage((message) =>
+    message.type === "ASSISTANT_RESPONSE_RESULT" && message.status === "received");
+  assert.equal(result.stage, "assistant_response_complete");
+  assert.equal(diagnosticStage(harness, "assistant_response_watch_summary").thinking_state_observed, true);
+});
+
+test("Content Script refreshes inactivity when assistant text grows", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage())).status, "watching");
+  const stopButton = harness.document.addStopButton();
+  const message = harness.document.appendAssistantCodeMessage({
+    codeText: '{"protocol":"comfy-connector/1"',
+    classLanguage: "connector-command"
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  message.querySelector("code").textContent = completeCommandJson();
+  harness.document.removeButton(stopButton);
+  const result = await harness.waitForRuntimeMessage((entry) =>
+    entry.type === "ASSISTANT_RESPONSE_RESULT" && entry.status === "received");
+  assert.equal(result.stage, "assistant_response_complete");
+  assert.ok(diagnosticStage(harness, "assistant_response_watch_summary").text_growth_event_count >= 1);
+});
+
+test("Content Script rebinds a remounted assistant node instead of interrupting", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage())).status, "watching");
+  const stopButton = harness.document.addStopButton();
+  const first = harness.document.appendAssistantCodeMessage({
+    codeText: completeCommandJson(),
+    classLanguage: "connector-command"
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  harness.document.removeAssistantMessage(first);
+  harness.document.appendAssistantCodeMessage({
+    codeText: completeCommandJson(),
+    classLanguage: "connector-command"
+  });
+  harness.document.removeButton(stopButton);
+  const result = await harness.waitForRuntimeMessage((entry) =>
+    entry.type === "ASSISTANT_RESPONSE_RESULT" && entry.status === "received");
+  assert.equal(result.stage, "assistant_response_complete");
+  assert.ok(diagnosticStage(harness, "assistant_response_watch_summary").response_remount_count >= 1);
+});
+
+test("Content Script continues after a brief assistant DOM gap within remount grace", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready", responseDomLostGraceMs: 80 });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage())).status, "watching");
+  const stopButton = harness.document.addStopButton();
+  const first = harness.document.appendAssistantCodeMessage({
+    codeText: completeCommandJson(),
+    classLanguage: "connector-command"
+  });
+  harness.document.removeAssistantMessage(first);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  harness.document.appendAssistantCodeMessage({
+    codeText: completeCommandJson(),
+    classLanguage: "connector-command"
+  });
+  harness.document.removeButton(stopButton);
+  const result = await harness.waitForRuntimeMessage((entry) =>
+    entry.type === "ASSISTANT_RESPONSE_RESULT" && entry.status === "received");
+  assert.equal(result.stage, "assistant_response_complete");
+});
+
+test("Content Script times out from inactivity after streaming progress stops", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage())).status, "watching");
+  const stopButton = harness.document.addStopButton();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  harness.document.removeButton(stopButton);
+  const result = await harness.waitForRuntimeMessage((entry) => entry.type === "ASSISTANT_RESPONSE_RESULT");
+  assert.equal(result.status, "error");
+  assert.equal(result.errorCode, "response_timeout");
+  assert.equal(result.stage, "assistant_response_stalled");
+  assert.equal(result.timeoutKind, "inactivity_timeout");
+  const failure = diagnosticStage(harness, "assistant_response_watch_failure_summary");
+  assert.equal(failure.timeout_kind, "inactivity_timeout");
+  assert.equal(failure.assistant_streaming_at_failure, false);
+});
+
+test("Content Script times out when thinking and text both go idle", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage())).status, "watching");
+  const thinking = harness.document.addThinkingIndicator();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  harness.document.body.removeChild(thinking);
+  const result = await harness.waitForRuntimeMessage((entry) => entry.type === "ASSISTANT_RESPONSE_RESULT");
+  assert.equal(result.errorCode, "response_timeout");
+  assert.equal(result.timeoutKind, "inactivity_timeout");
+});
+
+test("Content Script reports explicit_abort when the watch is cancelled", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage())).status, "watching");
+  const cancelled = await harness.send({
+    type: "CANCEL_ASSISTANT_RESPONSE_WATCH",
+    requestId: handoff.requestId,
+    sessionId: handoff.sessionId,
+    handoffId: handoff.handoffId,
+    boundaryId: handoff.boundaryId,
+    protocol: handoff.protocol
+  });
+  assert.equal(cancelled.status, "cancelled");
+  const result = await harness.waitForRuntimeMessage((entry) => entry.type === "ASSISTANT_RESPONSE_RESULT");
+  assert.equal(result.timeoutKind, "explicit_abort");
+  assert.equal(result.stage, "assistant_response_aborted");
+});
+
+test("Content Script uses hard safety timeout independently of inactivity", async () => {
+  const harness = await createHarness({
+    composer: "textarea",
+    sendButton: "ready",
+    responseTimeoutMs: 10000,
+    responseHardTimeoutMs: 80
+  });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage())).status, "watching");
+  harness.document.addStopButton();
+  const result = await harness.waitForRuntimeMessage((entry) => entry.type === "ASSISTANT_RESPONSE_RESULT");
+  assert.equal(result.errorCode, "response_timeout");
+  assert.equal(result.stage, "assistant_response_hard_timeout");
+  assert.equal(result.timeoutKind, "hard_timeout");
+});
+
+test("Content Script does not spend response-phase timeout while waiting for send", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(watchMessage({ prepare: true }))).status, "watching");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(harness.messages.some((message) => message.type === "ASSISTANT_RESPONSE_RESULT"), false);
+  assert.equal((await harness.send(handoff)).status, "sent");
+  harness.document.appendAssistantCodeMessage({
+    codeText: completeCommandJson(),
+    classLanguage: "connector-command"
+  });
+  const result = await harness.waitForRuntimeMessage((entry) =>
+    entry.type === "ASSISTANT_RESPONSE_RESULT" && entry.status === "received");
+  assert.equal(result.stage, "assistant_response_complete");
+});
+
+test("Content Script treats post-send thinking delay as pre-response rather than aborting a later stream", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(watchMessage({ prepare: true }))).status, "watching");
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal((await harness.send(handoff)).status, "sent");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  harness.document.appendAssistantCodeMessage({
+    codeText: completeCommandJson(),
+    classLanguage: "connector-command"
+  });
+  const result = await harness.waitForRuntimeMessage((entry) =>
+    entry.type === "ASSISTANT_RESPONSE_RESULT" && entry.status === "received");
+  assert.equal(result.stage, "assistant_response_complete");
+});
+
+test("Content Script does not complete on a partial connector-command while generation is alive", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage())).status, "watching");
+  const stopButton = harness.document.addStopButton();
+  harness.document.appendAssistantCodeMessage({
+    codeText: '{"protocol":"comfy-connector/1","action":"complete"',
+    classLanguage: "connector-command"
+  });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(harness.messages.some((message) => message.type === "ASSISTANT_RESPONSE_RESULT"), false);
+  harness.document.appendAssistantCodeMessage({
+    codeText: completeCommandJson(),
+    classLanguage: "connector-command"
+  });
+  harness.document.removeButton(stopButton);
+  const result = await harness.waitForRuntimeMessage((entry) =>
+    entry.type === "ASSISTANT_RESPONSE_RESULT" && entry.status === "received");
+  assert.equal(result.payload.includes("reason"), true);
+});
+
+test("Content Script watches the request-scoped target tab id supplied by Background", async () => {
+  const harness = await createHarness({ composer: "textarea", sendButton: "ready" });
+  assert.equal((await harness.send(handoff)).status, "sent");
+  assert.equal((await harness.send(watchMessage({ targetTabId: 77 }))).status, "watching");
+  harness.document.appendAssistantCodeMessage({
+    codeText: completeCommandJson(),
+    classLanguage: "connector-command"
+  });
+  const result = await harness.waitForRuntimeMessage((entry) =>
+    entry.type === "ASSISTANT_RESPONSE_RESULT" && entry.status === "received");
+  assert.equal(result.stage, "assistant_response_complete");
+  assert.equal(diagnosticStage(harness, "assistant_response_watch_summary").target_tab_fingerprint, "t:77");
 });

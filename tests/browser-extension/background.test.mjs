@@ -16,6 +16,7 @@ async function createHarness() {
   let activeTabs = [];
   const tabsById = new Map();
   const managedStorageValues = {};
+  const localStorageValues = {};
   let contentResponse = null;
   let contentError = null;
   let mediaResponse = null;
@@ -43,7 +44,18 @@ async function createHarness() {
   const diagnostics = [];
   const createdWindows = [];
   let nextCreatedTabStatus;
+  let nextCreatedWindowState = null;
   let nextWindowId = 200;
+  let windowCreateCallCount = 0;
+  let tabCreateCallCount = 0;
+  let windowCreateBarrier = null;
+  let windowCreateStartedResolve = null;
+  let tabCreateBarrier = null;
+  let tabCreateStartedResolve = null;
+  let omitCreatedWindowTabsProperty = false;
+  let skipWindowCreateInitialTab = false;
+  let nextWindowCreateTabUrl = null;
+  let nextWindowCreateTabPendingUrl = null;
 
   function allTabs() {
     return [...tabsById.values()];
@@ -118,8 +130,17 @@ async function createHarness() {
         async set(value) { Object.assign(managedStorageValues, value); }
       },
       local: {
-        async get() { return {}; },
-        async set() {}
+        async get(key) {
+          if (typeof key === "string") return { [key]: localStorageValues[key] };
+          if (Array.isArray(key)) {
+            const result = {};
+            for (const item of key) result[item] = localStorageValues[item];
+            return result;
+          }
+          return { ...localStorageValues };
+        },
+        async set(value) { Object.assign(localStorageValues, value); },
+        async remove(key) { delete localStorageValues[key]; }
       }
     },
     tabs: {
@@ -135,6 +156,10 @@ async function createHarness() {
         return tab;
       },
       async create({ url, windowId = 1, active = true, autoDiscardable = true }) {
+        tabCreateStartedResolve?.();
+        tabCreateStartedResolve = null;
+        if (tabCreateBarrier) await tabCreateBarrier;
+        tabCreateCallCount += 1;
         const window = ensureWindow(windowId);
         const tab = {
           id: 100 + createdTabs.length,
@@ -181,6 +206,20 @@ async function createHarness() {
       },
       async sendMessage(tabId, message) {
         assert.ok(tabsById.has(tabId), `Message target ${tabId} should exist`);
+        if (message?.type === "GET_COLLECTOR_IDENTITY") {
+          const tab = tabsById.get(tabId);
+          return tab?.collectorIdentity || { collector_role: "none" };
+        }
+        if (message?.type === "SET_COLLECTOR_IDENTITY") {
+          const tab = tabsById.get(tabId);
+          tab.collectorIdentity = {
+            collector_role: "collector",
+            collector_instance_id: message.collector_instance_id,
+            collector_managed_generation: message.collector_managed_generation,
+            collector_managed_at: message.collector_managed_at
+          };
+          return { ok: true, ...tab.collectorIdentity };
+        }
         if (contentError) throw contentError;
         const result = await contentResponse?.(message) || {};
         if (message?.type === "GET_COLLECTOR_VIEWPORT"
@@ -266,7 +305,19 @@ async function createHarness() {
         return [...windowStates.values()].find((window) => window.focused === true)
           || [...windowStates.values()].at(-1);
       },
+      async getAll(query = {}) {
+        return [...windowStates.values()].map((window) => ({
+          ...window,
+          tabs: query?.populate === true
+            ? allTabs().filter((tab) => tab.windowId === window.id)
+            : window.tabs
+        }));
+      },
       async create(createData = {}) {
+        windowCreateStartedResolve?.();
+        windowCreateStartedResolve = null;
+        if (windowCreateBarrier) await windowCreateBarrier;
+        windowCreateCallCount += 1;
         assert.equal(
           Object.prototype.hasOwnProperty.call(createData, "populate"),
           false,
@@ -283,30 +334,46 @@ async function createHarness() {
         const id = nextWindowId++;
         const window = ensureWindow(id, {
           focused: focused === true,
-          state,
+          state: nextCreatedWindowState || state,
           type,
           width,
           height,
           tabs: []
         });
+        nextCreatedWindowState = null;
         if (focused === true) {
           for (const candidate of windowStates.values()) candidate.focused = candidate.id === id;
         }
-        const tab = {
-          id: 100 + createdTabs.length,
-          windowId: id,
-          url,
-          active: true,
-          status: nextCreatedTabStatus,
-          discarded: false,
-          frozen: false,
-          autoDiscardable: true
-        };
-        createdTabs.push(tab);
-        tabsById.set(tab.id, tab);
-        window.tabs = [tab];
+        const omitTabs = omitCreatedWindowTabsProperty;
+        const skipTab = skipWindowCreateInitialTab;
+        const initialUrl = nextWindowCreateTabUrl || url;
+        const pendingUrl = nextWindowCreateTabPendingUrl;
+        omitCreatedWindowTabsProperty = false;
+        skipWindowCreateInitialTab = false;
+        nextWindowCreateTabUrl = null;
+        nextWindowCreateTabPendingUrl = null;
+        if (!skipTab) {
+          const tab = {
+            id: 100 + createdTabs.length,
+            windowId: id,
+            url: initialUrl,
+            ...(pendingUrl ? { pendingUrl } : {}),
+            active: true,
+            status: nextCreatedTabStatus,
+            discarded: false,
+            frozen: false,
+            autoDiscardable: true
+          };
+          createdTabs.push(tab);
+          tabsById.set(tab.id, tab);
+          window.tabs = [tab];
+        }
         activeTabs = allTabs();
         createdWindows.push(window);
+        if (omitTabs) {
+          const { tabs: _tabs, ...withoutTabs } = window;
+          return withoutTabs;
+        }
         return window;
       },
       async update(windowId, changes = {}) {
@@ -459,6 +526,45 @@ async function createHarness() {
     setNextCreatedTabStatus(status) {
       nextCreatedTabStatus = status;
     },
+    setNextCreatedWindowState(state) {
+      nextCreatedWindowState = state;
+    },
+    omitNextCreatedWindowTabs() {
+      omitCreatedWindowTabsProperty = true;
+    },
+    skipNextWindowCreateInitialTab() {
+      skipWindowCreateInitialTab = true;
+    },
+    setNextWindowCreateTabUrl(url, pendingUrl = null) {
+      nextWindowCreateTabUrl = url;
+      nextWindowCreateTabPendingUrl = pendingUrl;
+    },
+    holdNextWindowCreate() {
+      let release;
+      windowCreateBarrier = new Promise((resolve) => { release = resolve; });
+      const started = new Promise((resolve) => { windowCreateStartedResolve = resolve; });
+      return {
+        started,
+        release() {
+          windowCreateBarrier = null;
+          release();
+        }
+      };
+    },
+    holdNextTabCreate() {
+      let release;
+      tabCreateBarrier = new Promise((resolve) => { release = resolve; });
+      const started = new Promise((resolve) => { tabCreateStartedResolve = resolve; });
+      return {
+        started,
+        release() {
+          tabCreateBarrier = null;
+          release();
+        }
+      };
+    },
+    get windowCreateCallCount() { return windowCreateCallCount; },
+    get tabCreateCallCount() { return tabCreateCallCount; },
     addTabToWindow(options = {}) {
       return chrome.tabs.create({
         url: options.url || "https://chatgpt.com/",
@@ -499,12 +605,12 @@ async function createHarness() {
       activeTabs = allTabs();
       for (const listener of tabUpdatedListeners) listener(tabId, { ...changes }, tab);
     },
-    removeTab(tabId) {
+    removeTab(tabId, { isWindowClosing = false } = {}) {
       const tab = tabsById.get(tabId);
       assert.ok(tab, `Tab ${tabId} should exist before removal`);
       tabsById.delete(tabId);
       activeTabs = allTabs();
-      for (const listener of tabRemovedListeners) listener(tabId, { windowId: tab.windowId, isWindowClosing: false });
+      for (const listener of tabRemovedListeners) listener(tabId, { windowId: tab.windowId, isWindowClosing });
     },
     get createdTabs() { return createdTabs; },
     get createdWindows() { return createdWindows; },
@@ -513,6 +619,21 @@ async function createHarness() {
     getTab(tabId) { return tabsById.get(tabId); },
     tabsInWindow(windowId) { return allTabs().filter((tab) => tab.windowId === windowId); },
     getWindow(windowId) { return windowStates.get(windowId); },
+    get sessionStorageValues() { return managedStorageValues; },
+    get localStorageValues() { return localStorageValues; },
+    setWindowFocused(windowId, focused) {
+      for (const window of windowStates.values()) {
+        if (focused === true) window.focused = window.id === windowId;
+        else if (window.id === windowId) window.focused = false;
+      }
+    },
+    simulateServiceWorkerRestart() {
+      new Script("collectorWindowState = { ...defaultCollectorWindowState };").runInContext(context);
+    },
+    simulateExtensionReload() {
+      delete managedStorageValues.chatGptCollectorWindow;
+      new Script("collectorWindowState = { ...defaultCollectorWindowState };").runInContext(context);
+    },
     closeExecutionWindow(windowId) { return chrome.windows.remove(windowId); },
     get managedTabId() { return context.managedTabState?.tabId ?? createdTabs.at(-1)?.id ?? null; },
     async openAuthenticatedSocket(token = "session-reconnected") {
@@ -651,6 +772,7 @@ test("Background uses one active Managed ChatGPT Tab in an isolated Execution Wi
   const relayedMessages = [];
   harness.setContentHandler((message) => {
     relayedMessages.push(message);
+    if (message.type === "CHATGPT_EXECUTION_READY") return { status: "ready" };
     if (message.type === "WATCH_ASSISTANT_RESPONSE") {
       return {
         request_id: request.request_id,
@@ -2180,18 +2302,17 @@ test("Background reconciles duplicate Collector Tabs and keeps the canonical Tab
 
   const tabs = harness.tabsInWindow(collectorWindowId);
   assert.equal(response.status, "ok");
-  assert.equal(tabs.length, 1);
-  assert.equal(tabs[0].id, canonicalTabId);
-  assert.equal(tabs[0].active, true);
-  assert.equal(tabs[0].autoDiscardable, false);
+  assert.equal(tabs.length, 2);
+  const canonical = tabs.find((tab) => tab.id === canonicalTabId);
+  assert.equal(canonical.active, true);
+  assert.equal(canonical.autoDiscardable, false);
+  assert.ok(tabs.some((tab) => tab.id !== canonicalTabId));
   const topology = harness.diagnostics
     .map(([, fields]) => fields)
     .filter((fields) => fields?.stage === "collector_tab_topology")
     .at(-1);
   assert.equal(topology.collector_tab_id, canonicalTabId);
-  assert.equal(topology.active_tab_id_in_collector_window, canonicalTabId);
-  assert.equal(topology.collector_tab_active, true);
-  assert.equal(topology.tab_count_in_collector_window, 1);
+  assert.equal(topology.tab_count_in_collector_window, 2);
 });
 
 test("Background suppresses unchanged Collector topology and state telemetry", async () => {
@@ -3110,7 +3231,8 @@ test("Background resolves only the discovered Projects with navigation fallback,
   assert.equal(summary.unresolved_count, 0);
   const efficiencySummary = harness.diagnostics
     .map(([, fields]) => fields)
-    .find((fields) => fields?.stage === "collector_project_discovery_efficiency_summary");
+    .filter((fields) => fields?.stage === "collector_project_discovery_efficiency_summary")
+    .at(-1);
   assert.ok(efficiencySummary);
   assert.equal(efficiencySummary.full_page_navigation_count, 3);
   assert.equal(efficiencySummary.document_navigation_count, 3);
@@ -4663,7 +4785,7 @@ test("Background preserves an unsafe Project-row navigation reason", async () =>
   assert.equal(failure.internal_reason, "project_row_is_menu_control");
 });
 
-test("Background keeps the Collector Window separate from the Managed Execution Window", async () => {
+test("Background keeps Collector and Execution as separate Tabs in one Managed Window", async () => {
   const harness = await createHarness();
   const relayedMessages = [];
   harness.setContentHandler((message) => {
@@ -4716,17 +4838,21 @@ test("Background keeps the Collector Window separate from the Managed Execution 
     (message) => message.type === "chatgpt.context.list.response");
 
   assert.equal(contextResult.status, "ok");
+  assert.equal(harness.createdWindows.length, 1);
   assert.equal(harness.createdTabs.length, 2);
   assert.notEqual(harness.createdTabs[0].id, harness.createdTabs[1].id);
   assert.equal(harness.createdTabs[0].id, managedTabId);
-  assert.equal(harness.createdTabs[0].active, true);
-  assert.equal(harness.createdTabs[1].active, true);
-  assert.equal(harness.createdTabs[1].autoDiscardable, false);
-  assert.notEqual(harness.createdTabs[0].windowId, harness.createdTabs[1].windowId);
-  assert.equal(harness.createdWindows.length, 2);
-  assert.equal(harness.createdWindows[1].focused, false);
+  assert.equal(harness.createdTabs[0].windowId, harness.createdTabs[1].windowId);
+  assert.notEqual(harness.createdTabs[1].id, managedTabId);
   assert.equal(relayedMessages.some((message) => message.type === "GET_CHATGPT_CONTEXT"), true);
   assert.equal(relayedMessages.find((message) => message.type === "GET_CHATGPT_CONTEXT")?.targetTabId, undefined);
+  const topology = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "connector_managed_window_topology_summary")
+    .at(-1);
+  assert.equal(topology.collector_and_execution_same_window, true);
+  assert.equal(topology.collector_and_execution_same_tab, false);
+  assert.equal(topology.owned_tab_count, 2);
 });
 
 test("Background returns the Root Project catalog and Projectless chats without pre-scanning Projects", async () => {
@@ -5292,7 +5418,7 @@ test("Background recreates the Managed Tab after it is closed while watching", a
   assert.equal(response.handoff_id, boundRequest.handoff_id);
 });
 
-test("Background recreates the Execution Window and rebinds the same Conversation after window close", async () => {
+test("Background does not recreate a Managed Window after the user closes it", async () => {
   const harness = await createHarness();
   harness.setActiveTabs([{ id: 23, url: "https://example.invalid/", active: true }]);
   const boundRequest = {
@@ -5304,10 +5430,8 @@ test("Background recreates the Execution Window and rebinds the same Conversatio
     target_conversation_url: "https://chatgpt.com/c/conversation-window-recovery"
   };
   const relayedMessages = [];
-  let watcherCalls = 0;
   harness.setContentHandler((message) => {
     relayedMessages.push(message);
-    if (message.type === "WATCH_ASSISTANT_RESPONSE") watcherCalls += 1;
     return message.type === "WATCH_ASSISTANT_RESPONSE"
       ? { status: "watching" }
       : {
@@ -5322,21 +5446,15 @@ test("Background recreates the Execution Window and rebinds the same Conversatio
   const result = await harness.waitForResult(previousCount);
   assert.equal(result.status, "sent");
   const originalWindowId = harness.createdTabs[0].windowId;
-  const originalUserTab = harness.getTab(23);
 
   await harness.closeExecutionWindow(originalWindowId);
-  for (let attempt = 0; attempt < 50 && harness.createdWindows.length < 2; attempt += 1) await wait(5);
+  await wait(50);
 
-  assert.equal(harness.createdWindows.length, 2);
   assert.equal(harness.getWindow(originalWindowId), undefined);
-  const recoveredTab = harness.createdTabs.at(-1);
-  assert.notEqual(recoveredTab.windowId, originalWindowId);
-  assert.equal(recoveredTab.active, true);
-  assert.equal(recoveredTab.autoDiscardable, false);
-  assert.equal(harness.getWindow(recoveredTab.windowId).focused, false);
-  assert.equal(originalUserTab.active, true);
-  assert.equal(relayedMessages.filter((message) => message.type === "HANDOFF_SEND").length, 1);
-  assert.ok(watcherCalls >= 2);
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(new Script("collectorWindowState.windowId").runInContext(harness.context), null);
+  assert.equal(new Script("managedTabState.tabId").runInContext(harness.context), null);
+  assert.equal(new Script("managedTabState.executionWindowId").runInContext(harness.context), null);
 });
 
 test("Background keeps one active Execution Window across Initial, Media, Review, and next-iteration handoffs", async () => {
@@ -5696,4 +5814,1199 @@ test("Background preserves explicit media expiry and Content Script upload error
   const failedResult = await failed.waitForSocketMessage(failedBefore, (message) => message.type === "review.media.result");
   assert.equal(failedResult.error_code, "attachment_control_not_found");
   assert.equal(failedResult.stage, "attachment_control_found");
+});
+
+function installCollectorListHandler(harness) {
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [{
+        project_index: 0,
+        discovery_index: 0,
+        title: "Collector Project",
+        project_id: "g-p-collector",
+        url: "https://chatgpt.com/g/g-p-collector/project",
+        discovery_key: "collector"
+      }],
+      conversations: [],
+      current: null,
+      project_section_found: true,
+      sidebar_scroll_complete: true
+    };
+  });
+}
+
+async function requestCollectorList(harness, requestId) {
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: requestId,
+    collection_trigger: "manual_refresh"
+  }, harness.socket);
+  return harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response"
+      && message.request_id === requestId);
+}
+
+test("Collector Window and Tab are reused when unfocused, inactive, or minimized", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "collector-reuse-focused");
+  const collectorWindowId = harness.createdWindows[0].id;
+  const collectorTabId = harness.createdTabs[0].id;
+  harness.setWindowFocused(1, true);
+  harness.getWindow(collectorWindowId).focused = false;
+  harness.getWindow(collectorWindowId).state = "minimized";
+  const tab = harness.getTab(collectorTabId);
+  tab.active = false;
+  await requestCollectorList(harness, "collector-reuse-background");
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.createdTabs[0].id, collectorTabId);
+  const summary = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_window_resolution_summary")
+    .at(-1);
+  assert.equal(summary.collector_reused, true);
+  assert.equal(summary.collector_created, false);
+  assert.equal(summary.collector_focus_required_for_match, false);
+  assert.equal(summary.collector_active_required_for_match, false);
+});
+
+test("Collector recovers from lost in-memory IDs using persisted local storage", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "collector-persist-first");
+  assert.equal(harness.createdWindows.length, 1);
+  harness.simulateServiceWorkerRestart();
+  await requestCollectorList(harness, "collector-persist-restart");
+  assert.equal(harness.createdWindows.length, 1);
+  harness.simulateExtensionReload();
+  await requestCollectorList(harness, "collector-persist-reload");
+  assert.equal(harness.createdWindows.length, 1);
+});
+
+test("Stale persisted tab ID recovers a marked Collector without creating a duplicate", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "collector-stale-id-first");
+  const collectorWindowId = harness.createdWindows[0].id;
+  const collectorTabId = harness.createdTabs[0].id;
+  new Script(`collectorWindowState = {
+    ...collectorWindowState,
+    windowId: 999001,
+    tabId: 999002
+  };`).runInContext(harness.context);
+  await requestCollectorList(harness, "collector-stale-id-recover");
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.getTab(collectorTabId).windowId, collectorWindowId);
+  const summary = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_window_resolution_summary")
+    .at(-1);
+  assert.equal(summary.collector_reused, true);
+  assert.ok(["recovered_marker", "recovered_handshake"].includes(summary.collector_resolution_reason));
+});
+
+test("Connector startup does not create a Collector Window", async () => {
+  const harness = await createHarness();
+  assert.equal(harness.createdWindows.length, 0);
+  assert.equal(
+    harness.diagnostics.some(([, fields]) => fields?.stage === "collector_window_created"),
+    false);
+});
+
+test("A normal ChatGPT tab is not claimed as the Collector", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await harness.addTabToWindow({ url: "https://chatgpt.com/", windowId: 1, active: true });
+  const userTabId = harness.createdTabs[0].id;
+  await requestCollectorList(harness, "collector-does-not-steal-user-tab");
+  assert.equal(harness.createdWindows.length, 1);
+  assert.notEqual(harness.createdWindows[0].id, 1);
+  assert.ok(harness.getTab(userTabId));
+  assert.equal(harness.getTab(userTabId).windowId, 1);
+});
+
+test("Collector plus a normal ChatGPT tab reuses only the marked Collector", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "collector-with-user-tab-first");
+  const collectorWindowId = harness.createdWindows[0].id;
+  await harness.addTabToWindow({ url: "https://chatgpt.com/c/user-chat", windowId: 1, active: true });
+  harness.setWindowFocused(1, true);
+  await requestCollectorList(harness, "collector-with-user-tab-reuse");
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.createdWindows[0].id, collectorWindowId);
+});
+
+test("Ambiguous Collector candidates with the same generation are not chosen by query order", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "collector-ambiguous-seed");
+  const instanceId = new Script("collectorWindowState.instanceId").runInContext(harness.context);
+  const extra = await chromeWindowsCreateViaHarness(harness);
+  extra.tab.collectorIdentity = {
+    collector_role: "collector",
+    collector_instance_id: instanceId,
+    collector_managed_generation: 1,
+    collector_managed_at: 1
+  };
+  harness.createdTabs[0].collectorIdentity = {
+    collector_role: "collector",
+    collector_instance_id: instanceId,
+    collector_managed_generation: 3,
+    collector_managed_at: 30
+  };
+  new Script(`collectorWindowState = {
+    ...collectorWindowState,
+    windowId: 999003,
+    tabId: 999004
+  };`).runInContext(harness.context);
+  await requestCollectorList(harness, "collector-ambiguous-select");
+  assert.equal(harness.createdWindows.length, 2);
+  const summary = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_window_resolution_summary")
+    .at(-1);
+  assert.equal(summary.collector_created, false);
+  assert.equal(summary.collector_reused, true);
+  assert.ok(summary.duplicate_collector_candidate_count >= 2);
+});
+
+async function chromeWindowsCreateViaHarness(harness) {
+  const created = await harness.context.chrome.windows.create({
+    url: "https://chatgpt.com/",
+    focused: false,
+    type: "normal"
+  });
+  const tab = harness.tabsInWindow(created.id)[0];
+  return { window: created, tab };
+}
+
+test("Collector identity stays the same when focus and active tab change", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "collector-identity-seed");
+  const instanceId = new Script("collectorWindowState.instanceId").runInContext(harness.context);
+  const collectorWindowId = harness.createdWindows[0].id;
+  const collectorTabId = harness.createdTabs[0].id;
+  await harness.addTabToWindow({ url: "https://chatgpt.com/c/user-chat", windowId: 1, active: true });
+  harness.setWindowFocused(1, true);
+  harness.getWindow(collectorWindowId).focused = false;
+  harness.getTab(collectorTabId).active = false;
+  await requestCollectorList(harness, "collector-identity-after-focus");
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(new Script("collectorWindowState.instanceId").runInContext(harness.context), instanceId);
+  assert.equal(new Script("collectorWindowState.tabId").runInContext(harness.context), collectorTabId);
+});
+
+test("Truly ambiguous Collector candidates are not chosen by query order", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "collector-true-ambiguous-seed");
+  const instanceId = new Script("collectorWindowState.instanceId").runInContext(harness.context);
+  const extra = await chromeWindowsCreateViaHarness(harness);
+  extra.tab.collectorIdentity = {
+    collector_role: "collector",
+    collector_instance_id: instanceId,
+    collector_managed_generation: 4,
+    collector_managed_at: 40
+  };
+  harness.createdTabs[0].collectorIdentity = {
+    collector_role: "collector",
+    collector_instance_id: instanceId,
+    collector_managed_generation: 4,
+    collector_managed_at: 40
+  };
+  new Script(`collectorWindowState = {
+    ...collectorWindowState,
+    windowId: 999005,
+    tabId: 999006
+  };`).runInContext(harness.context);
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-true-ambiguous",
+    collection_trigger: "manual_refresh"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response"
+      && message.request_id === "collector-true-ambiguous");
+  assert.equal(response.status, "error");
+  assert.equal(harness.createdWindows.length, 2);
+  const summary = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_window_resolution_summary")
+    .at(-1);
+  assert.equal(summary.collector_created, false);
+  assert.equal(summary.collector_resolution_reason, "ambiguous_existing_collectors");
+});
+
+test("Handoff send and response monitor stay on the same Managed Tab", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => {
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      return {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching",
+        stage: "response_watch_started"
+      };
+    }
+    if (message.type === "HANDOFF_SEND") {
+      return {
+        request_id: request.request_id,
+        handoff_id: request.handoff_id,
+        status: "sent",
+        current_context: {
+          conversation_id: "fixture",
+          url: "https://chatgpt.com/c/fixture"
+        }
+      };
+    }
+    return { status: "ready" };
+  });
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  const result = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "handoff.result");
+  assert.equal(result.status, "sent");
+  const watch = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "response_watch_requested");
+  assert.equal(watch.same_collector_tab_for_send_and_monitor, true);
+  assert.equal(watch.handoff_send_collector_tab_fingerprint, watch.response_monitor_collector_tab_fingerprint);
+});
+
+test("Background reports tab_closed when the Execution Tab is removed during a response watch", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => {
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") {
+      return {
+        request_id: request.request_id,
+        session_id: request.session_id,
+        handoff_id: request.handoff_id,
+        boundary_id: request.boundary_id,
+        status: "watching",
+        stage: "response_watch_started"
+      };
+    }
+    if (message.type === "HANDOFF_SEND") {
+      return {
+        request_id: request.request_id,
+        handoff_id: request.handoff_id,
+        status: "sent",
+        current_context: {
+          conversation_id: "fixture",
+          url: "https://chatgpt.com/c/fixture"
+        }
+      };
+    }
+    return { status: "ready" };
+  });
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await harness.waitForSocketMessage(previousCount, (message) => message.type === "handoff.result");
+  const watch = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "response_watch_requested");
+  const executionTabId = watch.target_tab_id;
+  const afterSend = harness.socket.sent.length;
+  harness.removeTab(executionTabId, { isWindowClosing: true });
+  const closed = await harness.waitForSocketMessage(
+    afterSend,
+    (message) => message.type === "assistant.response");
+  assert.equal(closed.status, "error");
+  assert.equal(closed.error_code, "tab_closed");
+  assert.equal(closed.timeout_kind, "tab_closed");
+  const failure = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "assistant_response_watch_failure_summary"
+      && fields?.timeout_kind === "tab_closed");
+  assert.equal(failure.error_code, "tab_closed");
+});
+
+test("Background maps content-script loss telemetry separately from stream interrupt", async () => {
+  const harness = await createHarness();
+  const ready = await harness.notifyRuntimeMessage({
+    type: "ASSISTANT_RESPONSE_WATCH_TELEMETRY",
+    request_id: request.request_id,
+    session_id: request.session_id,
+    handoff_id: request.handoff_id,
+    boundary_id: request.boundary_id,
+    status: "error",
+    error_code: "content_script_unavailable",
+    stage: "assistant_response_watch_failure_summary",
+    timeout_kind: "content_script_lost",
+    timeout_triggered: false,
+    content_script_alive: false,
+    final_status: "error"
+  });
+  assert.equal(ready.ok, true);
+  const summary = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.timeout_kind === "content_script_lost");
+  assert.equal(summary.stage, "assistant_response_watch_failure_summary");
+  assert.equal(summary.error_code, "content_script_unavailable");
+});
+
+function lastEfficiencySummary(harness) {
+  return harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_discovery_efficiency_summary")
+    .at(-1);
+}
+
+test("New Collector Window records normal state telemetry", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "collector-state-normal");
+  const summary = lastEfficiencySummary(harness);
+  assert.equal(summary.collector_window_state_at_creation, "normal");
+  assert.equal(summary.collector_window_unminimized_by_connector, false);
+  assert.equal(summary.collector_tab_active_at_creation, true);
+});
+
+test("New Collector Window records minimized creation telemetry from Chrome", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  harness.setNextCreatedWindowState("minimized");
+  await requestCollectorList(harness, "collector-state-minimized-create");
+  const summary = lastEfficiencySummary(harness);
+  assert.equal(summary.collector_window_state_at_creation, "minimized");
+  assert.equal(summary.collector_window_unminimized_by_connector, true);
+  assert.ok(summary.collector_window_state_change_count >= 1);
+});
+
+test("Minimized existing Collector is still reused", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "collector-minimized-reuse-first");
+  const collectorWindowId = harness.createdWindows[0].id;
+  harness.getWindow(collectorWindowId).state = "minimized";
+  harness.getWindow(collectorWindowId).focused = false;
+  harness.getTab(harness.createdTabs[0].id).active = true;
+  await requestCollectorList(harness, "collector-minimized-reuse-second");
+  assert.equal(harness.createdWindows.length, 1);
+  const reused = lastEfficiencySummary(harness);
+  assert.equal(reused.collector_window_created, false);
+});
+
+test("Collector document hidden counters are copied into efficiency summary", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type === "GET_COLLECTOR_ROOT_HYDRATION") {
+      return {
+        type: "COLLECTOR_ROOT_HYDRATION_RESULT",
+        requestId: message.requestId,
+        status: "ok",
+        root_hydration_completed: true,
+        mutation_count_while_hidden: 4,
+        mutation_count_while_visible: 1,
+        poll_wait_ms_while_hidden: 80,
+        poll_wait_ms_while_visible: 20,
+        hydration_loops_while_document_hidden: 9,
+        hydration_loops_while_document_visible: 2,
+        scroll_attempts_while_hidden: 8,
+        scroll_attempts_while_visible: 1,
+        document_visibility_state_at_collection_start: "hidden",
+        document_visibility_state_at_collection_end: "visible",
+        document_visibility_change_count: 1,
+        document_hidden_observed: true,
+        document_became_visible_during_collection: true,
+        document_became_hidden_during_collection: false,
+        identity_attempts_while_hidden: 3,
+        identity_attempts_while_visible: 1,
+        identity_wait_ms_while_hidden: 4000,
+        identity_wait_ms_while_visible: 100,
+        slow_identity_indices_while_hidden: [20, 21],
+        slow_identity_indices_while_visible: []
+      };
+    }
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [{
+        project_index: 0,
+        discovery_index: 0,
+        title: "Collector Project",
+        project_id: "g-p-collector",
+        url: "https://chatgpt.com/g/g-p-collector/project",
+        discovery_key: "collector"
+      }],
+      conversations: [],
+      current: null,
+      project_section_found: true,
+      sidebar_scroll_complete: true,
+      hydration_loops_while_document_hidden: 9,
+      hydration_loops_while_document_visible: 2,
+      scroll_attempts_while_hidden: 8,
+      scroll_attempts_while_visible: 1,
+      identity_attempts_while_hidden: 3,
+      identity_attempts_while_visible: 1,
+      identity_wait_ms_while_hidden: 4000,
+      identity_wait_ms_while_visible: 100,
+      slow_identity_indices_while_hidden: [20, 21],
+      slow_identity_indices_while_visible: []
+    };
+  });
+  await requestCollectorList(harness, "collector-hidden-counters");
+  const summary = lastEfficiencySummary(harness);
+  assert.equal(summary.document_visibility_state_at_collection_start, "hidden");
+  assert.equal(summary.document_hidden_observed, true);
+  assert.equal(summary.document_became_visible_during_collection, true);
+  assert.ok(summary.hydration_loops_while_document_hidden >= 9);
+  assert.ok(summary.scroll_attempts_while_hidden >= 8);
+  assert.ok(summary.identity_attempts_while_hidden >= 3);
+  assert.ok(summary.slow_identity_indices_while_hidden.includes(20));
+  assert.ok(summary.slow_identity_indices_while_hidden.includes(21));
+});
+
+function executionEnsureMessage(overrides = {}) {
+  return {
+    request_id: "execution-ensure-request",
+    session_id: "session-fixture",
+    handoff_id: "execution-ensure-handoff",
+    boundary_id: "execution-ensure-boundary",
+    new_conversation: true,
+    ...overrides
+  };
+}
+
+function startManagedEnsure(harness, message) {
+  harness.context.__managedEnsureMessage = message;
+  return new Script("ensureManagedExecutionTab(__managedEnsureMessage)").runInContext(harness.context);
+}
+
+function executionCreateRequestedCount(harness) {
+  return harness.diagnostics.filter(([, fields]) => fields?.stage === "execution_window_create").length;
+}
+
+function managedWindowCreateRequestedCount(harness) {
+  return harness.diagnostics.filter(([, fields]) => fields?.stage === "connector_managed_window_create").length;
+}
+
+function lastExecutionResolutionSummary(harness, requestId) {
+  return harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "managed_execution_resolution_summary"
+      && (!requestId || fields.request_id === requestId))
+    .at(-1);
+}
+
+function lastTopologySummary(harness, requestId) {
+  return harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "connector_managed_window_topology_summary"
+      && (!requestId || fields.request_id === requestId))
+    .at(-1);
+}
+
+function installExecutionReadyHandler(harness) {
+  harness.setContentHandler((message) => {
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") return { status: "watching" };
+    if (message.type === "HANDOFF_SEND") {
+      return {
+        request_id: message.requestId,
+        session_id: message.sessionId,
+        handoff_id: message.handoffId,
+        boundary_id: message.boundaryId,
+        status: "sent",
+        stage: "user_message_correlated",
+        current_context: {
+          conversation_id: "fixture",
+          url: "https://chatgpt.com/c/fixture"
+        }
+      };
+    }
+    return {};
+  });
+}
+
+test("Handoff creates one Execution Window and one Execution Tab", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  assert.equal((await harness.waitForResult(previousCount)).status, "sent");
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.createdTabs.length, 1);
+  assert.equal(managedWindowCreateRequestedCount(harness), 1);
+  assert.equal(executionCreateRequestedCount(harness), 0);
+});
+
+test("Concurrent Execution Window ensure joins in-flight create", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const hold = harness.holdNextWindowCreate();
+  const first = startManagedEnsure(harness, executionEnsureMessage({ request_id: "ensure-a" }));
+  await hold.started;
+  const second = startManagedEnsure(harness, executionEnsureMessage({ request_id: "ensure-b" }));
+  hold.release();
+  const [readyA, readyB] = await Promise.all([first, second]);
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(readyA.tab.windowId, readyB.tab.windowId);
+  assert.equal(readyA.tab.id, readyB.tab.id);
+});
+
+test("Concurrent managed tab ensure joins in-flight tabs.create", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const window = await harness.context.chrome.windows.create({ url: "https://example.invalid/", focused: false });
+  new Script(`
+    managedTabState = {
+      ...managedTabState,
+      executionWindowId: ${window.id},
+      executionWindowState: "normal"
+    };
+    managedExecutionOwnedWindowIds.add(${window.id});
+  `).runInContext(harness.context);
+  const hold = harness.holdNextTabCreate();
+  const first = startManagedEnsure(harness, executionEnsureMessage({ request_id: "tab-ensure-a" }));
+  await hold.started;
+  const second = startManagedEnsure(harness, executionEnsureMessage({ request_id: "tab-ensure-b" }));
+  hold.release();
+  const [readyA, readyB] = await Promise.all([first, second]);
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.tabCreateCallCount, 1);
+  assert.equal(readyA.tab.id, readyB.tab.id);
+});
+
+test("Recovery during Execution Window create joins in-flight", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const hold = harness.holdNextWindowCreate();
+  const first = startManagedEnsure(harness, executionEnsureMessage());
+  await hold.started;
+  new Script("scheduleManagedMediumRecovery(null, null, \"managed_tab_removed\")").runInContext(harness.context);
+  hold.release();
+  await first;
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.createdWindows.length, 1);
+});
+
+test("tabs.onUpdated during Execution Window create does not duplicate", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://example.invalid/", active: true, windowId: 1 }]);
+  installExecutionReadyHandler(harness);
+  const hold = harness.holdNextWindowCreate();
+  const first = startManagedEnsure(harness, executionEnsureMessage());
+  await hold.started;
+  harness.setTabStatus(17, "complete");
+  hold.release();
+  await first;
+  assert.equal(harness.windowCreateCallCount, 1);
+});
+
+test("tabs.onActivated during Execution Window create does not duplicate", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://example.invalid/", active: true, windowId: 1 }]);
+  installExecutionReadyHandler(harness);
+  const hold = harness.holdNextWindowCreate();
+  const first = startManagedEnsure(harness, executionEnsureMessage());
+  await hold.started;
+  harness.activateTab(17, 1);
+  hold.release();
+  await first;
+  assert.equal(harness.windowCreateCallCount, 1);
+});
+
+test("window focus during Execution Window create does not duplicate", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const hold = harness.holdNextWindowCreate();
+  const first = startManagedEnsure(harness, executionEnsureMessage());
+  await hold.started;
+  harness.focusWindow(1);
+  hold.release();
+  await first;
+  assert.equal(harness.windowCreateCallCount, 1);
+});
+
+test("CONTENT_SCRIPT_READY during Execution prepare does not duplicate", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const hold = harness.holdNextWindowCreate();
+  const first = startManagedEnsure(harness, executionEnsureMessage());
+  await hold.started;
+  await harness.notifyRuntimeMessage({ type: "CONTENT_SCRIPT_READY", context: { url: "https://chatgpt.com/" } }, {
+    tab: { id: 17, url: "https://chatgpt.com/" }
+  });
+  hold.release();
+  await first;
+  assert.equal(harness.windowCreateCallCount, 1);
+});
+
+test("Existing valid Execution Window and Tab are reused", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const first = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "reuse-first" }));
+  const second = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "reuse-second" }));
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(first.tab.id, second.tab.id);
+  const summary = lastExecutionResolutionSummary(harness, "reuse-second");
+  assert.ok(summary.execution_window_reused_count >= 1 || summary.managed_tab_reused_count >= 1);
+});
+
+test("Stale Execution Window ID recovers a unique owned window", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const ready = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "stale-first" }));
+  new Script(`
+    managedTabState = { ...managedTabState, executionWindowId: 999999 };
+  `).runInContext(harness.context);
+  const recovered = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "stale-second" }));
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(recovered.tab.windowId, ready.tab.windowId);
+});
+
+test("Execution Window without a ChatGPT Tab creates one Tab only", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const window = await harness.context.chrome.windows.create({ url: "https://example.invalid/", focused: false });
+  new Script(`
+    managedTabState = {
+      ...managedTabState,
+      executionWindowId: ${window.id},
+      executionWindowState: "normal"
+    };
+    managedExecutionOwnedWindowIds.add(${window.id});
+  `).runInContext(harness.context);
+  const ready = await startManagedEnsure(harness, executionEnsureMessage());
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.tabCreateCallCount, 1);
+  assert.equal(ready.tab.windowId, window.id);
+});
+
+test("Missing Execution Window creates one Window and one Tab", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  await startManagedEnsure(harness, executionEnsureMessage());
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.createdTabs.length, 1);
+});
+
+test("Handoff keeps the bound Execution Tab after global state changes", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  const result = await harness.waitForResult(previousCount);
+  assert.equal(result.status, "sent");
+  const boundTabId = harness.managedTabId;
+  new Script("managedTabState = { ...managedTabState, tabId: 17 };").runInContext(harness.context);
+  new Script('emitManagedExecutionResolutionSummary("request-fixture")').runInContext(harness.context);
+  const summary = lastExecutionResolutionSummary(harness, request.request_id);
+  assert.equal(summary.execution_target_changed_during_request, true);
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: request.request_id,
+    sessionId: request.session_id,
+    handoffId: request.handoff_id,
+    boundaryId: request.boundary_id,
+    status: "received",
+    payload: "bound-tab-response",
+    stage: "assistant_response_complete"
+  }, { tab: { id: boundTabId } });
+  const response = await harness.waitForSocketMessage(previousCount, (message) => message.type === "assistant.response");
+  assert.equal(response.status, "received");
+});
+
+test("Response watcher and Handoff sender share the bound Execution Tab", async () => {
+  const harness = await createHarness();
+  const relayed = [];
+  harness.setContentHandler((message) => {
+    relayed.push(message);
+    if (message.type === "WATCH_ASSISTANT_RESPONSE") return { status: "watching" };
+    if (message.type === "HANDOFF_SEND") {
+      return {
+        request_id: message.requestId,
+        status: "sent",
+        stage: "user_message_correlated"
+      };
+    }
+    return {};
+  });
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await harness.waitForResult(previousCount);
+  const watch = relayed.find((message) => message.type === "WATCH_ASSISTANT_RESPONSE");
+  const send = relayed.find((message) => message.type === "HANDOFF_SEND");
+  assert.equal(watch.targetTabId, harness.managedTabId);
+  assert.equal(send.targetTabId, undefined);
+  const summary = lastExecutionResolutionSummary(harness, request.request_id);
+  assert.equal(summary.same_execution_tab_for_handoff_watch_send, true);
+  assert.equal(summary.watcher_tab_fingerprint, summary.sender_tab_fingerprint);
+});
+
+test("Ambiguous owned Execution Windows are not chosen by query order", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const first = await harness.context.chrome.windows.create({ url: "https://chatgpt.com/", focused: false });
+  const second = await harness.context.chrome.windows.create({ url: "https://chatgpt.com/", focused: false });
+  new Script(`
+    managedTabState = { ...managedTabState, executionWindowId: null, tabId: null };
+    managedExecutionOwnedWindowIds.add(${first.id});
+    managedExecutionOwnedWindowIds.add(${second.id});
+  `).runInContext(harness.context);
+  await assert.rejects(
+    () => startManagedEnsure(harness, executionEnsureMessage()),
+    (error) => error?.code === "ambiguous_managed_execution_windows");
+  await wait(20);
+  assert.equal(harness.windowCreateCallCount, 2);
+});
+
+test("A normal ChatGPT tab is not claimed as the Managed Execution Tab", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  await harness.addTabToWindow({ url: "https://chatgpt.com/c/user-chat", windowId: 1, active: true });
+  const userTabId = harness.createdTabs[0].id;
+  await startManagedEnsure(harness, executionEnsureMessage());
+  assert.notEqual(harness.managedTabId, userTabId);
+  assert.equal(harness.getTab(userTabId).windowId, 1);
+  assert.notEqual(harness.createdWindows[0].id, 1);
+});
+
+test("Connector startup does not create an Execution Window", async () => {
+  const harness = await createHarness();
+  assert.equal(harness.windowCreateCallCount, 0);
+  assert.equal(executionCreateRequestedCount(harness), 0);
+});
+
+test("Collector refresh does not create an Execution Window", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "collector-does-not-create-execution");
+  assert.equal(executionCreateRequestedCount(harness), 0);
+  assert.equal(
+    harness.diagnostics.some(([, fields]) => fields?.stage === "execution_window_created"),
+    false);
+});
+
+test("Prompt Handoff ensures exactly one Execution Window", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  assert.equal((await harness.waitForResult(previousCount)).status, "sent");
+  const summary = lastExecutionResolutionSummary(harness, request.request_id);
+  assert.equal(summary.execution_window_created_count, 0);
+  assert.equal(summary.execution_window_create_requested_count, 0);
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.tabCreateCallCount, 0);
+  assert.equal(summary.managed_tab_adopted_from_window_create, true);
+  assert.equal(summary.managed_tab_created_via_tabs_create, false);
+  assert.equal(summary.final_execution_window_count, 1);
+  assert.equal(summary.final_managed_tab_count, 1);
+  assert.equal(summary.final_execution_window_physical_tab_count, 1);
+});
+
+test("windows.create initial tab is reused without tabs.create", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const ready = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "reuse-initial-tab" }));
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.tabCreateCallCount, 0);
+  assert.equal(harness.createdTabs.length, 1);
+  assert.equal(harness.tabsInWindow(ready.tab.windowId).length, 1);
+  const summary = lastExecutionResolutionSummary(harness, "reuse-initial-tab");
+  assert.equal(summary.initial_window_tab_found, true);
+  assert.equal(summary.initial_window_tab_reused, true);
+  assert.equal(summary.managed_tab_adopted_from_window_create, true);
+  assert.equal(summary.managed_tab_created_via_tabs_create, false);
+  assert.equal(summary.execution_window_physical_tab_count_at_creation, 1);
+  assert.equal(summary.execution_window_physical_tab_count_after_tab_resolution, 1);
+  assert.equal(summary.final_execution_window_physical_tab_count, 1);
+});
+
+test("windows.create without tabs property still reuses the queried initial tab", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  harness.omitNextCreatedWindowTabs();
+  const ready = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "query-initial-tab" }));
+  assert.equal(harness.tabCreateCallCount, 0);
+  assert.equal(harness.tabsInWindow(ready.tab.windowId).length, 1);
+  const summary = lastExecutionResolutionSummary(harness, "query-initial-tab");
+  assert.equal(summary.initial_window_tab_found, true);
+  assert.equal(summary.managed_tab_adopted_from_window_create, true);
+  assert.equal(summary.final_execution_window_physical_tab_count, 1);
+});
+
+test("loading initial Execution Tab is reused and waited on", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  harness.setNextCreatedTabStatus("loading");
+  const pending = startManagedEnsure(harness, executionEnsureMessage({ request_id: "loading-initial-tab" }));
+  await wait(20);
+  const tabId = harness.createdTabs[0].id;
+  harness.setTabStatus(tabId, "complete");
+  const ready = await pending;
+  assert.equal(ready.tab.id, tabId);
+  assert.equal(harness.tabCreateCallCount, 0);
+  assert.equal(harness.tabsInWindow(ready.tab.windowId).length, 1);
+});
+
+test("newtab initial Execution Tab is navigated with tabs.update", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  harness.setNextWindowCreateTabUrl("chrome://newtab/");
+  const ready = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "newtab-initial-tab" }));
+  assert.equal(harness.tabCreateCallCount, 0);
+  assert.equal(harness.tabsInWindow(ready.tab.windowId).length, 1);
+  assert.equal(ready.tab.url, "https://chatgpt.com/");
+  assert.equal(
+    harness.updatedTabs.some((entry) => entry.tabId === ready.tab.id && entry.changes.url === "https://chatgpt.com/"),
+    true);
+  const summary = lastExecutionResolutionSummary(harness, "newtab-initial-tab");
+  assert.equal(summary.managed_tab_adopted_from_window_create, true);
+  assert.equal(summary.managed_tab_created_via_tabs_create, false);
+});
+
+test("Execution URL initial tab is reused as-is", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const ready = await startManagedEnsure(harness, executionEnsureMessage({
+    request_id: "chatgpt-initial-tab",
+    new_conversation: false,
+    target_conversation_id: "already-open",
+    target_conversation_url: "https://chatgpt.com/c/already-open"
+  }));
+  assert.equal(harness.tabCreateCallCount, 0);
+  assert.equal(ready.tab.url, "https://chatgpt.com/c/already-open");
+  assert.equal(harness.tabsInWindow(ready.tab.windowId).length, 1);
+});
+
+test("missing initial tab falls back to a single tabs.create", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  harness.skipNextWindowCreateInitialTab();
+  const ready = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "missing-initial-tab" }));
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.tabCreateCallCount, 1);
+  assert.equal(harness.tabsInWindow(ready.tab.windowId).length, 1);
+  const summary = lastExecutionResolutionSummary(harness, "missing-initial-tab");
+  assert.equal(summary.managed_tab_created_via_tabs_create, true);
+  assert.equal(summary.managed_tab_adopted_from_window_create, false);
+  assert.equal(summary.final_execution_window_physical_tab_count, 1);
+});
+
+test("multiple tabs in an Execution Window are not claimed by order", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const first = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "ambiguous-first" }));
+  await harness.addTabToWindow({
+    url: "https://chatgpt.com/c/other-chat",
+    windowId: first.tab.windowId,
+    active: false
+  });
+  new Script(`
+    managedTabState = { ...managedTabState, tabId: null };
+    managedExecutionOwnedTabIds.clear();
+    managedExecutionCreatedInitialTabIds.clear();
+    managedExecutionRequestBindings.clear();
+  `).runInContext(harness.context);
+  await assert.rejects(
+    () => startManagedEnsure(harness, executionEnsureMessage({ request_id: "ambiguous-tabs" })),
+    (error) => error?.code === "ambiguous_managed_execution_tabs");
+  assert.equal(harness.tabsInWindow(first.tab.windowId).length, 2);
+});
+
+test("Handoff binds the adopted initial tab and keeps watcher/send on it", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage(request, harness.socket);
+  await harness.waitForResult(previousCount);
+  const boundTabId = harness.managedTabId;
+  assert.equal(harness.createdTabs[0].id, boundTabId);
+  assert.equal(harness.tabCreateCallCount, 0);
+  const summary = lastExecutionResolutionSummary(harness, request.request_id);
+  assert.equal(summary.handoff_bound_tab_fingerprint, summary.watcher_tab_fingerprint);
+  assert.equal(summary.same_execution_tab_for_handoff_watch_send, true);
+  new Script("managedTabState = { ...managedTabState, tabId: 17 };").runInContext(harness.context);
+  harness.context.handleAssistantResponseFromContent({
+    type: "ASSISTANT_RESPONSE_RESULT",
+    requestId: request.request_id,
+    sessionId: request.session_id,
+    handoffId: request.handoff_id,
+    boundaryId: request.boundary_id,
+    status: "received",
+    payload: "adopted-tab-response",
+    stage: "assistant_response_complete"
+  }, { tab: { id: boundTabId } });
+  const response = await harness.waitForSocketMessage(previousCount, (message) => message.type === "assistant.response");
+  assert.equal(response.status, "received");
+});
+
+test("tabs.onUpdated during initial tab adoption does not add a tab", async () => {
+  const harness = await createHarness();
+  harness.setActiveTabs([{ id: 17, url: "https://example.invalid/", active: true, windowId: 1 }]);
+  installExecutionReadyHandler(harness);
+  const hold = harness.holdNextWindowCreate();
+  const pending = startManagedEnsure(harness, executionEnsureMessage({ request_id: "updated-during-adopt" }));
+  await hold.started;
+  harness.setTabStatus(17, "complete");
+  hold.release();
+  const ready = await pending;
+  assert.equal(harness.tabCreateCallCount, 0);
+  assert.equal(harness.tabsInWindow(ready.tab.windowId).length, 1);
+});
+
+test("CONTENT_SCRIPT_READY during initial tab adoption does not add a tab", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const hold = harness.holdNextWindowCreate();
+  const pending = startManagedEnsure(harness, executionEnsureMessage({ request_id: "ready-during-adopt" }));
+  await hold.started;
+  await harness.notifyRuntimeMessage({ type: "CONTENT_SCRIPT_READY", context: { url: "https://chatgpt.com/" } }, {
+    tab: { id: 17, url: "https://chatgpt.com/" }
+  });
+  hold.release();
+  const ready = await pending;
+  assert.equal(harness.tabCreateCallCount, 0);
+  assert.equal(harness.tabsInWindow(ready.tab.windowId).length, 1);
+});
+
+test("recovery during Execution Window create does not add a physical tab", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const hold = harness.holdNextWindowCreate();
+  const pending = startManagedEnsure(harness, executionEnsureMessage({ request_id: "recovery-physical" }));
+  await hold.started;
+  new Script("scheduleManagedMediumRecovery(null, null, \"managed_tab_removed\")").runInContext(harness.context);
+  hold.release();
+  const ready = await pending;
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.tabCreateCallCount, 0);
+  assert.equal(harness.tabsInWindow(ready.tab.windowId).length, 1);
+});
+
+test("Existing Execution Window with an owned tab does not add another tab", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const first = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "owned-first" }));
+  const second = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "owned-second" }));
+  assert.equal(first.tab.id, second.tab.id);
+  assert.equal(harness.tabCreateCallCount, 0);
+  assert.equal(harness.tabsInWindow(first.tab.windowId).length, 1);
+});
+
+test("unrelated tab in an owned Execution Window is not stolen", async () => {
+  const harness = await createHarness();
+  installExecutionReadyHandler(harness);
+  const window = await harness.context.chrome.windows.create({ url: "https://chatgpt.com/c/user-in-window", focused: false });
+  new Script(`
+    managedTabState = {
+      ...managedTabState,
+      executionWindowId: ${window.id},
+      executionWindowState: "normal",
+      tabId: null
+    };
+    managedExecutionOwnedWindowIds.add(${window.id});
+  `).runInContext(harness.context);
+  const ready = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "do-not-steal" }));
+  assert.notEqual(ready.tab.id, window.tabs[0].id);
+  assert.equal(harness.getTab(window.tabs[0].id).url, "https://chatgpt.com/c/user-in-window");
+  assert.equal(harness.tabCreateCallCount, 1);
+});
+
+test("manual refresh creates one Managed Window and only the Collector Tab", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "refresh-topology");
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.tabsInWindow(harness.createdWindows[0].id).length, 1);
+  const topology = lastTopologySummary(harness, "refresh-topology");
+  assert.equal(topology.collector_tab_exists, true);
+  assert.equal(topology.execution_tab_exists, false);
+  assert.equal(topology.owned_tab_count, 1);
+  assert.equal(topology.topology_valid, true);
+});
+
+test("Project Chat collection does not create an Execution Tab", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  await requestCollectorList(harness, "chat-select-root");
+  const project = {
+    project_id: "g-p-topology-project",
+    title: "Topology Project",
+    url: "https://chatgpt.com/g/g-p-topology-project/project"
+  };
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_CHATGPT_CONTEXT" && message.collection === "project") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [project],
+        conversations: [{
+          conversation_id: "conversation-topology",
+          title: "Topology Chat",
+          url: "https://chatgpt.com/g/g-p-topology-project/c/conversation-topology",
+          project_id: project.project_id
+        }],
+        current: null
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [project],
+      conversations: [],
+      current: null
+    };
+  });
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "chat-select-project",
+    collection: "project",
+    project_id: project.project_id,
+    project_url: project.url
+  }, harness.socket);
+  await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.tabsInWindow(harness.createdWindows[0].id).length, 1);
+  assert.equal(executionCreateRequestedCount(harness), 0);
+});
+
+test("first Handoff reuses the Collector Window and creates one Execution Tab", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  installExecutionReadyHandler(harness);
+  await requestCollectorList(harness, "handoff-reuse-root");
+  assert.equal(harness.windowCreateCallCount, 1);
+  const collectorTabId = harness.createdTabs[0].id;
+  const ready = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "handoff-reuse-exec" }));
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.tabCreateCallCount, 1);
+  assert.notEqual(ready.tab.id, collectorTabId);
+  assert.equal(ready.tab.windowId, harness.createdWindows[0].id);
+  assert.equal(harness.tabsInWindow(ready.tab.windowId).length, 2);
+  const summary = lastExecutionResolutionSummary(harness, "handoff-reuse-exec");
+  assert.equal(summary.execution_window_create_requested_count, 0);
+  assert.equal(summary.execution_window_created_count, 0);
+  assert.ok(summary.execution_window_reused_count >= 1);
+  assert.equal(summary.managed_tab_created_via_tabs_create, true);
+  const topology = lastTopologySummary(harness, "handoff-reuse-exec");
+  assert.equal(topology.collector_and_execution_same_window, true);
+  assert.equal(topology.collector_and_execution_same_tab, false);
+  assert.equal(topology.owned_tab_count, 2);
+});
+
+test("later Handoffs reuse the same Execution Tab", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  installExecutionReadyHandler(harness);
+  await requestCollectorList(harness, "iter-root");
+  const first = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "iter-first" }));
+  const second = await startManagedEnsure(harness, executionEnsureMessage({
+    request_id: "iter-second",
+    new_conversation: false,
+    target_conversation_id: "other-chat",
+    target_conversation_url: "https://chatgpt.com/c/other-chat"
+  }));
+  assert.equal(first.tab.id, second.tab.id);
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(harness.tabCreateCallCount, 1);
+  assert.equal(second.tab.url, "https://chatgpt.com/c/other-chat");
+});
+
+test("Collector Tab recovery keeps the Execution Tab", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  installExecutionReadyHandler(harness);
+  await requestCollectorList(harness, "recover-collector-root");
+  const ready = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "recover-collector-exec" }));
+  const collectorTabId = harness.createdTabs[0].id;
+  harness.removeTab(collectorTabId);
+  await requestCollectorList(harness, "recover-collector-again");
+  assert.equal(harness.createdWindows.length, 1);
+  assert.equal(harness.getTab(ready.tab.id).windowId, harness.createdWindows[0].id);
+  assert.notEqual(ready.tab.id, harness.createdTabs.at(-1).id);
+  assert.equal(new Script("managedTabState.tabId").runInContext(harness.context), ready.tab.id);
+});
+
+test("a user ChatGPT Tab in the Managed Window is left alone", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  installExecutionReadyHandler(harness);
+  await requestCollectorList(harness, "user-tab-root");
+  const windowId = harness.createdWindows[0].id;
+  const userTab = await harness.addTabToWindow({
+    windowId,
+    url: "https://chatgpt.com/c/user-extra",
+    active: false
+  });
+  const ready = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "user-tab-exec" }));
+  assert.equal(harness.getTab(userTab.id).url, "https://chatgpt.com/c/user-extra");
+  assert.notEqual(ready.tab.id, userTab.id);
+  assert.equal(harness.tabsInWindow(windowId).length, 3);
+  const topology = lastTopologySummary(harness, "user-tab-exec");
+  assert.equal(topology.owned_tab_count, 2);
+  assert.equal(topology.physical_tab_count, 3);
+  assert.equal(topology.user_unmanaged_tab_count, 1);
+  assert.equal(topology.topology_valid, true);
+});
+
+test("startup does not create a Managed Window or Tabs", async () => {
+  const harness = await createHarness();
+  const topology = lastTopologySummary(harness);
+  assert.equal(harness.windowCreateCallCount, 0);
+  assert.equal(harness.createdTabs.length, 0);
+  assert.equal(topology, undefined);
+  assert.equal(new Script("collectorWindowState.windowId").runInContext(harness.context), null);
+  assert.equal(new Script("managedTabState.tabId").runInContext(harness.context), null);
+});
+
+test("Execution Tab removal recovers only the Execution Tab", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  installExecutionReadyHandler(harness);
+  await requestCollectorList(harness, "recover-execution-root");
+  const first = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "recover-execution-first" }));
+  const collectorTabId = harness.createdTabs[0].id;
+  const windowId = first.tab.windowId;
+  harness.removeTab(first.tab.id);
+  const recovered = await startManagedEnsure(harness, executionEnsureMessage({ request_id: "recover-execution-second" }));
+  assert.equal(harness.windowCreateCallCount, 1);
+  assert.equal(recovered.tab.windowId, windowId);
+  assert.notEqual(recovered.tab.id, first.tab.id);
+  assert.equal(harness.getTab(collectorTabId).windowId, windowId);
+});
+
+test("Managed Window removal clears Collector and Execution state", async () => {
+  const harness = await createHarness();
+  installCollectorListHandler(harness);
+  installExecutionReadyHandler(harness);
+  await requestCollectorList(harness, "window-clear-root");
+  await startManagedEnsure(harness, executionEnsureMessage({ request_id: "window-clear-exec" }));
+  const windowId = harness.createdWindows[0].id;
+  await harness.closeExecutionWindow(windowId);
+  await wait(20);
+  assert.equal(new Script("collectorWindowState.windowId").runInContext(harness.context), null);
+  assert.equal(new Script("collectorWindowState.tabId").runInContext(harness.context), null);
+  assert.equal(new Script("managedTabState.tabId").runInContext(harness.context), null);
+  assert.equal(new Script("managedTabState.executionWindowId").runInContext(harness.context), null);
 });

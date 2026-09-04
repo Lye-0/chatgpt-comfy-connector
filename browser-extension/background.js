@@ -55,6 +55,8 @@ const NEW_CONVERSATION_BINDING_GRACE_MS = 6000;
 // Managed Execution Window, because discovery and execution have different DOM
 // lifecycles and a sidebar/project scan must not reset an active response watcher.
 const COLLECTOR_WINDOW_STORAGE_KEY = "chatGptCollectorWindow";
+const COLLECTOR_IDENTITY_MESSAGE_GET = "GET_COLLECTOR_IDENTITY";
+const COLLECTOR_IDENTITY_MESSAGE_SET = "SET_COLLECTOR_IDENTITY";
 const COLLECTOR_TAB_URL = "https://chatgpt.com/";
 const COLLECTOR_WINDOW_CREATE_TIMEOUT_MS = 15000;
 const COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS = 30000;
@@ -104,6 +106,7 @@ const BRIDGE_DELIVERY_TTL_MS = 10 * 60 * 1000;
 const PAIRING_STORAGE_KEY = "bridgePairing";
 const RESPONSE_WATCH_MESSAGE_TYPE = "WATCH_ASSISTANT_RESPONSE";
 const ASSISTANT_RESPONSE_RESULT_MESSAGE_TYPE = "ASSISTANT_RESPONSE_RESULT";
+const ASSISTANT_RESPONSE_WATCH_TELEMETRY_MESSAGE_TYPE = "ASSISTANT_RESPONSE_WATCH_TELEMETRY";
 const HANDOFF_SEND_CONFIRMED_MESSAGE_TYPE = "HANDOFF_SEND_CONFIRMED";
 const HANDOFF_ACCEPTANCE_CHECK_MESSAGE_TYPE = "CHECK_HANDOFF_SENT";
 const CHATGPT_EXECUTION_READY_MESSAGE_TYPE = "CHATGPT_EXECUTION_READY";
@@ -169,6 +172,7 @@ const defaultManagedTabState = {
   tabId: null,
   executionWindowId: null,
   executionWindowState: "Idle",
+  executionGeneration: 0,
   conversationId: null,
   conversationUrl: null,
   projectId: null,
@@ -185,6 +189,21 @@ const defaultManagedTabState = {
 };
 let managedTabState = { ...defaultManagedTabState };
 let managedTabStateOperation = Promise.resolve();
+let managedExecutionWindowEnsureInFlight = null;
+let managedExecutionTabEnsureInFlight = null;
+let managedExecutionTabEnsureMutex = Promise.resolve();
+let managedExecutionTabCreateInFlight = null;
+let connectorManagedWindowEnsureInFlight = null;
+let connectorManagedWindowInitialTabRole = null;
+let connectorManagedWindowCreatedCount = 0;
+let connectorManagedWindowReusedCount = 0;
+let managedExecutionGeneration = 0;
+const managedExecutionOwnedWindowIds = new Set();
+const managedExecutionOwnedTabIds = new Set();
+const managedExecutionCreatedInitialTabIds = new Set();
+const managedExecutionWindowInitialTabs = new Map();
+const managedExecutionRequestBindings = new Map();
+const managedExecutionResolutions = new Map();
 const managedHandoffOperations = new Map();
 const managedMediaOperations = new Map();
 const contentScriptReadyTabs = new Map();
@@ -255,10 +274,15 @@ const defaultCollectorWindowState = {
   mutationQuietMs: 0,
   rootUrlVerified: false,
   rootNavigationGeneration: null,
-  requestId: null
+  requestId: null,
+  instanceId: null,
+  managedGeneration: 0,
+  managedAt: 0
 };
 let collectorWindowState = { ...defaultCollectorWindowState };
 let collectorWindowStateOperation = Promise.resolve();
+let lastHandoffSendTabFingerprint = null;
+let lastResponseMonitorTabFingerprint = null;
 let projectDiscoverySequence = 0;
 let lastCollectorTabEnforcementTelemetrySignature = null;
 let lastCollectorTabTopologyTelemetrySignature = null;
@@ -269,6 +293,15 @@ const managedTabStateReady = (async () => {
     const stored = await storage.get(MANAGED_TAB_STORAGE_KEY);
     if (stored?.[MANAGED_TAB_STORAGE_KEY] && typeof stored[MANAGED_TAB_STORAGE_KEY] === "object") {
       managedTabState = { ...defaultManagedTabState, ...stored[MANAGED_TAB_STORAGE_KEY] };
+      if (Number.isSafeInteger(managedTabState.executionGeneration)) {
+        managedExecutionGeneration = managedTabState.executionGeneration;
+      }
+      if (Number.isSafeInteger(managedTabState.executionWindowId)) {
+        managedExecutionOwnedWindowIds.add(managedTabState.executionWindowId);
+      }
+      if (Number.isSafeInteger(managedTabState.tabId) && managedTabState.tabId >= 0) {
+        managedExecutionOwnedTabIds.add(managedTabState.tabId);
+      }
     }
   } catch (_) {
     // A missing session-storage implementation must not prevent the Bridge
@@ -280,10 +313,9 @@ const managedTabStateReady = (async () => {
 
 const collectorWindowStateReady = (async () => {
   try {
-    const storage = chrome.storage.session || chrome.storage.local;
-    const stored = await storage.get(COLLECTOR_WINDOW_STORAGE_KEY);
-    if (stored?.[COLLECTOR_WINDOW_STORAGE_KEY] && typeof stored[COLLECTOR_WINDOW_STORAGE_KEY] === "object") {
-      collectorWindowState = { ...defaultCollectorWindowState, ...stored[COLLECTOR_WINDOW_STORAGE_KEY] };
+    const stored = await readPersistedCollectorWindowState();
+    if (stored && typeof stored === "object") {
+      collectorWindowState = { ...defaultCollectorWindowState, ...stored };
     }
   } catch (_) {
     // The Collector Window is recoverable state. A storage failure must not
@@ -336,7 +368,8 @@ function isCollectorTelemetrySummaryStage(stage) {
   return typeof stage === "string"
     && (stage.endsWith("_complete")
       || stage.endsWith("_failure_summary")
-      || stage === "collector_project_discovery_efficiency_summary");
+      || stage === "collector_project_discovery_efficiency_summary"
+    || stage === "collector_window_resolution_summary");
 }
 
 function isHighVolumeCollectorTelemetryStage(stage) {
@@ -430,6 +463,60 @@ function createCollectorProjectDiscoveryEfficiencyState(pending) {
     collectorTabCreated: false,
     collectorTabReused: false,
     collectorCreationReason: null,
+    collectorResolutionReason: null,
+    collectorFoundByPersistedId: false,
+    collectorFoundByMarker: false,
+    collectorFoundByHandshake: false,
+    collectorCandidateWindowCount: 0,
+    collectorCandidateTabCount: 0,
+    collectorCandidateFocusedCount: 0,
+    collectorCandidateActiveCount: 0,
+    duplicateCollectorCandidateCount: 0,
+    persistedWindowIdPresent: false,
+    persistedTabIdPresent: false,
+    persistedWindowIdValid: false,
+    persistedTabIdValid: false,
+    collectorFocusRequiredForMatch: false,
+    collectorActiveRequiredForMatch: false,
+    selectedCollectorWindowFingerprint: null,
+    selectedCollectorTabFingerprint: null,
+    collectorWindowStateAtCreation: "unknown",
+    collectorWindowStateAtCollectionStart: "unknown",
+    collectorWindowStateAtCollectionEnd: "unknown",
+    collectorWindowFocusedAtCreation: false,
+    collectorWindowFocusedAtCollectionStart: false,
+    collectorWindowFocusedAtCollectionEnd: false,
+    collectorWindowStateChangeCount: 0,
+    collectorWindowUnminimizedByConnector: false,
+    collectorWindowMinimizedDuringCollection: false,
+    collectorTabActiveAtCreation: false,
+    collectorTabActiveAtCollectionStart: false,
+    collectorTabActiveAtCollectionEnd: false,
+    collectorTabDiscardedAtCollectionStart: false,
+    collectorTabStatusAtCollectionStart: "unknown",
+    documentVisibilityStateAtCollectionStart: "unknown",
+    documentVisibilityStateAtCollectionEnd: "unknown",
+    documentVisibilityChangeCount: 0,
+    documentHiddenObserved: false,
+    documentHiddenDurationMs: 0,
+    documentVisibleDurationMs: 0,
+    documentBecameVisibleDuringCollection: false,
+    documentBecameHiddenDuringCollection: false,
+    hydrationLoopsWhileDocumentHidden: 0,
+    hydrationLoopsWhileDocumentVisible: 0,
+    scrollAttemptsWhileHidden: 0,
+    scrollAttemptsWhileVisible: 0,
+    mutationCountWhileHidden: 0,
+    mutationCountWhileVisible: 0,
+    pollWaitMsWhileHidden: 0,
+    pollWaitMsWhileVisible: 0,
+    identityAttemptsWhileHidden: 0,
+    identityAttemptsWhileVisible: 0,
+    identityWaitMsWhileHidden: 0,
+    identityWaitMsWhileVisible: 0,
+    slowIdentityIndicesWhileHidden: [],
+    slowIdentityIndicesWhileVisible: [],
+    lastObservedCollectorWindowState: null,
     duplicateDiscoveryKeyCount: 0,
     discoveryKeyChangedForSameLogicalProjectCount: 0,
     moreControlSeenCount: 0,
@@ -842,7 +929,7 @@ function recordCollectorProjectDiscoveryEfficiencyNavigation(
   }
 }
 
-function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, errorCode = null) {
+async function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, errorCode = null) {
   if (!pending || pending.projectOnly || pending.currentOnly
     || !isCurrentCollectorRequest(pending)
     || pending.projectDiscoveryEfficiency?.efficiencySummaryEmitted === true) return;
@@ -867,6 +954,7 @@ function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, 
   efficiency.telemetryEventCountTotal += 1;
   efficiency.telemetryEventCountSummary += 1;
   efficiency.efficiencySummaryEmitted = true;
+  await recordCollectorPresentationPhase("collection_end", { request_id: pending.requestId });
   for (const project of projects) {
     const projectIndex = Number.isSafeInteger(project?.project_index)
       ? project.project_index
@@ -897,6 +985,9 @@ function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, 
     + efficiency.identityChildRegionWaitMs
     + efficiency.identityNavigationWaitMs;
   efficiency.identityMiscWaitMs = Math.max(0, efficiency.identityResolutionMs - identityAccountedMs);
+  mergeCollectorVisibilityTelemetry(efficiency, result);
+  mergeCollectorVisibilityTelemetry(efficiency, pending.projectDiscoveryScanResult);
+  mergeCollectorVisibilityTelemetry(efficiency, pending.projectIdentityResult);
   diagnostic("collector project discovery efficiency summary", {
     request_id: pending.requestId,
     refresh_generation: pending.generation,
@@ -975,6 +1066,23 @@ function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, 
     collector_tab_created: efficiency.collectorTabCreated,
     collector_tab_reused: efficiency.collectorTabReused,
     collector_creation_reason: efficiency.collectorCreationReason,
+    collector_resolution_reason: efficiency.collectorResolutionReason,
+    collector_found_by_persisted_id: efficiency.collectorFoundByPersistedId === true,
+    collector_found_by_marker: efficiency.collectorFoundByMarker === true,
+    collector_found_by_handshake: efficiency.collectorFoundByHandshake === true,
+    collector_candidate_window_count: efficiency.collectorCandidateWindowCount,
+    collector_candidate_tab_count: efficiency.collectorCandidateTabCount,
+    collector_candidate_focused_count: efficiency.collectorCandidateFocusedCount,
+    collector_candidate_active_count: efficiency.collectorCandidateActiveCount,
+    duplicate_collector_candidate_count: efficiency.duplicateCollectorCandidateCount,
+    persisted_window_id_present: efficiency.persistedWindowIdPresent === true,
+    persisted_tab_id_present: efficiency.persistedTabIdPresent === true,
+    persisted_window_id_valid: efficiency.persistedWindowIdValid === true,
+    persisted_tab_id_valid: efficiency.persistedTabIdValid === true,
+    collector_focus_required_for_match: false,
+    collector_active_required_for_match: false,
+    selected_collector_window_fingerprint: efficiency.selectedCollectorWindowFingerprint,
+    selected_collector_tab_fingerprint: efficiency.selectedCollectorTabFingerprint,
     duplicate_discovery_key_count: efficiency.duplicateDiscoveryKeyCount,
     discovery_key_changed_for_same_logical_project_count:
       efficiency.discoveryKeyChangedForSameLogicalProjectCount,
@@ -1021,6 +1129,50 @@ function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, 
       scroll_height: efficiency.hydrationStagnationResetReasonCounts.scroll_height,
       more_pagination: efficiency.hydrationStagnationResetReasonCounts.more_pagination
     },
+    collector_window_state_at_creation: efficiency.collectorWindowStateAtCreation,
+    collector_window_state_at_collection_start: efficiency.collectorWindowStateAtCollectionStart,
+    collector_window_state_at_collection_end: efficiency.collectorWindowStateAtCollectionEnd,
+    collector_window_focused_at_creation: efficiency.collectorWindowFocusedAtCreation === true,
+    collector_window_focused_at_collection_start:
+      efficiency.collectorWindowFocusedAtCollectionStart === true,
+    collector_window_focused_at_collection_end:
+      efficiency.collectorWindowFocusedAtCollectionEnd === true,
+    collector_window_state_change_count: efficiency.collectorWindowStateChangeCount,
+    collector_window_unminimized_by_connector:
+      efficiency.collectorWindowUnminimizedByConnector === true,
+    collector_window_minimized_during_collection:
+      efficiency.collectorWindowMinimizedDuringCollection === true,
+    collector_tab_active_at_creation: efficiency.collectorTabActiveAtCreation === true,
+    collector_tab_active_at_collection_start: efficiency.collectorTabActiveAtCollectionStart === true,
+    collector_tab_active_at_collection_end: efficiency.collectorTabActiveAtCollectionEnd === true,
+    collector_tab_discarded_at_collection_start:
+      efficiency.collectorTabDiscardedAtCollectionStart === true,
+    collector_tab_status_at_collection_start: efficiency.collectorTabStatusAtCollectionStart,
+    document_visibility_state_at_collection_start:
+      efficiency.documentVisibilityStateAtCollectionStart,
+    document_visibility_state_at_collection_end: efficiency.documentVisibilityStateAtCollectionEnd,
+    document_visibility_change_count: efficiency.documentVisibilityChangeCount,
+    document_hidden_observed: efficiency.documentHiddenObserved === true,
+    document_hidden_duration_ms: efficiency.documentHiddenDurationMs,
+    document_visible_duration_ms: efficiency.documentVisibleDurationMs,
+    document_became_visible_during_collection:
+      efficiency.documentBecameVisibleDuringCollection === true,
+    document_became_hidden_during_collection:
+      efficiency.documentBecameHiddenDuringCollection === true,
+    hydration_loops_while_document_hidden: efficiency.hydrationLoopsWhileDocumentHidden,
+    hydration_loops_while_document_visible: efficiency.hydrationLoopsWhileDocumentVisible,
+    scroll_attempts_while_hidden: efficiency.scrollAttemptsWhileHidden,
+    scroll_attempts_while_visible: efficiency.scrollAttemptsWhileVisible,
+    mutation_count_while_hidden: efficiency.mutationCountWhileHidden,
+    mutation_count_while_visible: efficiency.mutationCountWhileVisible,
+    poll_wait_ms_while_hidden: efficiency.pollWaitMsWhileHidden,
+    poll_wait_ms_while_visible: efficiency.pollWaitMsWhileVisible,
+    identity_attempts_while_hidden: efficiency.identityAttemptsWhileHidden,
+    identity_attempts_while_visible: efficiency.identityAttemptsWhileVisible,
+    identity_wait_ms_while_hidden: efficiency.identityWaitMsWhileHidden,
+    identity_wait_ms_while_visible: efficiency.identityWaitMsWhileVisible,
+    slow_identity_indices_while_hidden: [...efficiency.slowIdentityIndicesWhileHidden],
+    slow_identity_indices_while_visible: [...efficiency.slowIdentityIndicesWhileVisible],
     project_candidate_rejected_child_chat_count:
       efficiency.projectCandidateRejectedChildChatCount,
     project_candidate_rejected_non_project_count:
@@ -1152,6 +1304,54 @@ function diagnostic(eventName, fields = {}) {
     "execution_window_state",
     "execution_window_exists",
     "execution_window_minimized",
+    "execution_generation",
+    "ensure_call_count",
+    "ensure_joined_inflight_count",
+    "ensure_new_creation_count",
+    "execution_window_create_requested_count",
+    "execution_window_created_count",
+    "execution_window_reused_count",
+    "managed_tab_create_requested_count",
+    "managed_tab_created_count",
+    "managed_tab_reused_count",
+    "recovery_attempt_count",
+    "recovery_joined_inflight_count",
+    "duplicate_creation_prevented_count",
+    "final_execution_window_count",
+    "final_managed_tab_count",
+    "final_execution_window_physical_tab_count",
+    "execution_window_physical_tab_count_at_creation",
+    "execution_window_physical_tab_count_after_tab_resolution",
+    "execution_window_physical_tab_count_final",
+    "initial_window_tab_found",
+    "initial_window_tab_reused",
+    "initial_window_tab_closed",
+    "managed_tab_created_via_tabs_create",
+    "managed_tab_adopted_from_window_create",
+    "managed_window_exists",
+    "managed_window_created_count",
+    "managed_window_reused_count",
+    "collector_tab_exists",
+    "collector_tab_owned",
+    "execution_tab_exists",
+    "execution_tab_owned",
+    "collector_and_execution_same_window",
+    "collector_and_execution_same_tab",
+    "owned_tab_count",
+    "physical_tab_count",
+    "user_unmanaged_tab_count",
+    "topology_valid",
+    "collector_tab_fingerprint",
+    "execution_tab_fingerprint",
+    "managed_window_id",
+    "handoff_bound_window_fingerprint",
+    "handoff_bound_tab_fingerprint",
+    "watcher_window_fingerprint",
+    "watcher_tab_fingerprint",
+    "sender_window_fingerprint",
+    "sender_tab_fingerprint",
+    "same_execution_tab_for_handoff_watch_send",
+    "execution_target_changed_during_request",
     "collector_window_id",
     "collector_window_focused",
     "collector_window_state",
@@ -1588,9 +1788,69 @@ function diagnostic(eventName, fields = {}) {
     "provisional_observation_count_after_identity",
     "collection_trigger_source",
     "collector_creation_reason",
+    "collector_resolution_reason",
+    "collector_found_by_persisted_id",
+    "collector_found_by_marker",
+    "collector_found_by_handshake",
+    "collector_candidate_window_count",
+    "collector_candidate_tab_count",
+    "collector_candidate_focused_count",
+    "collector_candidate_active_count",
+    "duplicate_collector_candidate_count",
+    "persisted_window_id_present",
+    "persisted_tab_id_present",
+    "persisted_window_id_valid",
+    "persisted_tab_id_valid",
+    "collector_focus_required_for_match",
+    "collector_active_required_for_match",
+    "selected_collector_window_fingerprint",
+    "selected_collector_tab_fingerprint",
+    "handoff_send_collector_tab_fingerprint",
+    "response_monitor_collector_tab_fingerprint",
+    "same_collector_tab_for_send_and_monitor",
     "collector_window_created",
     "collector_tab_created",
     "collector_tab_reused",
+    "collector_reused",
+    "collector_created",
+    "trigger_source",
+    "collector_window_state_at_creation",
+    "collector_window_state_at_collection_start",
+    "collector_window_state_at_collection_end",
+    "collector_window_focused_at_creation",
+    "collector_window_focused_at_collection_start",
+    "collector_window_focused_at_collection_end",
+    "collector_window_state_change_count",
+    "collector_window_unminimized_by_connector",
+    "collector_window_minimized_during_collection",
+    "collector_tab_active_at_creation",
+    "collector_tab_active_at_collection_start",
+    "collector_tab_active_at_collection_end",
+    "collector_tab_discarded_at_collection_start",
+    "collector_tab_status_at_collection_start",
+    "collector_tab_active",
+    "collector_tab_discarded",
+    "collector_tab_status",
+    "document_visibility_state_at_collection_start",
+    "document_visibility_state_at_collection_end",
+    "document_visibility_change_count",
+    "document_hidden_observed",
+    "document_hidden_duration_ms",
+    "document_visible_duration_ms",
+    "document_became_visible_during_collection",
+    "document_became_hidden_during_collection",
+    "hydration_loops_while_document_hidden",
+    "hydration_loops_while_document_visible",
+    "scroll_attempts_while_hidden",
+    "scroll_attempts_while_visible",
+    "mutation_count_while_hidden",
+    "mutation_count_while_visible",
+    "poll_wait_ms_while_hidden",
+    "poll_wait_ms_while_visible",
+    "identity_attempts_while_hidden",
+    "identity_attempts_while_visible",
+    "identity_wait_ms_while_hidden",
+    "identity_wait_ms_while_visible",
     "startup_collection_suppressed",
     "manual_refresh_started",
     "manual_refresh_completed",
@@ -1733,7 +1993,36 @@ function diagnostic(eventName, fields = {}) {
     "content_ready",
     "conversation_ready",
     "composer_ready",
-    "watcher_ready"
+    "watcher_ready",
+    "target_tab_fingerprint",
+    "watch_started_at_relative_ms",
+    "send_confirmed_at_relative_ms",
+    "assistant_observed_at_relative_ms",
+    "streaming_started_at_relative_ms",
+    "completion_observed_at_relative_ms",
+    "total_watch_ms",
+    "absolute_timeout_ms",
+    "inactivity_timeout_ms",
+    "hard_timeout_ms",
+    "poll_count",
+    "meaningful_progress_count",
+    "last_progress_age_ms",
+    "text_growth_event_count",
+    "response_remount_count",
+    "streaming_state_change_count",
+    "thinking_state_observed",
+    "generation_alive_observation_count",
+    "document_visibility_state_at_start",
+    "document_hidden_observed",
+    "tab_active_at_start",
+    "window_focused_at_start",
+    "timeout_triggered",
+    "timeout_kind",
+    "assistant_streaming_at_failure",
+    "assistant_generation_alive_at_failure",
+    "response_node_present_at_failure",
+    "completion_detected",
+    "final_status"
   ]) {
     if (typeof fields[key] === "string" && fields[key].length <= 128) safe[key] = fields[key];
     if (typeof fields[key] === "number" && Number.isSafeInteger(fields[key])) safe[key] = fields[key];
@@ -1751,6 +2040,8 @@ function diagnostic(eventName, fields = {}) {
     "slow_identity_project_indices",
     "slow_identity_before_navigation_indices",
     "slow_identity_after_navigation_indices",
+    "slow_identity_indices_while_hidden",
+    "slow_identity_indices_while_visible",
     "final_catalog_indices",
     "descriptor_added_after_first_snapshot_indices"
   ]) {
@@ -2043,6 +2334,7 @@ function managedTabLifecycle(lifecycle, fields = {}) {
       tabId: managedTabState.tabId,
       executionWindowId: managedTabState.executionWindowId,
       executionWindowState: managedTabState.executionWindowState,
+      executionGeneration: managedTabState.executionGeneration || managedExecutionGeneration,
       conversationId: managedTabState.conversationId,
       conversationUrl: managedTabState.conversationUrl,
       projectId: managedTabState.projectId,
@@ -2093,6 +2385,220 @@ function withManagedTabOperation(operation) {
   const next = managedTabStateOperation.then(operation, operation);
   managedTabStateOperation = next.catch(() => {});
   return next;
+}
+
+function createManagedExecutionResolution(requestId, handoffId) {
+  return {
+    requestId: requestId || null,
+    handoffId: handoffId || null,
+    ensureCallCount: 0,
+    ensureJoinedInflightCount: 0,
+    ensureNewCreationCount: 0,
+    executionWindowCreateRequestedCount: 0,
+    executionWindowCreatedCount: 0,
+    executionWindowReusedCount: 0,
+    managedTabCreateRequestedCount: 0,
+    managedTabCreatedCount: 0,
+    managedTabReusedCount: 0,
+    recoveryAttemptCount: 0,
+    recoveryJoinedInflightCount: 0,
+    duplicateCreationPreventedCount: 0,
+    executionWindowPhysicalTabCountAtCreation: 0,
+    executionWindowPhysicalTabCountAfterTabResolution: 0,
+    executionWindowPhysicalTabCountFinal: 0,
+    initialWindowTabFound: false,
+    initialWindowTabReused: false,
+    initialWindowTabClosed: false,
+    managedTabCreatedViaTabsCreate: false,
+    managedTabAdoptedFromWindowCreate: false,
+    finalExecutionWindowCount: null,
+    finalManagedTabCount: null,
+    handoffBoundWindowFingerprint: "none",
+    handoffBoundTabFingerprint: "none",
+    watcherWindowFingerprint: "none",
+    watcherTabFingerprint: "none",
+    senderWindowFingerprint: "none",
+    senderTabFingerprint: "none"
+  };
+}
+
+function managedExecutionResolutionFor(requestId, handoffId = null) {
+  const key = typeof requestId === "string" && requestId.length > 0 ? requestId : "_global";
+  if (!managedExecutionResolutions.has(key)) {
+    managedExecutionResolutions.set(key, createManagedExecutionResolution(requestId, handoffId));
+  }
+  const resolution = managedExecutionResolutions.get(key);
+  if (handoffId && !resolution.handoffId) resolution.handoffId = handoffId;
+  return resolution;
+}
+
+function bindManagedExecutionToRequest(requestId, windowId, tabId, generation) {
+  if (typeof requestId !== "string" || requestId.length === 0) return null;
+  const existing = managedExecutionRequestBindings.get(requestId);
+  if (existing && Number.isSafeInteger(existing.targetTabId) && existing.targetTabId >= 0) return existing;
+  const binding = {
+    requestId,
+    executionWindowId: Number.isSafeInteger(windowId) ? windowId : null,
+    targetTabId: Number.isSafeInteger(tabId) ? tabId : null,
+    executionGeneration: Number.isSafeInteger(generation) ? generation : managedExecutionGeneration
+  };
+  managedExecutionRequestBindings.set(requestId, binding);
+  return binding;
+}
+
+function managedExecutionBindingForRequest(requestId) {
+  if (typeof requestId !== "string" || requestId.length === 0) return null;
+  return managedExecutionRequestBindings.get(requestId) || null;
+}
+
+async function liveManagedExecutionBinding(requestId) {
+  const binding = managedExecutionBindingForRequest(requestId);
+  if (!binding || !Number.isSafeInteger(binding.targetTabId)) return null;
+  try {
+    const tab = await chrome.tabs.get(binding.targetTabId);
+    if (!tab || !isUsableManagedExecutionTab(tab, binding.executionWindowId)) {
+      if (!tab || !isOwnedManagedExecutionTab(tab)) {
+        managedExecutionRequestBindings.delete(requestId);
+      }
+      return null;
+    }
+    if (Number.isSafeInteger(binding.executionWindowId)
+      && tab.windowId !== binding.executionWindowId) {
+      managedExecutionRequestBindings.delete(requestId);
+      return null;
+    }
+    return { binding, tab };
+  } catch (_) {
+    managedExecutionRequestBindings.delete(requestId);
+    return null;
+  }
+}
+
+async function countOwnedExecutionWindows() {
+  let count = 0;
+  for (const windowId of managedExecutionOwnedWindowIds) {
+    if (await getManagedExecutionWindow(windowId)) count += 1;
+  }
+  return count;
+}
+
+async function countOwnedExecutionTabs(windowId) {
+  const tabs = await tabsInManagedExecutionWindow(windowId);
+  const owned = tabs.filter((tab) => isOwnedManagedExecutionTab(tab)
+    && (isChatGptTab(tab) || isPlaceholderExecutionTab(tab)));
+  if (owned.length > 0) return owned.length;
+  return tabs.filter((tab) => isChatGptTab(tab)
+    && (tab.id === managedTabState.tabId
+      || [...managedExecutionRequestBindings.values()].some((binding) => binding.targetTabId === tab.id))).length;
+}
+
+async function countPhysicalExecutionWindowTabs(windowId) {
+  return (await tabsInManagedExecutionWindow(windowId)).length;
+}
+
+async function emitConnectorManagedWindowTopologySummary(requestId = null) {
+  const windowId = Number.isSafeInteger(collectorWindowState.windowId)
+    ? collectorWindowState.windowId
+    : managedTabState.executionWindowId;
+  const physical = Number.isSafeInteger(windowId) ? await countPhysicalExecutionWindowTabs(windowId) : 0;
+  const collectorExists = Number.isSafeInteger(collectorWindowState.tabId);
+  const executionExists = Number.isSafeInteger(managedTabState.tabId);
+  const sameWindow = collectorExists
+    && executionExists
+    && collectorWindowState.windowId === managedTabState.executionWindowId;
+  const sameTab = collectorExists && executionExists && collectorWindowState.tabId === managedTabState.tabId;
+  const ownedTabCount = (collectorExists ? 1 : 0) + (executionExists ? 1 : 0);
+  diagnostic("connector managed window topology summary", {
+    request_id: requestId,
+    collector_window_id: collectorWindowState.windowId,
+    execution_window_id: managedTabState.executionWindowId,
+    managed_window_exists: Number.isSafeInteger(windowId),
+    managed_window_id: windowId,
+    managed_window_created_count: connectorManagedWindowCreatedCount,
+    managed_window_reused_count: connectorManagedWindowReusedCount,
+    collector_tab_exists: collectorExists,
+    collector_tab_owned: collectorExists,
+    execution_tab_exists: executionExists,
+    execution_tab_owned: executionExists,
+    collector_and_execution_same_window: sameWindow === true,
+    collector_and_execution_same_tab: sameTab === true,
+    owned_tab_count: ownedTabCount,
+    physical_tab_count: physical,
+    user_unmanaged_tab_count: Math.max(0, physical - ownedTabCount),
+    topology_valid: sameTab !== true && (!collectorExists || !executionExists || sameWindow === true),
+    collector_tab_fingerprint: collectorHandleFingerprint(
+      collectorWindowState.windowId,
+      collectorWindowState.tabId),
+    execution_tab_fingerprint: collectorHandleFingerprint(
+      managedTabState.executionWindowId,
+      managedTabState.tabId),
+    status: "observed",
+    stage: "connector_managed_window_topology_summary"
+  });
+}
+
+function emitManagedExecutionResolutionSummary(requestId, extra = {}) {
+  const resolution = managedExecutionResolutionFor(requestId);
+  if (Number.isSafeInteger(extra.finalExecutionWindowCount)) {
+    resolution.finalExecutionWindowCount = extra.finalExecutionWindowCount;
+  }
+  if (Number.isSafeInteger(extra.finalManagedTabCount)) {
+    resolution.finalManagedTabCount = extra.finalManagedTabCount;
+  }
+  if (Number.isSafeInteger(extra.finalExecutionWindowPhysicalTabCount)) {
+    resolution.executionWindowPhysicalTabCountFinal = extra.finalExecutionWindowPhysicalTabCount;
+  }
+  const binding = managedExecutionBindingForRequest(requestId);
+  const boundFingerprint = collectorHandleFingerprint(
+    binding?.executionWindowId,
+    binding?.targetTabId);
+  const globalChanged = Boolean(binding
+    && Number.isSafeInteger(managedTabState.tabId)
+    && managedTabState.tabId !== binding.targetTabId);
+  diagnostic("managed execution resolution summary", {
+    request_id: resolution.requestId,
+    handoff_id: resolution.handoffId,
+    execution_generation: binding?.executionGeneration || managedExecutionGeneration,
+    ensure_call_count: resolution.ensureCallCount,
+    ensure_joined_inflight_count: resolution.ensureJoinedInflightCount,
+    ensure_new_creation_count: resolution.ensureNewCreationCount,
+    execution_window_create_requested_count: resolution.executionWindowCreateRequestedCount,
+    execution_window_created_count: resolution.executionWindowCreatedCount,
+    execution_window_reused_count: resolution.executionWindowReusedCount,
+    managed_tab_create_requested_count: resolution.managedTabCreateRequestedCount,
+    managed_tab_created_count: resolution.managedTabCreatedCount,
+    managed_tab_reused_count: resolution.managedTabReusedCount,
+    recovery_attempt_count: resolution.recoveryAttemptCount,
+    recovery_joined_inflight_count: resolution.recoveryJoinedInflightCount,
+    duplicate_creation_prevented_count: resolution.duplicateCreationPreventedCount,
+    execution_window_physical_tab_count_at_creation: resolution.executionWindowPhysicalTabCountAtCreation,
+    execution_window_physical_tab_count_after_tab_resolution: resolution.executionWindowPhysicalTabCountAfterTabResolution,
+    execution_window_physical_tab_count_final: extra.finalExecutionWindowPhysicalTabCount
+      ?? resolution.executionWindowPhysicalTabCountFinal,
+    initial_window_tab_found: resolution.initialWindowTabFound === true,
+    initial_window_tab_reused: resolution.initialWindowTabReused === true,
+    initial_window_tab_closed: resolution.initialWindowTabClosed === true,
+    managed_tab_created_via_tabs_create: resolution.managedTabCreatedViaTabsCreate === true,
+    managed_tab_adopted_from_window_create: resolution.managedTabAdoptedFromWindowCreate === true,
+    final_execution_window_count: extra.finalExecutionWindowCount ?? resolution.finalExecutionWindowCount,
+    final_managed_tab_count: extra.finalManagedTabCount ?? resolution.finalManagedTabCount,
+    final_execution_window_physical_tab_count: extra.finalExecutionWindowPhysicalTabCount
+      ?? resolution.executionWindowPhysicalTabCountFinal,
+    handoff_bound_window_fingerprint: resolution.handoffBoundWindowFingerprint,
+    handoff_bound_tab_fingerprint: resolution.handoffBoundTabFingerprint,
+    watcher_window_fingerprint: resolution.watcherWindowFingerprint,
+    watcher_tab_fingerprint: resolution.watcherTabFingerprint,
+    sender_window_fingerprint: resolution.senderWindowFingerprint,
+    sender_tab_fingerprint: resolution.senderTabFingerprint,
+    same_execution_tab_for_handoff_watch_send: extra.sameExecutionTab === true
+      || (
+        resolution.handoffBoundTabFingerprint !== "none"
+        && resolution.handoffBoundTabFingerprint === resolution.watcherTabFingerprint
+        && resolution.handoffBoundTabFingerprint === resolution.senderTabFingerprint),
+    execution_target_changed_during_request: globalChanged,
+    status: "observed",
+    stage: "managed_execution_resolution_summary"
+  });
 }
 
 function withCollectorWindowOperation(operation) {
@@ -2259,6 +2765,7 @@ function createPendingHandoffSend(message, bridgeSocket, targetTab) {
     handoffKind: message?.handoff_kind || null,
     bridgeSocket,
     targetTabId: targetTab?.id,
+    executionWindowId: Number.isSafeInteger(targetTab?.windowId) ? targetTab.windowId : managedTabState.executionWindowId,
     targetTabUrl: typeof targetTab?.url === "string" ? targetTab.url : null,
     targetConversationId: safeContextIdentifier(message?.target_conversation_id),
     targetConversationUrl: safeChatGptContextUrl(message?.target_conversation_url),
@@ -2674,13 +3181,84 @@ function clearContextRequestsForSocket(bridgeSocket) {
   }
 }
 
-function isChatGptTab(tab) {
+function isChatGptUrlValue(value) {
   try {
-    const url = new URL(tab?.url || "");
+    const url = new URL(value || "");
     return url.protocol === "https:" && url.hostname === "chatgpt.com" && url.port === "";
   } catch (_) {
     return false;
   }
+}
+
+function isChatGptTab(tab) {
+  return isChatGptUrlValue(tab?.url) || isChatGptUrlValue(tab?.pendingUrl);
+}
+
+function isPlaceholderExecutionTab(tab) {
+  const candidates = [tab?.url, tab?.pendingUrl]
+    .filter((value) => typeof value === "string")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  if (candidates.length === 0) return true;
+  return candidates.every((url) => {
+    const lower = url.toLowerCase();
+    return lower === "about:blank"
+      || lower === "about:newtab"
+      || lower.startsWith("chrome://newtab")
+      || lower.startsWith("chrome://new-tab-page")
+      || lower.startsWith("edge://newtab");
+  });
+}
+
+function isCollectorReservedTab(tab) {
+  return Boolean(tab && Number.isSafeInteger(tab.id) && tab.id === collectorWindowState.tabId);
+}
+
+function isOwnedManagedExecutionTab(tab) {
+  if (!tab || !Number.isSafeInteger(tab.id) || tab.id < 0) return false;
+  if (isCollectorReservedTab(tab)) return false;
+  if (tab.id === managedTabState.tabId) return true;
+  if (managedExecutionOwnedTabIds.has(tab.id)) return true;
+  if (managedExecutionCreatedInitialTabIds.has(tab.id)) return true;
+  for (const binding of managedExecutionRequestBindings.values()) {
+    if (binding.targetTabId === tab.id) return true;
+  }
+  return false;
+}
+
+function isUsableManagedExecutionTab(tab, expectedWindowId = null) {
+  if (!tab || !Number.isSafeInteger(tab.id) || tab.id < 0) return false;
+  if (Number.isSafeInteger(expectedWindowId)
+    && expectedWindowId >= 0
+    && tab.windowId !== expectedWindowId) return false;
+  return isChatGptTab(tab) || (isOwnedManagedExecutionTab(tab) && isPlaceholderExecutionTab(tab));
+}
+
+function stampManagedExecutionTab(tab, windowId) {
+  if (!tab || !Number.isSafeInteger(tab.id) || tab.id < 0) return;
+  managedExecutionOwnedTabIds.add(tab.id);
+  managedTabState = {
+    ...managedTabState,
+    tabId: tab.id,
+    executionWindowId: Number.isSafeInteger(windowId) ? windowId : (tab.windowId ?? managedTabState.executionWindowId)
+  };
+}
+
+function rememberCreatedExecutionWindowTabs(windowId, tabs) {
+  if (!Number.isSafeInteger(windowId) || windowId < 0 || !Array.isArray(tabs)) return;
+  const ids = [];
+  for (const tab of tabs) {
+    if (!Number.isSafeInteger(tab?.id) || tab.id < 0) continue;
+    managedExecutionCreatedInitialTabIds.add(tab.id);
+    ids.push(tab.id);
+  }
+  if (ids.length > 0) managedExecutionWindowInitialTabs.set(windowId, ids);
+}
+
+function forgetManagedExecutionTabId(tabId) {
+  if (!Number.isSafeInteger(tabId)) return;
+  managedExecutionOwnedTabIds.delete(tabId);
+  managedExecutionCreatedInitialTabIds.delete(tabId);
 }
 
 function chatGptConversationKey(value) {
@@ -2896,18 +3474,506 @@ function waitForTabReady(
   });
 }
 
-function collectorWindowStorage() {
-  return chrome.storage.session || chrome.storage.local;
+function collectorWindowStorageTargets() {
+  const targets = [];
+  if (chrome.storage?.local) targets.push(chrome.storage.local);
+  if (chrome.storage?.session && chrome.storage.session !== chrome.storage.local) {
+    targets.push(chrome.storage.session);
+  }
+  return targets;
 }
 
-function persistCollectorWindowState() {
-  const stored = {
+function persistedCollectorWindowRecord() {
+  return {
     windowId: collectorWindowState.windowId,
     tabId: collectorWindowState.tabId,
     windowState: collectorWindowState.windowState,
-    lifecycle: collectorWindowState.lifecycle
+    lifecycle: collectorWindowState.lifecycle,
+    instanceId: collectorWindowState.instanceId,
+    managedGeneration: Number.isSafeInteger(collectorWindowState.managedGeneration)
+      ? collectorWindowState.managedGeneration
+      : 0,
+    managedAt: Number.isSafeInteger(collectorWindowState.managedAt)
+      ? collectorWindowState.managedAt
+      : 0
   };
-  return collectorWindowStorage().set({ [COLLECTOR_WINDOW_STORAGE_KEY]: stored }).catch(() => {});
+}
+
+function persistCollectorWindowState() {
+  const stored = persistedCollectorWindowRecord();
+  return Promise.all(collectorWindowStorageTargets().map((storage) =>
+    storage.set({ [COLLECTOR_WINDOW_STORAGE_KEY]: stored }).catch(() => {})));
+}
+
+async function readPersistedCollectorWindowState() {
+  let sessionValue = null;
+  let localValue = null;
+  try {
+    const stored = await chrome.storage?.session?.get?.(COLLECTOR_WINDOW_STORAGE_KEY);
+    if (stored?.[COLLECTOR_WINDOW_STORAGE_KEY] && typeof stored[COLLECTOR_WINDOW_STORAGE_KEY] === "object") {
+      sessionValue = stored[COLLECTOR_WINDOW_STORAGE_KEY];
+    }
+  } catch (_) { }
+  try {
+    const stored = await chrome.storage?.local?.get?.(COLLECTOR_WINDOW_STORAGE_KEY);
+    if (stored?.[COLLECTOR_WINDOW_STORAGE_KEY] && typeof stored[COLLECTOR_WINDOW_STORAGE_KEY] === "object") {
+      localValue = stored[COLLECTOR_WINDOW_STORAGE_KEY];
+    }
+  } catch (_) { }
+  const sessionHasId = Number.isSafeInteger(sessionValue?.windowId) || Number.isSafeInteger(sessionValue?.tabId);
+  const localHasId = Number.isSafeInteger(localValue?.windowId) || Number.isSafeInteger(localValue?.tabId);
+  if (sessionHasId) return sessionValue;
+  if (localHasId) return localValue;
+  return sessionValue || localValue || null;
+}
+
+function generateCollectorInstanceId() {
+  try {
+    if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  } catch (_) { }
+  return `collector-${Date.now()}`;
+}
+
+function ensureCollectorInstanceId() {
+  if (typeof collectorWindowState.instanceId === "string"
+    && collectorWindowState.instanceId.length > 0) {
+    return collectorWindowState.instanceId;
+  }
+  collectorWindowState = {
+    ...collectorWindowState,
+    instanceId: generateCollectorInstanceId()
+  };
+  void persistCollectorWindowState();
+  return collectorWindowState.instanceId;
+}
+
+function collectorHandleFingerprint(windowId, tabId) {
+  if (!Number.isSafeInteger(windowId) || !Number.isSafeInteger(tabId)) return "none";
+  return `w:${windowId}:t:${tabId}`;
+}
+
+async function hydrateCollectorWindowState() {
+  await collectorWindowStateReady;
+  const stored = await readPersistedCollectorWindowState();
+  if (!stored || typeof stored !== "object") {
+    ensureCollectorInstanceId();
+    return;
+  }
+  const memoryLost = !Number.isSafeInteger(collectorWindowState.windowId)
+    && !Number.isSafeInteger(collectorWindowState.tabId);
+  if (memoryLost) {
+    collectorWindowState = { ...defaultCollectorWindowState, ...stored };
+  } else {
+    if (!collectorWindowState.instanceId && stored.instanceId) {
+      collectorWindowState.instanceId = stored.instanceId;
+    }
+    if (!Number.isSafeInteger(collectorWindowState.managedGeneration)
+      && Number.isSafeInteger(stored.managedGeneration)) {
+      collectorWindowState.managedGeneration = stored.managedGeneration;
+    }
+  }
+  ensureCollectorInstanceId();
+}
+
+async function getChromeWindowById(windowId) {
+  if (!Number.isSafeInteger(windowId) || windowId < 0 || typeof chrome.windows?.get !== "function") {
+    return null;
+  }
+  try {
+    const window = await chrome.windows.get(windowId);
+    if (!window || (window.type && window.type !== "normal")) return null;
+    return window;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function getChromeTabById(tabId) {
+  if (!Number.isSafeInteger(tabId) || tabId < 0 || typeof chrome.tabs?.get !== "function") return null;
+  try {
+    return await chrome.tabs.get(tabId);
+  } catch (_) {
+    return null;
+  }
+}
+
+function normalizeChromeWindowState(state) {
+  if (state === "normal" || state === "minimized" || state === "maximized" || state === "fullscreen") {
+    return state;
+  }
+  return "unknown";
+}
+
+function normalizeCollectorTabStatus(status) {
+  if (status === "loading" || status === "complete") return status;
+  return "unknown";
+}
+
+function normalizeDocumentVisibilityState(value) {
+  if (value === "visible" || value === "hidden" || value === "prerender") return value;
+  return "unknown";
+}
+
+async function snapshotCollectorChromePresentation() {
+  const window = await getChromeWindowById(collectorWindowState.windowId);
+  const tab = await getChromeTabById(collectorWindowState.tabId);
+  return {
+    windowState: normalizeChromeWindowState(window?.state),
+    focused: window?.focused === true,
+    tabActive: tab?.active === true,
+    discarded: tab?.discarded === true,
+    tabStatus: normalizeCollectorTabStatus(tab?.status)
+  };
+}
+
+function collectorEfficiencyFromTrace(trace = {}) {
+  return collectorProjectDiscoveryEfficiencyForRequest(trace.request_id || collectorWindowState.requestId);
+}
+
+function noteCollectorWindowState(efficiency, windowState) {
+  if (!efficiency) return;
+  const normalized = normalizeChromeWindowState(windowState);
+  if (efficiency.lastObservedCollectorWindowState
+    && efficiency.lastObservedCollectorWindowState !== normalized) {
+    efficiency.collectorWindowStateChangeCount += 1;
+  }
+  efficiency.lastObservedCollectorWindowState = normalized;
+  if (normalized === "minimized") efficiency.collectorWindowMinimizedDuringCollection = true;
+}
+
+async function recordCollectorPresentationPhase(phase, trace = {}, snapshot = null) {
+  const efficiency = collectorEfficiencyFromTrace(trace);
+  const observed = snapshot || await snapshotCollectorChromePresentation();
+  noteCollectorWindowState(efficiency, observed.windowState);
+  if (efficiency && phase === "creation") {
+    efficiency.collectorWindowStateAtCreation = observed.windowState;
+    efficiency.collectorWindowFocusedAtCreation = observed.focused === true;
+    efficiency.collectorTabActiveAtCreation = observed.tabActive === true;
+  }
+  if (efficiency && phase === "collection_start") {
+    efficiency.collectorWindowStateAtCollectionStart = observed.windowState;
+    efficiency.collectorWindowFocusedAtCollectionStart = observed.focused === true;
+    efficiency.collectorTabActiveAtCollectionStart = observed.tabActive === true;
+    efficiency.collectorTabDiscardedAtCollectionStart = observed.discarded === true;
+    efficiency.collectorTabStatusAtCollectionStart = observed.tabStatus;
+  }
+  if (efficiency && phase === "collection_end") {
+    efficiency.collectorWindowStateAtCollectionEnd = observed.windowState;
+    efficiency.collectorWindowFocusedAtCollectionEnd = observed.focused === true;
+    efficiency.collectorTabActiveAtCollectionEnd = observed.tabActive === true;
+  }
+  diagnostic("collector window presentation", {
+    ...trace,
+    stage: `collector_window_presentation_${phase}`,
+    collector_window_state: observed.windowState,
+    collector_window_focused: observed.focused === true,
+    collector_tab_active: observed.tabActive === true,
+    collector_tab_discarded: observed.discarded === true,
+    collector_tab_status: observed.tabStatus,
+    collector_window_state_change_count: efficiency?.collectorWindowStateChangeCount || 0,
+    collector_window_unminimized_by_connector: efficiency?.collectorWindowUnminimizedByConnector === true,
+    collector_window_minimized_during_collection: efficiency?.collectorWindowMinimizedDuringCollection === true,
+    status: "observed"
+  });
+  return observed;
+}
+
+function normalizeCollectorIdentity(value) {
+  if (!value || typeof value !== "object") return null;
+  const role = value.collector_role || value.collectorRole;
+  if (role !== "collector") return null;
+  const instanceId = typeof (value.collector_instance_id || value.instanceId) === "string"
+    ? String(value.collector_instance_id || value.instanceId).slice(0, 128)
+    : "";
+  if (!instanceId) return null;
+  const managedGeneration = Number.isSafeInteger(value.collector_managed_generation)
+    ? value.collector_managed_generation
+    : (Number.isSafeInteger(value.managedGeneration) ? value.managedGeneration : 0);
+  const managedAt = Number.isSafeInteger(value.collector_managed_at)
+    ? value.collector_managed_at
+    : (Number.isSafeInteger(value.managedAt) ? value.managedAt : 0);
+  return { instanceId, managedGeneration, managedAt };
+}
+
+async function queryCollectorTabIdentity(tabId) {
+  if (!Number.isSafeInteger(tabId) || typeof chrome.tabs?.sendMessage !== "function") return null;
+  try {
+    const result = await chrome.tabs.sendMessage(tabId, { type: COLLECTOR_IDENTITY_MESSAGE_GET });
+    return normalizeCollectorIdentity(result);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function stampCollectorTabIdentity(tab) {
+  if (!tab || !Number.isSafeInteger(tab.id)) return null;
+  const instanceId = ensureCollectorInstanceId();
+  const managedGeneration = Math.max(1, (Number(collectorWindowState.managedGeneration) || 0) + 1);
+  const managedAt = Date.now();
+  collectorWindowState = {
+    ...collectorWindowState,
+    windowId: Number.isSafeInteger(tab.windowId) ? tab.windowId : collectorWindowState.windowId,
+    tabId: tab.id,
+    instanceId,
+    managedGeneration,
+    managedAt
+  };
+  void persistCollectorWindowState();
+  if (typeof chrome.tabs?.sendMessage === "function") {
+    try {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: COLLECTOR_IDENTITY_MESSAGE_SET,
+        collector_role: "collector",
+        collector_instance_id: instanceId,
+        collector_managed_generation: managedGeneration,
+        collector_managed_at: managedAt
+      });
+    } catch (_) { }
+  }
+  return { instanceId, managedGeneration, managedAt };
+}
+
+async function listCollectorCandidateWindows() {
+  if (typeof chrome.windows?.getAll !== "function") return [];
+  try {
+    const windows = await chrome.windows.getAll();
+    return Array.isArray(windows) ? windows.filter((window) => !window?.type || window.type === "normal") : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+async function discoverMarkedCollectorCandidates() {
+  const windows = await listCollectorCandidateWindows();
+  const candidates = [];
+  let focusedCount = 0;
+  let activeCount = 0;
+  for (const window of windows) {
+    if (window?.focused === true) focusedCount += 1;
+    const tabs = Array.isArray(window?.tabs) ? window.tabs : await tabsInCollectorWindow(window?.id);
+    for (const tab of tabs) {
+      if (tab?.active === true) activeCount += 1;
+      if (!isChatGptTab(tab) && !(typeof tab?.url === "string" && tab.url.startsWith("https://chatgpt.com"))) {
+        continue;
+      }
+      const identity = await queryCollectorTabIdentity(tab.id);
+      if (!identity) continue;
+      candidates.push({
+        window,
+        tab,
+        identity,
+        focused: window?.focused === true,
+        active: tab?.active === true,
+        minimized: window?.state === "minimized"
+      });
+    }
+  }
+  return { windows, candidates, focusedCount, activeCount };
+}
+
+function selectMarkedCollectorCandidate(candidates, persistedTabId, persistedWindowId, instanceId) {
+  const marked = Array.isArray(candidates) ? [...candidates] : [];
+  if (marked.length === 0) return { selected: null, reason: "no_existing_collector", duplicateCount: 0 };
+  const matchingInstance = instanceId
+    ? marked.filter((item) => item.identity?.instanceId === instanceId)
+    : marked;
+  const pool = matchingInstance.length > 0 ? matchingInstance : marked;
+  if (pool.length === 0) {
+    return { selected: null, reason: "no_existing_collector", duplicateCount: 0 };
+  }
+  const persisted = pool.find((item) => item.tab?.id === persistedTabId)
+    || pool.find((item) => item.window?.id === persistedWindowId);
+  if (persisted) {
+    return {
+      selected: persisted,
+      reason: "recovered_marker",
+      duplicateCount: pool.length
+    };
+  }
+  pool.sort((left, right) => {
+    const generationDelta = (right.identity?.managedGeneration || 0) - (left.identity?.managedGeneration || 0);
+    if (generationDelta !== 0) return generationDelta;
+    const managedAtDelta = (right.identity?.managedAt || 0) - (left.identity?.managedAt || 0);
+    if (managedAtDelta !== 0) return managedAtDelta;
+    const windowDelta = (right.window?.id || 0) - (left.window?.id || 0);
+    if (windowDelta !== 0) return windowDelta;
+    return (right.tab?.id || 0) - (left.tab?.id || 0);
+  });
+  const uniqueTop = pool.length === 1
+    || (pool[0].identity?.managedGeneration || 0) !== (pool[1].identity?.managedGeneration || 0)
+    || (pool[0].identity?.managedAt || 0) !== (pool[1].identity?.managedAt || 0);
+  if (!uniqueTop) {
+    return { selected: null, reason: "ambiguous_existing_collectors", duplicateCount: pool.length };
+  }
+  return {
+    selected: pool[0],
+    reason: pool.length > 1 ? "recovered_marker" : "recovered_handshake",
+    duplicateCount: pool.length
+  };
+}
+
+function emptyCollectorResolution(fields = {}) {
+  return {
+    window: null,
+    tab: null,
+    reason: "no_existing_collector",
+    foundByPersistedId: false,
+    foundByMarker: false,
+    foundByHandshake: false,
+    persistedWindowIdPresent: false,
+    persistedTabIdPresent: false,
+    persistedWindowIdValid: false,
+    persistedTabIdValid: false,
+    candidateWindowCount: 0,
+    candidateTabCount: 0,
+    candidateFocusedCount: 0,
+    candidateActiveCount: 0,
+    duplicateCount: 0,
+    focusRequiredForMatch: false,
+    activeRequiredForMatch: false,
+    ...fields
+  };
+}
+
+async function resolveExistingCollector() {
+  const persistedWindowId = collectorWindowState.windowId;
+  const persistedTabId = collectorWindowState.tabId;
+  const instanceId = collectorWindowState.instanceId;
+  const persistedWindowIdPresent = Number.isSafeInteger(persistedWindowId);
+  const persistedTabIdPresent = Number.isSafeInteger(persistedTabId);
+  const persistedWindow = persistedWindowIdPresent ? await getChromeWindowById(persistedWindowId) : null;
+  const persistedTab = persistedTabIdPresent ? await getChromeTabById(persistedTabId) : null;
+  const persistedWindowIdValid = Boolean(persistedWindow);
+  const persistedTabIdValid = Boolean(persistedTab)
+    && (!persistedWindowIdValid || persistedTab.windowId === persistedWindow.id);
+
+  if (persistedWindowIdValid && persistedTabIdValid) {
+    return emptyCollectorResolution({
+      window: persistedWindow,
+      tab: persistedTab,
+      reason: "persisted_id",
+      foundByPersistedId: true,
+      persistedWindowIdPresent,
+      persistedTabIdPresent,
+      persistedWindowIdValid,
+      persistedTabIdValid
+    });
+  }
+
+  if (persistedWindowIdValid) {
+    const tabs = await tabsInCollectorWindow(persistedWindow.id);
+    const preferred = await chooseCollectorTab(tabs, persistedTabId);
+    return emptyCollectorResolution({
+      window: persistedWindow,
+      tab: preferred,
+      reason: persistedTabIdPresent && !persistedTabIdValid ? "stale_persisted_id" : "persisted_id",
+      foundByPersistedId: true,
+      persistedWindowIdPresent,
+      persistedTabIdPresent,
+      persistedWindowIdValid,
+      persistedTabIdValid,
+      candidateWindowCount: 1,
+      candidateTabCount: tabs.length
+    });
+  }
+
+  const discovered = await discoverMarkedCollectorCandidates();
+  const selection = selectMarkedCollectorCandidate(
+    discovered.candidates,
+    persistedTabId,
+    persistedWindowId,
+    instanceId);
+  const base = {
+    persistedWindowIdPresent,
+    persistedTabIdPresent,
+    persistedWindowIdValid,
+    persistedTabIdValid,
+    candidateWindowCount: discovered.windows.length,
+    candidateTabCount: discovered.candidates.length,
+    candidateFocusedCount: discovered.focusedCount,
+    candidateActiveCount: discovered.activeCount,
+    duplicateCount: selection.duplicateCount,
+    foundByMarker: selection.reason === "recovered_marker",
+    foundByHandshake: selection.reason === "recovered_handshake"
+      || selection.reason === "recovered_marker"
+  };
+  if (!selection.selected) {
+    const reason = selection.reason === "ambiguous_existing_collectors"
+      ? "ambiguous_existing_collectors"
+      : (persistedWindowIdPresent || persistedTabIdPresent
+        ? "stale_persisted_id"
+        : selection.reason);
+    return emptyCollectorResolution({
+      ...base,
+      reason
+    });
+  }
+  return emptyCollectorResolution({
+    ...base,
+    window: selection.selected.window,
+    tab: selection.selected.tab,
+    reason: selection.reason
+  });
+}
+
+function recordCollectorWindowResolution(resolution, trace = {}, created = false, reused = false) {
+  const efficiency = collectorProjectDiscoveryEfficiencyForRequest(trace.request_id);
+  const fingerprintWindow = collectorHandleFingerprint(
+    resolution?.window?.id || collectorWindowState.windowId,
+    resolution?.tab?.id || collectorWindowState.tabId);
+  if (efficiency) {
+    efficiency.persistedWindowIdPresent = resolution.persistedWindowIdPresent === true;
+    efficiency.persistedTabIdPresent = resolution.persistedTabIdPresent === true;
+    efficiency.persistedWindowIdValid = resolution.persistedWindowIdValid === true;
+    efficiency.persistedTabIdValid = resolution.persistedTabIdValid === true;
+    efficiency.collectorFoundByPersistedId = resolution.foundByPersistedId === true;
+    efficiency.collectorFoundByMarker = resolution.foundByMarker === true;
+    efficiency.collectorFoundByHandshake = resolution.foundByHandshake === true;
+    efficiency.collectorCandidateWindowCount = Number(resolution.candidateWindowCount) || 0;
+    efficiency.collectorCandidateTabCount = Number(resolution.candidateTabCount) || 0;
+    efficiency.collectorCandidateFocusedCount = Number(resolution.candidateFocusedCount) || 0;
+    efficiency.collectorCandidateActiveCount = Number(resolution.candidateActiveCount) || 0;
+    efficiency.duplicateCollectorCandidateCount = Number(resolution.duplicateCount) || 0;
+    efficiency.collectorFocusRequiredForMatch = false;
+    efficiency.collectorActiveRequiredForMatch = false;
+    efficiency.collectorResolutionReason = resolution.reason || (created ? "no_existing_collector" : "persisted_id");
+    efficiency.selectedCollectorWindowFingerprint = fingerprintWindow;
+    efficiency.selectedCollectorTabFingerprint = fingerprintWindow;
+    if (created) {
+      efficiency.collectorWindowCreated = true;
+      efficiency.collectorTabCreated = true;
+      efficiency.collectorCreationReason = "missing_collector_window";
+    } else if (reused) {
+      efficiency.collectorTabReused = true;
+    }
+  }
+  diagnostic("collector window resolution summary", {
+    ...trace,
+    trigger_source: efficiency?.collectionTriggerSource || trace.collection_trigger || "none",
+    persisted_window_id_present: resolution.persistedWindowIdPresent === true,
+    persisted_tab_id_present: resolution.persistedTabIdPresent === true,
+    persisted_window_id_valid: resolution.persistedWindowIdValid === true,
+    persisted_tab_id_valid: resolution.persistedTabIdValid === true,
+    collector_candidate_window_count: Number(resolution.candidateWindowCount) || 0,
+    collector_candidate_tab_count: Number(resolution.candidateTabCount) || 0,
+    collector_found_by_persisted_id: resolution.foundByPersistedId === true,
+    collector_found_by_marker: resolution.foundByMarker === true,
+    collector_found_by_handshake: resolution.foundByHandshake === true,
+    collector_candidate_focused_count: Number(resolution.candidateFocusedCount) || 0,
+    collector_candidate_active_count: Number(resolution.candidateActiveCount) || 0,
+    collector_reused: reused === true,
+    collector_created: created === true,
+    collector_resolution_reason: resolution.reason || (created ? "no_existing_collector" : "persisted_id"),
+    collector_focus_required_for_match: false,
+    collector_active_required_for_match: false,
+    duplicate_collector_candidate_count: Number(resolution.duplicateCount) || 0,
+    selected_collector_window_fingerprint: fingerprintWindow,
+    selected_collector_tab_fingerprint: fingerprintWindow,
+    status: "observed",
+    stage: "collector_window_resolution_summary",
+    target_tab_id: resolution?.tab?.id || collectorWindowState.tabId,
+    window_id: resolution?.window?.id || collectorWindowState.windowId
+  });
 }
 
 function collectorWindowLifecycle(lifecycle, fields = {}) {
@@ -3021,7 +4087,7 @@ function recordCollectorTabTopology(windowId, tabs, collectorTab, trace = {}) {
     collectorTabActive: topology.collectorTabActive,
     tabCountInWindow: topology.tabCount
   };
-  const valid = topology.tabCount === 1 && topology.collectorTabActive;
+  const valid = topology.collectorTabId !== null;
   const signature = [
     collectorWindowState.windowId,
     topology.collectorTabId,
@@ -3048,83 +4114,43 @@ function recordCollectorTabTopology(windowId, tabs, collectorTab, trace = {}) {
   return valid;
 }
 
-function chooseCollectorTab(tabs, preferredTabId = null) {
+async function chooseCollectorTab(tabs, preferredTabId = null) {
   const members = Array.isArray(tabs) ? tabs : [];
-  return members.find((tab) => tab?.id === preferredTabId)
-    || members.find((tab) => tab?.active === true && isChatGptTab(tab))
-    || members.find((tab) => isChatGptTab(tab))
-    || members.find((tab) => tab?.active === true)
-    || members[0]
-    || null;
+  const executionTabId = managedTabState.tabId;
+  const eligible = members.filter((tab) => !Number.isSafeInteger(executionTabId) || tab?.id !== executionTabId);
+  const preferred = eligible.find((tab) => tab?.id === preferredTabId)
+    || eligible.find((tab) => tab?.id === collectorWindowState.tabId);
+  if (preferred) return preferred;
+  for (const tab of eligible) {
+    if (!Number.isSafeInteger(tab?.id)) continue;
+    const identity = await queryCollectorTabIdentity(tab.id);
+    if (identity) return tab;
+  }
+  return null;
 }
 
 async function reconcileCollectorWindowTabs(windowId, preferredTabId = null, trace = {}) {
-  let tabs = await tabsInCollectorWindow(windowId);
-  let collectorTab = chooseCollectorTab(tabs, preferredTabId);
+  const tabs = await tabsInCollectorWindow(windowId);
+  const collectorTab = await chooseCollectorTab(tabs, preferredTabId);
   recordCollectorTabTopology(windowId, tabs, collectorTab, trace);
-
-  if (tabs.length > 1) {
-    diagnostic("collector tab count invalid", {
-      ...trace,
-      collector_window_id: windowId,
-      collector_tab_id: collectorTab?.id,
-      active_tab_id_in_collector_window: collectorTabTopology(tabs, collectorTab).activeTabId,
-      collector_tab_active: collectorTab?.active === true,
-      tab_count_in_collector_window: tabs.length,
-      status: "recovering",
-      error_code: "collector_tab_count_invalid",
-      stage: "collector_tab_reconcile"
-    });
-    if (typeof chrome.tabs?.remove !== "function") {
-      throw bridgeError(
-        "Collector Window内のTab数を1つに修復できません。",
-        0,
-        "collector_tab_count_invalid");
-    }
-    if (!collectorTab || !Number.isSafeInteger(collectorTab.id)) {
-      throw bridgeError(
-        "Collector Tabを決定できません。",
-        0,
-        "collector_tab_count_invalid");
-    }
+  if (collectorTab && Number.isSafeInteger(collectorTab.id)) {
     collectorWindowState = {
       ...collectorWindowState,
       windowId,
       tabId: collectorTab.id
     };
-    for (const extra of tabs.filter((tab) => tab?.id !== collectorTab.id)) {
-      if (!Number.isSafeInteger(extra?.id)) continue;
-      try {
-        await chrome.tabs.remove(extra.id);
-      } catch (_) {
-        // A concurrent close is harmless; the post-reconcile query below is
-        // the authority for whether the Window is actually back to one Tab.
-      }
-    }
-    tabs = await tabsInCollectorWindow(windowId);
-    collectorTab = chooseCollectorTab(tabs, collectorTab.id);
-    recordCollectorTabTopology(windowId, tabs, collectorTab, {
-      ...trace,
-      stage: "collector_tab_reconciled"
-    });
-    if (tabs.length !== 1 || !collectorTab) {
-      throw bridgeError(
-        "Collector Window内のTab数を1つに修復できません。",
-        0,
-        "collector_tab_count_invalid");
-    }
   }
-
-  collectorWindowState = {
-    ...collectorWindowState,
-    windowId,
-    tabId: collectorTab?.id ?? null
-  };
   return collectorTab;
 }
 
 function queueCollectorTabTopologyRepair(trace = {}) {
   if (!Number.isSafeInteger(collectorWindowState.windowId)) return Promise.resolve(null);
+  if (connectorManagedWindowEnsureInFlight
+    || managedExecutionWindowEnsureInFlight
+    || managedExecutionTabEnsureInFlight
+    || managedExecutionTabCreateInFlight) {
+    return Promise.resolve(null);
+  }
   return withCollectorWindowOperation(async () => {
     const window = await getCollectorWindow();
     if (!window) return null;
@@ -3133,14 +4159,14 @@ function queueCollectorTabTopologyRepair(trace = {}) {
       collectorWindowState.tabId,
       trace);
     if (!tab) {
-      const tabs = await tabsInCollectorWindow(window.id);
-      if (tabs.length === 0) {
-        return await ensureCollectorWindow(COLLECTOR_TAB_URL, {
-          ...trace,
-          stage: "collector_tab_topology_recreate"
-        });
+      if (collectorWindowState.lifecycle !== "Recoverable"
+        && !Number.isSafeInteger(collectorWindowState.tabId)) {
+        return null;
       }
-      return null;
+      return await ensureCollectorWindow(COLLECTOR_TAB_URL, {
+        ...trace,
+        stage: "collector_tab_topology_recreate"
+      });
     }
     if (collectorTabNeedsRecovery(tab)) {
       await replaceCollectorTab(tab, trace);
@@ -3149,7 +4175,7 @@ function queueCollectorTabTopologyRepair(trace = {}) {
         stage: "collector_tab_topology_recovery"
       });
     }
-    const enforced = await enforceCollectorTab(tab, trace);
+    const enforced = await enforceCollectorTab(tab, trace, { activate: false });
     recordCollectorTabTopology(
       window.id,
       await tabsInCollectorWindow(window.id),
@@ -3393,6 +4419,62 @@ function collectorProjectDiscoveryResultShape(source) {
   };
 }
 
+function mergeCollectorVisibilityTelemetry(efficiency, source) {
+  if (!efficiency || !source || typeof source !== "object") return;
+  if (source.document_visibility_state_at_collection_start) {
+    efficiency.documentVisibilityStateAtCollectionStart = normalizeDocumentVisibilityState(
+      source.document_visibility_state_at_collection_start);
+  }
+  if (source.document_visibility_state_at_collection_end) {
+    efficiency.documentVisibilityStateAtCollectionEnd = normalizeDocumentVisibilityState(
+      source.document_visibility_state_at_collection_end);
+  }
+  if (Number.isSafeInteger(source.document_visibility_change_count)
+    && source.document_visibility_change_count >= 0) {
+    efficiency.documentVisibilityChangeCount += source.document_visibility_change_count;
+  }
+  if (source.document_hidden_observed === true) efficiency.documentHiddenObserved = true;
+  if (source.document_became_visible_during_collection === true) {
+    efficiency.documentBecameVisibleDuringCollection = true;
+  }
+  if (source.document_became_hidden_during_collection === true) {
+    efficiency.documentBecameHiddenDuringCollection = true;
+  }
+  if (Number.isSafeInteger(source.document_hidden_duration_ms)
+    && source.document_hidden_duration_ms >= 0) {
+    efficiency.documentHiddenDurationMs += source.document_hidden_duration_ms;
+  }
+  if (Number.isSafeInteger(source.document_visible_duration_ms)
+    && source.document_visible_duration_ms >= 0) {
+    efficiency.documentVisibleDurationMs += source.document_visible_duration_ms;
+  }
+  const addMetric = (stateKey, sourceKey) => {
+    const value = source[sourceKey];
+    if (Number.isSafeInteger(value) && value >= 0) efficiency[stateKey] += value;
+  };
+  addMetric("hydrationLoopsWhileDocumentHidden", "hydration_loops_while_document_hidden");
+  addMetric("hydrationLoopsWhileDocumentVisible", "hydration_loops_while_document_visible");
+  addMetric("scrollAttemptsWhileHidden", "scroll_attempts_while_hidden");
+  addMetric("scrollAttemptsWhileVisible", "scroll_attempts_while_visible");
+  addMetric("mutationCountWhileHidden", "mutation_count_while_hidden");
+  addMetric("mutationCountWhileVisible", "mutation_count_while_visible");
+  addMetric("pollWaitMsWhileHidden", "poll_wait_ms_while_hidden");
+  addMetric("pollWaitMsWhileVisible", "poll_wait_ms_while_visible");
+  addMetric("identityAttemptsWhileHidden", "identity_attempts_while_hidden");
+  addMetric("identityAttemptsWhileVisible", "identity_attempts_while_visible");
+  addMetric("identityWaitMsWhileHidden", "identity_wait_ms_while_hidden");
+  addMetric("identityWaitMsWhileVisible", "identity_wait_ms_while_visible");
+  for (const key of ["slow_identity_indices_while_hidden", "slow_identity_indices_while_visible"]) {
+    if (!Array.isArray(source[key])) continue;
+    const target = key.endsWith("hidden")
+      ? "slowIdentityIndicesWhileHidden"
+      : "slowIdentityIndicesWhileVisible";
+    for (const index of source[key]) {
+      if (Number.isSafeInteger(index) && index >= 0) efficiency[target].push(index);
+    }
+  }
+}
+
 function recordCollectorProjectDiscoveryResult(source, pending) {
   const shape = collectorProjectDiscoveryResultShape(source);
   if (pending && typeof pending === "object") {
@@ -3545,6 +4627,7 @@ function recordCollectorProjectDiscoveryResult(source, pending) {
     if (source?.more_clickable_at_hydration_complete === true) {
       efficiency.moreClickableAtHydrationComplete = true;
     }
+    mergeCollectorVisibilityTelemetry(efficiency, source);
     assignIntegrityMetric(
       "projectCandidateRejectedChildChatCount",
       "project_candidate_rejected_child_chat_count");
@@ -3599,15 +4682,8 @@ function recordCollectorProjectDiscoveryResult(source, pending) {
 }
 
 async function getCollectorWindow(windowId = collectorWindowState.windowId) {
-  await collectorWindowStateReady;
-  if (!Number.isSafeInteger(windowId) || windowId < 0 || typeof chrome.windows?.get !== "function") return null;
-  try {
-    const window = await chrome.windows.get(windowId);
-    if (!window || window.type && window.type !== "normal") return null;
-    return window;
-  } catch (_) {
-    return null;
-  }
+  await hydrateCollectorWindowState();
+  return getChromeWindowById(windowId);
 }
 
 async function tabsInCollectorWindow(windowId) {
@@ -3641,7 +4717,11 @@ async function makeCollectorWindowUsable(window, trace = {}) {
   if (!window || !Number.isSafeInteger(window.id)) return null;
   let usable = window;
   const changes = {};
-  if (window.state === "minimized") changes.state = "normal";
+  if (window.state === "minimized") {
+    changes.state = "normal";
+    const efficiency = collectorEfficiencyFromTrace(trace);
+    if (efficiency) efficiency.collectorWindowUnminimizedByConnector = true;
+  }
   if (window.focused === true) changes.focused = false;
   if (Object.keys(changes).length > 0 && typeof chrome.windows?.update === "function") {
     try {
@@ -3696,7 +4776,161 @@ async function collectorWindowCreateData(url) {
   };
 }
 
-async function enforceCollectorTab(tab, trace = {}) {
+function bindConnectorManagedWindowId(windowId) {
+  if (!Number.isSafeInteger(windowId) || windowId < 0) return;
+  collectorWindowState = { ...collectorWindowState, windowId };
+  managedTabState = {
+    ...managedTabState,
+    executionWindowId: windowId,
+    executionWindowState: managedTabState.executionWindowState || "normal"
+  };
+  managedExecutionOwnedWindowIds.add(windowId);
+}
+
+async function liveConnectorManagedWindow() {
+  await hydrateCollectorWindowState();
+  await managedTabStateReady;
+  if (Number.isSafeInteger(collectorWindowState.windowId)) {
+    const existing = await getCollectorWindow();
+    if (existing) return existing;
+  }
+  const ownedLive = [];
+  for (const windowId of managedExecutionOwnedWindowIds) {
+    const owned = await getManagedExecutionWindow(windowId);
+    if (owned) ownedLive.push(owned);
+  }
+  if (ownedLive.length > 1) {
+    throw managedTabError(
+      "ambiguous_managed_execution_windows",
+      "execution_window_lookup",
+      "Managed Execution Windowの候補が複数あり、一意に特定できません。");
+  }
+  if (ownedLive.length === 1) return ownedLive[0];
+  if (Number.isSafeInteger(managedTabState.executionWindowId)) {
+    return getManagedExecutionWindow(managedTabState.executionWindowId);
+  }
+  return null;
+}
+
+async function ensureConnectorManagedWindowUnlocked(url, trace = {}, options = {}) {
+  const existing = await liveConnectorManagedWindow();
+  if (existing) {
+    bindConnectorManagedWindowId(existing.id);
+    connectorManagedWindowReusedCount += 1;
+    diagnostic("connector managed window reused", {
+      ...trace,
+      collector_window_id: existing.id,
+      execution_window_id: existing.id,
+      status: "reused",
+      stage: "connector_managed_window_reused"
+    });
+    return { window: existing, created: false };
+  }
+  if (typeof chrome.windows?.create !== "function") {
+    throw bridgeError("Connector Managed Windowを作成できません。", 0, "collector_window_create_failed");
+  }
+  diagnostic("connector managed window create requested", {
+    ...trace,
+    status: "requested",
+    stage: "connector_managed_window_create"
+  });
+  let created;
+  let createTimeout = null;
+  try {
+    const data = await collectorWindowCreateData(url);
+    created = await Promise.race([
+      chrome.windows.create(data),
+      new Promise((_, reject) => {
+        createTimeout = setTimeout(() => reject(bridgeError(
+          "Connector Managed Windowの作成がタイムアウトしました。",
+          0,
+          "collector_window_create_timeout")), COLLECTOR_WINDOW_CREATE_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (createTimeout !== null) clearTimeout(createTimeout);
+  }
+  if (!created || !Number.isSafeInteger(created.id) || created.id < 0) {
+    throw bridgeError("Connector Managed Windowを作成できません。", 0, "collector_window_create_failed");
+  }
+  bindConnectorManagedWindowId(created.id);
+  connectorManagedWindowCreatedCount += 1;
+  const createResultTabs = Array.isArray(created.tabs) ? created.tabs : [];
+  const queried = await tabsInCollectorWindow(created.id);
+  const initial = createResultTabs[0] || queried[0] || null;
+  const collectorInitial = options.role === "collector";
+  if (initial && Number.isSafeInteger(initial.id)) {
+    if (collectorInitial) {
+      collectorWindowState = { ...collectorWindowState, windowId: created.id, tabId: initial.id };
+      connectorManagedWindowInitialTabRole = "collector";
+    } else {
+      connectorManagedWindowInitialTabRole = "execution";
+      rememberCreatedExecutionWindowTabs(created.id, [initial, ...queried]);
+    }
+  }
+  diagnostic("connector managed window created", {
+    ...trace,
+    collector_window_id: created.id,
+    execution_window_id: created.id,
+    status: "created",
+    stage: "connector_managed_window_created"
+  });
+  if (options.role === "execution") {
+    const resolution = managedExecutionResolutionFor(trace.request_id, trace.handoff_id);
+    resolution.executionWindowPhysicalTabCountAtCreation = (createResultTabs.length || queried.length);
+    resolution.initialWindowTabFound = Boolean(initial && Number.isSafeInteger(initial.id));
+  }
+  const initialWindowState = created.state;
+  const initialTabActive = initial?.active === true;
+  const usable = options.role === "collector"
+    ? await makeCollectorWindowUsable({
+      ...created,
+      state: created.state || "normal"
+    }, trace)
+    : await makeManagedExecutionWindowUsable(created, trace);
+  return {
+    window: usable || created,
+    created: true,
+    initialWindowState,
+    initialTabActive
+  };
+}
+
+async function ensureConnectorManagedWindow(url, trace = {}, options = {}) {
+  if (connectorManagedWindowEnsureInFlight) return connectorManagedWindowEnsureInFlight;
+  let operation;
+  operation = (async () => {
+    try {
+      return await ensureConnectorManagedWindowUnlocked(url, trace, options);
+    } finally {
+      if (connectorManagedWindowEnsureInFlight === operation) connectorManagedWindowEnsureInFlight = null;
+    }
+  })();
+  connectorManagedWindowEnsureInFlight = operation;
+  return operation;
+}
+
+function collectorCollectionIsInFlight() {
+  if (collectorWindowState.projectDiscoveryInFlight === true) return true;
+  for (const pending of contextRequests.values()) {
+    if (pending?.generation === collectorContextGeneration
+      && pending?.projectDiscovery?.inFlight === true) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function waitForCollectorCollectionIdle() {
+  if (!collectorCollectionIsInFlight()) return;
+  const operation = collectorWindowStateOperation;
+  await Promise.race([
+    Promise.resolve(operation).catch(() => {}),
+    wait(120000)
+  ]);
+}
+
+async function enforceCollectorTab(tab, trace = {}, options = {}) {
   if (!tab || !Number.isSafeInteger(tab.id)) return tab;
   if (tab.windowId !== collectorWindowState.windowId) {
     throw bridgeError("Collector TabがCollector Windowにありません。", 0, "collector_tab_wrong_window");
@@ -3704,8 +4938,11 @@ async function enforceCollectorTab(tab, trace = {}) {
   if (tab.discarded === true || tab.frozen === true) {
     throw bridgeError("Collector Tabがdiscardedまたはfrozenになっています。", 0, "collector_tab_state_changed");
   }
+  const activate = options.activate !== false
+    && !managedExecutionTabEnsureInFlight
+    && !managedExecutionTabCreateInFlight;
   const changes = {};
-  if (tab.active !== true) changes.active = true;
+  if (activate && tab.active !== true) changes.active = true;
   if (tab.autoDiscardable !== false) changes.autoDiscardable = false;
   let normalized = tab;
   if (Object.keys(changes).length > 0 && typeof chrome.tabs?.update === "function") {
@@ -3816,11 +5053,19 @@ async function createCollectorTabInWindow(windowId, url, trace = {}) {
 }
 
 async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
-  await collectorWindowStateReady;
+  await hydrateCollectorWindowState();
   let rootNavigationCreated = false;
   let windowCreated = false;
   let tabCreated = false;
-  let window = await getCollectorWindow();
+  const resolution = await resolveExistingCollector();
+  let window = resolution.window;
+  if (!window && resolution.reason === "ambiguous_existing_collectors") {
+    recordCollectorWindowResolution(resolution, trace, false, false);
+    throw bridgeError(
+      "Collector Windowの候補が複数あり、一意に特定できません。",
+      0,
+      "ambiguous_existing_collectors");
+  }
   if (!window) {
     if (Number.isSafeInteger(collectorWindowState.windowId)) {
       diagnostic("collector window unavailable", {
@@ -3831,54 +5076,44 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
         stage: "collector_window_lookup"
       });
     }
-    if (typeof chrome.windows?.create !== "function") {
-      throw bridgeError("ChatGPT Context収集用Windowを作成できません。", 0, "collector_window_create_failed");
+    collectorWindowLifecycle("PreparingWindow", { windowId: null, tabId: collectorWindowState.tabId });
+    const ensured = await ensureConnectorManagedWindow(url, trace, { role: "collector" });
+    window = ensured.window;
+    windowCreated = ensured.created === true;
+    bindConnectorManagedWindowId(window.id);
+    if (windowCreated) {
+      await recordCollectorPresentationPhase("creation", trace, {
+        windowState: normalizeChromeWindowState(ensured.initialWindowState || window.state),
+        focused: window.focused === true,
+        tabActive: ensured.initialTabActive === true
+      });
+      if (isCollectorRootUrl(safeChatGptContextUrl(url))) {
+        rootNavigationCreated = true;
+        recordCollectorProjectDiscoveryEfficiencyNavigation(
+          trace.request_id,
+          "root",
+          null,
+          `${trace.request_id || "collector"}:created-window:${window.id}`);
+        recordCollectorProjectDiscoveryEfficiencyNavigation(
+          trace.request_id,
+          "full_page",
+          null,
+          `${trace.request_id || "collector"}:created-window:${window.id}:root`);
+      }
+      diagnostic("collector window created", {
+        ...trace,
+        collector_window_id: window.id,
+        collector_window_focused: window.focused === true,
+        collector_window_state: window.state || "normal",
+        collector_window_exists: true,
+        status: "created",
+        stage: "collector_window_created"
+      });
+    } else {
+      window = await makeCollectorWindowUsable(window, trace);
     }
-    collectorWindowLifecycle("PreparingWindow", { windowId: null, tabId: null });
-    let created;
-    let createTimeout = null;
-    try {
-      const data = await collectorWindowCreateData(url);
-      created = await Promise.race([
-        chrome.windows.create(data),
-        new Promise((_, reject) => {
-          createTimeout = setTimeout(() => reject(bridgeError(
-            "ChatGPT Context収集用Windowの作成がタイムアウトしました。",
-            0,
-            "collector_window_create_timeout")), COLLECTOR_WINDOW_CREATE_TIMEOUT_MS);
-        })
-      ]);
-    } finally {
-      if (createTimeout !== null) clearTimeout(createTimeout);
-    }
-    if (!created || !Number.isSafeInteger(created.id) || created.id < 0) {
-      throw bridgeError("ChatGPT Context収集用Windowを作成できません。", 0, "collector_window_create_failed");
-    }
-    window = await makeCollectorWindowUsable({ ...created, state: created.state || "normal" }, trace);
-    windowCreated = true;
-    if (isCollectorRootUrl(safeChatGptContextUrl(url))) {
-      rootNavigationCreated = true;
-      recordCollectorProjectDiscoveryEfficiencyNavigation(
-        trace.request_id,
-        "root",
-        null,
-        `${trace.request_id || "collector"}:created-window:${window.id}`);
-      recordCollectorProjectDiscoveryEfficiencyNavigation(
-        trace.request_id,
-        "full_page",
-        null,
-        `${trace.request_id || "collector"}:created-window:${window.id}:root`);
-    }
-    diagnostic("collector window created", {
-      ...trace,
-      collector_window_id: window.id,
-      collector_window_focused: window.focused === true,
-      collector_window_state: window.state || "normal",
-      collector_window_exists: true,
-      status: "created",
-      stage: "collector_window_created"
-    });
   } else {
+    bindConnectorManagedWindowId(window.id);
     window = await makeCollectorWindowUsable(window, trace);
   }
 
@@ -3891,7 +5126,7 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
   await waitForCollectorWindowTabs(window.id);
   let tab = await reconcileCollectorWindowTabs(
     window.id,
-    collectorWindowState.tabId,
+    resolution.tab?.id || collectorWindowState.tabId,
     trace);
   if (collectorTabNeedsRecovery(tab)) {
     await replaceCollectorTab(tab, trace);
@@ -3939,21 +5174,27 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
       "collector_tab_navigation_timeout");
   }
   collectorWindowLifecycle("WaitingContentScript", { windowId: window.id, tabId: tab.id });
+  await stampCollectorTabIdentity(tab);
+  recordCollectorWindowResolution(
+    {
+      ...resolution,
+      window,
+      tab,
+      reason: windowCreated
+        ? (resolution.reason === "stale_persisted_id" ? "stale_persisted_id" : "no_existing_collector")
+        : (resolution.reason || "persisted_id")
+    },
+    trace,
+    windowCreated,
+    !windowCreated && !tabCreated);
   const efficiency = collectorProjectDiscoveryEfficiencyForRequest(trace.request_id);
-  if (efficiency) {
-    if (windowCreated) {
-      efficiency.collectorWindowCreated = true;
-      efficiency.collectorTabCreated = true;
-      efficiency.collectorCreationReason = "missing_collector_window";
-    } else if (tabCreated) {
-      efficiency.collectorTabCreated = true;
-      if (!efficiency.collectorCreationReason) {
-        efficiency.collectorCreationReason = "missing_collector_tab";
-      }
-    } else {
-      efficiency.collectorTabReused = true;
+  if (efficiency && tabCreated && !windowCreated) {
+    efficiency.collectorTabCreated = true;
+    if (!efficiency.collectorCreationReason) {
+      efficiency.collectorCreationReason = "missing_collector_tab";
     }
   }
+  await emitConnectorManagedWindowTopologySummary(trace.request_id);
   return tab;
 }
 
@@ -4242,6 +5483,7 @@ async function waitForRootSidebarHydration(tab, pending, request, attempt = 0) {
       pending.projectDiscoveryEfficiency.rootHydrationPollIntervalMs =
         source.hydration_poll_interval_ms;
     }
+    mergeCollectorVisibilityTelemetry(pending.projectDiscoveryEfficiency, source);
     addCollectorProjectDiscoveryEfficiencyDuration(
       pending,
       "rootHydrationWaitMs",
@@ -4523,10 +5765,15 @@ async function ensureCollectorReady(tab, trace = {}) {
 }
 
 async function getCollectorTab() {
-  await collectorWindowStateReady;
+  await hydrateCollectorWindowState();
   const window = await getCollectorWindow();
   if (!window) {
-    collectorWindowState = { ...defaultCollectorWindowState };
+    collectorWindowState = {
+      ...defaultCollectorWindowState,
+      instanceId: collectorWindowState.instanceId,
+      managedGeneration: collectorWindowState.managedGeneration,
+      managedAt: collectorWindowState.managedAt
+    };
     void persistCollectorWindowState();
     return null;
   }
@@ -6538,6 +7785,7 @@ async function applyCollectorDomIdentityPass(
     projects: merged,
     unresolved_project_count: collectProjectMetadataResolution({ projects: merged }).unresolvedCount
   };
+  mergeCollectorVisibilityTelemetry(efficiency, domResult);
   if (efficiency && afterNavigation) {
     efficiency.postNavigationIdentityCount += 1;
     efficiency.postNavigationIdentityWaitMs += Math.max(0, Date.now() - startedAt);
@@ -8602,6 +9850,7 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
             ? "context_current_requested"
             : projectOnly ? "context_project_requested" : "context_list_requested"
         });
+      await recordCollectorPresentationPhase("collection_start", { request_id: requestId });
       addCollectorProjectDiscoveryEfficiencyDuration(
         pending,
         "collectorRecoveryWaitMs",
@@ -8673,7 +9922,7 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
           pending);
       }
     } finally {
-      emitCollectorProjectDiscoveryEfficiencySummary(
+      await emitCollectorProjectDiscoveryEfficiencySummary(
         pending,
         pending.projectDiscoveryResult || pending.projectIdentityResult
           || pending.projectDiscoveryScanResult,
@@ -8983,6 +10232,11 @@ function sendAssistantResponseToBridge(response, bridgeSocket) {
   if (response.error_code) envelope.error_code = response.error_code;
   if (response.message) envelope.message = response.message;
   if (response.stage) envelope.stage = response.stage;
+  if (typeof response.timeout_kind === "string"
+    && response.timeout_kind.length <= 64
+    && response.timeout_kind !== "none") {
+    envelope.timeout_kind = response.timeout_kind;
+  }
   if (Number.isSafeInteger(response.target_tab_id)) envelope.target_tab_id = response.target_tab_id;
   if (typeof response.target_tab_url === "string" && response.target_tab_url.length <= 2048) envelope.target_tab_url = response.target_tab_url;
   if (typeof response.target_conversation_id === "string" && response.target_conversation_id.length <= 128) {
@@ -9006,7 +10260,9 @@ function responseWatchMessageForPending(pending) {
     ...(pending.targetConversationId ? { targetConversationId: pending.targetConversationId } : {}),
     ...(pending.targetConversationUrl ? { targetConversationUrl: pending.targetConversationUrl } : {}),
     ...(pending.isReview ? { review: true } : {}),
-    ...(pending.preSend ? { prepare: true } : {})
+    ...(pending.preSend ? { prepare: true } : {}),
+    ...(typeof pending.tabActive === "boolean" ? { tabActive: pending.tabActive } : {}),
+    ...(typeof pending.windowFocused === "boolean" ? { windowFocused: pending.windowFocused } : {})
   };
 }
 
@@ -9056,6 +10312,13 @@ function scheduleResponseWatchRearm(pending) {
   }, RESPONSE_WATCH_REARM_DELAY_MS);
 }
 
+function timeoutKindForWatchError(errorCode, stage) {
+  if (errorCode === "tab_closed" || stage === "assistant_response_tab_closed") return "tab_closed";
+  if (errorCode === "content_script_unavailable") return "content_script_lost";
+  if (stage === "assistant_response_aborted") return "explicit_abort";
+  return "none";
+}
+
 function failResponseWatch(pending, errorCode, stage, message = "ChatGPTのassistant応答監視を開始できませんでした。") {
   if (responseWatches.get(pending.requestId) !== pending) return;
   if (pending.rearmTimer !== null) {
@@ -9064,17 +10327,29 @@ function failResponseWatch(pending, errorCode, stage, message = "ChatGPTのassis
   }
   stopResponseWatchLifecycleTelemetry(pending);
   responseWatches.delete(pending.requestId);
+  const timeoutKind = timeoutKindForWatchError(errorCode, stage);
   diagnostic("assistant response watch failed", responseWatchTraceForPending(pending, {
     status: "error",
     error_code: errorCode,
-    stage
+    stage,
+    timeout_kind: timeoutKind
+  }));
+  diagnostic("assistant response watch failure summary", responseWatchTraceForPending(pending, {
+    status: "error",
+    error_code: errorCode,
+    stage: "assistant_response_watch_failure_summary",
+    timeout_kind: timeoutKind,
+    timeout_triggered: timeoutKind !== "none" && timeoutKind !== "explicit_abort",
+    content_script_alive: errorCode !== "content_script_unavailable",
+    final_status: "error"
   }));
   recordManagedTabLifecycleTelemetry("response_watch_failed", responseWatchTraceForPending(pending, {
     status: "error",
     error_code: errorCode,
     stage,
-    assistant_state: errorCode === "response_stream_interrupted" ? "streaming" : "not_detected",
-    watcher_state: "idle"
+    assistant_state: errorCode === "response_stream_interrupted" ? "interrupted" : "not_detected",
+    watcher_state: "idle",
+    timeout_kind: timeoutKind
   }), pending.tabId);
   sendAssistantResponseToBridge({
     request_id: pending.requestId,
@@ -9085,11 +10360,25 @@ function failResponseWatch(pending, errorCode, stage, message = "ChatGPTのassis
     error_code: errorCode,
     message,
     stage,
+    timeout_kind: timeoutKind,
     ...(pending.isReview ? {
       target_tab_id: pending.targetTabId,
       target_tab_url: pending.targetTabUrl
     } : {})
   }, pending.bridgeSocket);
+}
+
+function failResponseWatchesForClosedTab(tabId) {
+  if (!Number.isSafeInteger(tabId)) return;
+  for (const pending of [...responseWatches.values()]) {
+    if (pending.tabId === tabId || pending.targetTabId === tabId) {
+      failResponseWatch(
+        pending,
+        "tab_closed",
+        "assistant_response_tab_closed",
+        "監視中のChatGPTタブが閉じられました。");
+    }
+  }
 }
 
 async function rearmResponseWatchesForTab(tabId) {
@@ -9190,6 +10479,23 @@ function scheduleManagedMediumRecovery(removedTabId = null, removedWindowId = nu
 
 async function recoverManagedTabAfterRemoval(removedTabId = null, removedWindowId = null, reason = "managed_tab_removed") {
   await managedTabStateReady;
+  const resolution = managedExecutionResolutionFor(
+    managedTabState.currentRequestId,
+    managedTabState.currentHandoffId);
+  resolution.recoveryAttemptCount += 1;
+  if (managedExecutionWindowEnsureInFlight || managedExecutionTabEnsureInFlight) {
+    resolution.recoveryJoinedInflightCount += 1;
+    diagnostic("managed execution recovery joined inflight", {
+      target_tab_id: removedTabId,
+      event_window_id: removedWindowId,
+      status: "pending",
+      stage: "managed_execution_recovery_joined_inflight"
+    });
+    try {
+      await (managedExecutionTabEnsureInFlight || managedExecutionWindowEnsureInFlight);
+    } catch (_) { }
+    return;
+  }
   const previousTabId = managedTabState.tabId;
   const previousExecutionWindowId = managedTabState.executionWindowId;
   const executionWindowRemoved = reason === "execution_window_removed";
@@ -9209,10 +10515,16 @@ async function recoverManagedTabAfterRemoval(removedTabId = null, removedWindowI
       : null);
 
   for (const pending of pendingWatches) {
+    const live = await liveManagedExecutionBinding(pending.requestId);
+    if (live && live.tab.id !== removedTabId) continue;
     pending.tabId = null;
     pending.targetTabId = null;
   }
-  for (const pending of pendingSends) pending.targetTabId = null;
+  for (const pending of pendingSends) {
+    const live = await liveManagedExecutionBinding(pending.requestId);
+    if (live && live.tab.id !== removedTabId) continue;
+    pending.targetTabId = null;
+  }
 
   if (executionWindowRemoved
     && Number.isSafeInteger(previousExecutionWindowId)
@@ -9228,6 +10540,17 @@ async function recoverManagedTabAfterRemoval(removedTabId = null, removedWindowI
     });
   } else if (managedTabState.tabId === removedTabId) {
     clearManagedTabState("PreparingTab");
+  }
+
+  if (executionWindowRemoved) {
+    managedExecutionRequestBindings.clear();
+    diagnostic("managed execution recovery skipped after window removal", {
+      target_tab_id: removedTabId,
+      event_window_id: removedWindowId,
+      status: "pending",
+      stage: "managed_execution_recovery_window_cleared"
+    });
+    return;
   }
 
   if (!conversationId && !conversationUrl) {
@@ -9612,12 +10935,107 @@ async function tabsInManagedExecutionWindow(windowId) {
   }
 }
 
-async function findManagedExecutionWindowTab(windowId) {
-  const tabs = await tabsInManagedExecutionWindow(windowId);
-  return tabs.find((tab) => tab?.id === managedTabState.tabId)
-    || tabs.find((tab) => isChatGptTab(tab))
-    || tabs[0]
-    || null;
+async function rememberedExecutionWindowTabs(windowId) {
+  const remembered = [];
+  const ids = managedExecutionWindowInitialTabs.get(windowId) || [];
+  if (typeof chrome.tabs?.get !== "function") return remembered;
+  for (const tabId of ids) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab && tab.windowId === windowId) remembered.push(tab);
+    } catch (_) { }
+  }
+  return remembered;
+}
+
+async function physicalTabsInExecutionWindow(windowId, extraTabs = []) {
+  const queried = await tabsInManagedExecutionWindow(windowId);
+  const byId = new Map();
+  for (const tab of [...extraTabs, ...queried, ...await rememberedExecutionWindowTabs(windowId)]) {
+    if (Number.isSafeInteger(tab?.id) && tab.id >= 0) byId.set(tab.id, tab);
+  }
+  return [...byId.values()];
+}
+
+function executionTabNeedsDestination(tab, destination) {
+  if (!tab || !isChatGptTab(tab)) return true;
+  const actual = tab.url || tab.pendingUrl;
+  const conversationId = chatGptConversationId(destination);
+  if (conversationId) return !isSameChatGptConversation(actual, destination, conversationId);
+  const actualKey = chatGptConversationKey(actual);
+  const expectedKey = chatGptConversationKey(destination);
+  return actualKey === null || expectedKey === null || actualKey !== expectedKey;
+}
+
+async function findManagedExecutionWindowTab(windowId, extraTabs = []) {
+  if (Number.isSafeInteger(managedTabState.tabId)
+    && managedTabState.tabId >= 0
+    && managedTabState.tabId !== collectorWindowState.tabId
+    && typeof chrome.tabs?.get === "function") {
+    try {
+      const bound = await chrome.tabs.get(managedTabState.tabId);
+      if (bound && bound.windowId === windowId && !isCollectorReservedTab(bound)) return bound;
+    } catch (_) { }
+  }
+  const tabs = (await physicalTabsInExecutionWindow(windowId, extraTabs))
+    .filter((tab) => !isCollectorReservedTab(tab));
+  const owned = tabs.filter((tab) => isOwnedManagedExecutionTab(tab));
+  if (owned.length === 1) return owned[0];
+  if (owned.length > 1) {
+    throw managedTabError(
+      "ambiguous_managed_execution_tabs",
+      "managed_tab_lookup",
+      "Managed Execution Tabの候補が複数あり、一意に特定できません。");
+  }
+  const createdInitial = tabs.filter((tab) => managedExecutionCreatedInitialTabIds.has(tab.id)
+    && connectorManagedWindowInitialTabRole === "execution");
+  if (createdInitial.length === 1) return createdInitial[0];
+  if (createdInitial.length > 1) {
+    const createdChatGpt = createdInitial.filter((tab) => isChatGptTab(tab));
+    if (createdChatGpt.length === 1) return createdChatGpt[0];
+    throw managedTabError(
+      "ambiguous_managed_execution_tabs",
+      "managed_tab_lookup",
+      "Managed Execution Tabの候補が複数あり、一意に特定できません。");
+  }
+  if (tabs.length === 1
+    && managedExecutionOwnedWindowIds.has(windowId)
+    && connectorManagedWindowInitialTabRole === "execution"
+    && (isPlaceholderExecutionTab(tabs[0]) || isOwnedManagedExecutionTab(tabs[0]))) {
+    return tabs[0];
+  }
+  const chatgpt = tabs.filter((tab) => isChatGptTab(tab));
+  if (chatgpt.length > 1) {
+    throw managedTabError(
+      "ambiguous_managed_execution_tabs",
+      "managed_tab_lookup",
+      "Managed Execution Tabの候補が複数あり、一意に特定できません。");
+  }
+  return null;
+}
+
+async function closeProvenCreatedInitialPlaceholder(windowId, keepTabId, resolution) {
+  if (!Number.isSafeInteger(windowId) || typeof chrome.tabs?.remove !== "function") return;
+  const tabs = await physicalTabsInExecutionWindow(windowId);
+  const leftover = tabs.filter((tab) => tab.id !== keepTabId
+    && tab.id !== collectorWindowState.tabId
+    && managedExecutionCreatedInitialTabIds.has(tab.id)
+    && isPlaceholderExecutionTab(tab)
+    && !isChatGptTab(tab)
+    && !isCollectorReservedTab(tab));
+  if (leftover.length !== 1) return;
+  try {
+    await chrome.tabs.remove(leftover[0].id);
+    forgetManagedExecutionTabId(leftover[0].id);
+    if (resolution) resolution.initialWindowTabClosed = true;
+    diagnostic("initial execution tab closed", {
+      execution_window_id: windowId,
+      event_tab_id: leftover[0].id,
+      target_tab_id: keepTabId,
+      status: "closed",
+      stage: "initial_tab_closed"
+    });
+  } catch (_) { }
 }
 
 async function makeManagedExecutionWindowUsable(window, trace = {}) {
@@ -9687,65 +11105,56 @@ async function managedExecutionWindowCreateData(url) {
   };
 }
 
-async function ensureManagedExecutionWindow(url, trace = {}) {
-  await managedTabStateReady;
+async function adoptCreatedManagedExecutionWindow(created, trace, resolution) {
   const existingWindowId = managedTabState.executionWindowId;
-  if (Number.isSafeInteger(existingWindowId) && existingWindowId >= 0) {
+  if (Number.isSafeInteger(existingWindowId)
+    && existingWindowId >= 0
+    && existingWindowId !== created.id) {
     const existing = await getManagedExecutionWindow(existingWindowId);
     if (existing) {
+      resolution.duplicateCreationPreventedCount += 1;
+      managedExecutionOwnedWindowIds.delete(created.id);
+      if (typeof chrome.windows?.remove === "function") {
+        try { await chrome.windows.remove(created.id); } catch (_) { }
+      }
+      diagnostic("managed execution duplicate window closed", {
+        ...trace,
+        execution_window_id: existingWindowId,
+        event_window_id: created.id,
+        status: "suppressed",
+        error_code: "duplicate_execution_window_prevented",
+        stage: "execution_window_duplicate_prevented"
+      });
+      resolution.executionWindowReusedCount += 1;
       return makeManagedExecutionWindowUsable(existing, trace);
     }
-    diagnostic("managed execution window unavailable", {
+  }
+  managedExecutionOwnedWindowIds.add(created.id);
+  managedExecutionGeneration += 1;
+  managedTabState = {
+    ...managedTabState,
+    executionGeneration: managedExecutionGeneration
+  };
+  const createResultTabs = Array.isArray(created.tabs) ? created.tabs : [];
+  rememberCreatedExecutionWindowTabs(created.id, createResultTabs);
+  const physicalTabs = await physicalTabsInExecutionWindow(created.id, createResultTabs);
+  rememberCreatedExecutionWindowTabs(created.id, physicalTabs);
+  resolution.executionWindowPhysicalTabCountAtCreation = physicalTabs.length;
+  resolution.initialWindowTabFound = physicalTabs.length >= 1;
+  const uniquePhysical = physicalTabs.length === 1 ? physicalTabs[0] : null;
+  const uniqueCreatedChatGpt = physicalTabs.filter((tab) => isChatGptTab(tab));
+  const initialTab = uniquePhysical
+    || (uniqueCreatedChatGpt.length === 1 ? uniqueCreatedChatGpt[0] : null);
+  if (initialTab && Number.isSafeInteger(initialTab.id)) {
+    stampManagedExecutionTab(initialTab, created.id);
+    diagnostic("initial execution tab detected", {
       ...trace,
-      execution_window_id: existingWindowId,
-      error_code: "execution_window_closed",
-      status: "error",
-      stage: "execution_window_lookup"
+      execution_window_id: created.id,
+      target_tab_id: initialTab.id,
+      execution_generation: managedExecutionGeneration,
+      status: "observed",
+      stage: "initial_tab_detected"
     });
-    clearManagedTabState("PreparingTab", { clearExecutionWindow: true });
-  }
-
-  if (typeof chrome.windows?.create !== "function") {
-    throw managedTabError(
-      "managed_execution_window_create_failed",
-      "execution_window_create",
-      "Managed ChatGPT Execution Windowを作成できません。");
-  }
-
-  diagnostic("managed execution window create requested", {
-    ...trace,
-    status: "requested",
-    stage: "execution_window_create"
-  });
-  let created;
-  let createTimeout = null;
-  try {
-    const createData = await managedExecutionWindowCreateData(url);
-    created = await Promise.race([
-      chrome.windows.create(createData),
-      new Promise((_, reject) => {
-        createTimeout = setTimeout(() => reject(managedTabError(
-          "managed_execution_window_create_timeout",
-          "execution_window_create_timeout",
-          "Managed ChatGPT Execution Windowの作成がタイムアウトしました。")), MANAGED_EXECUTION_WINDOW_CREATE_TIMEOUT_MS);
-      })
-    ]);
-  } catch (error) {
-    throw error?.code
-      ? error
-      : managedTabError(
-        "managed_execution_window_create_failed",
-        "execution_window_create",
-        "Managed ChatGPT Execution Windowを作成できません。");
-  } finally {
-    if (createTimeout !== null) clearTimeout(createTimeout);
-  }
-  if (!created || !Number.isSafeInteger(created.id) || created.id < 0) {
-    throw managedTabError(
-      "managed_execution_window_create_failed",
-      "execution_window_create",
-      "Managed ChatGPT Execution Windowを作成できません。"
-    );
   }
   const usable = await makeManagedExecutionWindowUsable({
     ...created,
@@ -9757,6 +11166,7 @@ async function ensureManagedExecutionWindow(url, trace = {}) {
     execution_window_id: usable.id,
     execution_window_focused: usable.focused,
     execution_window_state: executionWindowState(usable),
+    execution_generation: managedExecutionGeneration,
     status: "created",
     stage: "execution_window_created"
   });
@@ -9766,10 +11176,45 @@ async function ensureManagedExecutionWindow(url, trace = {}) {
     execution_window_focused: usable.focused,
     execution_window_state: executionWindowState(usable),
     execution_window_exists: true,
+    execution_generation: managedExecutionGeneration,
     status: "created",
     stage: "execution_window_created"
   }, null, null, usable.id);
+  resolution.executionWindowCreatedCount += 1;
+  resolution.ensureNewCreationCount += 1;
   return usable;
+}
+
+async function ensureManagedExecutionWindowUnlocked(url, trace, resolution) {
+  await managedTabStateReady;
+  await hydrateCollectorWindowState();
+  const ensured = await ensureConnectorManagedWindow(url, trace, { role: "execution" });
+  const window = ensured.window;
+  bindConnectorManagedWindowId(window.id);
+  if (ensured.created === true && connectorManagedWindowInitialTabRole === "execution") {
+    resolution.ensureNewCreationCount += 1;
+  } else {
+    resolution.executionWindowReusedCount += 1;
+  }
+  return makeManagedExecutionWindowUsable(window, trace);
+}
+
+async function ensureManagedExecutionWindow(url, trace = {}) {
+  const resolution = managedExecutionResolutionFor(trace.request_id, trace.handoff_id);
+  if (managedExecutionWindowEnsureInFlight) {
+    resolution.ensureJoinedInflightCount += 1;
+    return managedExecutionWindowEnsureInFlight;
+  }
+  let operation;
+  operation = (async () => {
+    try {
+      return await ensureManagedExecutionWindowUnlocked(url, trace, resolution);
+    } finally {
+      if (managedExecutionWindowEnsureInFlight === operation) managedExecutionWindowEnsureInFlight = null;
+    }
+  })();
+  managedExecutionWindowEnsureInFlight = operation;
+  return operation;
 }
 
 async function enforceManagedExecutionTab(tab, trace = {}) {
@@ -9825,14 +11270,14 @@ async function getManagedExecutionTab(trace) {
   }
   try {
     const tab = await chrome.tabs.get(managedTabState.tabId);
-    if (!tab || tab.id === undefined || !isChatGptTab(tab)) {
+    if (!tab || tab.id === undefined || !isUsableManagedExecutionTab(tab, managedTabState.executionWindowId)) {
       diagnostic("managed tab unavailable", {
         ...managedTabTrace(trace),
         status: "error",
         error_code: "managed_tab_unavailable",
         stage: "managed_tab_lookup"
       });
-      clearManagedTabState("Failed");
+      if (!tab || !isOwnedManagedExecutionTab(tab)) clearManagedTabState("Failed");
       return null;
     }
     if (tab.windowId !== managedTabState.executionWindowId) {
@@ -9873,9 +11318,28 @@ async function getManagedExecutionTab(trace) {
 }
 
 async function createManagedTabInExecutionWindow(url, windowId, trace) {
+  const resolution = managedExecutionResolutionFor(trace.request_id, trace.handoff_id);
+  if (managedExecutionTabCreateInFlight) {
+    resolution.ensureJoinedInflightCount += 1;
+    return managedExecutionTabCreateInFlight;
+  }
   if (typeof chrome.tabs?.create !== "function") {
     throw managedTabError("managed_tab_create_failed", "managed_tab_create", "Managed ChatGPTタブを作成できません。");
   }
+  resolution.managedTabCreateRequestedCount += 1;
+  let operation;
+  operation = (async () => {
+    try {
+      return await createManagedTabInExecutionWindowUnlocked(url, windowId, trace, resolution);
+    } finally {
+      if (managedExecutionTabCreateInFlight === operation) managedExecutionTabCreateInFlight = null;
+    }
+  })();
+  managedExecutionTabCreateInFlight = operation;
+  return operation;
+}
+
+async function createManagedTabInExecutionWindowUnlocked(url, windowId, trace, resolution) {
   let created;
   try {
     created = await chrome.tabs.create({ url, windowId, active: true });
@@ -9891,6 +11355,7 @@ async function createManagedTabInExecutionWindow(url, windowId, trace) {
     executionWindowId: windowId,
     executionWindowState: managedTabState.executionWindowState || "normal"
   };
+  stampManagedExecutionTab(created, windowId);
   managedTabLifecycle("PreparingTab", {
     tabId: created.id,
     executionWindowId: windowId,
@@ -9900,6 +11365,7 @@ async function createManagedTabInExecutionWindow(url, windowId, trace) {
     watcherReady: false
   });
   const normalized = await enforceManagedExecutionTab(created, trace);
+  resolution.managedTabCreatedCount += 1;
   diagnostic("managed tab created", {
     ...trace,
     status: "created",
@@ -9920,37 +11386,79 @@ async function createManagedTabInExecutionWindow(url, windowId, trace) {
 async function createManagedExecutionTab(url, trace) {
   const previousExecutionWindowId = managedTabState.executionWindowId;
   managedTabLifecycle("PreparingTab", {
-    tabId: null,
     contentReady: false,
     conversationReady: false,
     composerReady: false,
     watcherReady: false
   });
   const window = await ensureManagedExecutionWindow(url, trace);
-  let created = await findManagedExecutionWindowTab(window.id);
-  if (!created) created = await createManagedTabInExecutionWindow(url, window.id, trace);
-  else {
-    managedTabState = {
-      ...managedTabState,
-      tabId: created.id,
-      executionWindowId: window.id,
-      executionWindowState: executionWindowState(window)
-    };
+  const resolution = managedExecutionResolutionFor(trace.request_id, trace.handoff_id);
+  const createResultTabs = Array.isArray(window?.tabs) ? window.tabs : [];
+  let created = await findManagedExecutionWindowTab(window.id, createResultTabs);
+  if (created
+    && !isCollectorReservedTab(created)
+    && (isOwnedManagedExecutionTab(created)
+      || isChatGptTab(created)
+      || isPlaceholderExecutionTab(created))) {
+    stampManagedExecutionTab(created, window.id);
     managedTabLifecycle("PreparingTab", { tabId: created.id });
+    if (executionTabNeedsDestination(created, url)) {
+      created = await navigateManagedExecutionTab(created, url, trace);
+    }
     created = await enforceManagedExecutionTab(created, trace);
+    resolution.initialWindowTabFound = resolution.initialWindowTabFound || managedExecutionCreatedInitialTabIds.has(created.id);
+    if (connectorManagedWindowInitialTabRole === "execution"
+      && managedExecutionCreatedInitialTabIds.has(created.id)) {
+      resolution.initialWindowTabReused = true;
+      resolution.managedTabAdoptedFromWindowCreate = true;
+      diagnostic("initial execution tab adopted", {
+        ...trace,
+        status: "adopted",
+        stage: "initial_tab_adopted",
+        target_tab_id: created.id,
+        execution_window_id: window.id
+      });
+    } else {
+      resolution.managedTabReusedCount += 1;
+    }
+  } else if (!created) {
+    created = await createManagedTabInExecutionWindow(url, window.id, trace);
+    resolution.managedTabCreatedViaTabsCreate = true;
+    await closeProvenCreatedInitialPlaceholder(window.id, created.id, resolution);
+  } else {
+    throw managedTabError(
+      "ambiguous_managed_execution_tabs",
+      "managed_tab_lookup",
+      "Managed Execution Tabの候補が複数あり、一意に特定できません。");
   }
+  resolution.executionWindowPhysicalTabCountAfterTabResolution = await countPhysicalExecutionWindowTabs(window.id);
+  resolution.executionWindowPhysicalTabCountFinal = resolution.executionWindowPhysicalTabCountAfterTabResolution;
   if (previousExecutionWindowId !== window.id) {
     diagnostic("managed tab created", {
       ...trace,
-      status: "created",
+      status: resolution.managedTabCreatedViaTabsCreate === true ? "created" : "adopted",
       stage: "managed_tab_created",
       target_tab_id: created.id,
       execution_window_id: window.id
     });
     recordManagedTabLifecycleTelemetry("managed_tab_created", {
       ...trace,
-      status: "created",
+      status: resolution.managedTabCreatedViaTabsCreate === true ? "created" : "adopted",
       stage: "managed_tab_created",
+      target_tab_id: created.id,
+      execution_window_id: window.id
+    }, created.id, created, window.id);
+    diagnostic("managed tab ready", {
+      ...trace,
+      status: "ready",
+      stage: "managed_tab_ready",
+      target_tab_id: created.id,
+      execution_window_id: window.id
+    });
+    recordManagedTabLifecycleTelemetry("managed_tab_ready", {
+      ...trace,
+      status: "ready",
+      stage: "managed_tab_ready",
       target_tab_id: created.id,
       execution_window_id: window.id
     }, created.id, created, window.id);
@@ -10067,9 +11575,35 @@ async function ensureManagedExecutionTab(message, trace = traceForMessage(messag
   if (!destination) {
     throw managedTabError("target_conversation_not_found", "target_conversation_check", "保存済みのChatGPT Conversation URLがありません。");
   }
-  let tab = await getManagedExecutionTab(trace);
+  const resolution = managedExecutionResolutionFor(message?.request_id, message?.handoff_id);
+  resolution.ensureCallCount += 1;
+  if (managedExecutionTabEnsureInFlight) resolution.ensureJoinedInflightCount += 1;
+  let releaseMutex = () => {};
+  const previousMutex = managedExecutionTabEnsureMutex;
+  managedExecutionTabEnsureMutex = new Promise((resolve) => { releaseMutex = resolve; });
+  try {
+    await previousMutex;
+  } catch (_) { }
+  const operation = completeManagedExecutionTabEnsure(message, trace, target, destination, resolution);
+  managedExecutionTabEnsureInFlight = operation;
+  try {
+    return await operation;
+  } finally {
+    if (managedExecutionTabEnsureInFlight === operation) managedExecutionTabEnsureInFlight = null;
+    releaseMutex();
+  }
+}
+
+async function completeManagedExecutionTabEnsure(message, trace, target, destination, resolution) {
+  await waitForCollectorCollectionIdle();
+  const liveBound = await liveManagedExecutionBinding(message?.request_id);
+  let tab = liveBound?.tab || null;
+  if (!tab) tab = await getManagedExecutionTab(trace);
+  if (liveBound?.tab) resolution.managedTabReusedCount += 1;
   if (!tab) {
     tab = await createManagedExecutionTab(destination, trace);
+  } else if (!liveBound?.tab) {
+    resolution.managedTabReusedCount += 1;
   }
   if (!managedTabMatchesTarget(tab, target)) {
     tab = await navigateManagedExecutionTab(tab, destination, trace);
@@ -10082,6 +11616,12 @@ async function ensureManagedExecutionTab(message, trace = traceForMessage(messag
     });
   }
   tab = await enforceManagedExecutionTab(tab, trace);
+  stampManagedExecutionTab(tab, tab.windowId ?? managedTabState.executionWindowId);
+  bindManagedExecutionToRequest(
+    message?.request_id,
+    tab.windowId ?? managedTabState.executionWindowId,
+    tab.id,
+    managedTabState.executionGeneration || managedExecutionGeneration);
 
   managedTabState = {
     ...managedTabState,
@@ -10165,6 +11705,25 @@ async function ensureManagedExecutionTab(message, trace = traceForMessage(messag
     status: "ready",
     stage: "conversation_ready"
   }));
+  const bound = bindManagedExecutionToRequest(
+    message?.request_id,
+    resolvedTab?.windowId ?? tab.windowId ?? managedTabState.executionWindowId,
+    resolvedTab?.id ?? tab.id,
+    managedTabState.executionGeneration || managedExecutionGeneration);
+  const boundFingerprint = collectorHandleFingerprint(
+    bound?.executionWindowId,
+    bound?.targetTabId);
+  resolution.handoffBoundWindowFingerprint = boundFingerprint;
+  resolution.handoffBoundTabFingerprint = boundFingerprint;
+  emitManagedExecutionResolutionSummary(message?.request_id, {
+    finalExecutionWindowCount: await countOwnedExecutionWindows(),
+    finalManagedTabCount: await countOwnedExecutionTabs(
+      bound?.executionWindowId || managedTabState.executionWindowId),
+    finalExecutionWindowPhysicalTabCount: await countPhysicalExecutionWindowTabs(
+      bound?.executionWindowId || managedTabState.executionWindowId),
+    sameExecutionTab: true
+  });
+  await emitConnectorManagedWindowTopologySummary(message?.request_id);
   return {
     tab: resolvedTab || tab,
     target,
@@ -10361,7 +11920,32 @@ async function sendReviewMediaToTarget(message, bridgeSocket) {
 
 async function startAssistantResponseWatch(tabId, message, bridgeSocket, options = {}) {
   const requestId = message.request_id;
+  const bound = managedExecutionBindingForRequest(requestId);
+  if (bound && Number.isSafeInteger(bound.targetTabId)) {
+    const liveBound = await liveManagedExecutionBinding(requestId);
+    if (liveBound) tabId = liveBound.tab.id;
+  }
   const preSend = options.preSend === true;
+  let monitorWindowId = bound?.executionWindowId || managedTabState.executionWindowId;
+  let tabActive = null;
+  let windowFocused = null;
+  if (typeof chrome.tabs?.get === "function") {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (Number.isSafeInteger(tab?.windowId)) monitorWindowId = tab.windowId;
+      if (typeof tab?.active === "boolean") tabActive = tab.active;
+      if (Number.isSafeInteger(tab?.windowId) && typeof chrome.windows?.get === "function") {
+        try {
+          const windowInfo = await chrome.windows.get(tab.windowId);
+          if (typeof windowInfo?.focused === "boolean") windowFocused = windowInfo.focused;
+        } catch (_) { }
+      }
+    } catch (_) { }
+  }
+  lastResponseMonitorTabFingerprint = collectorHandleFingerprint(monitorWindowId, tabId);
+  const watchResolution = managedExecutionResolutionFor(requestId, message.handoff_id);
+  watchResolution.watcherWindowFingerprint = lastResponseMonitorTabFingerprint;
+  watchResolution.watcherTabFingerprint = lastResponseMonitorTabFingerprint;
   // A retry rotates request_id but intentionally keeps the same immutable
   // Handoff boundary. Do not let a late watcher from the previous attempt
   // compete with the current request or forward a stale response.
@@ -10369,7 +11953,11 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket, options
   diagnostic(message.handoff_kind === "review" ? "review response watch requested" : "response watch requested", traceForMessage(message, {
     status: "requested",
     stage: "response_watch_requested",
-    target_tab_id: tabId
+    target_tab_id: tabId,
+    handoff_send_collector_tab_fingerprint: lastHandoffSendTabFingerprint || "none",
+    response_monitor_collector_tab_fingerprint: lastResponseMonitorTabFingerprint,
+    same_collector_tab_for_send_and_monitor: Boolean(lastHandoffSendTabFingerprint)
+      && lastHandoffSendTabFingerprint === lastResponseMonitorTabFingerprint
   }));
   const pending = {
     requestId,
@@ -10389,7 +11977,9 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket, options
     rearmInProgress: false,
     rearmTimer: null,
     rearmDeadline: Date.now() + RESPONSE_WATCH_REARM_TIMEOUT_MS,
-    lifecycleTelemetryTimer: null
+    lifecycleTelemetryTimer: null,
+    tabActive,
+    windowFocused
   };
   responseWatches.set(requestId, pending);
   scheduleResponseWatchLifecycleTelemetry(pending);
@@ -10405,7 +11995,9 @@ async function startAssistantResponseWatch(tabId, message, bridgeSocket, options
       protocol: HANDOFF_PROTOCOL,
       targetTabId: tabId,
       ...(message.handoff_kind === "review" ? { review: true } : {}),
-      ...(preSend ? { prepare: true } : {})
+      ...(preSend ? { prepare: true } : {}),
+      ...(typeof tabActive === "boolean" ? { tabActive } : {}),
+      ...(typeof windowFocused === "boolean" ? { windowFocused } : {})
     },
     message,
     { timeoutMs: MANAGED_WATCHER_READY_TIMEOUT_MS, timeoutStage: "response_watch_ready_timeout" });
@@ -10562,6 +12154,14 @@ async function sendHandoffToManagedTab(message, bridgeSocket) {
     } else {
       targetTab = target.tab;
       targetTabId = targetTab?.id ?? null;
+      lastHandoffSendTabFingerprint = collectorHandleFingerprint(
+        targetTab?.windowId,
+        targetTabId);
+      const sendResolution = managedExecutionResolutionFor(message.request_id, message.handoff_id);
+      sendResolution.senderWindowFingerprint = lastHandoffSendTabFingerprint;
+      sendResolution.senderTabFingerprint = lastHandoffSendTabFingerprint;
+      sendResolution.handoffBoundWindowFingerprint = lastHandoffSendTabFingerprint;
+      sendResolution.handoffBoundTabFingerprint = lastHandoffSendTabFingerprint;
       handoffCurrentContext = target.currentContext || null;
       const accepted = getAcceptedHandoff(message);
       if (accepted) {
@@ -10605,6 +12205,9 @@ async function sendHandoffToManagedTab(message, bridgeSocket) {
           currentBoundaryId: message.boundary_id
         });
         responseWatchPreArmed = true;
+        lastHandoffSendTabFingerprint = collectorHandleFingerprint(
+          targetTab.windowId,
+          targetTab.id);
         responseWatchReady = await startAssistantResponseWatch(targetTab.id, message, bridgeSocket, { preSend: true });
         if (!responseWatchReady) {
           result = handoffResult(
@@ -10846,6 +12449,7 @@ async function sendHandoffToManagedTab(message, bridgeSocket) {
     }
     pendingHandoffSends.delete(pendingSend.requestId);
   }
+  emitManagedExecutionResolutionSummary(message.request_id, { sameExecutionTab: true });
   return result;
   });
 }
@@ -10927,7 +12531,9 @@ async function handleAssistantResponseFromContent(message, sender) {
     }, sender?.tab?.id);
     return;
   }
-  if (Number.isSafeInteger(managedTabState.tabId) && managedTabState.tabId !== pending.tabId) {
+  if (Number.isSafeInteger(managedTabState.tabId)
+    && managedTabState.tabId !== pending.tabId
+    && managedExecutionBindingForRequest(requestId)?.targetTabId !== pending.tabId) {
     diagnostic("assistant response rejected", {
       request_id: requestId,
       session_id: sessionId,
@@ -11090,6 +12696,9 @@ async function handleAssistantResponseFromContent(message, sender) {
   let responsePayload = message?.payload;
   let responseMessage = message?.message;
   let stage = message?.stage;
+  let timeoutKind = typeof message?.timeoutKind === "string"
+    ? message.timeoutKind
+    : (typeof message?.timeout_kind === "string" ? message.timeout_kind : "none");
   if (status === "received" && (typeof responsePayload !== "string" || responsePayload.length === 0)) {
     status = "error";
     errorCode = "response_extraction_failed";
@@ -11113,7 +12722,8 @@ async function handleAssistantResponseFromContent(message, sender) {
     status,
     error_code: errorCode,
     stage: "assistant_response_received",
-    target_tab_id: pending.tabId
+    target_tab_id: pending.tabId,
+    timeout_kind: timeoutKind
   });
   recordManagedTabLifecycleTelemetry("assistant_response_received", responseWatchTraceForPending(pending, {
     status,
@@ -11122,9 +12732,12 @@ async function handleAssistantResponseFromContent(message, sender) {
     assistant_state: status === "received"
       ? "completed"
       : errorCode === "response_stream_interrupted"
-        ? "streaming"
-        : "not_detected",
-    watcher_state: "idle"
+        ? "interrupted"
+        : timeoutKind === "inactivity_timeout" || timeoutKind === "hard_timeout"
+          ? "stalled"
+          : "not_detected",
+    watcher_state: "idle",
+    timeout_kind: timeoutKind
   }), pending.tabId);
   if (status === "received") {
     managedTabLifecycle("ResponseReceived", {
@@ -11165,8 +12778,9 @@ async function handleAssistantResponseFromContent(message, sender) {
       status: "error",
       error_code: errorCode,
       stage: "response_correlation_rejected",
-      assistant_state: errorCode === "response_stream_interrupted" ? "streaming" : "not_detected",
-      watcher_state: "idle"
+      assistant_state: errorCode === "response_stream_interrupted" ? "interrupted" : "not_detected",
+      watcher_state: "idle",
+      timeout_kind: timeoutKind
     }), pending.tabId);
   }
   sendAssistantResponseToBridge({
@@ -11179,6 +12793,7 @@ async function handleAssistantResponseFromContent(message, sender) {
     error_code: errorCode,
     message: responseMessage,
     stage,
+    timeout_kind: timeoutKind,
     ...(pending.isReview ? {
       target_tab_id: pending.tabId,
       target_tab_url: pending.targetTabUrl,
@@ -11227,10 +12842,9 @@ function handleBridgeMessage(message, bridgeSocket) {
   }
 
   if (message.type === "handoff.send") {
-    // The Background owns one active Managed ChatGPT Tab inside its
-    // connector-created Execution Window. All DOM discovery and mutation
-    // remains in the ChatGPT Content Script; the user's foreground tab is
-    // never selected as an execution target.
+    // The Background owns one Connector Managed Window with a Collector Tab
+    // and a separate Execution Tab. Handoff/watch/send never target the
+    // Collector Tab or a user's foreground ChatGPT tab.
     diagnostic("background received", traceForMessage(message, {
       stage: message.handoff_kind === "review" ? "review_handoff_received" : "handoff_received"
     }));
@@ -11510,8 +13124,10 @@ chrome.runtime.onStartup.addListener(() => {
 // the owner of the correlation identity, so the new script can safely locate
 // the same marker-bearing user message and continue from there.
 chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
-  const isManagedExecutionTab = Number.isSafeInteger(managedTabState.tabId)
-    && tabId === managedTabState.tabId
+  const isManagedExecutionTab = (
+    (Number.isSafeInteger(managedTabState.tabId) && tabId === managedTabState.tabId)
+    || managedExecutionOwnedTabIds.has(tabId)
+  )
     && Number.isSafeInteger(managedTabState.executionWindowId)
     && tab?.windowId === managedTabState.executionWindowId;
   const isCollectorWindowTab = Number.isSafeInteger(collectorWindowState.tabId)
@@ -11528,7 +13144,7 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
     "autoDiscardable",
     "url"
   ].some((key) => Object.prototype.hasOwnProperty.call(changeInfo || {}, key));
-  if (isCollectorWindowMember && collectorTabLifecycleChanged) {
+  if (isCollectorWindowTab && (changeInfo?.discarded === true || changeInfo?.frozen === true)) {
     void queueCollectorTabTopologyRepair({
       event_tab_id: tabId,
       event_window_id: tab?.windowId,
@@ -11550,9 +13166,9 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
       tab_status: typeof tab?.status === "string" ? tab.status : changeInfo?.status
     });
   }
-  if (isCollectorWindowTab) {
-    const efficiencyPending = contextRequests.get(collectorWindowState.requestId);
-    if (efficiencyPending?.tabId === tabId) {
+  const efficiencyPending = [...contextRequests.values()].find((pending) => pending.tabId === tabId)
+    || contextRequests.get(collectorWindowState.requestId);
+  if (efficiencyPending?.tabId === tabId) {
       if (Object.prototype.hasOwnProperty.call(changeInfo || {}, "url")) {
         recordCollectorProjectDiscoveryEfficiencyObservedEvent(
           efficiencyPending.requestId,
@@ -11568,7 +13184,6 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
           efficiencyPending.requestId,
           "observedCompleteCount");
       }
-    }
   }
   const identityNavigationPending = isCollectorWindowTab
     ? collectorProjectIdentityPendingForTab(tabId)
@@ -11776,7 +13391,8 @@ chrome.tabs.onActivated?.addListener?.((activeInfo) => {
       tab_active: activeInfo?.windowId === collectorWindowState.windowId
         && activeInfo?.tabId === collectorWindowState.tabId
     });
-    if (activeInfo?.windowId === collectorWindowState.windowId) {
+    if (activeInfo?.windowId === collectorWindowState.windowId
+      && activeInfo?.tabId !== managedTabState.tabId) {
       diagnostic("collector tab activation restore requested", {
         collector_window_id: collectorWindowState.windowId,
         collector_tab_id: collectorWindowState.tabId,
@@ -11802,6 +13418,8 @@ chrome.tabs.onActivated?.addListener?.((activeInfo) => {
   }, managedTabState.tabId, null, activeInfo?.windowId);
   if (activeInfo?.windowId === managedTabState.executionWindowId
     && activeInfo?.tabId !== managedTabState.tabId
+    && activeInfo?.tabId !== collectorWindowState.tabId
+    && !collectorCollectionIsInFlight()
     && typeof chrome.tabs?.get === "function") {
     diagnostic("managed execution tab activation restored", {
       ...managedTabTrace({
@@ -11827,6 +13445,20 @@ chrome.tabs.onActivated?.addListener?.((activeInfo) => {
   }
 });
 
+chrome.windows?.onBoundsChanged?.addListener?.((window) => {
+  if (!window || window.id !== collectorWindowState.windowId) return;
+  void recordCollectorPresentationPhase("bounds_changed", {
+    request_id: collectorWindowState.requestId,
+    event_window_id: window.id
+  }, {
+    windowState: normalizeChromeWindowState(window.state),
+    focused: window.focused === true,
+    tabActive: false,
+    discarded: false,
+    tabStatus: "unknown"
+  });
+});
+
 chrome.windows?.onFocusChanged?.addListener?.((windowId) => {
   const hasCollectorWindow = Number.isSafeInteger(collectorWindowState.windowId);
   if (hasCollectorWindow) {
@@ -11836,6 +13468,10 @@ chrome.windows?.onFocusChanged?.addListener?.((windowId) => {
       collector_window_id: collectorWindowState.windowId,
       collector_tab_id: collectorWindowState.tabId,
       collector_window_focused: windowId === collectorWindowState.windowId,
+      event_window_id: windowId
+    });
+    void recordCollectorPresentationPhase("focus_changed", {
+      request_id: collectorWindowState.requestId,
       event_window_id: windowId
     });
     if (windowId === collectorWindowState.windowId
@@ -11892,6 +13528,9 @@ chrome.windows?.onFocusChanged?.addListener?.((windowId) => {
 });
 
 chrome.tabs.onRemoved?.addListener?.((tabId, removeInfo) => {
+  if (removeInfo?.isWindowClosing === true) {
+    failResponseWatchesForClosedTab(tabId);
+  }
   if (tabId === collectorWindowState.tabId) {
     markCollectorRequestMediumLost(tabId, removeInfo?.windowId, "collector_tab_removed");
   }
@@ -11920,7 +13559,16 @@ chrome.tabs.onRemoved?.addListener?.((tabId, removeInfo) => {
       stage: "collector_tab_removed"
     });
   }
-  if (tabId !== managedTabState.tabId) return;
+  forgetManagedExecutionTabId(tabId);
+  if (tabId !== managedTabState.tabId) {
+    for (const [requestId, binding] of managedExecutionRequestBindings) {
+      if (binding.targetTabId === tabId) managedExecutionRequestBindings.delete(requestId);
+    }
+    return;
+  }
+  for (const [requestId, binding] of managedExecutionRequestBindings) {
+    if (binding.targetTabId === tabId) managedExecutionRequestBindings.delete(requestId);
+  }
   contentScriptReadyTabs.delete(tabId);
   recordManagedTabLifecycleTelemetry("tabs_on_removed", {
     status: "error",
@@ -11945,7 +13593,15 @@ chrome.windows?.onRemoved?.addListener?.((windowId) => {
   if (windowId === collectorWindowState.windowId) {
     markCollectorRequestMediumLost(null, windowId, "collector_window_removed");
     const collectorTabId = collectorWindowState.tabId;
-    collectorWindowState = { ...defaultCollectorWindowState };
+    const instanceId = collectorWindowState.instanceId;
+    const managedGeneration = collectorWindowState.managedGeneration;
+    const managedAt = collectorWindowState.managedAt;
+    collectorWindowState = {
+      ...defaultCollectorWindowState,
+      instanceId,
+      managedGeneration,
+      managedAt
+    };
     void persistCollectorWindowState();
     diagnostic("collector window removed", {
       status: "pending",
@@ -11956,6 +13612,10 @@ chrome.windows?.onRemoved?.addListener?.((windowId) => {
       target_tab_id: collectorTabId
     });
   }
+  if (windowId !== managedTabState.executionWindowId
+    && !managedExecutionOwnedWindowIds.has(windowId)) return;
+  managedExecutionOwnedWindowIds.delete(windowId);
+  managedExecutionWindowInitialTabs.delete(windowId);
   if (windowId !== managedTabState.executionWindowId) return;
   const managedTabId = managedTabState.tabId;
   recordManagedTabLifecycleTelemetry("windows_on_removed", {
@@ -12008,6 +13668,53 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch(() => sendResponse({ ok: false, error: "context_change_relay_failed" }));
     return true;
   }
+  if (message?.type === ASSISTANT_RESPONSE_WATCH_TELEMETRY_MESSAGE_TYPE) {
+    diagnostic(
+      message.stage === "assistant_response_watch_failure_summary"
+        ? "assistant response watch failure summary"
+        : "assistant response watch summary",
+      {
+        request_id: message.request_id || message.requestId,
+        session_id: message.session_id || message.sessionId,
+        handoff_id: message.handoff_id || message.handoffId,
+        boundary_id: message.boundary_id || message.boundaryId,
+        target_tab_id: message.target_tab_id,
+        target_tab_fingerprint: message.target_tab_fingerprint,
+        watch_started_at_relative_ms: message.watch_started_at_relative_ms,
+        send_confirmed_at_relative_ms: message.send_confirmed_at_relative_ms,
+        assistant_observed_at_relative_ms: message.assistant_observed_at_relative_ms,
+        streaming_started_at_relative_ms: message.streaming_started_at_relative_ms,
+        completion_observed_at_relative_ms: message.completion_observed_at_relative_ms,
+        total_watch_ms: message.total_watch_ms,
+        absolute_timeout_ms: message.absolute_timeout_ms,
+        inactivity_timeout_ms: message.inactivity_timeout_ms,
+        hard_timeout_ms: message.hard_timeout_ms,
+        poll_count: message.poll_count,
+        meaningful_progress_count: message.meaningful_progress_count,
+        last_progress_age_ms: message.last_progress_age_ms,
+        text_growth_event_count: message.text_growth_event_count,
+        response_remount_count: message.response_remount_count,
+        streaming_state_change_count: message.streaming_state_change_count,
+        thinking_state_observed: message.thinking_state_observed,
+        generation_alive_observation_count: message.generation_alive_observation_count,
+        document_visibility_state_at_start: message.document_visibility_state_at_start,
+        document_hidden_observed: message.document_hidden_observed,
+        tab_active_at_start: message.tab_active_at_start,
+        window_focused_at_start: message.window_focused_at_start,
+        timeout_triggered: message.timeout_triggered,
+        timeout_kind: message.timeout_kind,
+        assistant_streaming_at_failure: message.assistant_streaming_at_failure,
+        assistant_generation_alive_at_failure: message.assistant_generation_alive_at_failure,
+        response_node_present_at_failure: message.response_node_present_at_failure,
+        completion_detected: message.completion_detected,
+        final_status: message.final_status,
+        error_code: message.error_code,
+        status: message.status,
+        stage: message.stage || "assistant_response_watch_summary"
+      });
+    sendResponse({ ok: true });
+    return true;
+  }
   if (message?.type === ASSISTANT_RESPONSE_RESULT_MESSAGE_TYPE) {
     // Keep the MV3 service worker event alive until the Review target check
     // and authenticated WebSocket relay have completed. Returning before the
@@ -12044,7 +13751,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           const context = normalizeCurrentContext(message?.context);
           contentScriptReadyTabs.set(readyTabId, {
             readyAt: Date.now(),
-            context
+            context,
+            collectorIdentity: normalizeCollectorIdentity(message)
           });
           diagnostic("content script ready", {
             target_tab_id: readyTabId,

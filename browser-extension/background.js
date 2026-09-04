@@ -369,6 +369,7 @@ function isCollectorTelemetrySummaryStage(stage) {
     && (stage.endsWith("_complete")
       || stage.endsWith("_failure_summary")
       || stage === "collector_project_discovery_efficiency_summary"
+      || stage === "collector_project_identity_performance_summary"
     || stage === "collector_window_resolution_summary");
 }
 
@@ -605,6 +606,25 @@ function createCollectorProjectDiscoveryEfficiencyState(pending) {
     identityCandidateSearchMs: 0,
     identityRelocationWaitMs: 0,
     identityChildRegionWaitMs: 0,
+    childRegionWaitAverageMs: 0,
+    childRegionWaitMaxMs: 0,
+    childRegionWaitP50Ms: 0,
+    childRegionWaitP95Ms: 0,
+    childRegionImmediateHitCount: 0,
+    childRegionObserverNeededCount: 0,
+    childRegionPollNeededCount: 0,
+    childRegionEarlySuccessCount: 0,
+    childRegionTimeoutCount: 0,
+    childRegionAmbiguousCount: 0,
+    childRegionCandidateZeroCount: 0,
+    childRegionUniqueCandidateCount: 0,
+    childRegionSameIdMultiCandidateCount: 0,
+    childRegionDistinctIdCollisionCount: 0,
+    mutationQuietWaitTotalMs: 0,
+    disclosureOpenWaitTotalMs: 0,
+    remountRecoveryWaitTotalMs: 0,
+    identityPerformanceSlowProjectIndices: "",
+    identityPerformanceSlowProjectMs: "",
     identityNavigationWaitMs: 0,
     identityMiscWaitMs: 0,
     identitySourceRowMetadataCount: 0,
@@ -881,6 +901,67 @@ function recordCollectorProjectDiscoveryEfficiencyEvent(fields = {}, options = {
       efficiency.identityProjectElapsedMs.set(projectKey, previous + fields.identity_elapsed_ms);
     }
     recordCollectorIdentitySource(efficiency, fields.identity_source, projectKey);
+  }
+  if (stage === "collector_project_identity_performance_summary") {
+    efficiency.childRegionWaitAverageMs = Number.isSafeInteger(fields.child_region_wait_average_ms)
+      ? fields.child_region_wait_average_ms
+      : efficiency.childRegionWaitAverageMs;
+    efficiency.childRegionWaitMaxMs = Number.isSafeInteger(fields.child_region_wait_max_ms)
+      ? fields.child_region_wait_max_ms
+      : efficiency.childRegionWaitMaxMs;
+    efficiency.childRegionWaitP50Ms = Number.isSafeInteger(fields.child_region_wait_p50_ms)
+      ? fields.child_region_wait_p50_ms
+      : efficiency.childRegionWaitP50Ms;
+    efficiency.childRegionWaitP95Ms = Number.isSafeInteger(fields.child_region_wait_p95_ms)
+      ? fields.child_region_wait_p95_ms
+      : efficiency.childRegionWaitP95Ms;
+    efficiency.childRegionImmediateHitCount = Number.isSafeInteger(fields.child_region_immediate_hit_count)
+      ? fields.child_region_immediate_hit_count
+      : efficiency.childRegionImmediateHitCount;
+    efficiency.childRegionObserverNeededCount = Number.isSafeInteger(fields.child_region_observer_needed_count)
+      ? fields.child_region_observer_needed_count
+      : efficiency.childRegionObserverNeededCount;
+    efficiency.childRegionPollNeededCount = Number.isSafeInteger(fields.child_region_poll_needed_count)
+      ? fields.child_region_poll_needed_count
+      : efficiency.childRegionPollNeededCount;
+    efficiency.childRegionEarlySuccessCount = Number.isSafeInteger(fields.child_region_early_success_count)
+      ? fields.child_region_early_success_count
+      : efficiency.childRegionEarlySuccessCount;
+    efficiency.childRegionTimeoutCount = Number.isSafeInteger(fields.child_region_timeout_count)
+      ? fields.child_region_timeout_count
+      : efficiency.childRegionTimeoutCount;
+    efficiency.childRegionAmbiguousCount = Number.isSafeInteger(fields.child_region_ambiguous_count)
+      ? fields.child_region_ambiguous_count
+      : efficiency.childRegionAmbiguousCount;
+    efficiency.childRegionCandidateZeroCount = Number.isSafeInteger(fields.child_region_candidate_zero_count)
+      ? fields.child_region_candidate_zero_count
+      : efficiency.childRegionCandidateZeroCount;
+    efficiency.childRegionUniqueCandidateCount = Number.isSafeInteger(fields.child_region_unique_candidate_count)
+      ? fields.child_region_unique_candidate_count
+      : efficiency.childRegionUniqueCandidateCount;
+    efficiency.childRegionSameIdMultiCandidateCount =
+      Number.isSafeInteger(fields.child_region_same_id_multi_candidate_count)
+        ? fields.child_region_same_id_multi_candidate_count
+        : efficiency.childRegionSameIdMultiCandidateCount;
+    efficiency.childRegionDistinctIdCollisionCount =
+      Number.isSafeInteger(fields.child_region_distinct_id_collision_count)
+        ? fields.child_region_distinct_id_collision_count
+        : efficiency.childRegionDistinctIdCollisionCount;
+    efficiency.mutationQuietWaitTotalMs = Number.isSafeInteger(fields.mutation_quiet_wait_total_ms)
+      ? fields.mutation_quiet_wait_total_ms
+      : efficiency.mutationQuietWaitTotalMs;
+    efficiency.disclosureOpenWaitTotalMs = Number.isSafeInteger(fields.disclosure_open_wait_total_ms)
+      ? fields.disclosure_open_wait_total_ms
+      : efficiency.disclosureOpenWaitTotalMs;
+    efficiency.remountRecoveryWaitTotalMs = Number.isSafeInteger(fields.remount_recovery_wait_total_ms)
+      ? fields.remount_recovery_wait_total_ms
+      : efficiency.remountRecoveryWaitTotalMs;
+    if (typeof fields.slow_project_indices === "string") {
+      efficiency.identityPerformanceSlowProjectIndices = fields.slow_project_indices.slice(0, 128);
+    }
+    if (typeof fields.slow_project_ms === "string") {
+      efficiency.identityPerformanceSlowProjectMs = fields.slow_project_ms.slice(0, 128);
+    }
   }
   if (fields.stale_navigation_result_rejected === true) {
     efficiency.staleNavigationResultRejectedCount += 1;
@@ -1223,6 +1304,25 @@ async function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = 
     identity_candidate_search_ms: efficiency.identityCandidateSearchMs,
     identity_relocation_wait_ms: efficiency.identityRelocationWaitMs,
     identity_child_region_wait_ms: efficiency.identityChildRegionWaitMs,
+    child_region_wait_average_ms: efficiency.childRegionWaitAverageMs,
+    child_region_wait_max_ms: efficiency.childRegionWaitMaxMs,
+    child_region_wait_p50_ms: efficiency.childRegionWaitP50Ms,
+    child_region_wait_p95_ms: efficiency.childRegionWaitP95Ms,
+    child_region_immediate_hit_count: efficiency.childRegionImmediateHitCount,
+    child_region_observer_needed_count: efficiency.childRegionObserverNeededCount,
+    child_region_poll_needed_count: efficiency.childRegionPollNeededCount,
+    child_region_early_success_count: efficiency.childRegionEarlySuccessCount,
+    child_region_timeout_count: efficiency.childRegionTimeoutCount,
+    child_region_ambiguous_count: efficiency.childRegionAmbiguousCount,
+    child_region_candidate_zero_count: efficiency.childRegionCandidateZeroCount,
+    child_region_unique_candidate_count: efficiency.childRegionUniqueCandidateCount,
+    child_region_same_id_multi_candidate_count: efficiency.childRegionSameIdMultiCandidateCount,
+    child_region_distinct_id_collision_count: efficiency.childRegionDistinctIdCollisionCount,
+    mutation_quiet_wait_total_ms: efficiency.mutationQuietWaitTotalMs,
+    disclosure_open_wait_total_ms: efficiency.disclosureOpenWaitTotalMs,
+    remount_recovery_wait_total_ms: efficiency.remountRecoveryWaitTotalMs,
+    slow_project_indices: efficiency.identityPerformanceSlowProjectIndices,
+    slow_project_ms: efficiency.identityPerformanceSlowProjectMs,
     identity_navigation_wait_ms: efficiency.identityNavigationWaitMs,
     identity_misc_wait_ms: efficiency.identityMiscWaitMs,
     identity_source_row_metadata_count: efficiency.identitySourceRowMetadataCount,
@@ -1941,6 +2041,26 @@ function diagnostic(eventName, fields = {}) {
     "identity_candidate_search_ms",
     "identity_relocation_wait_ms",
     "identity_child_region_wait_ms",
+    "child_region_wait_average_ms",
+    "child_region_wait_max_ms",
+    "child_region_wait_p50_ms",
+    "child_region_wait_p95_ms",
+    "child_region_immediate_hit_count",
+    "child_region_observer_needed_count",
+    "child_region_poll_needed_count",
+    "child_region_early_success_count",
+    "child_region_timeout_count",
+    "child_region_ambiguous_count",
+    "child_region_candidate_zero_count",
+    "child_region_unique_candidate_count",
+    "child_region_same_id_multi_candidate_count",
+    "child_region_distinct_id_collision_count",
+    "mutation_quiet_wait_total_ms",
+    "disclosure_open_wait_total_ms",
+    "remount_recovery_wait_total_ms",
+    "slow_project_count",
+    "slow_project_indices",
+    "slow_project_ms",
     "identity_navigation_wait_ms",
     "identity_misc_wait_ms",
     "identity_elapsed_ms",
@@ -7042,6 +7162,30 @@ const collectorProjectIdentityNavigationTelemetryKeys = [
   "identity_child_region_wait_ms",
   "identity_candidate_search_ms",
   "identity_relocation_wait_ms",
+  "project_count",
+  "child_chat_resolved_count",
+  "navigation_resolved_count",
+  "child_region_wait_total_ms",
+  "child_region_wait_average_ms",
+  "child_region_wait_max_ms",
+  "child_region_wait_p50_ms",
+  "child_region_wait_p95_ms",
+  "child_region_immediate_hit_count",
+  "child_region_observer_needed_count",
+  "child_region_poll_needed_count",
+  "child_region_early_success_count",
+  "child_region_timeout_count",
+  "child_region_ambiguous_count",
+  "child_region_candidate_zero_count",
+  "child_region_unique_candidate_count",
+  "child_region_same_id_multi_candidate_count",
+  "child_region_distinct_id_collision_count",
+  "mutation_quiet_wait_total_ms",
+  "disclosure_open_wait_total_ms",
+  "remount_recovery_wait_total_ms",
+  "slow_project_count",
+  "slow_project_indices",
+  "slow_project_ms",
   "catalog_reused",
   "relocation_skipped_connected_row"
 ];
@@ -7766,7 +7910,8 @@ async function applyCollectorDomIdentityPass(
       identityCatalog: projects,
       totalProjects: projects.length,
       resetSidebarCatalog: resetSidebarCatalog === true,
-      navigationTimeoutMs: 10000
+      navigationTimeoutMs: 10000,
+      disclosureTimeoutMs: 2500
     }, request, {
       timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
       timeoutStage: "collector_project_identity_dom_timeout"

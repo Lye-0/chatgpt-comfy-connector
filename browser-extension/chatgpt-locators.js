@@ -1620,6 +1620,26 @@
     });
   }
 
+    function identityWaitObservationTarget(root) {
+    try {
+      return findSidebarRoot(root)
+        || root?.body
+        || root?.documentElement
+        || root;
+    } catch (_) {
+      return root;
+    }
+  }
+
+  // Short tick while waiting for a child region. Unrelated document-wide
+  // mutations are ignored by observing the Sidebar when possible. This is
+  // not a mutation-quiet gate: the caller inspects first and stops as soon
+  // as a unique Stable Project ID exists.
+  function waitForIdentityChildRegionTick(root, timeoutMs = 50) {
+    const waitMs = Math.max(16, Math.min(80, Number(timeoutMs) || 50));
+    return waitForSidebarMutation(identityWaitObservationTarget(root), waitMs);
+  }
+
   function waitForMorePaginationSettle(root, options = {}) {
     const timeoutMs = Math.max(40, Math.min(2000, Number(options.moreSettleMs)
       || Number(options.settleMs)
@@ -2870,9 +2890,12 @@
         if (direct) return direct;
       } catch (_) { }
     }
-    for (const source of sources) {
+    const scopedRoots = [];
+    const sidebar = findSidebarRoot(root);
+    if (sidebar) scopedRoots.push(sidebar);
+    for (const scoped of scopedRoots) {
       try {
-        const candidates = source.querySelectorAll?.("[id]") || [];
+        const candidates = scoped.querySelectorAll?.("[id]") || [];
         for (const candidate of candidates) {
           if (attributeValue(candidate, "id") === normalizedId) return candidate;
         }
@@ -2898,6 +2921,40 @@
       return region;
     }
     return null;
+  }
+
+  function projectExclusiveAdjacentListElements(row, root = row?.ownerDocument || globalThis.document, baseUrl = documentHref(root)) {
+    const elements = [];
+    const seen = new Set();
+    if (!row) return elements;
+    const sidebar = findSidebarRoot(root);
+    const otherRows = projectRowCandidatesInSidebar(sidebar).filter((candidate) => candidate !== row);
+    const belongsToOtherRow = (element) => otherRows.some((other) =>
+      element === other || isDescendantOf(element, other));
+    const siblingIsForeignProjectRow = (sibling) => {
+      if (!sibling || sibling === row) return false;
+      if (belongsToOtherRow(sibling)) return true;
+      const sidebarItem = attributeValue(sibling, "data-sidebar-item");
+      if (sidebarItem && sidebarItem !== "false") return true;
+      try {
+        for (const nested of sibling.querySelectorAll?.("[data-sidebar-item]") || []) {
+          if (nested !== row && !isDescendantOf(nested, row)) return true;
+        }
+      } catch (_) { }
+      return false;
+    };
+    let sibling = row.nextElementSibling;
+    for (let hops = 0; sibling && hops < 6; hops += 1, sibling = sibling.nextElementSibling) {
+      if (siblingIsForeignProjectRow(sibling)) break;
+      addProjectIdentityElement(elements, seen, sibling);
+      try {
+        for (const node of sibling.querySelectorAll?.("*") || []) {
+          if (belongsToOtherRow(node)) continue;
+          addProjectIdentityElement(elements, seen, node);
+        }
+      } catch (_) { }
+    }
+    return elements;
   }
 
   function projectRowsControllingDisclosureRegion(region, root, baseUrl) {
@@ -2940,7 +2997,8 @@
     baseUrl = globalThis.location?.href) {
     const controls = attributeValue(row, "aria-controls").trim();
     const region = projectDisclosureRegionForRow(row, root);
-    const regionElements = projectDisclosureElements(region);
+    const adjacent = projectExclusiveAdjacentListElements(row, root, baseUrl);
+    const regionElements = [...projectDisclosureElements(region), ...adjacent];
     const projectChatLinks = new Set();
     const projectHomeLinks = new Set();
     for (const element of regionElements) {
@@ -2959,12 +3017,8 @@
         else projectHomeLinks.add(identity.projectId);
       }
     }
-    const identity = region
-      ? resolveProjectIdentityFromCandidates(
-        row,
-        projectDisclosureElements(region),
-        baseUrl,
-        true)
+    const identity = (region || adjacent.length > 0)
+      ? resolveProjectIdentityFromCandidates(row, regionElements, baseUrl, true)
       : { reason: "controlled_region_not_found" };
     const ariaExpanded = safeAriaToken(row, "aria-expanded");
     return {
@@ -3006,6 +3060,9 @@
     // read and never broadens the scan to generic Sidebar controls.
     const controlledRegion = projectDisclosureRegionForRow(row);
     for (const element of projectDisclosureElements(controlledRegion)) {
+      addProjectIdentityElement(elements, seen, element);
+    }
+    for (const element of projectExclusiveAdjacentListElements(row, row?.ownerDocument || globalThis.document, baseUrl)) {
       addProjectIdentityElement(elements, seen, element);
     }
     let ancestor = row?.parentElement;
@@ -3068,10 +3125,27 @@
     return "other";
   }
 
+  function elementIsExclusiveAdjacentToProjectRow(row, element, root, baseUrl) {
+    if (!row || !element || element === row) return false;
+    const adjacent = projectExclusiveAdjacentListElements(row, root, baseUrl);
+    return adjacent.includes(element);
+  }
+
   function projectIdentityScopeForElement(row, element) {
-    const controlledRegion = projectDisclosureRegionForRow(row);
+    const root = row?.ownerDocument || element?.ownerDocument || globalThis.document;
+    const baseUrl = documentHref(root);
+    const controlledRegion = projectDisclosureRegionForRow(row, root);
     if (controlledRegion && (element === controlledRegion || isDescendantOf(element, controlledRegion))) {
       return "controlled";
+    }
+    if (elementIsExclusiveAdjacentToProjectRow(row, element, root, baseUrl)) {
+      for (const attribute of projectIdentityUrlAttributes) {
+        const rawUrl = attributeValue(element, attribute);
+        if (!rawUrl) continue;
+        const candidateUrl = chatGptMetadataUrl(rawUrl, baseUrl) || rawUrl;
+        if (conversationIdFromUrl(candidateUrl)) return "controlled";
+      }
+      return "shell";
     }
     if (element === row || (row && isDescendantOf(element, row))) return "row";
     return "shell";
@@ -4208,6 +4282,15 @@
     return lastRelocation;
   }
 
+  function classifyIdentityChildRegionCandidates(after, identity, lastReason) {
+    if (lastReason === "ambiguous_project_identity") return "distinct_id_collision";
+    const chatCount = Number(after?.controlledRegionProjectChatLinkCount) || 0;
+    if (identity?.projectId && chatCount > 1) return "same_id_multi_candidate";
+    if (identity?.projectId) return "unique_candidate";
+    if (chatCount === 0 && !(after?.controlledRegionProjectHomeLinkCount > 0)) return "candidate_zero";
+    return "other";
+  }
+
   async function resolveProjectIdentityFromDisclosureAsync(
     root,
     initialRow,
@@ -4228,6 +4311,10 @@
     let eventFallbackDispatched = false;
     let urlChanged = false;
     let navigationIdentity = null;
+    let waitStrategy = "immediate";
+    let observerNeeded = false;
+    let pollNeeded = false;
+    let remountRecoveryWaitMs = 0;
     const before = projectDisclosureStructureForRow(row, root, baseUrl);
     let after = before;
     let lastReason = before.controlledRegionFound
@@ -4238,8 +4325,12 @@
     const currentRow = () => {
       try {
         if (connectedRowStillMatchesDescriptor(row, descriptor, baseUrl)) return row;
+        const relocateStartedAt = Date.now();
         const relocated = options.relocateRow?.();
-        if (relocated) row = relocated;
+        if (relocated && relocated !== row) {
+          remountRecoveryWaitMs += Math.max(0, Date.now() - relocateStartedAt);
+          row = relocated;
+        } else if (relocated) row = relocated;
       } catch (_) { }
       return row;
     };
@@ -4290,6 +4381,12 @@
       const childRegionWaitMs = clickCompletedAt === null
         ? elapsedMs
         : Math.max(0, now - clickCompletedAt);
+      const resolvedReason = reason || (identity ? "none" : lastReason || "project_disclosure_identity_not_found");
+      const candidateClass = classifyIdentityChildRegionCandidates(after, identity, lastReason);
+      const timedOut = !identity
+        && (resolvedReason === "project_disclosure_identity_not_found"
+          || resolvedReason === "controlled_region_not_found"
+          || resolvedReason === "missing_stable_identity");
       return {
         isDisclosure: before.rowIsDisclosureControl === true,
         identity: identity || null,
@@ -4306,8 +4403,30 @@
         elapsedMs,
         disclosurePrepMs,
         childRegionWaitMs,
-        reason: reason || (identity ? "none" : lastReason || "project_disclosure_identity_not_found")
+        waitStrategy,
+        observerNeeded,
+        pollNeeded,
+        earlySuccess: Boolean(identity) && lastReason !== "ambiguous_project_identity",
+        timedOut,
+        candidateClass,
+        mutationQuietWaitMs: 0,
+        remountRecoveryWaitMs,
+        reason: resolvedReason
       };
+    };
+    const tickWait = async (deadline) => {
+      const remaining = Math.max(0, deadline - Date.now());
+      if (remaining <= 0) return;
+      const MutationObserverCtor = root?.ownerDocument?.defaultView?.MutationObserver
+        || globalThis.MutationObserver;
+      if (typeof MutationObserverCtor === "function") {
+        observerNeeded = true;
+        if (waitStrategy === "immediate") waitStrategy = "observer";
+      } else {
+        pollNeeded = true;
+        waitStrategy = "poll";
+      }
+      await waitForIdentityChildRegionTick(root, Math.min(50, Math.max(16, remaining)));
     };
 
     if (!before.rowIsDisclosureControl) return result(null, "not_a_disclosure_control");
@@ -4338,8 +4457,6 @@
       identity = inspect();
       if (identity) return result(identity);
 
-      await waitForSidebarMutation(root, Math.min(150, Math.max(20, timeoutMs)));
-      identity = inspect();
       const stateChanged = before.ariaExpanded !== after.ariaExpanded
         || before.controlledRegionFound !== after.controlledRegionFound
         || before.controlledRegionElementCount !== after.controlledRegionElementCount
@@ -4352,7 +4469,6 @@
         eventFallbackAttempted = true;
         const eventResult = dispatchProjectInteractiveEventSequence(row, row, root, initialUrl);
         eventFallbackDispatched = eventResult.dispatched;
-        await waitForSidebarMutation(root, Math.min(100, Math.max(20, timeoutMs)));
         identity = inspect();
       }
     }
@@ -4363,13 +4479,15 @@
     }
     const deadline = startedAt + timeoutMs;
     while (Date.now() <= deadline) {
-      await waitForSidebarMutation(root, Math.min(100, Math.max(20, deadline - Date.now())));
       identity = inspect();
       if (identity) return result(identity);
       if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
         return result(null, lastReason);
       }
+      await tickWait(deadline);
     }
+    identity = inspect();
+    if (identity) return result(identity);
     return result(
       null,
       urlChanged ? "disclosure_navigation_target_not_project" : "project_disclosure_identity_not_found");
@@ -4496,6 +4614,113 @@
       identityWaitMsWhileVisible: 0,
       slowIdentityIndicesWhileHidden: [],
       slowIdentityIndicesWhileVisible: []
+    };
+    const identityPerformance = {
+      samples: [],
+      childChatResolvedCount: 0,
+      navigationResolvedCount: 0,
+      immediateHitCount: 0,
+      observerNeededCount: 0,
+      pollNeededCount: 0,
+      earlySuccessCount: 0,
+      timeoutCount: 0,
+      ambiguousCount: 0,
+      candidateZeroCount: 0,
+      uniqueCandidateCount: 0,
+      sameIdMultiCount: 0,
+      distinctCollisionCount: 0,
+      mutationQuietWaitTotalMs: 0,
+      disclosureOpenWaitTotalMs: 0,
+      remountRecoveryWaitTotalMs: 0
+    };
+    const identityWaitPercentile = (values, percentile) => {
+      if (!values.length) return 0;
+      const sorted = [...values].sort((left, right) => left - right);
+      const rank = Math.min(
+        sorted.length - 1,
+        Math.max(0, Math.ceil((percentile / 100) * sorted.length) - 1));
+      return sorted[rank];
+    };
+    const recordIdentityPerformance = (projectIndex, disclosureResult = null, extras = {}) => {
+      const childRegionWaitMs = Number.isSafeInteger(disclosureResult?.childRegionWaitMs)
+        ? disclosureResult.childRegionWaitMs
+        : 0;
+      const waitStrategy = typeof disclosureResult?.waitStrategy === "string"
+        ? disclosureResult.waitStrategy
+        : "immediate";
+      const candidateClass = typeof disclosureResult?.candidateClass === "string"
+        ? disclosureResult.candidateClass
+        : "other";
+      identityPerformance.samples.push({
+        projectIndex,
+        childRegionWaitMs,
+        waitStrategy,
+        candidateClass
+      });
+      identityPerformance.mutationQuietWaitTotalMs += Number.isSafeInteger(disclosureResult?.mutationQuietWaitMs)
+        ? disclosureResult.mutationQuietWaitMs
+        : 0;
+      identityPerformance.disclosureOpenWaitTotalMs += Number.isSafeInteger(disclosureResult?.disclosurePrepMs)
+        ? disclosureResult.disclosurePrepMs
+        : 0;
+      identityPerformance.remountRecoveryWaitTotalMs += Number.isSafeInteger(disclosureResult?.remountRecoveryWaitMs)
+        ? disclosureResult.remountRecoveryWaitMs
+        : 0;
+      if (disclosureResult?.waitStrategy === "immediate" || !disclosureResult) {
+        identityPerformance.immediateHitCount += 1;
+      }
+      if (disclosureResult?.observerNeeded === true) identityPerformance.observerNeededCount += 1;
+      if (disclosureResult?.pollNeeded === true) identityPerformance.pollNeededCount += 1;
+      if (disclosureResult?.earlySuccess === true
+        || (!disclosureResult && extras.identitySource && extras.identitySource !== "none")) {
+        identityPerformance.earlySuccessCount += 1;
+      }
+      if (disclosureResult?.timedOut === true) identityPerformance.timeoutCount += 1;
+      if (candidateClass === "distinct_id_collision") identityPerformance.distinctCollisionCount += 1;
+      else if (candidateClass === "same_id_multi_candidate") identityPerformance.sameIdMultiCount += 1;
+      else if (candidateClass === "unique_candidate") identityPerformance.uniqueCandidateCount += 1;
+      else if (candidateClass === "candidate_zero") identityPerformance.candidateZeroCount += 1;
+      if (extras.identitySource === "child_chat_url" || extras.identitySource === "controlled_region") {
+        identityPerformance.childChatResolvedCount += 1;
+      } else if (extras.identitySource === "navigation_url") {
+        identityPerformance.navigationResolvedCount += 1;
+      }
+    };
+    const emitIdentityPerformanceSummary = () => {
+      const waits = identityPerformance.samples.map((sample) => sample.childRegionWaitMs);
+      const totalWait = waits.reduce((sum, value) => sum + value, 0);
+      const slow = identityPerformance.samples
+        .filter((sample) => sample.childRegionWaitMs >= 250)
+        .map((sample) => ({ index: sample.projectIndex, ms: sample.childRegionWaitMs }));
+      emitNavigationTelemetry("collector_project_identity_performance_summary", {
+        project_count: output.length,
+        child_chat_resolved_count: identityPerformance.childChatResolvedCount,
+        navigation_resolved_count: identityPerformance.navigationResolvedCount,
+        child_region_wait_total_ms: totalWait,
+        child_region_wait_average_ms: waits.length
+          ? Math.round(totalWait / waits.length)
+          : 0,
+        child_region_wait_max_ms: waits.length ? Math.max(...waits) : 0,
+        child_region_wait_p50_ms: identityWaitPercentile(waits, 50),
+        child_region_wait_p95_ms: identityWaitPercentile(waits, 95),
+        child_region_immediate_hit_count: identityPerformance.immediateHitCount,
+        child_region_observer_needed_count: identityPerformance.observerNeededCount,
+        child_region_poll_needed_count: identityPerformance.pollNeededCount,
+        child_region_early_success_count: identityPerformance.earlySuccessCount,
+        child_region_timeout_count: identityPerformance.timeoutCount,
+        child_region_ambiguous_count: identityPerformance.ambiguousCount
+          + identityPerformance.distinctCollisionCount,
+        child_region_candidate_zero_count: identityPerformance.candidateZeroCount,
+        child_region_unique_candidate_count: identityPerformance.uniqueCandidateCount,
+        child_region_same_id_multi_candidate_count: identityPerformance.sameIdMultiCount,
+        child_region_distinct_id_collision_count: identityPerformance.distinctCollisionCount,
+        mutation_quiet_wait_total_ms: identityPerformance.mutationQuietWaitTotalMs,
+        disclosure_open_wait_total_ms: identityPerformance.disclosureOpenWaitTotalMs,
+        remount_recovery_wait_total_ms: identityPerformance.remountRecoveryWaitTotalMs,
+        slow_project_count: slow.length,
+        slow_project_indices: slow.map((item) => item.index).join(","),
+        slow_project_ms: slow.map((item) => item.ms).join(",")
+      });
     };
     const noteIdentityVisibility = (hidden, projectIndex, startedAt) => {
       const elapsed = Math.max(0, Date.now() - startedAt);
@@ -4688,7 +4913,31 @@
       "identity_candidate_search_ms",
       "identity_relocation_wait_ms",
       "catalog_reused",
-      "relocation_skipped_connected_row"
+      "relocation_skipped_connected_row",
+      "project_count",
+      "child_chat_resolved_count",
+      "navigation_resolved_count",
+      "child_region_wait_total_ms",
+      "child_region_wait_average_ms",
+      "child_region_wait_max_ms",
+      "child_region_wait_p50_ms",
+      "child_region_wait_p95_ms",
+      "child_region_immediate_hit_count",
+      "child_region_observer_needed_count",
+      "child_region_poll_needed_count",
+      "child_region_early_success_count",
+      "child_region_timeout_count",
+      "child_region_ambiguous_count",
+      "child_region_candidate_zero_count",
+      "child_region_unique_candidate_count",
+      "child_region_same_id_multi_candidate_count",
+      "child_region_distinct_id_collision_count",
+      "mutation_quiet_wait_total_ms",
+      "disclosure_open_wait_total_ms",
+      "remount_recovery_wait_total_ms",
+      "slow_project_count",
+      "slow_project_indices",
+      "slow_project_ms"
     ];
     const navigationTelemetry = [];
     const emitNavigationTelemetry = (stage, fields = {}) => {
@@ -4726,6 +4975,7 @@
         let childRegionWaitMs = 0;
         let candidateSearchMs = 0;
         let relocationWaitMs = 0;
+        let lastDisclosureResult = null;
         if (!identity) {
           const searchStartedAt = Date.now();
           let relocation = sidebarCatalog.relocate(descriptor, identityCatalog);
@@ -4786,6 +5036,7 @@
               baseUrl,
               {
                 navigationTimeoutMs: options.navigationTimeoutMs,
+                disclosureTimeoutMs: options.disclosureTimeoutMs,
                 relocateRow: () => {
                   if (connectedRowStillMatchesDescriptor(row, descriptor, baseUrl)) return row;
                   sidebarCatalog.snapshot(true);
@@ -4794,6 +5045,7 @@
                   return row;
                 }
               });
+            lastDisclosureResult = disclosureResult;
             disclosureWaitMs += Number.isSafeInteger(disclosureResult.disclosurePrepMs)
               ? disclosureResult.disclosurePrepMs
               : 0;
@@ -4875,6 +5127,11 @@
           identity_candidate_search_ms: candidateSearchMs,
           identity_relocation_wait_ms: relocationWaitMs
         });
+        recordIdentityPerformance(projectIndex, lastDisclosureResult, {
+          identitySource: identity
+            ? (identity.source || (existing.projectId ? "row_url" : "other"))
+            : "none"
+        });
         output[index] = identityProjectResult(
           descriptor,
           projectIndex,
@@ -4933,6 +5190,7 @@
       let identityChildRegionWaitMs = 0;
       let identityCandidateSearchMs = 0;
       let identityRelocationWaitMs = 0;
+      let disclosureResult = null;
       const identityCatalog = Array.isArray(options.identityCatalog)
         ? options.identityCatalog
         : [];
@@ -4995,7 +5253,6 @@
         }
         let row = relocation.row;
         classificationRow = row;
-        let disclosureResult = null;
         if (row) {
           const relocateRow = () => {
             if (connectedRowStillMatchesDescriptor(row, descriptor, baseUrl)) return row;
@@ -5012,6 +5269,7 @@
             baseUrl,
             {
               navigationTimeoutMs: options.navigationTimeoutMs,
+              disclosureTimeoutMs: options.disclosureTimeoutMs,
               relocateRow
             });
           identityDisclosureWaitMs += Number.isSafeInteger(disclosureResult.disclosurePrepMs)
@@ -5574,6 +5832,10 @@
       });
       const navigationResultIdentity = observedIdentity || identity;
       const navigationResolved = Boolean(observedIdentity);
+      recordIdentityPerformance(currentProjectIndex, disclosureResult, {
+        identitySource: identity ? (identitySource || identity.source || "other") : "none"
+      });
+      emitIdentityPerformanceSummary();
       emitNavigationTelemetry("collector_project_identity_navigation_result", {
         project_index: currentProjectIndex,
         navigation_target_verified: navigationResolved,
@@ -5630,6 +5892,7 @@
       noteIdentityVisibility(documentIsHidden(root), currentProjectIndex, identityStartedAt);
     }
 
+    if (mode === "dom") emitIdentityPerformanceSummary();
     const unresolvedCount = output.reduce((count, project) => {
       const identity = projectIdentityFromProjectMetadata(project, baseUrl);
       return count + (metadataTitle(project?.title, "") && identity.projectId ? 0 : 1);
@@ -7924,7 +8187,7 @@
   function isVisible(element) {
     if (!element || element.hidden || element.getAttribute("aria-hidden") === "true") return false;
     const ownerWindow = element.ownerDocument?.defaultView;
-    if (ownerWindow) {
+    if (ownerWindow && typeof ownerWindow.getComputedStyle === "function") {
       const style = ownerWindow.getComputedStyle(element);
       if (style.display === "none" || style.visibility === "hidden") return false;
     }

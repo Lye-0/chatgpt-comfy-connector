@@ -651,6 +651,30 @@
     "identity_child_region_wait_ms",
     "identity_candidate_search_ms",
     "identity_relocation_wait_ms",
+    "project_count",
+    "child_chat_resolved_count",
+    "navigation_resolved_count",
+    "child_region_wait_total_ms",
+    "child_region_wait_average_ms",
+    "child_region_wait_max_ms",
+    "child_region_wait_p50_ms",
+    "child_region_wait_p95_ms",
+    "child_region_immediate_hit_count",
+    "child_region_observer_needed_count",
+    "child_region_poll_needed_count",
+    "child_region_early_success_count",
+    "child_region_timeout_count",
+    "child_region_ambiguous_count",
+    "child_region_candidate_zero_count",
+    "child_region_unique_candidate_count",
+    "child_region_same_id_multi_candidate_count",
+    "child_region_distinct_id_collision_count",
+    "mutation_quiet_wait_total_ms",
+    "disclosure_open_wait_total_ms",
+    "remount_recovery_wait_total_ms",
+    "slow_project_count",
+    "slow_project_indices",
+    "slow_project_ms",
     "catalog_reused",
     "relocation_skipped_connected_row"
   ];
@@ -1843,6 +1867,7 @@
             resetSidebarCatalog: message.resetSidebarCatalog === true
               || message.reset_sidebar_catalog === true,
             navigationTimeoutMs: message.navigationTimeoutMs,
+            disclosureTimeoutMs: message.disclosureTimeoutMs,
             totalProjects: Number.isSafeInteger(message.totalProjects)
               ? message.totalProjects
               : (Array.isArray(message.identityCatalog) ? message.identityCatalog.length : undefined),

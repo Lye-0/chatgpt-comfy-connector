@@ -1585,6 +1585,43 @@
     });
   }
 
+  function waitForMorePaginationSettle(root, options = {}) {
+    const timeoutMs = Math.max(40, Math.min(2000, Number(options.moreSettleMs)
+      || Number(options.settleMs)
+      || 250));
+    const quietMs = Math.max(20, Math.min(timeoutMs, Number(options.moreQuietMs) || 80));
+    const MutationObserverCtor = root?.ownerDocument?.defaultView?.MutationObserver
+      || globalThis.MutationObserver;
+    if (typeof globalThis.setTimeout !== "function") return Promise.resolve();
+    if (typeof MutationObserverCtor !== "function") return waitForLocatorDelay(timeoutMs);
+    return new Promise((resolve) => {
+      let settled = false;
+      let observer = null;
+      let quietTimer = null;
+      let timeoutTimer = null;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (observer) observer.disconnect();
+        if (quietTimer !== null) globalThis.clearTimeout?.(quietTimer);
+        if (timeoutTimer !== null) globalThis.clearTimeout?.(timeoutTimer);
+        resolve();
+      };
+      const armQuiet = () => {
+        if (quietTimer !== null) globalThis.clearTimeout?.(quietTimer);
+        quietTimer = globalThis.setTimeout(finish, quietMs);
+      };
+      try {
+        observer = new MutationObserverCtor(armQuiet);
+        observer.observe(root, { childList: true, subtree: true, characterData: true });
+      } catch (_) {
+        observer = null;
+      }
+      armQuiet();
+      timeoutTimer = globalThis.setTimeout(finish, timeoutMs);
+    });
+  }
+
   function moreControlExpansionMetrics(root, sidebarOverride = null) {
     const sidebar = sidebarOverride && sidebarOverride.isConnected !== false
       ? sidebarOverride
@@ -1596,6 +1633,60 @@
     };
   }
 
+  function morePaginationMetrics(root, sidebarOverride, catalog) {
+    const sidebar = sidebarOverride && sidebarOverride.isConnected !== false
+      ? sidebarOverride
+      : findIdentitySidebarRoot(root);
+    const scroller = findIdentityScrollContainer(root, sidebar);
+    return {
+      confirmedCount: Array.isArray(catalog?.projects) ? catalog.projects.length : 0,
+      provisionalCount: Array.isArray(catalog?.provisional_observations)
+        ? catalog.provisional_observations.length
+        : 0,
+      candidateCount: projectRowCandidatesInSidebar(sidebar).length,
+      scrollHeight: Number(scroller?.scrollHeight) || 0
+    };
+  }
+
+  function morePaginationHasProgress(before, after) {
+    if (!before || !after) return false;
+    return after.confirmedCount > before.confirmedCount
+      || after.provisionalCount > before.provisionalCount
+      || after.candidateCount > before.candidateCount
+      || after.scrollHeight > before.scrollHeight;
+  }
+
+  function morePaginationStateFor(stats, key) {
+    if (!stats || typeof stats !== "object") {
+      return { clickCount: 0, consecutiveNoProgressCount: 0, exhausted: false };
+    }
+    if (!(stats.morePaginationStates instanceof Map)) stats.morePaginationStates = new Map();
+    const id = key || "__missing_logical_more__";
+    if (!stats.morePaginationStates.has(id)) {
+      stats.morePaginationStates.set(id, {
+        clickCount: 0,
+        consecutiveNoProgressCount: 0,
+        exhausted: false
+      });
+    }
+    return stats.morePaginationStates.get(id);
+  }
+
+  function isMorePaginationExhausted(stats, key) {
+    if (!stats || !(stats.morePaginationStates instanceof Map)) return false;
+    return stats.morePaginationStates.get(key || "__missing_logical_more__")?.exhausted === true;
+  }
+
+  function bumpDiscoveryStat(stats, field, amount = 1) {
+    if (!stats || typeof stats !== "object") return;
+    stats[field] = (Number(stats[field]) || 0) + amount;
+  }
+
+  function isMoreControlActivatable(element, options = {}) {
+    if (!element || isDisabled(element)) return false;
+    return isMoreButton(element, options);
+  }
+
   async function expandSidebarMoreButtons(root, options = {}, sidebarOverride = null) {
     const maxClicks = Math.max(0, Math.min(32, Number(options.maxMoreClicks) || 8));
     const clicked = options.clickedMoreControls instanceof Set
@@ -1605,13 +1696,24 @@
       ? options.discoveryStats
       : null;
     const allowRepeatOnGrowth = options.allowRepeatOnGrowth === true;
+    const paginateOnProgress = options.paginateOnProgress === true;
+    const findOptions = { requireVisible: options.includeHiddenMore !== true };
     let clicks = 0;
+    if (stats) stats.moreLastClickHadProgress = false;
     while (clicks < maxClicks) {
-      const button = findMoreButtons(root, sidebarOverride, {
-        requireVisible: options.includeHiddenMore !== true
-      })
+      const button = findMoreButtons(root, sidebarOverride, findOptions)
         .find((candidate) => {
+          if (!isMoreControlActivatable(candidate, findOptions)) return false;
           const key = sidebarMoreControlKey(candidate);
+          if (paginateOnProgress) {
+            const state = morePaginationStateFor(stats, key);
+            if (state.exhausted) {
+              bumpDiscoveryStat(stats, "moreControlDuplicateSuppressedCount");
+              bumpDiscoveryStat(stats, "moreReclickSuppressedCount");
+              return false;
+            }
+            return true;
+          }
           if (key && clicked.has(key) && !clicked.has(candidate) && stats) {
             stats.moreControlDuplicateSuppressedCount =
               (stats.moreControlDuplicateSuppressedCount || 0) + 1;
@@ -1620,13 +1722,54 @@
         });
       if (!button) break;
       const key = sidebarMoreControlKey(button);
-      const beforeMetrics = allowRepeatOnGrowth
-        ? moreControlExpansionMetrics(root, sidebarOverride)
-        : null;
+      const paginationState = paginateOnProgress ? morePaginationStateFor(stats, key) : null;
+      if (paginateOnProgress && paginationState.clickCount > 0) {
+        bumpDiscoveryStat(stats, "moreReappearedAfterClickCount");
+        bumpDiscoveryStat(stats, "moreReclickAllowedCount");
+      }
+      const beforeMetrics = paginateOnProgress
+        ? morePaginationMetrics(root, sidebarOverride, options.catalog)
+        : (allowRepeatOnGrowth ? moreControlExpansionMetrics(root, sidebarOverride) : null);
       clicked.add(button);
-      if (key) clicked.add(key);
+      if (key && !paginateOnProgress) clicked.add(key);
       try { button.click?.(); } catch (_) { break; }
       clicks += 1;
+      bumpDiscoveryStat(stats, "morePaginationRoundCount");
+      if (paginateOnProgress && paginationState) paginationState.clickCount += 1;
+      if (paginateOnProgress) {
+        bumpDiscoveryStat(stats, "moreProjectCountBeforeClickTotal", beforeMetrics.confirmedCount);
+        await waitForMorePaginationSettle(root, options);
+        if (typeof options.afterMoreClick === "function") {
+          try { await options.afterMoreClick(); } catch (_) { }
+        }
+        const afterMetrics = morePaginationMetrics(root, sidebarOverride, options.catalog);
+        bumpDiscoveryStat(stats, "moreProjectCountAfterClickTotal", afterMetrics.confirmedCount);
+        const progressed = morePaginationHasProgress(beforeMetrics, afterMetrics);
+        if (stats) stats.moreLastClickHadProgress = progressed;
+        if (progressed) {
+          paginationState.consecutiveNoProgressCount = 0;
+          paginationState.exhausted = false;
+          clicked.delete(button);
+          bumpDiscoveryStat(stats, "moreClickProgressCount");
+          if (afterMetrics.scrollHeight > beforeMetrics.scrollHeight) {
+            bumpDiscoveryStat(stats, "moreScrollHeightIncreasedCount");
+          }
+          if (afterMetrics.candidateCount > beforeMetrics.candidateCount) {
+            bumpDiscoveryStat(stats, "moreCandidateCountIncreasedCount");
+          }
+          if (afterMetrics.confirmedCount > beforeMetrics.confirmedCount
+            || afterMetrics.provisionalCount > beforeMetrics.provisionalCount) {
+            bumpDiscoveryStat(stats, "moreDescriptorCountIncreasedCount");
+          }
+        } else {
+          paginationState.consecutiveNoProgressCount += 1;
+          paginationState.exhausted = true;
+          if (key) clicked.add(key);
+          bumpDiscoveryStat(stats, "moreClickNoProgressCount");
+          break;
+        }
+        continue;
+      }
       await waitForSidebarMutation(root, options.settleMs);
       if (beforeMetrics) {
         const afterMetrics = moreControlExpansionMetrics(root, sidebarOverride);
@@ -1681,6 +1824,19 @@
       moreControlSeenCount: 0,
       moreControlLogicalUniqueCount: 0,
       moreControlDuplicateSuppressedCount: 0,
+      morePaginationRoundCount: 0,
+      moreClickProgressCount: 0,
+      moreClickNoProgressCount: 0,
+      moreReappearedAfterClickCount: 0,
+      moreReclickAllowedCount: 0,
+      moreReclickSuppressedCount: 0,
+      moreProjectCountBeforeClickTotal: 0,
+      moreProjectCountAfterClickTotal: 0,
+      moreScrollHeightIncreasedCount: 0,
+      moreCandidateCountIncreasedCount: 0,
+      moreDescriptorCountIncreasedCount: 0,
+      moreLastClickHadProgress: false,
+      morePaginationStates: new Map(),
       projectCandidateRejectedChildChatCount: 0,
       projectCandidateRejectedNonProjectCount: 0,
       descriptorAddedAfterFirstSnapshotIndices: [],
@@ -1688,10 +1844,85 @@
       seenMoreLogicalKeys: new Set(),
       titleOnlyReconcileAttemptCount: 0,
       titleOnlyReconcileRejectedCount: 0,
+      titleOnlyObservationPreservedCount: 0,
       titleHintUsedCount: 0,
       stableEvidenceReconcileCount: 0,
-      ambiguousSameTitleReconcileCount: 0
+      ambiguousSameTitleReconcileCount: 0,
+      provisionalObservationCreatedCount: 0,
+      provisionalObservationReusedCount: 0
     };
+  }
+
+  function observationIdentityKey(item) {
+    const projectId = stableProjectIdFromValue(item?.project_id || item?.projectId);
+    if (projectId) return `id:${projectId}`;
+    const stableLocatorKey = metadataIdentifier(item?.stable_locator_key || item?.stableLocatorKey);
+    if (stableLocatorKey) return `locator:${stableLocatorKey}`;
+    const discoveryKey = metadataIdentifier(item?.discovery_key || item?.discoveryKey);
+    if (discoveryKey) return `discovery:${discoveryKey}`;
+    return null;
+  }
+
+  function cloneProjectObservation(item, extras = {}) {
+    if (!item || typeof item !== "object") return null;
+    const projectId = stableProjectIdFromValue(item.project_id || item.projectId);
+    const title = metadataTitle(item.title);
+    const url = chatGptMetadataUrl(item.url);
+    const discoveryKey = metadataIdentifier(item.discovery_key || item.discoveryKey);
+    const stableLocatorKey = metadataIdentifier(item.stable_locator_key || item.stableLocatorKey);
+    const discoveryIndex = Number.isSafeInteger(item.discovery_index) && item.discovery_index >= 0
+      ? item.discovery_index
+      : (Number.isSafeInteger(item.discoveryIndex) && item.discoveryIndex >= 0
+        ? item.discoveryIndex
+        : null);
+    if (!title || (!projectId && !discoveryKey)) return null;
+    return {
+      ...(projectId ? { project_id: projectId } : {}),
+      title,
+      ...(url ? { url } : {}),
+      ...(discoveryKey ? { discovery_key: discoveryKey } : {}),
+      ...(stableLocatorKey ? { stable_locator_key: stableLocatorKey } : {}),
+      ...(discoveryIndex !== null ? { discovery_index: discoveryIndex } : {}),
+      ...extras
+    };
+  }
+
+  function upsertProvisionalObservation(provisionals, item, options = {}) {
+    if (!Array.isArray(provisionals)) return null;
+    const stats = options.stats && typeof options.stats === "object" ? options.stats : null;
+    const identityKey = observationIdentityKey(item);
+    if (!identityKey) return null;
+    const existing = provisionals.find((candidate) => observationIdentityKey(candidate) === identityKey);
+    if (existing) {
+      applyContextProjectFields(existing, item, { replaceDiscoveryKey: false });
+      if (Number.isSafeInteger(options.snapshotGeneration) && options.snapshotGeneration > 0) {
+        existing.snapshot_generation = options.snapshotGeneration;
+      }
+      if (stats) stats.provisionalObservationReusedCount += 1;
+      return existing;
+    }
+    const created = cloneProjectObservation(item, {
+      observation_role: "provisional",
+      unresolved_reason: "title_only_no_stable_evidence",
+      snapshot_generation: Number.isSafeInteger(options.snapshotGeneration)
+        ? options.snapshotGeneration
+        : 0,
+      occupancy_source_index: Number.isSafeInteger(options.occupancySourceIndex)
+        && options.occupancySourceIndex >= 0
+        ? options.occupancySourceIndex
+        : null,
+      row_metadata_present: Boolean(metadataIdentifier(item?.discovery_key || item?.discoveryKey)),
+      child_identity_candidate_available: Boolean(
+        stableProjectIdFromValue(item?.project_id || item?.projectId)
+        || chatGptMetadataUrl(item?.url))
+    });
+    if (!created) return null;
+    provisionals.push(created);
+    if (stats) {
+      stats.provisionalObservationCreatedCount += 1;
+      stats.titleOnlyObservationPreservedCount += 1;
+    }
+    return created;
   }
 
   function countProjectsByTitleKey(projects) {
@@ -1877,14 +2108,20 @@
     const hasStableEvidence = Boolean(projectId || stableLocatorKey);
     if (titleKey && stats) stats.titleHintUsedCount += 1;
     if (!existing && !hasStableEvidence && titleKey && snapshotTitleCount === 1 && catalogTitleCount === 1) {
-      // Title may narrow candidates, but it is never proof that a remounted
-      // unique-looking row is the same logical Project. Virtualized Sidebars
-      // can show same-title siblings one at a time. Keep the existing
-      // descriptor unchanged and do not append a title-only duplicate.
+      // Title is never proof of identity. Keep the confirmed descriptor
+      // unchanged, but preserve this observation as provisional so a
+      // same-title sibling that never co-appears is not dropped.
       if (stats) {
         stats.titleOnlyReconcileAttemptCount += 1;
         stats.titleOnlyReconcileRejectedCount += 1;
       }
+      const occupyingIndex = projects.findIndex((candidate) =>
+        metadataTextKey(candidate.title) === titleKey);
+      upsertProvisionalObservation(options.provisionals, item, {
+        stats,
+        snapshotGeneration: options.snapshotGeneration,
+        occupancySourceIndex: occupyingIndex
+      });
       return null;
     }
     if (!existing && !hasStableEvidence && titleKey && snapshotTitleCount > 1) {
@@ -1941,6 +2178,9 @@
   function mergeContextProjectCatalog(destination, source, stats = null) {
     if (!destination || typeof destination !== "object") return;
     if (!Array.isArray(destination.projects)) destination.projects = [];
+    if (!Array.isArray(destination.provisional_observations)) {
+      destination.provisional_observations = [];
+    }
     const snapshotProjects = source?.projects || [];
     const snapshotTitleCounts = countProjectsByTitleKey(snapshotProjects);
     if (stats && typeof stats === "object") {
@@ -1973,13 +2213,15 @@
         reserved,
         stats,
         snapshotGeneration,
+        provisionals: destination.provisional_observations,
         observedTitleMaxConcurrent: stats?.observedTitleMaxConcurrent
       });
     }
   }
 
-  function discoveryCatalogIntegrityTelemetry(projects, stats) {
+  function discoveryCatalogIntegrityTelemetry(projects, stats, provisionals = []) {
     const catalog = Array.isArray(projects) ? projects : [];
+    const pending = Array.isArray(provisionals) ? provisionals : [];
     const indices = catalog.map((_, index) => index);
     return {
       discovery_snapshot_count: Number(stats?.discoverySnapshotCount) || 0,
@@ -2001,21 +2243,229 @@
         ? stats.seenMoreLogicalKeys.size
         : (Number(stats?.moreControlLogicalUniqueCount) || 0),
       more_control_duplicate_suppressed_count: Number(stats?.moreControlDuplicateSuppressedCount) || 0,
+      more_pagination_round_count: Number(stats?.morePaginationRoundCount) || 0,
+      more_click_progress_count: Number(stats?.moreClickProgressCount) || 0,
+      more_click_no_progress_count: Number(stats?.moreClickNoProgressCount) || 0,
+      more_reappeared_after_click_count: Number(stats?.moreReappearedAfterClickCount) || 0,
+      more_reclick_allowed_count: Number(stats?.moreReclickAllowedCount) || 0,
+      more_reclick_suppressed_count: Number(stats?.moreReclickSuppressedCount) || 0,
+      more_project_count_before_click_total: Number(stats?.moreProjectCountBeforeClickTotal) || 0,
+      more_project_count_after_click_total: Number(stats?.moreProjectCountAfterClickTotal) || 0,
+      more_scroll_height_increased_count: Number(stats?.moreScrollHeightIncreasedCount) || 0,
+      more_candidate_count_increased_count: Number(stats?.moreCandidateCountIncreasedCount) || 0,
+      more_descriptor_count_increased_count: Number(stats?.moreDescriptorCountIncreasedCount) || 0,
       project_candidate_rejected_child_chat_count:
         Number(stats?.projectCandidateRejectedChildChatCount) || 0,
       project_candidate_rejected_non_project_count:
         Number(stats?.projectCandidateRejectedNonProjectCount) || 0,
       title_only_reconcile_attempt_count: Number(stats?.titleOnlyReconcileAttemptCount) || 0,
       title_only_reconcile_rejected_count: Number(stats?.titleOnlyReconcileRejectedCount) || 0,
+      title_only_observation_preserved_count: Number(stats?.titleOnlyObservationPreservedCount) || 0,
       title_hint_used_count: Number(stats?.titleHintUsedCount) || 0,
       stable_evidence_reconcile_count: Number(stats?.stableEvidenceReconcileCount) || 0,
       ambiguous_same_title_reconcile_count: Number(stats?.ambiguousSameTitleReconcileCount) || 0,
+      provisional_observation_created_count: Number(stats?.provisionalObservationCreatedCount) || 0,
+      provisional_observation_reused_count: Number(stats?.provisionalObservationReusedCount) || 0,
+      provisional_observation_count: pending.length,
+      confirmed_logical_project_count_before_identity: catalog.length,
       final_catalog_index_count: catalog.length,
       final_catalog_indices: indices,
       descriptor_added_after_first_snapshot_indices:
         Array.isArray(stats?.descriptorAddedAfterFirstSnapshotIndices)
           ? [...stats.descriptorAddedAfterFirstSnapshotIndices]
           : []
+    };
+  }
+
+  function stableIdentityIdFromProject(project) {
+    return stableProjectIdFromValue(project?.project_id || project?.projectId);
+  }
+
+  function stripObservationBookkeeping(project) {
+    if (!project || typeof project !== "object") return project;
+    const copy = { ...project };
+    delete copy.observation_role;
+    delete copy.unresolved_reason;
+    delete copy.snapshot_generation;
+    delete copy.occupancy_source_index;
+    delete copy.row_metadata_present;
+    delete copy.child_identity_candidate_available;
+    delete copy._unresolved_confirmed_index;
+    return copy;
+  }
+
+  function remountSafeLocatorKey(item) {
+    return metadataIdentifier(item?.stable_locator_key || item?.stableLocatorKey);
+  }
+
+  function remountSafeDuplicateProof(unresolved, resolved) {
+    const unresolvedId = stableIdentityIdFromProject(unresolved);
+    const resolvedId = stableIdentityIdFromProject(resolved);
+    if (unresolvedId && resolvedId && unresolvedId === resolvedId) return "project_id";
+    const left = remountSafeLocatorKey(unresolved);
+    const right = remountSafeLocatorKey(resolved);
+    if (left && right && left === right && resolvedId) return "stable_locator";
+    return null;
+  }
+
+  function provenDuplicateAgainstResolved(unresolved, resolvedItems) {
+    const matches = [];
+    for (const resolved of resolvedItems || []) {
+      const proof = remountSafeDuplicateProof(unresolved, resolved);
+      if (!proof) continue;
+      const id = stableIdentityIdFromProject(resolved);
+      if (!id) continue;
+      matches.push({ proof, id });
+    }
+    const uniqueIds = [...new Set(matches.map((item) => item.id))];
+    if (uniqueIds.length !== 1) return null;
+    return matches[0];
+  }
+
+  function createProvisionalFinalizeStats(items) {
+    return {
+      provisionalObservationResolvedCount: 0,
+      provisionalObservationMergedExistingCount: 0,
+      provisionalObservationPromotedNewProjectCount: 0,
+      provisionalObservationUnresolvedCount: 0,
+      provisionalResolvedSameExistingCount: 0,
+      provisionalResolvedDistinctProjectCount: 0,
+      provisionalUnresolvedKeptCount: 0,
+      provisionalUnresolvedDiscardedAsProvenDuplicateCount: 0,
+      provisionalUnresolvedDiscardRejectedCount: 0,
+      provisionalDuplicateProofProjectIdCount: 0,
+      provisionalDuplicateProofStableLocatorCount: 0,
+      provisionalDuplicateProofOtherStableEvidenceCount: 0,
+      incompleteDueToUnresolvedProvisionalCount: 0,
+      sameTitleIdentitySameProjectCount: 0,
+      sameTitleIdentityDistinctProjectCount: 0,
+      confirmedLogicalProjectCountBeforeIdentity:
+        items.filter((item) => item?.observation_role !== "provisional").length,
+      provisionalObservationCountBeforeIdentity:
+        items.filter((item) => item?.observation_role === "provisional").length
+    };
+  }
+
+  function recordDuplicateProof(stats, proof) {
+    if (proof === "project_id") stats.provisionalDuplicateProofProjectIdCount += 1;
+    else if (proof === "stable_locator") stats.provisionalDuplicateProofStableLocatorCount += 1;
+    else if (proof) stats.provisionalDuplicateProofOtherStableEvidenceCount += 1;
+  }
+
+  function finalizeProvisionalProjectObservations(identityProjects) {
+    const items = Array.isArray(identityProjects) ? identityProjects : [];
+    const stats = createProvisionalFinalizeStats(items);
+    const byId = new Map();
+    const logical = [];
+    const titleIdSets = new Map();
+    const rememberTitleId = (title, id) => {
+      const titleKey = metadataTextKey(metadataTitle(title));
+      if (!titleKey || !id) return;
+      if (!titleIdSets.has(titleKey)) titleIdSets.set(titleKey, new Set());
+      titleIdSets.get(titleKey).add(id);
+    };
+
+    const publish = (item) => {
+      const published = stripObservationBookkeeping(cloneProjectObservation(item) || { ...item });
+      if (item?.identity_source) published.identity_source = item.identity_source;
+      if (item?.url && !published.url) published.url = item.url;
+      if (item?.project_id && !published.project_id) {
+        published.project_id = stableIdentityIdFromProject(item);
+      }
+      return published;
+    };
+
+    const mergeOrAdd = (item, role) => {
+      const id = stableIdentityIdFromProject(item);
+      if (id && byId.has(id)) {
+        if (role !== "provisional") {
+          const published = publish(item);
+          logical.push(published);
+          rememberTitleId(item?.title, id);
+          return published;
+        }
+        applyContextProjectFields(byId.get(id), item, { replaceDiscoveryKey: true });
+        if (item?.url && !byId.get(id).url) byId.get(id).url = item.url;
+        stats.provisionalObservationMergedExistingCount += 1;
+        stats.provisionalResolvedSameExistingCount += 1;
+        stats.sameTitleIdentitySameProjectCount += 1;
+        return byId.get(id);
+      }
+      const published = publish(item);
+      logical.push(published);
+      if (id) byId.set(id, published);
+      rememberTitleId(item?.title, id);
+      if (role === "provisional") {
+        stats.provisionalObservationPromotedNewProjectCount += 1;
+        stats.provisionalResolvedDistinctProjectCount += 1;
+      }
+      return published;
+    };
+
+    items.forEach((item, index) => {
+      if (item?.observation_role === "provisional") return;
+      const id = stableIdentityIdFromProject(item);
+      if (id) mergeOrAdd(item, "confirmed");
+      else {
+        const published = publish(item);
+        published._unresolved_confirmed_index = index;
+        logical.push(published);
+      }
+    });
+
+    const resolvedPool = items.filter((candidate) => stableIdentityIdFromProject(candidate));
+    for (const item of items) {
+      if (item?.observation_role !== "provisional") continue;
+      const id = stableIdentityIdFromProject(item);
+      if (!id) {
+        const proof = provenDuplicateAgainstResolved(item, resolvedPool);
+        if (proof) {
+          stats.provisionalUnresolvedDiscardedAsProvenDuplicateCount += 1;
+          recordDuplicateProof(stats, proof.proof);
+          continue;
+        }
+        if (Number.isSafeInteger(item.occupancy_source_index) || item.disconnected === true) {
+          stats.provisionalUnresolvedDiscardRejectedCount += 1;
+        }
+        stats.provisionalObservationUnresolvedCount += 1;
+        stats.provisionalUnresolvedKeptCount += 1;
+        continue;
+      }
+      stats.provisionalObservationResolvedCount += 1;
+      const existing = byId.get(id);
+      mergeOrAdd(item, "provisional");
+      if (!existing) {
+        const titleKey = metadataTextKey(metadataTitle(item.title));
+        const ids = titleIdSets.get(titleKey);
+        if (ids && ids.size > 1) stats.sameTitleIdentityDistinctProjectCount += 1;
+      }
+    }
+
+    for (let index = logical.length - 1; index >= 0; index -= 1) {
+      const item = logical[index];
+      const confirmedIndex = item._unresolved_confirmed_index;
+      if (!Number.isSafeInteger(confirmedIndex) || stableIdentityIdFromProject(item)) {
+        delete item._unresolved_confirmed_index;
+        continue;
+      }
+      const proof = provenDuplicateAgainstResolved(item, resolvedPool);
+      if (proof) {
+        logical.splice(index, 1);
+        stats.provisionalUnresolvedDiscardedAsProvenDuplicateCount += 1;
+        recordDuplicateProof(stats, proof.proof);
+        stats.sameTitleIdentitySameProjectCount += 1;
+        continue;
+      }
+      delete item._unresolved_confirmed_index;
+    }
+
+    stats.confirmedLogicalProjectCountAfterIdentity = logical.filter((item) =>
+      stableIdentityIdFromProject(item)).length;
+    stats.provisionalObservationCountAfterIdentity = stats.provisionalUnresolvedKeptCount;
+    stats.incompleteDueToUnresolvedProvisionalCount = stats.provisionalUnresolvedKeptCount;
+    return {
+      projects: logical,
+      ...stats
     };
   }
 
@@ -5114,7 +5564,7 @@
     root = globalThis.document,
     url = globalThis.location?.href,
     options = {}) {
-    const merged = { projects: [], conversations: [] };
+    const merged = { projects: [], conversations: [], provisional_observations: [] };
     let rootCatalogBuildCount = 0;
     let rootCatalogReuseCount = 0;
     let sidebarScrollAttemptCount = 0;
@@ -5170,10 +5620,33 @@
         if (key) discoveryStats.seenMoreLogicalKeys.add(key);
       }
     };
+    const moreFindOptions = { requireVisible: false };
+    const moreClickableRemaining = () => {
+      refreshRootContainers();
+      return findMoreButtons(root, sidebar, moreFindOptions).some((candidate) => {
+        if (!isMoreControlActivatable(candidate, moreFindOptions)) return false;
+        return !isMorePaginationExhausted(discoveryStats, sidebarMoreControlKey(candidate));
+      });
+    };
+    const inspectMoreAtComplete = () => {
+      refreshRootContainers();
+      const controls = findMoreButtons(root, sidebar, moreFindOptions);
+      const visible = findMoreButtons(root, sidebar, { requireVisible: true });
+      const enabled = controls.filter((candidate) => !isDisabled(candidate));
+      const clickable = controls.filter((candidate) =>
+        isMoreControlActivatable(candidate, moreFindOptions)
+        && !isMorePaginationExhausted(discoveryStats, sidebarMoreControlKey(candidate)));
+      return {
+        found: controls.length > 0,
+        visible: visible.length > 0,
+        enabled: enabled.length > 0,
+        clickable: clickable.length > 0
+      };
+    };
     const expandAvailableMoreButtons = async () => {
       if (!allowSidebarControls || moreControlClicks >= maxMoreClicks) return 0;
       refreshRootContainers();
-      const controlsBefore = findMoreButtons(root, sidebar);
+      const controlsBefore = findMoreButtons(root, sidebar, moreFindOptions);
       observeMoreControls(controlsBefore);
       if (controlsBefore[0]) observedMoreControl = controlsBefore[0];
       const moreWaitStartedAt = Date.now();
@@ -5182,8 +5655,14 @@
         maxMoreClicks: maxMoreClicks - moreControlClicks,
         clickedMoreControls,
         includeHiddenMore: true,
-        allowRepeatOnGrowth: true,
-        discoveryStats
+        paginateOnProgress: true,
+        catalog: merged,
+        discoveryStats,
+        afterMoreClick: async () => {
+          const snapshot = collectSnapshot();
+          mergeContextProjectCatalog(merged, snapshot, discoveryStats);
+          mergeContextConversationCatalog(merged, snapshot);
+        }
       }, sidebar);
       if (clicks > 0) {
         const elapsed = Math.max(0, Date.now() - moreWaitStartedAt);
@@ -5191,10 +5670,18 @@
         totalDomWaitMs += elapsed;
       }
       moreControlClicks += clicks;
-      const controlsAfter = findMoreButtons(root, sidebar);
+      const controlsAfter = findMoreButtons(root, sidebar, moreFindOptions);
       observeMoreControls(controlsAfter);
       if (controlsAfter[0]) observedMoreControl = controlsAfter[0];
       return clicks;
+    };
+    let moreRepaintGracePasses = 0;
+    const noteMoreRepaintGrace = () => {
+      if (discoveryStats.moreLastClickHadProgress === true && !moreClickableRemaining()) {
+        moreRepaintGracePasses = 2;
+      } else if (moreClickableRemaining()) {
+        moreRepaintGracePasses = 0;
+      }
     };
     let result = null;
     let latestSnapshot = null;
@@ -5241,11 +5728,16 @@
       mergeContextProjectCatalog(merged, initial, discoveryStats);
       mergeContextConversationCatalog(merged, initial);
       const initialMoreClicks = await expandAvailableMoreButtons();
+      noteMoreRepaintGrace();
       snapshotNeedsCollect = initialMoreClicks > 0;
       for (let pass = 0; pass < maxScrolls; pass += 1) {
         if (!ensureCollectionActive()) break;
         const expandedBeforeScan = await expandAvailableMoreButtons();
-        const beforeCount = merged.projects.length + merged.conversations.length;
+        noteMoreRepaintGrace();
+        const catalogOccupancy = () => merged.projects.length
+          + (merged.provisional_observations?.length || 0)
+          + merged.conversations.length;
+        const beforeCount = catalogOccupancy();
         const beforeTop = canScroll ? Number(scrollContainer.scrollTop) || 0 : 0;
         const beforeHeight = canScroll ? Number(scrollContainer.scrollHeight) || 0 : 0;
         const clientHeight = canScroll ? Number(scrollContainer.clientHeight) || 0 : 0;
@@ -5255,21 +5747,28 @@
           mergeContextConversationCatalog(merged, latestSnapshot);
           snapshotNeedsCollect = false;
         }
-        const added = merged.projects.length + merged.conversations.length - beforeCount;
-        const moreRemainingUnclicked = findMoreButtons(root, sidebar, { requireVisible: false })
-          .some((candidate) => {
-            const key = sidebarMoreControlKey(candidate);
-            return !clickedMoreControls.has(candidate)
-              && (!key || !clickedMoreControls.has(key));
-          });
+        const added = catalogOccupancy() - beforeCount;
+        const moreRemainingClickable = moreClickableRemaining();
         if (!canScroll) {
-          if (expandedBeforeScan > 0 || moreRemainingUnclicked) continue;
+          if (expandedBeforeScan > 0 || moreRemainingClickable || moreRepaintGracePasses > 0) {
+            if (moreRepaintGracePasses > 0 && !moreRemainingClickable) {
+              moreRepaintGracePasses -= 1;
+              await waitForMorePaginationSettle(root, options);
+            }
+            continue;
+          }
           break;
         }
 
         const maxTop = Math.max(0, beforeHeight - clientHeight);
         if (beforeTop >= maxTop) {
-          if (expandedBeforeScan > 0 || moreRemainingUnclicked) continue;
+          if (expandedBeforeScan > 0 || moreRemainingClickable || moreRepaintGracePasses > 0) {
+            if (moreRepaintGracePasses > 0 && !moreRemainingClickable) {
+              moreRepaintGracePasses -= 1;
+              await waitForMorePaginationSettle(root, options);
+            }
+            continue;
+          }
           sidebarScrollComplete = true;
           break;
         }
@@ -5288,6 +5787,7 @@
         totalDomWaitMs += scrollWaitMs;
         if (!ensureCollectionActive()) break;
         const expandedAfterScroll = await expandAvailableMoreButtons();
+        noteMoreRepaintGrace();
         const afterTop = Number(scrollContainer.scrollTop) || 0;
         const afterHeight = Number(scrollContainer.scrollHeight) || 0;
         if (afterTop !== beforeTop) sidebarScrollPositionChangeCount += 1;
@@ -5304,34 +5804,52 @@
         snapshotNeedsCollect = true;
         // Keep the old scan order: the next pass collects the rows exposed by
         // this scroll, including the final viewport at the bottom.
-        if (stagnantPasses >= 2 && !moreRemainingUnclicked) {
+        if (stagnantPasses >= 2 && !moreClickableRemaining() && moreRepaintGracePasses <= 0) {
           sidebarScrollComplete = true;
           break;
         }
       }
       const trailingMoreClicks = await expandAvailableMoreButtons();
+      noteMoreRepaintGrace();
       if (trailingMoreClicks > 0) {
         const trailing = collectSnapshot();
         mergeContextProjectCatalog(merged, trailing, discoveryStats);
         mergeContextConversationCatalog(merged, trailing);
       }
-      const finalMoreUnclicked = findMoreButtons(root, sidebar, { requireVisible: false })
-        .some((candidate) => {
-          const key = sidebarMoreControlKey(candidate);
-          return !clickedMoreControls.has(candidate)
-            && (!key || !clickedMoreControls.has(key));
-        });
+      while (moreRepaintGracePasses > 0 && !moreClickableRemaining()) {
+        if (!ensureCollectionActive()) break;
+        moreRepaintGracePasses -= 1;
+        await waitForMorePaginationSettle(root, options);
+        const delayedClicks = await expandAvailableMoreButtons();
+        noteMoreRepaintGrace();
+        if (delayedClicks > 0) {
+          const delayed = collectSnapshot();
+          mergeContextProjectCatalog(merged, delayed, discoveryStats);
+          mergeContextConversationCatalog(merged, delayed);
+        }
+      }
+      const moreAtComplete = inspectMoreAtComplete();
+      const timedOut = Date.now() >= deadline;
+      let hydrationStopReason = "no_more_control";
+      if (timedOut) hydrationStopReason = "timeout";
+      else if (moreAtComplete.clickable) hydrationStopReason = "stagnation";
+      else if (moreAtComplete.found) hydrationStopReason = "no_progress";
+      else if (stagnantPasses >= 2) hydrationStopReason = "stagnation";
+      else if (!canScroll || Boolean(scrollMetricsFor(scrollContainer)?.atBottom)) {
+        hydrationStopReason = "scroll_exhausted";
+      }
       const finalMetrics = scrollMetricsFor(scrollContainer);
-      sidebarScrollComplete = (sidebarScrollComplete
-        || Boolean(finalMetrics && (!finalMetrics.canScroll
-          || finalMetrics.atBottom
-          || stagnantPasses >= 2)))
-        && !finalMoreUnclicked;
+      sidebarScrollComplete = !moreAtComplete.clickable
+        && (sidebarScrollComplete
+          || Boolean(finalMetrics && (!finalMetrics.canScroll
+            || finalMetrics.atBottom
+            || stagnantPasses >= 2)));
       result = {
         // Project discovery is deliberately kept metadata-only. The
         // Collector receives these established Project URLs and performs the
         // later Chat scan by direct navigation in its single Collector Tab.
         projects: merged.projects,
+        provisional_observations: merged.provisional_observations,
         conversations: merged.conversations,
         current: getCurrentChatGptContextFromEntries(merged, root, url),
         project_discovery_source: projectDiscoverySource,
@@ -5360,7 +5878,16 @@
           observedMoreControl,
           moreControlClicks,
           merged.projects.length),
-        ...discoveryCatalogIntegrityTelemetry(merged.projects, discoveryStats)
+        ...discoveryCatalogIntegrityTelemetry(
+          merged.projects,
+          discoveryStats,
+          merged.provisional_observations),
+        hydration_stop_reason: hydrationStopReason,
+        hydration_completed_with_more_visible: moreAtComplete.visible === true,
+        hydration_completed_after_more_no_progress: hydrationStopReason === "no_progress",
+        more_visible_at_hydration_complete: moreAtComplete.visible === true,
+        more_enabled_at_hydration_complete: moreAtComplete.enabled === true,
+        more_clickable_at_hydration_complete: moreAtComplete.clickable === true
       };
     } finally {
       const restoreScrollContainer = scrollContainer?.isConnected === false
@@ -7954,6 +8481,7 @@
     stableProjectIdFromValue,
     collectChatGptContext,
     collectChatGptContextAsync,
+    finalizeProvisionalProjectObservations,
     collectProjectContextEntries,
     resolveChatGptProjectIdentitiesAsync,
     collectChatGptProjectContextAsync,

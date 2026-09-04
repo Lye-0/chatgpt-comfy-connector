@@ -827,6 +827,9 @@
       conversations: Array.isArray(data.conversations) ? data.conversations : [],
       current: data.current || null
     };
+    if (Array.isArray(data.provisional_observations)) {
+      result.provisional_observations = data.provisional_observations;
+    }
     if (Number.isSafeInteger(message?.refreshGeneration)) {
       result.refresh_generation = message.refreshGeneration;
     }
@@ -869,6 +872,15 @@
     if (data.resolution_method === "dom" || data.resolution_method === "navigation") {
       result.resolution_method = data.resolution_method;
     }
+    if ([
+      "no_more_control",
+      "no_progress",
+      "scroll_exhausted",
+      "timeout",
+      "stagnation"
+    ].includes(data.hydration_stop_reason)) {
+      result.hydration_stop_reason = data.hydration_stop_reason;
+    }
     for (const key of ["exit_reason", "internal_reason", "navigation_failure_reason"]) {
       if (typeof data[key] === "string" && data[key].length <= 128) result[key] = data[key];
     }
@@ -905,13 +917,29 @@
       "more_control_seen_count",
       "more_control_logical_unique_count",
       "more_control_duplicate_suppressed_count",
+      "more_pagination_round_count",
+      "more_click_progress_count",
+      "more_click_no_progress_count",
+      "more_reappeared_after_click_count",
+      "more_reclick_allowed_count",
+      "more_reclick_suppressed_count",
+      "more_project_count_before_click_total",
+      "more_project_count_after_click_total",
+      "more_scroll_height_increased_count",
+      "more_candidate_count_increased_count",
+      "more_descriptor_count_increased_count",
       "project_candidate_rejected_child_chat_count",
       "project_candidate_rejected_non_project_count",
       "title_only_reconcile_attempt_count",
       "title_only_reconcile_rejected_count",
+      "title_only_observation_preserved_count",
       "title_hint_used_count",
       "stable_evidence_reconcile_count",
       "ambiguous_same_title_reconcile_count",
+      "provisional_observation_created_count",
+      "provisional_observation_reused_count",
+      "provisional_observation_count",
+      "confirmed_logical_project_count_before_identity",
       "final_catalog_index_count",
       "visible_chat_count",
       "discovered_chat_count",
@@ -995,6 +1023,11 @@
       "project_section_found",
       "sidebar_scroll_complete",
       "sidebar_scroll_container_found",
+      "hydration_completed_with_more_visible",
+      "hydration_completed_after_more_no_progress",
+      "more_visible_at_hydration_complete",
+      "more_enabled_at_hydration_complete",
+      "more_clickable_at_hydration_complete",
       "project_page_ready",
       "current_project_id_verified",
       "current_project_identity_navigation_fallback_used",

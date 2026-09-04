@@ -403,6 +403,28 @@ function createCollectorProjectDiscoveryEfficiencyState(pending) {
     titleHintUsedCount: 0,
     stableEvidenceReconcileCount: 0,
     ambiguousSameTitleReconcileCount: 0,
+    titleOnlyObservationPreservedCount: 0,
+    provisionalObservationCreatedCount: 0,
+    provisionalObservationReusedCount: 0,
+    provisionalObservationResolvedCount: 0,
+    provisionalObservationMergedExistingCount: 0,
+    provisionalObservationPromotedNewProjectCount: 0,
+    provisionalObservationUnresolvedCount: 0,
+    provisionalResolvedSameExistingCount: 0,
+    provisionalResolvedDistinctProjectCount: 0,
+    provisionalUnresolvedKeptCount: 0,
+    provisionalUnresolvedDiscardedAsProvenDuplicateCount: 0,
+    provisionalUnresolvedDiscardRejectedCount: 0,
+    provisionalDuplicateProofProjectIdCount: 0,
+    provisionalDuplicateProofStableLocatorCount: 0,
+    provisionalDuplicateProofOtherStableEvidenceCount: 0,
+    incompleteDueToUnresolvedProvisionalCount: 0,
+    sameTitleIdentitySameProjectCount: 0,
+    sameTitleIdentityDistinctProjectCount: 0,
+    confirmedLogicalProjectCountBeforeIdentity: 0,
+    confirmedLogicalProjectCountAfterIdentity: 0,
+    provisionalObservationCountBeforeIdentity: 0,
+    provisionalObservationCountAfterIdentity: 0,
     collectionTriggerSource: null,
     collectorWindowCreated: false,
     collectorTabCreated: false,
@@ -413,6 +435,23 @@ function createCollectorProjectDiscoveryEfficiencyState(pending) {
     moreControlSeenCount: 0,
     moreControlLogicalUniqueCount: 0,
     moreControlDuplicateSuppressedCount: 0,
+    morePaginationRoundCount: 0,
+    moreClickProgressCount: 0,
+    moreClickNoProgressCount: 0,
+    moreReappearedAfterClickCount: 0,
+    moreReclickAllowedCount: 0,
+    moreReclickSuppressedCount: 0,
+    moreProjectCountBeforeClickTotal: 0,
+    moreProjectCountAfterClickTotal: 0,
+    moreScrollHeightIncreasedCount: 0,
+    moreCandidateCountIncreasedCount: 0,
+    moreDescriptorCountIncreasedCount: 0,
+    hydrationCompletedWithMoreVisible: false,
+    hydrationCompletedAfterMoreNoProgress: false,
+    moreVisibleAtHydrationComplete: false,
+    moreEnabledAtHydrationComplete: false,
+    moreClickableAtHydrationComplete: false,
+    hydrationStopReason: null,
     projectCandidateRejectedChildChatCount: 0,
     projectCandidateRejectedNonProjectCount: 0,
     finalCatalogIndexCount: 0,
@@ -863,6 +902,38 @@ function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, 
     title_hint_used_count: efficiency.titleHintUsedCount,
     stable_evidence_reconcile_count: efficiency.stableEvidenceReconcileCount,
     ambiguous_same_title_reconcile_count: efficiency.ambiguousSameTitleReconcileCount,
+    title_only_observation_preserved_count: efficiency.titleOnlyObservationPreservedCount,
+    provisional_observation_created_count: efficiency.provisionalObservationCreatedCount,
+    provisional_observation_reused_count: efficiency.provisionalObservationReusedCount,
+    provisional_observation_resolved_count: efficiency.provisionalObservationResolvedCount,
+    provisional_observation_merged_existing_count: efficiency.provisionalObservationMergedExistingCount,
+    provisional_observation_promoted_new_project_count:
+      efficiency.provisionalObservationPromotedNewProjectCount,
+    provisional_observation_unresolved_count: efficiency.provisionalObservationUnresolvedCount,
+    provisional_resolved_same_existing_count: efficiency.provisionalResolvedSameExistingCount,
+    provisional_resolved_distinct_project_count: efficiency.provisionalResolvedDistinctProjectCount,
+    provisional_unresolved_kept_count: efficiency.provisionalUnresolvedKeptCount,
+    provisional_unresolved_discarded_as_proven_duplicate_count:
+      efficiency.provisionalUnresolvedDiscardedAsProvenDuplicateCount,
+    provisional_unresolved_discard_rejected_count:
+      efficiency.provisionalUnresolvedDiscardRejectedCount,
+    provisional_duplicate_proof_project_id_count: efficiency.provisionalDuplicateProofProjectIdCount,
+    provisional_duplicate_proof_stable_locator_count:
+      efficiency.provisionalDuplicateProofStableLocatorCount,
+    provisional_duplicate_proof_other_stable_evidence_count:
+      efficiency.provisionalDuplicateProofOtherStableEvidenceCount,
+    incomplete_due_to_unresolved_provisional_count:
+      efficiency.incompleteDueToUnresolvedProvisionalCount,
+    same_title_identity_same_project_count: efficiency.sameTitleIdentitySameProjectCount,
+    same_title_identity_distinct_project_count: efficiency.sameTitleIdentityDistinctProjectCount,
+    confirmed_logical_project_count_before_identity:
+      efficiency.confirmedLogicalProjectCountBeforeIdentity,
+    confirmed_logical_project_count_after_identity:
+      efficiency.confirmedLogicalProjectCountAfterIdentity,
+    provisional_observation_count_before_identity:
+      efficiency.provisionalObservationCountBeforeIdentity,
+    provisional_observation_count_after_identity:
+      efficiency.provisionalObservationCountAfterIdentity,
     collection_trigger_source: efficiency.collectionTriggerSource,
     collector_window_created: efficiency.collectorWindowCreated,
     collector_tab_created: efficiency.collectorTabCreated,
@@ -874,6 +945,24 @@ function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, 
     more_control_seen_count: efficiency.moreControlSeenCount,
     more_control_logical_unique_count: efficiency.moreControlLogicalUniqueCount,
     more_control_duplicate_suppressed_count: efficiency.moreControlDuplicateSuppressedCount,
+    more_pagination_round_count: efficiency.morePaginationRoundCount,
+    more_click_progress_count: efficiency.moreClickProgressCount,
+    more_click_no_progress_count: efficiency.moreClickNoProgressCount,
+    more_reappeared_after_click_count: efficiency.moreReappearedAfterClickCount,
+    more_reclick_allowed_count: efficiency.moreReclickAllowedCount,
+    more_reclick_suppressed_count: efficiency.moreReclickSuppressedCount,
+    more_project_count_before_click_total: efficiency.moreProjectCountBeforeClickTotal,
+    more_project_count_after_click_total: efficiency.moreProjectCountAfterClickTotal,
+    more_scroll_height_increased_count: efficiency.moreScrollHeightIncreasedCount,
+    more_candidate_count_increased_count: efficiency.moreCandidateCountIncreasedCount,
+    more_descriptor_count_increased_count: efficiency.moreDescriptorCountIncreasedCount,
+    hydration_completed_with_more_visible: efficiency.hydrationCompletedWithMoreVisible === true,
+    hydration_completed_after_more_no_progress:
+      efficiency.hydrationCompletedAfterMoreNoProgress === true,
+    more_visible_at_hydration_complete: efficiency.moreVisibleAtHydrationComplete === true,
+    more_enabled_at_hydration_complete: efficiency.moreEnabledAtHydrationComplete === true,
+    more_clickable_at_hydration_complete: efficiency.moreClickableAtHydrationComplete === true,
+    hydration_stop_reason: efficiency.hydrationStopReason,
     project_candidate_rejected_child_chat_count:
       efficiency.projectCandidateRejectedChildChatCount,
     project_candidate_rejected_non_project_count:
@@ -1395,6 +1484,28 @@ function diagnostic(eventName, fields = {}) {
     "title_hint_used_count",
     "stable_evidence_reconcile_count",
     "ambiguous_same_title_reconcile_count",
+    "title_only_observation_preserved_count",
+    "provisional_observation_created_count",
+    "provisional_observation_reused_count",
+    "provisional_observation_resolved_count",
+    "provisional_observation_merged_existing_count",
+    "provisional_observation_promoted_new_project_count",
+    "provisional_observation_unresolved_count",
+    "provisional_resolved_same_existing_count",
+    "provisional_resolved_distinct_project_count",
+    "provisional_unresolved_kept_count",
+    "provisional_unresolved_discarded_as_proven_duplicate_count",
+    "provisional_unresolved_discard_rejected_count",
+    "provisional_duplicate_proof_project_id_count",
+    "provisional_duplicate_proof_stable_locator_count",
+    "provisional_duplicate_proof_other_stable_evidence_count",
+    "incomplete_due_to_unresolved_provisional_count",
+    "same_title_identity_same_project_count",
+    "same_title_identity_distinct_project_count",
+    "confirmed_logical_project_count_before_identity",
+    "confirmed_logical_project_count_after_identity",
+    "provisional_observation_count_before_identity",
+    "provisional_observation_count_after_identity",
     "collection_trigger_source",
     "collector_creation_reason",
     "collector_window_created",
@@ -1408,6 +1519,23 @@ function diagnostic(eventName, fields = {}) {
     "more_control_seen_count",
     "more_control_logical_unique_count",
     "more_control_duplicate_suppressed_count",
+    "more_pagination_round_count",
+    "more_click_progress_count",
+    "more_click_no_progress_count",
+    "more_reappeared_after_click_count",
+    "more_reclick_allowed_count",
+    "more_reclick_suppressed_count",
+    "more_project_count_before_click_total",
+    "more_project_count_after_click_total",
+    "more_scroll_height_increased_count",
+    "more_candidate_count_increased_count",
+    "more_descriptor_count_increased_count",
+    "hydration_completed_with_more_visible",
+    "hydration_completed_after_more_no_progress",
+    "more_visible_at_hydration_complete",
+    "more_enabled_at_hydration_complete",
+    "more_clickable_at_hydration_complete",
+    "hydration_stop_reason",
     "project_candidate_rejected_child_chat_count",
     "project_candidate_rejected_non_project_count",
     "final_catalog_index_count",
@@ -3208,6 +3336,15 @@ function recordCollectorProjectDiscoveryResult(source, pending) {
     assignIntegrityMetric("titleHintUsedCount", "title_hint_used_count");
     assignIntegrityMetric("stableEvidenceReconcileCount", "stable_evidence_reconcile_count");
     assignIntegrityMetric("ambiguousSameTitleReconcileCount", "ambiguous_same_title_reconcile_count");
+    assignIntegrityMetric("titleOnlyObservationPreservedCount", "title_only_observation_preserved_count");
+    assignIntegrityMetric("provisionalObservationCreatedCount", "provisional_observation_created_count");
+    assignIntegrityMetric("provisionalObservationReusedCount", "provisional_observation_reused_count");
+    assignIntegrityMetric(
+      "provisionalObservationCountBeforeIdentity",
+      "provisional_observation_count");
+    assignIntegrityMetric(
+      "confirmedLogicalProjectCountBeforeIdentity",
+      "confirmed_logical_project_count_before_identity");
     assignIntegrityMetric("duplicateDiscoveryKeyCount", "duplicate_discovery_key_count");
     assignIntegrityMetric(
       "discoveryKeyChangedForSameLogicalProjectCount",
@@ -3217,6 +3354,42 @@ function recordCollectorProjectDiscoveryResult(source, pending) {
     assignIntegrityMetric(
       "moreControlDuplicateSuppressedCount",
       "more_control_duplicate_suppressed_count");
+    assignIntegrityMetric("morePaginationRoundCount", "more_pagination_round_count");
+    assignIntegrityMetric("moreClickProgressCount", "more_click_progress_count");
+    assignIntegrityMetric("moreClickNoProgressCount", "more_click_no_progress_count");
+    assignIntegrityMetric("moreReappearedAfterClickCount", "more_reappeared_after_click_count");
+    assignIntegrityMetric("moreReclickAllowedCount", "more_reclick_allowed_count");
+    assignIntegrityMetric("moreReclickSuppressedCount", "more_reclick_suppressed_count");
+    assignIntegrityMetric("moreProjectCountBeforeClickTotal", "more_project_count_before_click_total");
+    assignIntegrityMetric("moreProjectCountAfterClickTotal", "more_project_count_after_click_total");
+    assignIntegrityMetric("moreScrollHeightIncreasedCount", "more_scroll_height_increased_count");
+    assignIntegrityMetric("moreCandidateCountIncreasedCount", "more_candidate_count_increased_count");
+    assignIntegrityMetric("moreDescriptorCountIncreasedCount", "more_descriptor_count_increased_count");
+    const moreStopReasons = new Set([
+      "no_more_control",
+      "no_progress",
+      "scroll_exhausted",
+      "timeout",
+      "stagnation"
+    ]);
+    if (moreStopReasons.has(source?.hydration_stop_reason)) {
+      efficiency.hydrationStopReason = source.hydration_stop_reason;
+    }
+    if (source?.hydration_completed_with_more_visible === true) {
+      efficiency.hydrationCompletedWithMoreVisible = true;
+    }
+    if (source?.hydration_completed_after_more_no_progress === true) {
+      efficiency.hydrationCompletedAfterMoreNoProgress = true;
+    }
+    if (source?.more_visible_at_hydration_complete === true) {
+      efficiency.moreVisibleAtHydrationComplete = true;
+    }
+    if (source?.more_enabled_at_hydration_complete === true) {
+      efficiency.moreEnabledAtHydrationComplete = true;
+    }
+    if (source?.more_clickable_at_hydration_complete === true) {
+      efficiency.moreClickableAtHydrationComplete = true;
+    }
     assignIntegrityMetric(
       "projectCandidateRejectedChildChatCount",
       "project_candidate_rejected_child_chat_count");
@@ -4813,11 +4986,16 @@ function validateCollectorRootResult(source, pending) {
   // is useful for display diagnostics, but it is not a safe navigation target
   // and must never make the final metadata snapshot look complete.
   const resolution = collectProjectMetadataResolution(source);
-  if (Array.isArray(pending?.projectDiscoveryScanResult?.projects)
-    && source.projects.length !== pending.projectDiscoveryScanResult.projects.length) {
-    return Math.max(
-      1,
-      Math.max(reportedUnresolved, resolution.unresolvedCount));
+  const scanProjects = pending?.projectDiscoveryScanResult?.projects;
+  const scanCount = Array.isArray(scanProjects) ? scanProjects.length : 0;
+  const provisionalCount = collectorDiscoveryProvisionals(pending?.projectDiscoveryScanResult).length;
+  if (scanCount > 0) {
+    const finalCount = source.projects.length;
+    if (finalCount < scanCount || finalCount > scanCount + provisionalCount) {
+      return Math.max(
+        1,
+        Math.max(reportedUnresolved, resolution.unresolvedCount));
+    }
   }
   return Math.max(reportedUnresolved, resolution.unresolvedCount);
 }
@@ -5966,6 +6144,202 @@ async function waitForCollectorProjectIdentityTab(
   return null;
 }
 
+function collectorDiscoveryProvisionals(source) {
+  return Array.isArray(source?.provisional_observations) ? source.provisional_observations : [];
+}
+
+function buildCollectorIdentityProjects(confirmed, provisionals) {
+  return [
+    ...(Array.isArray(confirmed) ? confirmed : []).map((project) => ({
+      ...project,
+      observation_role: "confirmed"
+    })),
+    ...(Array.isArray(provisionals) ? provisionals : []).map((project) => ({
+      ...project,
+      observation_role: "provisional"
+    }))
+  ];
+}
+
+function stripCollectorObservationBookkeeping(project) {
+  if (!project || typeof project !== "object") return project;
+  const copy = { ...project };
+  delete copy.observation_role;
+  delete copy.unresolved_reason;
+  delete copy.snapshot_generation;
+  delete copy.occupancy_source_index;
+  delete copy.row_metadata_present;
+  delete copy.child_identity_candidate_available;
+  delete copy._unresolved_confirmed_index;
+  return copy;
+}
+
+function remountSafeLocatorKey(item) {
+  return safeContextIdentifier(item?.stable_locator_key || item?.stableLocatorKey);
+}
+
+function remountSafeDuplicateProof(unresolved, resolved) {
+  const unresolvedId = stableChatGptProjectId(unresolved?.project_id || unresolved?.projectId);
+  const resolvedId = stableChatGptProjectId(resolved?.project_id || resolved?.projectId);
+  if (unresolvedId && resolvedId && unresolvedId === resolvedId) return "project_id";
+  const left = remountSafeLocatorKey(unresolved);
+  const right = remountSafeLocatorKey(resolved);
+  if (left && right && left === right && resolvedId) return "stable_locator";
+  return null;
+}
+
+function provenDuplicateAgainstResolved(unresolved, resolvedItems) {
+  const matches = [];
+  for (const resolved of resolvedItems || []) {
+    const proof = remountSafeDuplicateProof(unresolved, resolved);
+    if (!proof) continue;
+    const id = stableChatGptProjectId(resolved?.project_id || resolved?.projectId);
+    if (!id) continue;
+    matches.push({ proof, id });
+  }
+  const uniqueIds = [...new Set(matches.map((item) => item.id))];
+  if (uniqueIds.length !== 1) return null;
+  return matches[0];
+}
+
+function recordCollectorDuplicateProof(stats, proof) {
+  if (proof === "project_id") stats.provisionalDuplicateProofProjectIdCount += 1;
+  else if (proof === "stable_locator") stats.provisionalDuplicateProofStableLocatorCount += 1;
+  else if (proof) stats.provisionalDuplicateProofOtherStableEvidenceCount += 1;
+}
+
+function createCollectorProvisionalFinalizeStats(items) {
+  return {
+    provisionalObservationResolvedCount: 0,
+    provisionalObservationMergedExistingCount: 0,
+    provisionalObservationPromotedNewProjectCount: 0,
+    provisionalObservationUnresolvedCount: 0,
+    provisionalResolvedSameExistingCount: 0,
+    provisionalResolvedDistinctProjectCount: 0,
+    provisionalUnresolvedKeptCount: 0,
+    provisionalUnresolvedDiscardedAsProvenDuplicateCount: 0,
+    provisionalUnresolvedDiscardRejectedCount: 0,
+    provisionalDuplicateProofProjectIdCount: 0,
+    provisionalDuplicateProofStableLocatorCount: 0,
+    provisionalDuplicateProofOtherStableEvidenceCount: 0,
+    incompleteDueToUnresolvedProvisionalCount: 0,
+    sameTitleIdentitySameProjectCount: 0,
+    sameTitleIdentityDistinctProjectCount: 0,
+    confirmedLogicalProjectCountBeforeIdentity:
+      items.filter((item) => item?.observation_role !== "provisional").length,
+    provisionalObservationCountBeforeIdentity:
+      items.filter((item) => item?.observation_role === "provisional").length
+  };
+}
+
+function finalizeCollectorIdentityProjects(identityProjects) {
+  const items = Array.isArray(identityProjects) ? identityProjects : [];
+  const stats = createCollectorProvisionalFinalizeStats(items);
+  const byId = new Map();
+  const logical = [];
+  const titleIdSets = new Map();
+  const titleKeyOf = (project) => {
+    const title = typeof project?.title === "string" ? project.title.trim().toLocaleLowerCase() : "";
+    return title.replace(/\s+/g, " ");
+  };
+  const rememberTitleId = (project, id) => {
+    const titleKey = titleKeyOf(project);
+    if (!titleKey || !id) return;
+    if (!titleIdSets.has(titleKey)) titleIdSets.set(titleKey, new Set());
+    titleIdSets.get(titleKey).add(id);
+  };
+  const mergeOrAdd = (item, role) => {
+    const id = stableChatGptProjectId(item?.project_id || item?.projectId);
+    if (id && byId.has(id)) {
+      if (role !== "provisional") {
+        const published = stripCollectorObservationBookkeeping(item);
+        logical.push(published);
+        rememberTitleId(item, id);
+        return published;
+      }
+      const existing = byId.get(id);
+      if (item?.url && !existing.url) existing.url = item.url;
+      if (item?.discovery_key && !existing.discovery_key) existing.discovery_key = item.discovery_key;
+      if (item?.stable_locator_key && !existing.stable_locator_key) {
+        existing.stable_locator_key = item.stable_locator_key;
+      }
+      stats.provisionalObservationMergedExistingCount += 1;
+      stats.provisionalResolvedSameExistingCount += 1;
+      stats.sameTitleIdentitySameProjectCount += 1;
+      return existing;
+    }
+    const published = stripCollectorObservationBookkeeping(item);
+    logical.push(published);
+    if (id) byId.set(id, published);
+    rememberTitleId(item, id);
+    if (role === "provisional") {
+      stats.provisionalObservationPromotedNewProjectCount += 1;
+      stats.provisionalResolvedDistinctProjectCount += 1;
+    }
+    return published;
+  };
+
+  items.forEach((item, index) => {
+    if (item?.observation_role === "provisional") return;
+    const id = stableChatGptProjectId(item?.project_id || item?.projectId);
+    if (id) mergeOrAdd(item, "confirmed");
+    else logical.push({ ...stripCollectorObservationBookkeeping(item), _unresolved_confirmed_index: index });
+  });
+
+  const resolvedPool = items.filter((candidate) =>
+    stableChatGptProjectId(candidate?.project_id || candidate?.projectId));
+  for (const item of items) {
+    if (item?.observation_role !== "provisional") continue;
+    const id = stableChatGptProjectId(item?.project_id || item?.projectId);
+    if (!id) {
+      const proof = provenDuplicateAgainstResolved(item, resolvedPool);
+      if (proof) {
+        stats.provisionalUnresolvedDiscardedAsProvenDuplicateCount += 1;
+        recordCollectorDuplicateProof(stats, proof.proof);
+        continue;
+      }
+      if (Number.isSafeInteger(item.occupancy_source_index) || item.disconnected === true) {
+        stats.provisionalUnresolvedDiscardRejectedCount += 1;
+      }
+      stats.provisionalObservationUnresolvedCount += 1;
+      stats.provisionalUnresolvedKeptCount += 1;
+      continue;
+    }
+    stats.provisionalObservationResolvedCount += 1;
+    const existing = byId.get(id);
+    mergeOrAdd(item, "provisional");
+    if (!existing) {
+      const ids = titleIdSets.get(titleKeyOf(item));
+      if (ids && ids.size > 1) stats.sameTitleIdentityDistinctProjectCount += 1;
+    }
+  }
+
+  for (let index = logical.length - 1; index >= 0; index -= 1) {
+    const item = logical[index];
+    const confirmedIndex = item._unresolved_confirmed_index;
+    if (!Number.isSafeInteger(confirmedIndex)
+      || stableChatGptProjectId(item?.project_id || item?.projectId)) {
+      delete item._unresolved_confirmed_index;
+      continue;
+    }
+    const proof = provenDuplicateAgainstResolved(item, resolvedPool);
+    if (proof) {
+      logical.splice(index, 1);
+      stats.provisionalUnresolvedDiscardedAsProvenDuplicateCount += 1;
+      recordCollectorDuplicateProof(stats, proof.proof);
+      stats.sameTitleIdentitySameProjectCount += 1;
+      continue;
+    }
+    delete item._unresolved_confirmed_index;
+  }
+
+  stats.confirmedLogicalProjectCountAfterIdentity = logical.filter((item) =>
+    stableChatGptProjectId(item?.project_id || item?.projectId)).length;
+  stats.provisionalObservationCountAfterIdentity = stats.provisionalUnresolvedKeptCount;
+  stats.incompleteDueToUnresolvedProvisionalCount = stats.provisionalUnresolvedKeptCount;
+  return { projects: logical, stats };
+}
+
 async function resolveCollectorProjectIdentities(tab, pending, request, rootResult) {
   throwIfCollectorRequestSuperseded(pending);
   pending.identityResolutionAttempted = true;
@@ -5974,8 +6348,11 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
     && pending.projectDiscoveryScanResult.projects.length > 0
     ? pending.projectDiscoveryScanResult.projects
     : (Array.isArray(rootResult?.projects) ? rootResult.projects : []);
+  const provisionals = collectorDiscoveryProvisionals(
+    pending.projectDiscoveryScanResult || rootResult);
+  const identityCatalog = buildCollectorIdentityProjects(discoveryProjects, provisionals);
   let projects = mergeIdentityProgressOntoDiscovery(
-    discoveryProjects,
+    identityCatalog,
     pending.projectIdentityResult?.projects);
   const initialResolution = collectProjectMetadataResolution({ projects });
   incrementCollectorProjectDiscoveryEfficiency(
@@ -5995,6 +6372,8 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
       project_identity_resolution_completed: false,
       identity_resolution_input_count: projects.length,
       discovery_catalog_count: discoveryProjects.length,
+      provisional_observation_count_before_identity: provisionals.length,
+      confirmed_logical_project_count_before_identity: discoveryProjects.length,
       current_project_index: -1,
       resolution_method: "dom",
       navigation_target_verified: false,
@@ -6024,6 +6403,7 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
         collection: "project_identity",
         identityMode: "dom",
         projects,
+        identityCatalog: projects,
         totalProjects: projects.length,
         navigationTimeoutMs: 10000
       }, request, {
@@ -6525,7 +6905,7 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
     }
   }
 
-  if (projects.length !== discoveryProjects.length) {
+  if (projects.length !== identityCatalog.length) {
     emitCollectorProjectIdentityFailureSummary(
       pending,
       projects,
@@ -6535,8 +6915,49 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
       0,
       "context_projects_incomplete");
   }
+  const finalized = finalizeCollectorIdentityProjects(projects);
+  const efficiency = collectorProjectDiscoveryEfficiencyFor(pending);
+  if (efficiency) {
+    efficiency.provisionalObservationResolvedCount = finalized.stats.provisionalObservationResolvedCount;
+    efficiency.provisionalObservationMergedExistingCount =
+      finalized.stats.provisionalObservationMergedExistingCount;
+    efficiency.provisionalObservationPromotedNewProjectCount =
+      finalized.stats.provisionalObservationPromotedNewProjectCount;
+    efficiency.provisionalObservationUnresolvedCount =
+      finalized.stats.provisionalObservationUnresolvedCount;
+    efficiency.provisionalResolvedSameExistingCount =
+      finalized.stats.provisionalResolvedSameExistingCount;
+    efficiency.provisionalResolvedDistinctProjectCount =
+      finalized.stats.provisionalResolvedDistinctProjectCount;
+    efficiency.provisionalUnresolvedKeptCount = finalized.stats.provisionalUnresolvedKeptCount;
+    efficiency.provisionalUnresolvedDiscardedAsProvenDuplicateCount =
+      finalized.stats.provisionalUnresolvedDiscardedAsProvenDuplicateCount;
+    efficiency.provisionalUnresolvedDiscardRejectedCount =
+      finalized.stats.provisionalUnresolvedDiscardRejectedCount;
+    efficiency.provisionalDuplicateProofProjectIdCount =
+      finalized.stats.provisionalDuplicateProofProjectIdCount;
+    efficiency.provisionalDuplicateProofStableLocatorCount =
+      finalized.stats.provisionalDuplicateProofStableLocatorCount;
+    efficiency.provisionalDuplicateProofOtherStableEvidenceCount =
+      finalized.stats.provisionalDuplicateProofOtherStableEvidenceCount;
+    efficiency.incompleteDueToUnresolvedProvisionalCount =
+      finalized.stats.incompleteDueToUnresolvedProvisionalCount;
+    efficiency.sameTitleIdentitySameProjectCount = finalized.stats.sameTitleIdentitySameProjectCount;
+    efficiency.sameTitleIdentityDistinctProjectCount =
+      finalized.stats.sameTitleIdentityDistinctProjectCount;
+    efficiency.confirmedLogicalProjectCountBeforeIdentity =
+      finalized.stats.confirmedLogicalProjectCountBeforeIdentity;
+    efficiency.confirmedLogicalProjectCountAfterIdentity =
+      finalized.stats.confirmedLogicalProjectCountAfterIdentity;
+    efficiency.provisionalObservationCountBeforeIdentity =
+      finalized.stats.provisionalObservationCountBeforeIdentity;
+    efficiency.provisionalObservationCountAfterIdentity =
+      finalized.stats.provisionalObservationCountAfterIdentity;
+  }
+  projects = finalized.projects;
   const finalResolution = collectProjectMetadataResolution({ projects });
-  if (finalResolution.unresolvedCount > 0) {
+  if (finalResolution.unresolvedCount > 0
+    || finalized.stats.provisionalObservationUnresolvedCount > 0) {
     emitCollectorProjectIdentityFailureSummary(
       pending,
       projects,
@@ -6645,6 +7066,7 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
   return {
     ...rootResult,
     projects,
+    provisional_observations: [],
     unresolved_project_count: 0,
     project_identity_resolution_started: true,
     project_identity_resolution_completed: true,

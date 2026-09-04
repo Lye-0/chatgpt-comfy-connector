@@ -409,13 +409,15 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
     projectIds = [],
     stableRowIds = [],
     nestedScroll = false,
-    emptyUntilScroll = false
+    emptyUntilScroll = false,
+    remountOnScroll = false
   } = {}) {
     super(document, "NAV");
     this.itemWindow = itemWindow;
     this.expanded = true;
     this.nestedScroll = nestedScroll;
     this.emptyUntilScroll = emptyUntilScroll;
+    this.remountOnScroll = remountOnScroll;
     this.projectNames = projectNames;
     this.projectIds = projectIds;
     this.stableRowIds = stableRowIds;
@@ -437,6 +439,10 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
       set: (value) => {
         this.scrollport._scrollTop = Number(value) || 0;
         this.scrollHistory.push(this.scrollport._scrollTop);
+        if (this.remountOnScroll) {
+          this.projectRows.forEach((row) => { row.isConnected = false; });
+          this.rebuildRows();
+        }
       }
     });
     this.appendChild(this.scrollport);
@@ -449,8 +455,14 @@ class VirtualizedProjectSidebar extends FakeMetadataNode {
           this.scrollport.scrollTop = value;
           return;
         }
-        currentScrollTop = Number(value) || 0;
+        const next = Number(value) || 0;
+        const changed = next !== currentScrollTop;
+        currentScrollTop = next;
         this.scrollHistory.push(currentScrollTop);
+        if (this.remountOnScroll && changed) {
+          this.projectRows.forEach((row) => { row.isConnected = false; });
+          this.rebuildRows();
+        }
       }
     });
     if (this.nestedScroll) {
@@ -819,7 +831,50 @@ test("Root Sidebar hydration waits for DOM mutation quiet before completing", as
   assert.equal(result.mutation_count, 1);
   assert.ok(result.mutation_quiet_ms >= 30);
   assert.ok(result.hydration_wait_ms >= 30);
+  assert.ok(result.hydration_poll_count >= 1);
+  assert.ok(result.hydration_poll_wait_ms >= 0);
+  assert.equal(result.hydration_poll_interval_ms, 25);
   assert.deepEqual(sidebar.scrollHistory, []);
+});
+
+test("Root Sidebar hydration ignores unrelated main-content mutation churn", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const sidebar = new FakeSidebar(null, [], [], null, null, []);
+  const content = new FakeMetadataNode(null, "MAIN");
+  const document = new FakeProjectDocument(rootHref, sidebar, content);
+  sidebar.ownerDocument = document;
+  content.ownerDocument = document;
+  document.readyState = "complete";
+  document.documentElement = document;
+  document.defaultView = {
+    innerWidth: 1024,
+    innerHeight: 540,
+    getComputedStyle() { return { display: "", visibility: "" }; },
+    setTimeout,
+    clearTimeout,
+    MutationObserver: FakeMutationObserver
+  };
+  FakeMutationObserver.instances.length = 0;
+  const locators = loadLocators(document, {
+    MutationObserver: FakeMutationObserver,
+    setTimeout,
+    clearTimeout
+  });
+
+  const hydrationPromise = locators.waitForChatGptRootSidebarHydrationAsync(
+    document,
+    rootHref,
+    { timeoutMs: 300, quietMs: 30, pollMs: 25 });
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  const observer = FakeMutationObserver.instances.at(-1);
+  assert.ok(observer);
+  observer.emit([{ type: "childList", target: content }]);
+
+  const result = await hydrationPromise;
+  assert.equal(result.status, "ok");
+  assert.equal(result.root_hydration_completed, true);
+  assert.equal(result.mutation_count, 0);
+  assert.ok(result.hydration_wait_ms >= 30);
 });
 
 test("sidebar discovery uses the first known history sidebar", () => {
@@ -1125,6 +1180,12 @@ test("sidebar discovery selects the real nested scroll container and reports com
   assert.equal(snapshot.discovered_project_count, 6);
   assert.equal(snapshot.sidebar_scroll_direction, "down");
   assert.equal(snapshot.sidebar_restore_count, 1);
+  assert.ok(snapshot.root_catalog_build_count > 0);
+  assert.equal(snapshot.root_catalog_reuse_count, snapshot.root_catalog_build_count - 1);
+  assert.ok(snapshot.root_catalog_build_count <= snapshot.sidebar_scroll_attempt_count + 1);
+  assert.equal(
+    snapshot.sidebar_scroll_position_change_count,
+    snapshot.sidebar_scroll_attempt_count);
   assert.equal(sidebar.scrollport.scrollTop, 0);
 });
 
@@ -3753,6 +3814,22 @@ test("Project page collection handles a plain Chat link under the expanded curre
   assert.equal(snapshot.project_chat_collection_complete, true);
 });
 
+function attachCollapsedDisclosure(document, row, regionId, projectId) {
+  row.attributes.set("aria-controls", regionId);
+  row.attributes.set("aria-expanded", "false");
+  const region = new FakeMetadataNode(document, "DIV", "", { id: regionId });
+  document.registerElementById(region);
+  row.click = () => {
+    row.attributes.set("aria-expanded", "true");
+    if (region.children.length === 0 && projectId) {
+      region.appendChild(new FakeMetadataNode(document, "A", "Chat", {
+        href: `/g/${projectId}/c/${projectId}-chat`
+      }));
+    }
+  };
+  return region;
+}
+
 function attachExclusiveChildChats(document, row, regionId, projectId, count, mixedIds = null) {
   row.attributes.set("aria-controls", regionId);
   row.attributes.set("aria-expanded", "true");
@@ -3794,6 +3871,330 @@ test("28 Project rows with exclusive child Chat identities keep unique Stable ID
   assert.equal(result.non_navigation_resolved_count, 28);
   assert.equal(new Set(ids).size, 28);
   assert.deepEqual(ids, Array.from({ length: 28 }, (_, index) => `g-p-unique-${index}`));
+});
+
+test("28 collapsed disclosure Projects resolve in one DOM pass without double relocation", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const names = Array.from({ length: 28 }, (_, index) => `Disclosure Project ${index}`);
+  const sidebar = new FakeSidebar(document, names, [], null, null, []);
+  sidebar.itemWindow = 28;
+  document.sidebar = sidebar;
+  const catalog = names.map((title, index) => {
+    attachCollapsedDisclosure(
+      document,
+      sidebar.projectRows[index],
+      `collapsed-${index}`,
+      `g-p-collapsed-${index}`);
+    return {
+      project_index: index,
+      discovery_index: index,
+      title,
+      discovery_key: `collapsed-${index}`
+    };
+  });
+  const locators = loadLocators(document);
+  const telemetry = [];
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    catalog,
+    {
+      identityMode: "dom",
+      identityCatalog: catalog,
+      onTelemetry: (event) => telemetry.push(event)
+    });
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(result.non_navigation_resolved_count, 28);
+  assert.equal(result.navigation_resolved_count, 0);
+  assert.deepEqual(
+    result.projects.map((project) => project.project_id),
+    Array.from({ length: 28 }, (_, index) => `g-p-collapsed-${index}`));
+  assert.equal(result.projects.every((project) => project.identity_source === "child_chat_url"), true);
+  const starts = telemetry.filter((event) =>
+    event.stage === "collector_project_identity_row_relocation_start");
+  const relocations = telemetry.filter((event) =>
+    event.stage === "collector_project_identity_row_relocation");
+  assert.equal(starts.length, 28);
+  assert.equal(relocations.length, 28);
+  assert.equal(starts.every((event) => event.sidebar_dom_generation_changed !== true), true);
+  assert.equal(relocations.filter((event) => event.catalog_reused === true).length, 27);
+  assert.equal(telemetry.some((event) => event.stage === "collector_project_identity_navigation_wait"), false);
+  assert.equal(telemetry.filter((event) =>
+    event.stage === "collector_project_identity_disclosure_click").length, 28);
+});
+
+test("connected disclosure row does not force a second relocation", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["Connected Project"], [], null, null, []);
+  document.sidebar = sidebar;
+  attachCollapsedDisclosure(document, sidebar.projectRows[0], "connected-region", "g-p-connected");
+  const locators = loadLocators(document);
+  const telemetry = [];
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "Connected Project", discovery_key: "connected-0" }],
+    {
+      identityMode: "dom",
+      onTelemetry: (event) => telemetry.push(event)
+    });
+  assert.equal(result.projects[0].project_id, "g-p-connected");
+  assert.equal(sidebar.projectRows[0].isConnected, true);
+  assert.equal(telemetry.filter((event) =>
+    event.stage === "collector_project_identity_row_relocation_start").length, 1);
+  assert.equal(telemetry.filter((event) =>
+    event.stage === "collector_project_identity_row_relocation").length, 1);
+  assert.equal(telemetry.some((event) =>
+    event.stage === "collector_project_identity_row_relocation"
+    && event.relocation_skipped_connected_row === true), true);
+});
+
+test("disconnected disclosure row is relocated instead of reused", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["Remount Project"], [], null, null, []);
+  document.sidebar = sidebar;
+  const original = sidebar.projectRows[0];
+  original.attributes.set("aria-controls", "remount-region");
+  original.attributes.set("aria-expanded", "false");
+  const region = new FakeMetadataNode(document, "DIV", "", { id: "remount-region" });
+  document.registerElementById(region);
+  original.click = () => {
+    original.isConnected = false;
+    const replacement = new FakeMetadataNode(document, "DIV", "", {
+      role: "button",
+      "data-sidebar-item": "true",
+      "aria-expanded": "true",
+      "aria-controls": "remount-region"
+    });
+    replacement.appendChild(new FakeMetadataNode(document, "SPAN", "Remount Project", {
+      "data-marquee-text": "true"
+    }));
+    replacement.isConnected = true;
+    sidebar.projectRows[0] = replacement;
+    if (region.children.length === 0) {
+      region.appendChild(new FakeMetadataNode(document, "A", "Chat", {
+        href: "/g/g-p-remount/c/remount-chat"
+      }));
+    }
+  };
+  const locators = loadLocators(document);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "Remount Project", discovery_key: "remount-0" }],
+    { identityMode: "dom" });
+  assert.equal(original.isConnected, false);
+  assert.equal(sidebar.projectRows[0].isConnected, true);
+  assert.equal(result.projects[0].project_id, "g-p-remount");
+  assert.equal(result.unresolved_count, 0);
+});
+
+test("Stable ID from a controlled region ends identity without navigation search", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["Region Project"], [], null, null, []);
+  document.sidebar = sidebar;
+  attachCollapsedDisclosure(document, sidebar.projectRows[0], "region-id", "g-p-region");
+  const locators = loadLocators(document);
+  const telemetry = [];
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "Region Project" }],
+    {
+      identityMode: "dom",
+      onTelemetry: (event) => telemetry.push(event)
+    });
+  assert.equal(result.projects[0].project_id, "g-p-region");
+  assert.equal(result.projects[0].identity_source, "child_chat_url");
+  assert.equal(telemetry.some((event) => event.stage === "collector_project_identity_navigation_wait"), false);
+  assert.equal(telemetry.some((event) => event.stage === "collector_project_identity_row_structure"), false);
+  const classification = telemetry.find((event) =>
+    event.stage === "collector_project_identity_source_classification");
+  assert.equal(classification.resolution_success, true);
+  assert.ok(Number.isSafeInteger(classification.identity_elapsed_ms));
+});
+
+test("descriptor Stable ID skips disclosure entirely", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["Metadata Project"], [], null, null, []);
+  document.sidebar = sidebar;
+  let clickCount = 0;
+  attachCollapsedDisclosure(document, sidebar.projectRows[0], "meta-region", "g-p-meta");
+  sidebar.projectRows[0].click = () => {
+    clickCount += 1;
+  };
+  const locators = loadLocators(document);
+  const telemetry = [];
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{
+      project_index: 0,
+      discovery_index: 0,
+      title: "Metadata Project",
+      project_id: "g-p-meta",
+      url: "https://chatgpt.com/g/g-p-meta/project"
+    }],
+    {
+      identityMode: "dom",
+      onTelemetry: (event) => telemetry.push(event)
+    });
+  assert.equal(clickCount, 0);
+  assert.equal(result.projects[0].project_id, "g-p-meta");
+  assert.equal(telemetry.some((event) =>
+    event.stage === "collector_project_identity_disclosure_click"), false);
+  assert.equal(telemetry.some((event) =>
+    event.stage === "collector_project_identity_row_relocation_start"), false);
+});
+
+test("DOM generation change rebuilds the identity candidate catalog", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const names = ["First Catalog Project", "Second Catalog Project"];
+  const sidebar = new FakeSidebar(document, names, [], null, null, []);
+  sidebar.itemWindow = 2;
+  document.sidebar = sidebar;
+  names.forEach((title, index) => {
+    const row = sidebar.projectRows[index];
+    attachCollapsedDisclosure(document, row, `gen-${index}`, `g-p-gen-${index}`);
+    const originalClick = row.click;
+    row.click = () => {
+      originalClick();
+      if (index === 0) {
+        row.isConnected = false;
+        const replacement = new FakeMetadataNode(document, "DIV", "", {
+          role: "button",
+          "data-sidebar-item": "true",
+          "aria-expanded": "true",
+          "aria-controls": `gen-${index}`
+        });
+        replacement.appendChild(new FakeMetadataNode(document, "SPAN", title, {
+          "data-marquee-text": "true"
+        }));
+        sidebar.projectRows[index] = replacement;
+      }
+    };
+  });
+  const catalog = names.map((title, index) => ({
+    project_index: index,
+    discovery_index: index,
+    title,
+    discovery_key: `gen-${index}`
+  }));
+  const locators = loadLocators(document);
+  const telemetry = [];
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    catalog,
+    {
+      identityMode: "dom",
+      identityCatalog: catalog,
+      onTelemetry: (event) => telemetry.push(event)
+    });
+  assert.equal(result.unresolved_count, 0);
+  const relocations = telemetry.filter((event) =>
+    event.stage === "collector_project_identity_row_relocation");
+  assert.ok(relocations.some((event) => event.catalog_reused === true)
+    || relocations.some((event) => event.catalog_reused === false));
+  assert.equal(relocations[0].catalog_reused, false);
+});
+
+test("duplicate titles are not bound by title alone during identity", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["同じProject", "同じProject"], [], null, null, []);
+  sidebar.itemWindow = 2;
+  document.sidebar = sidebar;
+  attachCollapsedDisclosure(document, sidebar.projectRows[0], "dup-a", "g-p-dup-a");
+  attachCollapsedDisclosure(document, sidebar.projectRows[1], "dup-b", "g-p-dup-b");
+  const locators = loadLocators(document);
+  const discovered = locators.collectChatGptContext(document, rootHref);
+  assert.equal(discovered.projects.length, 2);
+  assert.notEqual(discovered.projects[0].discovery_key, discovered.projects[1].discovery_key);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    discovered.projects.map((project, index) => ({
+      ...project,
+      project_index: index,
+      discovery_index: index
+    })),
+    { identityMode: "dom", identityCatalog: discovered.projects });
+  assert.equal(result.projects[0].project_id, "g-p-dup-a");
+  assert.equal(result.projects[1].project_id, "g-p-dup-b");
+  assert.equal(result.unresolved_count, 0);
+});
+
+test("one Project uses navigation fallback after DOM disclosure identity", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["Resolved Project", "Fallback Project"], [], null, null, []);
+  sidebar.itemWindow = 2;
+  document.sidebar = sidebar;
+  attachCollapsedDisclosure(document, sidebar.projectRows[0], "resolved-region", "g-p-resolved");
+  const fallbackRow = sidebar.projectRows[1];
+  fallbackRow.attributes.set("aria-controls", "fallback-empty");
+  document.registerElementById(new FakeMetadataNode(document, "DIV", "", {
+    id: "fallback-empty"
+  }));
+  const fallbackLink = new FakeMetadataNode(document, "DIV", "Fallback Project", { role: "link" });
+  fallbackRow.click = () => {
+    fallbackRow.attributes.set("aria-expanded", "true");
+  };
+  fallbackLink.click = () => {
+    document.location.href = "https://chatgpt.com/g/g-p-fallback/project";
+  };
+  fallbackRow.appendChild(fallbackLink);
+  const catalog = [
+    { project_index: 0, discovery_index: 0, title: "Resolved Project", discovery_key: "resolved-0" },
+    { project_index: 20, discovery_index: 20, title: "Fallback Project", discovery_key: "fallback-20" }
+  ];
+  const locators = loadLocators(document);
+  const domTelemetry = [];
+  const dom = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    catalog,
+    {
+      identityMode: "dom",
+      identityCatalog: catalog,
+      navigationTimeoutMs: 400,
+      onTelemetry: (event) => domTelemetry.push(event)
+    });
+  assert.equal(dom.projects[0].project_id, "g-p-resolved");
+  assert.equal(dom.projects[1].project_id, undefined);
+  assert.equal(dom.unresolved_count, 1);
+  assert.equal(domTelemetry.some((event) =>
+    event.stage === "collector_project_identity_navigation_wait"), false);
+
+  document.location.href = rootHref;
+  const navigationTelemetry = [];
+  const navigation = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [catalog[1]],
+    {
+      identityMode: "navigation",
+      identityCatalog: catalog,
+      navigationTimeoutMs: 500,
+      onTelemetry: (event) => navigationTelemetry.push(event)
+    });
+  assert.equal(navigation.projects[0].project_id, "g-p-fallback");
+  assert.equal(navigation.projects[0].identity_source, "navigation_url");
+  const classification = navigationTelemetry.find((event) =>
+    event.stage === "collector_project_identity_source_classification");
+  assert.equal(classification.navigation_fallback_attempted, true);
+  assert.equal(classification.navigation_fallback_success, true);
+  assert.equal(classification.project_index, 20);
+  assert.equal(navigationTelemetry.filter((event) =>
+    event.stage === "collector_project_identity_navigation_wait"
+    && event.navigation_detected === true).length >= 1, true);
 });
 
 test("Five child Chat URLs for one Project all pointing at the same g-p-* resolve consistently", async () => {
@@ -3983,6 +4384,404 @@ test("Index 26 and 27 with five distinct child Chat identities stay unique", asy
     ids.push(result.projects[0].project_id);
   }
   assert.deepEqual(ids, ["g-p-late-26", "g-p-late-27"]);
+});
+
+class RemountingMoreSidebar extends FakeMetadataNode {
+  constructor(document, names) {
+    super(document, "NAV");
+    this.attributes.set("aria-label", "チャット履歴");
+    this.names = names;
+    this.clickCount = 0;
+    this.moreGeneration = 0;
+    this.clientHeight = 400;
+    this.scrollHeight = 400;
+    this.scrollTop = 0;
+    this.projectRows = names.map((name, index) => {
+      const row = new FakeMetadataNode(document, "DIV", "", {
+        role: "button",
+        "data-sidebar-item": "true",
+        "aria-expanded": "false",
+        "aria-controls": `more-side-${index}`
+      });
+      row.appendChild(new FakeMetadataNode(document, "SPAN", name, { "data-marquee-text": "true" }));
+      return row;
+    });
+    this.rebuildMore();
+  }
+
+  rebuildMore() {
+    this.moreGeneration += 1;
+    this.moreButton = new FakeMetadataNode(this.ownerDocument, "BUTTON", "さらに表示", {
+      role: "button",
+      "aria-controls": `more-remount-${this.moreGeneration}`
+    });
+    this.moreButton.click = () => {
+      this.clickCount += 1;
+      this.rebuildMore();
+    };
+  }
+
+  querySelectorAll(selector) {
+    if (selector.includes("data-sidebar-item")) return this.projectRows;
+    if (selector === "button") return [this.moreButton];
+    if (selector.includes('role="button"')) return [...this.projectRows, this.moreButton];
+    if (selector.includes("data-marquee-text")) {
+      return this.projectRows.flatMap((row) => row.querySelectorAll(selector));
+    }
+    if (selector === "a[href]") return [];
+    return [];
+  }
+}
+
+class NestedChildChatSidebar extends FakeMetadataNode {
+  constructor(document) {
+    super(document, "NAV");
+    this.attributes.set("aria-label", "チャット履歴");
+    this.clientHeight = 400;
+    this.scrollHeight = 400;
+    this.scrollTop = 0;
+    this.projectRow = new FakeMetadataNode(document, "DIV", "", {
+      role: "button",
+      "data-sidebar-item": "true",
+      "aria-expanded": "true",
+      "aria-controls": "nested-child-region"
+    });
+    this.projectRow.appendChild(new FakeMetadataNode(document, "SPAN", "Parent Project", {
+      "data-marquee-text": "true"
+    }));
+    this.childChat = new FakeMetadataNode(document, "DIV", "", {
+      role: "button",
+      "data-sidebar-item": "true"
+    });
+    this.childChat.appendChild(new FakeMetadataNode(document, "SPAN", "Nested Chat", {
+      "data-marquee-text": "true"
+    }));
+    this.projectRow.appendChild(this.childChat);
+    this.appendChild(this.projectRow);
+  }
+}
+
+test("28 unique Projects without remount stay 28 logical descriptors", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => `Logical Project ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, { itemWindow: 28 });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 4,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 28);
+  assert.equal(snapshot.discovery_logical_project_count_final, 28);
+  assert.equal(snapshot.descriptor_added_count, 28);
+});
+
+test("full Sidebar remount keeps 28 logical Projects instead of appending a second generation", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => `Remount Project ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 20,
+    nestedScroll: true,
+    remountOnScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 32,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 28);
+  assert.equal(snapshot.discovery_logical_project_count_final, 28);
+  assert.ok(snapshot.descriptor_remount_reconciled_count >= 1);
+  assert.ok(snapshot.discovery_key_changed_for_same_logical_project_count >= 1);
+  assert.equal(snapshot.projects.length, 28);
+});
+
+test("aria-controls regeneration does not create duplicate logical Projects", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => `Volatile Project ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, { itemWindow: 28 });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const first = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 2,
+    initialSettleMs: 0
+  });
+  sidebar.remount();
+  const second = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 2,
+    initialSettleMs: 0
+  });
+  assert.equal(first.projects.length, 28);
+  assert.equal(second.projects.length, 28);
+  assert.notEqual(first.projects[0].discovery_key, second.projects[0].discovery_key);
+});
+
+test("same-title Projects are not merged by title during remount", async () => {
+  const href = "https://chatgpt.com/";
+  const names = ["同じProject", "同じProject"];
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 2,
+    remountOnScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 2);
+  assert.equal(snapshot.projects.filter((project) => project.title === "同じProject").length, 2);
+  assert.notEqual(snapshot.projects[0].discovery_key, snapshot.projects[1].discovery_key);
+});
+
+test("stable locator remount reconciles onto the existing descriptor", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 8 }, (_, index) => `Stable Locator ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 8,
+    remountOnScroll: true,
+    stableRowIds: names.map((_, index) => `stable-row-${index}`)
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 8);
+  assert.equal(snapshot.projects.filter((project) => project.stable_locator_key).length, 8);
+  assert.ok(snapshot.descriptor_updated_count >= 1 || snapshot.descriptor_added_count === 8);
+});
+
+test("ambiguous same-title remount does not invent extra descriptors", async () => {
+  const href = "https://chatgpt.com/";
+  const names = ["Ambiguous", "Ambiguous"];
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 2,
+    remountOnScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 2);
+  assert.ok(snapshot.descriptor_ambiguous_reconcile_count >= 0);
+});
+
+test("remounted More control is not clicked again without growth", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => `Listed Project ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new RemountingMoreSidebar(document, names);
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    maxMoreClicks: 12,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 28);
+  assert.equal(sidebar.clickCount, 1);
+  assert.equal(snapshot.project_more_control_click_count, 1);
+  assert.ok(snapshot.more_control_duplicate_suppressed_count >= 1);
+  assert.equal(snapshot.more_control_logical_unique_count, 1);
+});
+
+test("More click that regenerates the same Project rows does not duplicate the catalog", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => `Regenerated ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new RemountingMoreSidebar(document, names);
+  sidebar.moreButton.click = () => {
+    sidebar.clickCount += 1;
+    sidebar.projectRows.forEach((row) => { row.isConnected = false; });
+    sidebar.projectRows = names.map((name, index) => {
+      const row = new FakeMetadataNode(document, "DIV", "", {
+        role: "button",
+        "data-sidebar-item": "true",
+        "aria-expanded": "false",
+        "aria-controls": `regen-${sidebar.clickCount}-${index}`
+      });
+      row.appendChild(new FakeMetadataNode(document, "SPAN", name, { "data-marquee-text": "true" }));
+      return row;
+    });
+    sidebar.rebuildMore();
+  };
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    maxMoreClicks: 12,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 28);
+  assert.equal(snapshot.discovery_logical_project_count_final, 28);
+});
+
+test("nested child Chat rows are rejected as Project candidates", async () => {
+  const href = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new NestedChildChatSidebar(document);
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 2,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 1);
+  assert.equal(snapshot.projects[0].title, "Parent Project");
+  assert.ok(snapshot.project_candidate_rejected_child_chat_count >= 1);
+});
+
+test("untitled non-Project rows increment the rejected non-project count", async () => {
+  const href = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new FakeMetadataNode(document, "NAV");
+  sidebar.attributes.set("aria-label", "チャット履歴");
+  sidebar.clientHeight = 400;
+  sidebar.scrollHeight = 400;
+  sidebar.scrollTop = 0;
+  const blank = new FakeMetadataNode(document, "DIV", "", {
+    role: "button",
+    "data-sidebar-item": "true"
+  });
+  const titled = new FakeMetadataNode(document, "DIV", "", {
+    role: "button",
+    "data-sidebar-item": "true"
+  });
+  titled.appendChild(new FakeMetadataNode(document, "SPAN", "Kept Project", {
+    "data-marquee-text": "true"
+  }));
+  sidebar.appendChild(blank);
+  sidebar.appendChild(titled);
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 2,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 1);
+  assert.ok(snapshot.project_candidate_rejected_non_project_count >= 1);
+});
+
+test("repeated catalog rebuilds do not grow a 28 Project logical catalog", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => `Rebuild Project ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 20,
+    nestedScroll: true,
+    remountOnScroll: true
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 32,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 28);
+  assert.ok(snapshot.root_catalog_build_count >= 2);
+  assert.equal(snapshot.discovery_logical_project_count_final, 28);
+});
+
+test("a genuinely new Project is appended once", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 27 }, (_, index) => `Growing Project ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 28,
+    nestedScroll: true
+  });
+  let added = false;
+  Object.defineProperty(sidebar.scrollport, "scrollTop", {
+    configurable: true,
+    get: () => sidebar.scrollport._scrollTop,
+    set: (value) => {
+      sidebar.scrollport._scrollTop = Number(value) || 0;
+      sidebar.scrollHistory.push(sidebar.scrollport._scrollTop);
+      if (!added) {
+        added = true;
+        sidebar.projectNames = [...sidebar.projectNames, "Growing Project 27"];
+        sidebar.rebuildRows();
+      }
+    }
+  });
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 28);
+  assert.equal(snapshot.projects.filter((project) => project.title === "Growing Project 27").length, 1);
+});
+
+test("a hidden Project keeps its stale descriptor instead of collapsing the catalog", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => `Stale Project ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new VirtualizedProjectSidebar(document, names, {
+    itemWindow: 28,
+    nestedScroll: true
+  });
+  const originalQuery = sidebar.querySelectorAll.bind(sidebar);
+  sidebar.querySelectorAll = (selector) => {
+    const rows = originalQuery(selector);
+    if (selector.includes("data-sidebar-item") && sidebar.scrollHistory.length >= 1) {
+      return rows.slice(0, 27);
+    }
+    return rows;
+  };
+  document.sidebar = sidebar;
+  const locators = loadLocators(document);
+  const snapshot = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 8,
+    initialSettleMs: 0
+  });
+  assert.equal(snapshot.projects.length, 28);
+});
+
+test("28 Project remount discovery still resolves 28 identities", async () => {
+  const href = "https://chatgpt.com/";
+  const names = Array.from({ length: 28 }, (_, index) => `Identity Remount ${index}`);
+  const document = new FakeMetadataDocument(href, null);
+  const sidebar = new FakeSidebar(document, names, [], null, null, []);
+  sidebar.itemWindow = 28;
+  document.sidebar = sidebar;
+  names.forEach((_, index) => {
+    attachExclusiveChildChats(
+      document,
+      sidebar.projectRows[index],
+      `identity-remount-${index}`,
+      `g-p-identity-remount-${index}`,
+      1);
+  });
+  const locators = loadLocators(document);
+  const discovered = await locators.collectChatGptContextAsync(document, href, {
+    maxScrolls: 4,
+    initialSettleMs: 0
+  });
+  assert.equal(discovered.projects.length, 28);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    href,
+    discovered.projects.map((project, index) => ({
+      ...project,
+      project_index: index,
+      discovery_index: index
+    })),
+    { identityMode: "dom", identityCatalog: discovered.projects });
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(result.non_navigation_resolved_count, 28);
 });
 
 function assertProject(projects, projectId) {

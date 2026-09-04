@@ -61,6 +61,20 @@
   // Keep page diagnostics limited to request identity, stage, and the
   // outcome. The session token and Handoff body are never logged by the
   // Content Script.
+  function collectorDebugTelemetryEnabled() {
+    return globalThis.__CHATGPT_COMFY_CONNECTOR_DEBUG_TELEMETRY__ === true;
+  }
+
+  function isHighVolumeCollectorTelemetryStage(stage) {
+    if (typeof stage !== "string") return false;
+    return stage === "collector_project_identity_row_relocation"
+      || stage === "collector_project_identity_row_fingerprint"
+      || stage === "collector_project_identity_relocation_candidates"
+      || stage.endsWith("_navigation_wait")
+      || stage.endsWith("_hydration_probe")
+      || stage.endsWith("_poll");
+  }
+
   function diagnostic(eventName, fields = {}) {
     const safe = {};
     for (const key of [
@@ -97,6 +111,9 @@
       "root_hydration_completed",
       "root_hydration_timeout",
       "hydration_wait_ms",
+      "hydration_poll_count",
+      "hydration_poll_wait_ms",
+      "hydration_poll_interval_ms",
       "document_ready_state",
       "sidebar_root_present",
       "sidebar_scroll_container_present",
@@ -265,6 +282,8 @@
       if (typeof fields[key] === "boolean") safe[key] = fields[key];
       if (Number.isSafeInteger(fields[key]) && fields[key] >= 0) safe[key] = fields[key];
     }
+    if (!collectorDebugTelemetryEnabled()
+      && isHighVolumeCollectorTelemetryStage(fields?.stage)) return;
     try {
       console.info(`[ChatGPT Comfy Connector] ${eventName}`, safe);
     } catch (_) {
@@ -428,6 +447,7 @@
     "scroll_search_attempted",
     "scroll_search_stagnated",
     "more_clicked",
+    "more_click_count",
     "more_attempted",
     "scroll_attempts",
     "relocation_phase",
@@ -458,10 +478,18 @@
     "scroll_required",
     "scroll_position_changed",
     "more_available",
+    "relocation_elapsed_ms",
     "rows_reenumerated_after_navigation",
     "stale_discovery_row_discarded",
     "identity_catalog_count",
-    "total_projects"
+    "total_projects",
+    "identity_elapsed_ms",
+    "identity_disclosure_wait_ms",
+    "identity_child_region_wait_ms",
+    "identity_candidate_search_ms",
+    "identity_relocation_wait_ms",
+    "catalog_reused",
+    "relocation_skipped_connected_row"
   ];
 
   const collectorProjectChatTelemetryKeys = [
@@ -852,6 +880,34 @@
       "discovered_project_count",
       "no_growth_count",
       "sidebar_restore_count",
+      "root_catalog_build_count",
+      "root_catalog_reuse_count",
+      "root_catalog_build_ms",
+      "root_hydration_scroll_wait_ms",
+      "more_click_wait_ms",
+      "total_dom_wait_ms",
+      "dom_remount_count",
+      "sidebar_scroll_attempt_count",
+      "sidebar_scroll_position_change_count",
+      "sidebar_scroll_stagnation_count",
+      "discovery_snapshot_count",
+      "discovery_snapshot_project_candidate_count_total",
+      "discovery_logical_project_count_final",
+      "descriptor_added_count",
+      "descriptor_updated_count",
+      "descriptor_replaced_count",
+      "descriptor_removed_count",
+      "descriptor_duplicate_rejected_count",
+      "descriptor_remount_reconciled_count",
+      "descriptor_ambiguous_reconcile_count",
+      "duplicate_discovery_key_count",
+      "discovery_key_changed_for_same_logical_project_count",
+      "more_control_seen_count",
+      "more_control_logical_unique_count",
+      "more_control_duplicate_suppressed_count",
+      "project_candidate_rejected_child_chat_count",
+      "project_candidate_rejected_non_project_count",
+      "final_catalog_index_count",
       "visible_chat_count",
       "discovered_chat_count",
       "deduped_chat_count",
@@ -996,6 +1052,12 @@
       "chat_title_source"
     ]) {
       if (typeof data[key] === "string" && data[key].length <= 128) result[key] = data[key];
+    }
+    for (const key of ["final_catalog_indices", "descriptor_added_after_first_snapshot_indices"]) {
+      if (!Array.isArray(data[key])) continue;
+      result[key] = data[key]
+        .filter((value) => Number.isSafeInteger(value) && value >= 0)
+        .slice(0, 5000);
     }
     return result;
   }
@@ -1186,6 +1248,12 @@
       root_hydration_timeout: data.root_hydration_timeout === true,
       hydration_wait_ms: Number.isSafeInteger(data.hydration_wait_ms)
         ? data.hydration_wait_ms : 0,
+      hydration_poll_count: Number.isSafeInteger(data.hydration_poll_count)
+        ? data.hydration_poll_count : 0,
+      hydration_poll_wait_ms: Number.isSafeInteger(data.hydration_poll_wait_ms)
+        ? data.hydration_poll_wait_ms : 0,
+      hydration_poll_interval_ms: Number.isSafeInteger(data.hydration_poll_interval_ms)
+        ? data.hydration_poll_interval_ms : 0,
       document_ready_state: typeof data.document_ready_state === "string"
         ? data.document_ready_state : "unknown",
       sidebar_root_present: data.sidebar_root_present === true,
@@ -1250,6 +1318,9 @@
         root_hydration_completed: result.root_hydration_completed,
         root_hydration_timeout: result.root_hydration_timeout,
         hydration_wait_ms: result.hydration_wait_ms,
+        hydration_poll_count: result.hydration_poll_count,
+        hydration_poll_wait_ms: result.hydration_poll_wait_ms,
+        hydration_poll_interval_ms: result.hydration_poll_interval_ms,
         document_ready_state: result.document_ready_state,
         sidebar_root_present: result.sidebar_root_present,
         sidebar_scroll_container_present: result.sidebar_scroll_container_present,
@@ -1334,6 +1405,7 @@
           maxScrolls: message.maxScrolls,
           maxMoreClicks: message.maxMoreClicks,
           timeoutMs: message.timeoutMs,
+          rootHydrationCompleted: message.rootHydrationCompleted === true,
           allowSidebarControls: message.allowSidebarControls !== false,
           projectDiscoverySource: message.projectDiscoverySource
         });

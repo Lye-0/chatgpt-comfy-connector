@@ -497,11 +497,19 @@
     return null;
   }
 
+  function isVolatileDomIdentityToken(value) {
+    const token = String(value || "").trim();
+    if (!token) return true;
+    if (/^:r[\w-]*:$/i.test(token)) return true;
+    if (/^radix-/i.test(token)) return true;
+    if (/^\d{1,6}$/.test(token)) return true;
+    return false;
+  }
+
   function isRemountStableRowAttribute(_name, value) {
     if (stableProjectIdFromValue(value)) return true;
     if (/^g-p-/i.test(value)) return true;
-    if (/^\d{1,6}$/.test(value)) return false;
-    if (/^:r[\w-]+:$/i.test(value)) return false;
+    if (isVolatileDomIdentityToken(value)) return false;
     return value.length >= 8;
   }
 
@@ -889,9 +897,38 @@
       .filter((element) => element?.isConnected !== false && !isMoreButton(element)));
   }
 
+  function classifySidebarProjectRowCandidates(candidates) {
+    const rows = Array.isArray(candidates) ? candidates.filter(Boolean) : [];
+    const accepted = [];
+    let rejectedChildChatCount = 0;
+    let rejectedNonProjectCount = 0;
+    for (const element of rows) {
+      let nested = false;
+      for (const parent of rows) {
+        if (parent === element) continue;
+        try {
+          if (typeof parent.contains === "function" && parent.contains(element)) {
+            nested = true;
+            break;
+          }
+        } catch (_) { }
+      }
+      if (nested) {
+        rejectedChildChatCount += 1;
+        continue;
+      }
+      accepted.push(element);
+    }
+    return {
+      accepted,
+      rejectedChildChatCount,
+      rejectedNonProjectCount
+    };
+  }
+
   function projectRowsInSidebar(sidebar, baseUrl = globalThis.location?.href) {
-    return projectRowCandidatesInSidebar(sidebar)
-      .filter((element) => isVisible(element));
+    const classified = classifySidebarProjectRowCandidates(projectRowCandidatesInSidebar(sidebar));
+    return classified.accepted.filter((element) => isVisible(element));
   }
 
   function findIdentitySidebarRoot(root = globalThis.document) {
@@ -1162,6 +1199,8 @@
       let lastMutationAt = startedAt;
       let lastFingerprint = null;
       let fingerprintStableAt = startedAt;
+      let hydrationPollCount = 0;
+      let hydrationPollWaitMs = 0;
       let observer = null;
       let pollTimer = null;
       let timeoutTimer = null;
@@ -1180,12 +1219,43 @@
           root_hydration_completed: completed,
           root_hydration_timeout: !completed && errorCode === "collector_root_hydration_timeout",
           hydration_wait_ms: Math.max(0, now - startedAt),
+          hydration_poll_count: hydrationPollCount,
+          hydration_poll_wait_ms: hydrationPollWaitMs,
+          hydration_poll_interval_ms: pollMs,
           mutation_count: mutationCount,
           mutation_quiet_ms: Math.max(0, now - lastMutationAt),
           sidebar_sections_stable: completed || state.sidebar_sections_stable === true,
           ...state,
           ...(errorCode ? { errorCode } : {})
         });
+      };
+
+      const mutationAffectsSidebar = (records) => {
+        const sidebar = uniqueElements(sidebarRootSelectors, root)
+          .find((element) => element !== root) || null;
+        // Before the Sidebar exists, every mutation may be the one that
+        // mounts it. Once it exists, ignore unrelated main-content churn so
+        // hydration does not wait for the entire ChatGPT document to become
+        // quiet.
+        if (!sidebar) return Array.isArray(records) ? records.length : 1;
+        const nodesWithin = (ancestor, node) => {
+          if (!ancestor || !node) return false;
+          if (ancestor === node) return true;
+          try { return typeof ancestor.contains === "function" && ancestor.contains(node); }
+          catch (_) { return false; }
+        };
+        const relevant = (record) => {
+          if (!record || typeof record !== "object") return true;
+          // Lightweight test doubles and non-standard observers may omit
+          // target; keep those notifications conservative.
+          if (!record.target) return true;
+          if (nodesWithin(sidebar, record.target)) return true;
+          for (const node of [...(record.addedNodes || []), ...(record.removedNodes || [])]) {
+            if (nodesWithin(sidebar, node) || nodesWithin(node, sidebar)) return true;
+          }
+          return false;
+        };
+        return (Array.isArray(records) ? records : [records]).filter(relevant).length;
       };
 
       const inspect = () => {
@@ -1216,15 +1286,20 @@
           finish(state, false, "collector_root_hydration_timeout");
           return;
         }
-        pollTimer = setTimer(inspect, pollMs);
+        const pollScheduledAt = Date.now();
+        pollTimer = setTimer(() => {
+          hydrationPollCount += 1;
+          hydrationPollWaitMs += Math.max(0, Date.now() - pollScheduledAt);
+          inspect();
+        }, pollMs);
       };
 
       if (typeof MutationObserverCtor === "function") {
         try {
           observer = new MutationObserverCtor((records) => {
-            mutationCount += Number.isSafeInteger(records?.length) && records.length > 0
-              ? records.length
-              : 1;
+            const relevantMutationCount = mutationAffectsSidebar(records);
+            if (relevantMutationCount <= 0) return;
+            mutationCount += relevantMutationCount;
             lastMutationAt = Date.now();
           });
           const observationTarget = root?.documentElement || root;
@@ -1430,17 +1505,18 @@
 
   function sidebarMoreControlKey(element) {
     if (!element) return null;
-    for (const attribute of [
-      "data-sidebar-more",
-      "aria-controls",
-      "id",
-      "data-testid",
-      "data-sidebar-section"
-    ]) {
-      const value = attributeValue(element, attribute).trim();
-      if (value) return attribute + ":" + value;
-    }
-    return null;
+    const marked = attributeValue(element, "data-sidebar-more").trim();
+    if (marked) return "data-sidebar-more:" + marked;
+    const testId = attributeValue(element, "data-testid").trim();
+    if (testId && !isVolatileDomIdentityToken(testId)) return "data-testid:" + testId;
+    const section = attributeValue(element, "data-sidebar-section").trim();
+    if (section) return "data-sidebar-section:" + section;
+    const label = metadataTextKey(
+      `${visibleElementText(element)} ${attributeValue(element, "aria-label")}`.trim());
+    const role = attributeValue(element, "role").trim().toLowerCase()
+      || String(element.tagName || "").toLowerCase();
+    if (!label && !role) return null;
+    return ["more", role || "unknown", label || "unlabeled"].join("|");
   }
 
   function isMoreButton(element, options = {}) {
@@ -1479,10 +1555,14 @@
   }
 
   function waitForSidebarMutation(root, timeoutMs = 150) {
+    const waitMs = Math.max(20, Number(timeoutMs) || 150);
     const MutationObserverCtor = root?.ownerDocument?.defaultView?.MutationObserver
       || globalThis.MutationObserver;
-    if (typeof MutationObserverCtor !== "function" || typeof globalThis.setTimeout !== "function") {
+    if (typeof globalThis.setTimeout !== "function") {
       return Promise.resolve();
+    }
+    if (typeof MutationObserverCtor !== "function") {
+      return waitForLocatorDelay(waitMs);
     }
     return new Promise((resolve) => {
       let settled = false;
@@ -1501,8 +1581,19 @@
       } catch (_) {
         observer = null;
       }
-      timer = globalThis.setTimeout(finish, Math.max(20, Number(timeoutMs) || 150));
+      timer = globalThis.setTimeout(finish, waitMs);
     });
+  }
+
+  function moreControlExpansionMetrics(root, sidebarOverride = null) {
+    const sidebar = sidebarOverride && sidebarOverride.isConnected !== false
+      ? sidebarOverride
+      : findIdentitySidebarRoot(root);
+    const scroller = findIdentityScrollContainer(root, sidebar);
+    return {
+      visibleProjectCount: projectRowsInSidebar(sidebar).length,
+      scrollHeight: Number(scroller?.scrollHeight) || 0
+    };
   }
 
   async function expandSidebarMoreButtons(root, options = {}, sidebarOverride = null) {
@@ -1510,6 +1601,10 @@
     const clicked = options.clickedMoreControls instanceof Set
       ? options.clickedMoreControls
       : new Set();
+    const stats = options.discoveryStats && typeof options.discoveryStats === "object"
+      ? options.discoveryStats
+      : null;
+    const allowRepeatOnGrowth = options.allowRepeatOnGrowth === true;
     let clicks = 0;
     while (clicks < maxClicks) {
       const button = findMoreButtons(root, sidebarOverride, {
@@ -1517,15 +1612,30 @@
       })
         .find((candidate) => {
           const key = sidebarMoreControlKey(candidate);
+          if (key && clicked.has(key) && !clicked.has(candidate) && stats) {
+            stats.moreControlDuplicateSuppressedCount =
+              (stats.moreControlDuplicateSuppressedCount || 0) + 1;
+          }
           return !clicked.has(candidate) && (!key || !clicked.has(key));
         });
       if (!button) break;
-      clicked.add(button);
       const key = sidebarMoreControlKey(button);
+      const beforeMetrics = allowRepeatOnGrowth
+        ? moreControlExpansionMetrics(root, sidebarOverride)
+        : null;
+      clicked.add(button);
       if (key) clicked.add(key);
       try { button.click?.(); } catch (_) { break; }
       clicks += 1;
       await waitForSidebarMutation(root, options.settleMs);
+      if (beforeMetrics) {
+        const afterMetrics = moreControlExpansionMetrics(root, sidebarOverride);
+        if (afterMetrics.visibleProjectCount > beforeMetrics.visibleProjectCount
+          || afterMetrics.scrollHeight > beforeMetrics.scrollHeight) {
+          clicked.delete(button);
+          if (key) clicked.delete(key);
+        }
+      }
     }
     return clicks;
   }
@@ -1556,6 +1666,85 @@
     };
   }
 
+  function createDiscoveryCatalogStats() {
+    return {
+      discoverySnapshotCount: 0,
+      discoverySnapshotProjectCandidateCountTotal: 0,
+      descriptorAddedCount: 0,
+      descriptorUpdatedCount: 0,
+      descriptorReplacedCount: 0,
+      descriptorRemovedCount: 0,
+      descriptorDuplicateRejectedCount: 0,
+      descriptorRemountReconciledCount: 0,
+      descriptorAmbiguousReconcileCount: 0,
+      discoveryKeyChangedForSameLogicalProjectCount: 0,
+      moreControlSeenCount: 0,
+      moreControlLogicalUniqueCount: 0,
+      moreControlDuplicateSuppressedCount: 0,
+      projectCandidateRejectedChildChatCount: 0,
+      projectCandidateRejectedNonProjectCount: 0,
+      descriptorAddedAfterFirstSnapshotIndices: [],
+      observedTitleMaxConcurrent: new Map(),
+      seenMoreLogicalKeys: new Set()
+    };
+  }
+
+  function countProjectsByTitleKey(projects) {
+    const counts = new Map();
+    for (const project of projects || []) {
+      const titleKey = metadataTextKey(metadataTitle(project?.title));
+      if (!titleKey) continue;
+      counts.set(titleKey, (counts.get(titleKey) || 0) + 1);
+    }
+    return counts;
+  }
+
+  function duplicateDiscoveryKeyCount(projects) {
+    const counts = new Map();
+    for (const project of projects || []) {
+      const key = metadataIdentifier(project?.discovery_key);
+      if (!key) continue;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    let extras = 0;
+    for (const count of counts.values()) {
+      if (count > 1) extras += count - 1;
+    }
+    return extras;
+  }
+
+  function applyContextProjectFields(existing, item, options = {}) {
+    const projectId = stableProjectIdFromValue(item?.project_id || item?.projectId);
+    const title = metadataTitle(item?.title);
+    const url = chatGptMetadataUrl(item?.url);
+    const discoveryKey = metadataIdentifier(item?.discovery_key || item?.discoveryKey);
+    const stableLocatorKey = metadataIdentifier(item?.stable_locator_key || item?.stableLocatorKey);
+    const discoveryIndex = Number.isSafeInteger(item?.discovery_index)
+      && item.discovery_index >= 0
+      ? item.discovery_index
+      : (Number.isSafeInteger(item?.discoveryIndex) && item.discoveryIndex >= 0
+        ? item.discoveryIndex
+        : null);
+    const replaceDiscoveryKey = options.replaceDiscoveryKey === true;
+    const previousDiscoveryKey = existing.discovery_key;
+    if (projectId) existing.project_id = projectId;
+    if (title && (!existing.title || projectFallbackTitlePattern.test(existing.title))) existing.title = title;
+    if (url && !existing.url) existing.url = url;
+    if (discoveryKey && (!existing.discovery_key || replaceDiscoveryKey)) {
+      existing.discovery_key = discoveryKey;
+    }
+    if (stableLocatorKey && !existing.stable_locator_key) existing.stable_locator_key = stableLocatorKey;
+    if (discoveryIndex !== null
+      && (existing.discovery_index === undefined || replaceDiscoveryKey)) {
+      existing.discovery_index = discoveryIndex;
+    }
+    return {
+      discoveryKeyChanged: Boolean(discoveryKey
+        && previousDiscoveryKey
+        && previousDiscoveryKey !== existing.discovery_key)
+    };
+  }
+
   function upsertContextProject(projects, item) {
     if (!item || typeof item !== "object") return null;
     const projectId = stableProjectIdFromValue(item.project_id || item.projectId);
@@ -1583,6 +1772,15 @@
         existing = keyCandidate;
       }
     }
+    if (!existing && stableLocatorKey) {
+      const locatorCandidate = projects.find((candidate) =>
+        candidate.stable_locator_key === stableLocatorKey);
+      if (locatorCandidate && (!projectId
+        || !locatorCandidate.project_id
+        || locatorCandidate.project_id === projectId)) {
+        existing = locatorCandidate;
+      }
+    }
     if (!existing && projectId && titleKey) {
       const titleCandidates = projects.filter((candidate) => !candidate.project_id
         && metadataTextKey(candidate.title) === titleKey);
@@ -1603,14 +1801,13 @@
     }
 
     if (existing) {
-      if (projectId) existing.project_id = projectId;
-      if (title && (!existing.title || projectFallbackTitlePattern.test(existing.title))) existing.title = title;
-      if (url && !existing.url) existing.url = url;
-      if (discoveryKey && !existing.discovery_key) existing.discovery_key = discoveryKey;
-      if (stableLocatorKey && !existing.stable_locator_key) existing.stable_locator_key = stableLocatorKey;
-      if (discoveryIndex !== null && existing.discovery_index === undefined) {
-        existing.discovery_index = discoveryIndex;
-      }
+      applyContextProjectFields(existing, item, {
+        replaceDiscoveryKey: Boolean(stableLocatorKey
+          && existing.stable_locator_key === stableLocatorKey
+          && discoveryKey
+          && existing.discovery_key
+          && existing.discovery_key !== discoveryKey)
+      });
       return existing;
     }
     if (!title || (!projectId && !discoveryKey)) return null;
@@ -1626,8 +1823,186 @@
     return entry;
   }
 
-  function mergeContextProjectCatalog(destination, source) {
-    for (const project of source?.projects || []) upsertContextProject(destination.projects, project);
+  function reconcileCatalogProject(projects, item, options = {}) {
+    if (!item || typeof item !== "object") return null;
+    const stats = options.stats && typeof options.stats === "object" ? options.stats : null;
+    const reserved = options.reserved instanceof Set ? options.reserved : new Set();
+    const snapshotTitleCounts = options.snapshotTitleCounts instanceof Map
+      ? options.snapshotTitleCounts
+      : countProjectsByTitleKey([item]);
+    const observedTitleMaxConcurrent = options.observedTitleMaxConcurrent instanceof Map
+      ? options.observedTitleMaxConcurrent
+      : snapshotTitleCounts;
+    const projectId = stableProjectIdFromValue(item.project_id || item.projectId);
+    const title = metadataTitle(item.title);
+    const titleKey = metadataTextKey(title);
+    const discoveryKey = metadataIdentifier(item.discovery_key || item.discoveryKey);
+    const stableLocatorKey = metadataIdentifier(item.stable_locator_key || item.stableLocatorKey);
+    const available = () => projects.filter((candidate) => !reserved.has(candidate));
+    let existing = null;
+    let remounted = false;
+
+    if (projectId) {
+      existing = available().find((candidate) => candidate.project_id === projectId) || null;
+    }
+    if (!existing && discoveryKey) {
+      const keyCandidate = available().find((candidate) => candidate.discovery_key === discoveryKey);
+      if (keyCandidate && (!projectId
+        || !keyCandidate.project_id
+        || keyCandidate.project_id === projectId)) {
+        existing = keyCandidate;
+      }
+    }
+    if (!existing && stableLocatorKey) {
+      const locatorCandidate = available().find((candidate) =>
+        candidate.stable_locator_key === stableLocatorKey);
+      if (locatorCandidate && (!projectId
+        || !locatorCandidate.project_id
+        || locatorCandidate.project_id === projectId)) {
+        existing = locatorCandidate;
+        remounted = Boolean(discoveryKey
+          && locatorCandidate.discovery_key
+          && locatorCandidate.discovery_key !== discoveryKey);
+      }
+    }
+    const snapshotTitleCount = titleKey ? (snapshotTitleCounts.get(titleKey) || 0) : 0;
+    const observedMax = titleKey ? (observedTitleMaxConcurrent.get(titleKey) || snapshotTitleCount) : 0;
+    if (!existing && !projectId && titleKey && snapshotTitleCount === 1 && observedMax === 1) {
+      const titleCandidates = available().filter((candidate) =>
+        metadataTextKey(candidate.title) === titleKey
+        && (!candidate.project_id || !projectId || candidate.project_id === projectId));
+      if (titleCandidates.length === 1) {
+        existing = titleCandidates[0];
+        remounted = Boolean(discoveryKey
+          && existing.discovery_key
+          && existing.discovery_key !== discoveryKey);
+      }
+    }
+    if (!existing && !projectId && titleKey && snapshotTitleCount > 1) {
+      const catalogSameTitle = projects.filter((candidate) =>
+        metadataTextKey(candidate.title) === titleKey).length;
+      if (catalogSameTitle >= snapshotTitleCount) {
+        if (stats) {
+          stats.descriptorDuplicateRejectedCount += 1;
+          stats.descriptorAmbiguousReconcileCount += 1;
+        }
+        return null;
+      }
+    }
+
+    if (existing) {
+      reserved.add(existing);
+      const applied = applyContextProjectFields(existing, item, {
+        replaceDiscoveryKey: remounted || Boolean(stableLocatorKey
+          && existing.stable_locator_key === stableLocatorKey
+          && discoveryKey
+          && existing.discovery_key
+          && existing.discovery_key !== discoveryKey)
+      });
+      if (stats) {
+        stats.descriptorUpdatedCount += 1;
+        if (remounted || applied.discoveryKeyChanged) {
+          stats.descriptorRemountReconciledCount += 1;
+          stats.descriptorReplacedCount += 1;
+        }
+        if (applied.discoveryKeyChanged) {
+          stats.discoveryKeyChangedForSameLogicalProjectCount += 1;
+        }
+      }
+      return existing;
+    }
+
+    const created = upsertContextProject(projects, item);
+    if (created && !reserved.has(created)) {
+      reserved.add(created);
+      if (stats) {
+        stats.descriptorAddedCount += 1;
+        const generation = Number(options.snapshotGeneration) || 0;
+        if (generation > 1) {
+          const index = projects.indexOf(created);
+          if (index >= 0) stats.descriptorAddedAfterFirstSnapshotIndices.push(index);
+        }
+      }
+    } else if (!created && stats) {
+      stats.descriptorDuplicateRejectedCount += 1;
+    }
+    return created;
+  }
+
+  function mergeContextProjectCatalog(destination, source, stats = null) {
+    if (!destination || typeof destination !== "object") return;
+    if (!Array.isArray(destination.projects)) destination.projects = [];
+    const snapshotProjects = source?.projects || [];
+    const snapshotTitleCounts = countProjectsByTitleKey(snapshotProjects);
+    if (stats && typeof stats === "object") {
+      stats.discoverySnapshotCount = (stats.discoverySnapshotCount || 0) + 1;
+      stats.discoverySnapshotProjectCandidateCountTotal =
+        (stats.discoverySnapshotProjectCandidateCountTotal || 0)
+        + (Number.isSafeInteger(source?.project_candidate_count)
+          ? source.project_candidate_count
+          : snapshotProjects.length);
+      stats.projectCandidateRejectedChildChatCount =
+        (stats.projectCandidateRejectedChildChatCount || 0)
+        + (Number(source?.project_candidate_rejected_child_chat_count) || 0);
+      stats.projectCandidateRejectedNonProjectCount =
+        (stats.projectCandidateRejectedNonProjectCount || 0)
+        + (Number(source?.project_candidate_rejected_non_project_count) || 0);
+      if (!(stats.observedTitleMaxConcurrent instanceof Map)) {
+        stats.observedTitleMaxConcurrent = new Map();
+      }
+      for (const [titleKey, count] of snapshotTitleCounts.entries()) {
+        stats.observedTitleMaxConcurrent.set(
+          titleKey,
+          Math.max(stats.observedTitleMaxConcurrent.get(titleKey) || 0, count));
+      }
+    }
+    const reserved = new Set();
+    const snapshotGeneration = stats ? (stats.discoverySnapshotCount || 0) : 0;
+    for (const project of snapshotProjects) {
+      reconcileCatalogProject(destination.projects, project, {
+        snapshotTitleCounts,
+        reserved,
+        stats,
+        snapshotGeneration,
+        observedTitleMaxConcurrent: stats?.observedTitleMaxConcurrent
+      });
+    }
+  }
+
+  function discoveryCatalogIntegrityTelemetry(projects, stats) {
+    const catalog = Array.isArray(projects) ? projects : [];
+    const indices = catalog.map((_, index) => index);
+    return {
+      discovery_snapshot_count: Number(stats?.discoverySnapshotCount) || 0,
+      discovery_snapshot_project_candidate_count_total:
+        Number(stats?.discoverySnapshotProjectCandidateCountTotal) || 0,
+      discovery_logical_project_count_final: catalog.length,
+      descriptor_added_count: Number(stats?.descriptorAddedCount) || 0,
+      descriptor_updated_count: Number(stats?.descriptorUpdatedCount) || 0,
+      descriptor_replaced_count: Number(stats?.descriptorReplacedCount) || 0,
+      descriptor_removed_count: Number(stats?.descriptorRemovedCount) || 0,
+      descriptor_duplicate_rejected_count: Number(stats?.descriptorDuplicateRejectedCount) || 0,
+      descriptor_remount_reconciled_count: Number(stats?.descriptorRemountReconciledCount) || 0,
+      descriptor_ambiguous_reconcile_count: Number(stats?.descriptorAmbiguousReconcileCount) || 0,
+      duplicate_discovery_key_count: duplicateDiscoveryKeyCount(catalog),
+      discovery_key_changed_for_same_logical_project_count:
+        Number(stats?.discoveryKeyChangedForSameLogicalProjectCount) || 0,
+      more_control_seen_count: Number(stats?.moreControlSeenCount) || 0,
+      more_control_logical_unique_count: stats?.seenMoreLogicalKeys instanceof Set
+        ? stats.seenMoreLogicalKeys.size
+        : (Number(stats?.moreControlLogicalUniqueCount) || 0),
+      more_control_duplicate_suppressed_count: Number(stats?.moreControlDuplicateSuppressedCount) || 0,
+      project_candidate_rejected_child_chat_count:
+        Number(stats?.projectCandidateRejectedChildChatCount) || 0,
+      project_candidate_rejected_non_project_count:
+        Number(stats?.projectCandidateRejectedNonProjectCount) || 0,
+      final_catalog_index_count: catalog.length,
+      final_catalog_indices: indices,
+      descriptor_added_after_first_snapshot_indices:
+        Array.isArray(stats?.descriptorAddedAfterFirstSnapshotIndices)
+          ? [...stats.descriptorAddedAfterFirstSnapshotIndices]
+          : []
+    };
   }
 
   function mergeContextConversationCatalog(destination, source) {
@@ -1658,7 +2033,12 @@
     let anchors = [];
     try { anchors = Array.from(sidebarRoot?.querySelectorAll?.("a[href]") || []); } catch (_) { anchors = []; }
     const projectAnchors = anchors.filter((anchor) => isProjectHomeUrl(attributeValue(anchor, "href")));
-    const projectRows = projectRowsInSidebar(sidebarRoot, documentHref(root));
+    const classifiedRows = classifySidebarProjectRowCandidates(
+      projectRowCandidatesInSidebar(sidebarRoot));
+    const projectRows = classifiedRows.accepted.filter((element) => {
+      try { return isVisible(element); } catch (_) { return false; }
+    });
+    let rejectedNonProjectCount = classifiedRows.rejectedNonProjectCount;
     const currentProjectId = projectIdFromUrl(url);
 
     const upsertProject = (projectId, title, projectUrl, discoveryKey, discoveryIndex = null, extras = {}) => {
@@ -1681,7 +2061,10 @@
     // and no Project ID is inferred from a navigation side effect.
     for (const [discoveryIndex, row] of projectRows.entries()) {
       const title = visibleTitleFromElement(row);
-      if (!title) continue;
+      if (!title) {
+        rejectedNonProjectCount += 1;
+        continue;
+      }
       // Keep the historical metadata-only scan, but accept the stable
       // Project carrier ChatGPT currently renders inside the row.  It may be
       // a non-anchor href for a Project conversation (`/g/g-p-*/c/*`).
@@ -1776,7 +2159,13 @@
       }
     }
 
-    return { projects, conversations };
+    return {
+      projects,
+      conversations,
+      project_candidate_count: classifiedRows.accepted.length,
+      project_candidate_rejected_child_chat_count: classifiedRows.rejectedChildChatCount,
+      project_candidate_rejected_non_project_count: rejectedNonProjectCount
+    };
   }
 
   function canonicalProjectUrl(projectId, value = null, baseUrl = globalThis.location?.href) {
@@ -2701,9 +3090,63 @@
       more_available: extra.moreAvailable === true,
       rows_reenumerated_after_navigation: extra.rowsReenumeratedAfterNavigation !== false,
       stale_discovery_row_discarded: extra.staleDiscoveryRowDiscarded !== false,
+      relocation_elapsed_ms: Number.isSafeInteger(extra.relocationElapsedMs)
+        ? extra.relocationElapsedMs
+        : 0,
       failure_reason: relocation.reason || "none",
       unresolved_reason: relocation.reason || "none"
     };
+  }
+
+  function createIdentitySidebarCatalog(root, baseUrl = globalThis.location?.href) {
+    let sidebar = null;
+    let rows = null;
+    let fingerprints = null;
+    let generation = 0;
+    const rowsStillConnected = () => Array.isArray(rows)
+      && rows.every((row) => row?.isConnected !== false);
+    const refresh = (force = false) => {
+      const nextSidebar = findIdentitySidebarRoot(root);
+      if (!force
+        && nextSidebar
+        && nextSidebar === sidebar
+        && nextSidebar.isConnected !== false
+        && rowsStillConnected()) {
+        return { sidebar, rows, fingerprints, generation, reused: true };
+      }
+      sidebar = nextSidebar;
+      rows = projectRowsInSidebar(sidebar, baseUrl);
+      fingerprints = rows.map((row, index) => projectRowFingerprint(
+        row,
+        visibleTitleFromElement(row, ""),
+        index,
+        baseUrl));
+      generation += 1;
+      return { sidebar, rows, fingerprints, generation, reused: false };
+    };
+    return {
+      snapshot: (force = false) => refresh(force === true),
+      relocate(descriptor, catalog) {
+        const current = refresh(false);
+        return {
+          ...projectRowRelocationForIdentityDescriptor(
+            current.sidebar,
+            current.rows,
+            descriptor,
+            baseUrl,
+            { catalog, fingerprints: current.fingerprints }),
+          catalogReused: current.reused === true,
+          catalogGeneration: current.generation
+        };
+      }
+    };
+  }
+
+  function connectedRowStillMatchesDescriptor(row, descriptor) {
+    if (!row || row.isConnected === false) return false;
+    const expectedTitle = metadataTextKey(metadataTitle(descriptor?.title));
+    if (!expectedTitle) return false;
+    return metadataTextKey(visibleTitleFromElement(row, "")) === expectedTitle;
   }
 
   function projectRowRelocationForIdentityDescriptor(
@@ -2738,12 +3181,15 @@
     const expectedStableLocatorKey = metadataIdentifier(
       descriptor?.stable_locator_key || descriptor?.stableLocatorKey);
     const expectedLocatorProjectId = stableProjectIdFromValue(descriptor?.project_id || descriptor?.projectId);
-    const candidateFingerprints = (rows || []).map((candidate, candidateIndex) =>
-      projectRowFingerprint(
-        candidate,
-        visibleTitleFromElement(candidate, ""),
-        candidateIndex,
-        baseUrl));
+    const candidateFingerprints = Array.isArray(options.fingerprints)
+      && options.fingerprints.length === (rows || []).length
+      ? options.fingerprints
+      : (rows || []).map((candidate, candidateIndex) =>
+        projectRowFingerprint(
+          candidate,
+          visibleTitleFromElement(candidate, ""),
+          candidateIndex,
+          baseUrl));
     const fingerprintRows = expectedDiscoveryKey
       ? (rows || []).filter((candidate, candidateIndex) =>
         candidateFingerprints[candidateIndex]?.discovery_key === expectedDiscoveryKey)
@@ -2909,6 +3355,7 @@
   }
 
   async function relocateProjectRowForIdentityAsync(root, descriptor, options = {}) {
+    const relocationStartedAt = Date.now();
     const catalog = Array.isArray(options.catalog) ? options.catalog : [];
     const maxAttempts = Math.max(1, Math.min(80, Number(options.maxAttempts) || 48));
     const clickedMoreControls = new Set();
@@ -2953,6 +3400,7 @@
             catalogTitleMatchCount: catalogTitleCount,
             staleDiscoveryRowDiscarded: true,
             rowsReenumeratedAfterNavigation: true,
+            relocationElapsedMs: Math.max(0, Date.now() - relocationStartedAt),
             ...extra
           }),
           project_index: projectIndex,
@@ -2963,6 +3411,7 @@
           scroll_search_attempted: scrollAttempts > 0,
           scroll_search_stagnated: extra.scrollSearchStagnated === true
             || extra.relocationStagnated === true,
+          more_click_count: moreClickCount,
           ...extra
         });
         const sampleRow = relocation.row || extra.sampleRow || null;
@@ -3073,6 +3522,7 @@
     };
     let moreClicked = false;
     let moreAttempted = false;
+    let moreClickCount = 0;
     let scrollAttempts = 0;
     let stagnantCandidatePasses = 0;
     let previousTop = null;
@@ -3109,7 +3559,10 @@
         clickedMoreControls,
         settleMs: options.settleMs
       }, current.sidebar);
-      if (moreClicks > 0) moreClicked = true;
+      if (moreClicks > 0) {
+        moreClicked = true;
+        moreClickCount += moreClicks;
+      }
       const afterMore = snapshot();
       let scrolled = false;
       const scrollContainer = afterMore.scrollContainer;
@@ -3197,6 +3650,7 @@
     const expectedProjectId = stableProjectIdFromValue(descriptor?.project_id || descriptor?.projectId);
     const currentRow = () => {
       try {
+        if (connectedRowStillMatchesDescriptor(row, descriptor)) return row;
         const relocated = options.relocateRow?.();
         if (relocated) row = relocated;
       } catch (_) { }
@@ -3239,22 +3693,35 @@
       }
       return identity;
     };
-    const result = (identity, reason = null) => ({
-      isDisclosure: before.rowIsDisclosureControl === true,
-      identity: identity || null,
-      navigationIdentity,
-      row,
-      before,
-      after,
-      clickAttempted,
-      clickDispatched,
-      eventFallbackAttempted,
-      eventFallbackDispatched,
-      urlChanged,
-      navigationDetected: Boolean(navigationIdentity),
-      elapsedMs: Math.max(0, Date.now() - startedAt),
-      reason: reason || (identity ? "none" : lastReason || "project_disclosure_identity_not_found")
-    });
+    let clickCompletedAt = null;
+    const result = (identity, reason = null) => {
+      const now = Date.now();
+      const elapsedMs = Math.max(0, now - startedAt);
+      const disclosurePrepMs = clickCompletedAt === null
+        ? 0
+        : Math.max(0, clickCompletedAt - startedAt);
+      const childRegionWaitMs = clickCompletedAt === null
+        ? elapsedMs
+        : Math.max(0, now - clickCompletedAt);
+      return {
+        isDisclosure: before.rowIsDisclosureControl === true,
+        identity: identity || null,
+        navigationIdentity,
+        row,
+        before,
+        after,
+        clickAttempted,
+        clickDispatched,
+        eventFallbackAttempted,
+        eventFallbackDispatched,
+        urlChanged,
+        navigationDetected: Boolean(navigationIdentity),
+        elapsedMs,
+        disclosurePrepMs,
+        childRegionWaitMs,
+        reason: reason || (identity ? "none" : lastReason || "project_disclosure_identity_not_found")
+      };
+    };
 
     if (!before.rowIsDisclosureControl) return result(null, "not_a_disclosure_control");
 
@@ -3263,7 +3730,6 @@
     if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
       return result(null, lastReason);
     }
-
     // An expanded region may be present but still hydrating. Do not click it
     // again; the bounded wait below gives its metadata a chance to arrive.
     if (before.ariaExpanded !== "true") {
@@ -3281,10 +3747,11 @@
       } catch (_) {
         clickDispatched = false;
       }
+      clickCompletedAt = Date.now();
+      identity = inspect();
+      if (identity) return result(identity);
 
-      // Give React's click handler a short opportunity to update aria-expanded
-      // or mount the controlled list before considering an event fallback.
-      await waitForLocatorDelay(Math.min(150, Math.max(0, timeoutMs)));
+      await waitForSidebarMutation(root, Math.min(150, Math.max(20, timeoutMs)));
       identity = inspect();
       const stateChanged = before.ariaExpanded !== after.ariaExpanded
         || before.controlledRegionFound !== after.controlledRegionFound
@@ -3298,7 +3765,7 @@
         eventFallbackAttempted = true;
         const eventResult = dispatchProjectInteractiveEventSequence(row, row, root, initialUrl);
         eventFallbackDispatched = eventResult.dispatched;
-        await waitForLocatorDelay(Math.min(100, Math.max(0, timeoutMs)));
+        await waitForSidebarMutation(root, Math.min(100, Math.max(20, timeoutMs)));
         identity = inspect();
       }
     }
@@ -3309,7 +3776,7 @@
     }
     const deadline = startedAt + timeoutMs;
     while (Date.now() <= deadline) {
-      await waitForLocatorDelay(Math.min(100, Math.max(0, deadline - Date.now())));
+      await waitForSidebarMutation(root, Math.min(100, Math.max(20, deadline - Date.now())));
       identity = inspect();
       if (identity) return result(identity);
       if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
@@ -3569,6 +4036,7 @@
       "scroll_search_attempted",
       "scroll_search_stagnated",
       "more_clicked",
+      "more_click_count",
       "more_attempted",
       "more_available",
       "scroll_attempts",
@@ -3602,7 +4070,14 @@
       "rows_reenumerated_after_navigation",
       "stale_discovery_row_discarded",
       "identity_catalog_count",
-      "total_projects"
+      "total_projects",
+      "identity_elapsed_ms",
+      "identity_disclosure_wait_ms",
+      "identity_child_region_wait_ms",
+      "identity_candidate_search_ms",
+      "identity_relocation_wait_ms",
+      "catalog_reused",
+      "relocation_skipped_connected_row"
     ];
     const navigationTelemetry = [];
     const emitNavigationTelemetry = (stage, fields = {}) => {
@@ -3618,34 +4093,187 @@
       try { options.onTelemetry?.(event); } catch (_) { }
     };
 
-    // This resolver intentionally performs only bounded DOM reads in `dom`
-    // mode. It never selects a new scrollport, scrolls the Sidebar, or calls
-    // the Project discovery routine again.
+    // DOM mode may open a Project disclosure to read child URLs, but it never
+    // navigates away from Root. Navigation fallback remains a later stage.
     if (mode === "dom") {
-      const sidebar = findSidebarRoot(root);
-      const rows = projectRowsInSidebar(sidebar, baseUrl);
+      const identityCatalog = Array.isArray(options.identityCatalog) && options.identityCatalog.length > 0
+        ? options.identityCatalog
+        : output;
+      const sidebarCatalog = createIdentitySidebarCatalog(root, baseUrl);
       for (let index = 0; index < output.length; index += 1) {
         const descriptor = output[index];
+        const projectIndex = Number.isSafeInteger(descriptor.project_index)
+          ? descriptor.project_index
+          : index;
+        const projectStartedAt = Date.now();
         const existing = projectIdentityFromProjectMetadata(descriptor, baseUrl);
         let identity = existing.projectId ? existing : null;
         let reason = existing.reason;
+        let disclosureWaitMs = 0;
+        let childRegionWaitMs = 0;
+        let candidateSearchMs = 0;
+        let relocationWaitMs = 0;
         if (!identity) {
-          const row = projectRowForIdentityDescriptor(rows, descriptor, baseUrl, {
-            catalog: Array.isArray(options.identityCatalog) && options.identityCatalog.length > 0
-              ? options.identityCatalog
-              : output
+          const searchStartedAt = Date.now();
+          let relocation = sidebarCatalog.relocate(descriptor, identityCatalog);
+          candidateSearchMs += Math.max(0, Date.now() - searchStartedAt);
+          const connectedMatch = Boolean(relocation.rowFound && relocation.row?.isConnected !== false);
+          emitNavigationTelemetry("collector_project_identity_row_relocation_start", {
+            project_index: projectIndex,
+            sidebar_dom_generation_changed: connectedMatch !== true
           });
+          if (!connectedMatch && (relocation.reason === "project_row_not_visible"
+            || relocation.reason === "project_row_not_found")) {
+            const relocateStartedAt = Date.now();
+            relocation = await relocateProjectRowForIdentityAsync(root, descriptor, {
+              catalog: identityCatalog,
+              baseUrl,
+              navigationSinceDiscovery: false,
+              sidebarDomGenerationChanged: true,
+              telemetry: (event, fields) => emitNavigationTelemetry(event, fields)
+            });
+            relocationWaitMs += Math.max(0, Date.now() - relocateStartedAt);
+            sidebarCatalog.snapshot(true);
+          } else {
+            emitNavigationTelemetry("collector_project_identity_row_relocation", {
+              ...projectRowRelocationTelemetryFields(relocation, {
+                relocationAttempted: true,
+                discoveryRowStillConnected: connectedMatch,
+                discoveryRowReused: connectedMatch,
+                sidebarDomGenerationChanged: false,
+                staleDiscoveryRowDiscarded: connectedMatch !== true,
+                rowsReenumeratedAfterNavigation: false,
+                relocationPhase: relocation.catalogReused ? "cached_catalog" : "dom_scan",
+                candidateSearchAttempted: true,
+                scrollSearchAttempted: false,
+                scrollSearchStagnated: false,
+                scrollAttempts: 0,
+                moreClickCount: 0
+              }),
+              project_index: projectIndex,
+              candidate_search_attempted: true,
+              catalog_reused: relocation.catalogReused === true,
+              relocation_skipped_connected_row: true,
+              scroll_search_attempted: false,
+              scroll_search_stagnated: false,
+              more_click_count: 0,
+              relocation_attempt: 0,
+              identity_candidate_search_ms: candidateSearchMs
+            });
+          }
+          let row = relocation.row;
           const fromRow = row ? projectIdentityFromElement(row, baseUrl) : { reason: "project_row_not_found" };
           identity = fromRow.projectId ? fromRow : null;
           reason = fromRow.reason || reason;
+          if (!identity && row) {
+            const disclosureResult = await resolveProjectIdentityFromDisclosureAsync(
+              root,
+              row,
+              descriptor,
+              baseUrl,
+              {
+                navigationTimeoutMs: options.navigationTimeoutMs,
+                relocateRow: () => {
+                  if (connectedRowStillMatchesDescriptor(row, descriptor)) return row;
+                  sidebarCatalog.snapshot(true);
+                  const relocated = sidebarCatalog.relocate(descriptor, identityCatalog);
+                  row = relocated.row;
+                  return row;
+                }
+              });
+            disclosureWaitMs += Number.isSafeInteger(disclosureResult.disclosurePrepMs)
+              ? disclosureResult.disclosurePrepMs
+              : 0;
+            childRegionWaitMs += Number.isSafeInteger(disclosureResult.childRegionWaitMs)
+              ? disclosureResult.childRegionWaitMs
+              : Math.max(0, disclosureResult.elapsedMs || 0);
+            const beforeDisclosure = disclosureResult.before || {};
+            const afterDisclosure = disclosureResult.after || {};
+            const disclosureStateChanged = beforeDisclosure.ariaExpanded
+              !== afterDisclosure.ariaExpanded
+              || beforeDisclosure.controlledRegionFound
+              !== afterDisclosure.controlledRegionFound
+              || beforeDisclosure.controlledRegionElementCount
+              !== afterDisclosure.controlledRegionElementCount
+              || beforeDisclosure.controlledRegionProjectChatLinkCount
+              !== afterDisclosure.controlledRegionProjectChatLinkCount
+              || beforeDisclosure.controlledRegionProjectHomeLinkCount
+              !== afterDisclosure.controlledRegionProjectHomeLinkCount;
+            if (disclosureResult.isDisclosure) {
+              emitNavigationTelemetry("collector_project_identity_disclosure_structure", {
+                project_index: projectIndex,
+                row_is_disclosure_control: beforeDisclosure.rowIsDisclosureControl,
+                row_aria_controls_present: beforeDisclosure.ariaControlsPresent,
+                row_aria_expanded: beforeDisclosure.ariaExpanded,
+                controlled_region_found: afterDisclosure.controlledRegionFound,
+                controlled_region_visible: afterDisclosure.controlledRegionVisible,
+                controlled_region_element_count: afterDisclosure.controlledRegionElementCount,
+                controlled_region_project_chat_link_count: afterDisclosure.controlledRegionProjectChatLinkCount,
+                controlled_region_project_home_link_count: afterDisclosure.controlledRegionProjectHomeLinkCount,
+                controlled_region_project_identity_present: afterDisclosure.controlledRegionProjectIdentityPresent,
+                controlled_region_identity_reason: afterDisclosure.controlledRegionIdentityReason,
+                aria_expanded_before: beforeDisclosure.ariaExpanded,
+                aria_expanded_after: afterDisclosure.ariaExpanded,
+                disclosure_state_changed: disclosureStateChanged,
+                disclosure_url_changed: disclosureResult.urlChanged,
+                disclosure_resolution_method: disclosureResult.identity
+                  ? "dom"
+                  : "none"
+              });
+            }
+            if (disclosureResult.clickAttempted || disclosureResult.eventFallbackAttempted) {
+              emitNavigationTelemetry("collector_project_identity_disclosure_click", {
+                project_index: projectIndex,
+                clickable_element_found: Boolean(
+                  typeof disclosureResult.row?.click === "function"
+                  || typeof disclosureResult.row?.dispatchEvent === "function"),
+                click_attempted: disclosureResult.clickAttempted,
+                click_dispatched: disclosureResult.clickDispatched,
+                click_method: disclosureResult.eventFallbackAttempted
+                  ? "event_sequence"
+                  : "disclosure.click",
+                click_target_is_project_row: true,
+                click_target_section_verified: relocation.sectionVerified,
+                disclosure_click_attempted: disclosureResult.clickAttempted,
+                disclosure_click_dispatched: disclosureResult.clickDispatched,
+                disclosure_event_fallback_attempted: disclosureResult.eventFallbackAttempted,
+                disclosure_event_fallback_dispatched: disclosureResult.eventFallbackDispatched,
+                disclosure_state_changed: disclosureStateChanged,
+                disclosure_url_changed: disclosureResult.urlChanged
+              });
+            }
+            if (disclosureResult.identity) {
+              identity = disclosureResult.identity;
+              reason = null;
+            } else if (disclosureResult.isDisclosure) {
+              reason = disclosureResult.reason || "project_disclosure_identity_not_found";
+            }
+          }
         }
+        emitNavigationTelemetry("collector_project_identity_source_classification", {
+          project_index: projectIndex,
+          identity_source: identity
+            ? (identity.source || (existing.projectId ? "row_url" : "other"))
+            : "none",
+          resolution_success: Boolean(identity),
+          identity_elapsed_ms: Math.max(0, Date.now() - projectStartedAt),
+          identity_disclosure_wait_ms: disclosureWaitMs,
+          identity_child_region_wait_ms: childRegionWaitMs,
+          identity_candidate_search_ms: candidateSearchMs,
+          identity_relocation_wait_ms: relocationWaitMs
+        });
         output[index] = identityProjectResult(
           descriptor,
-          Number.isSafeInteger(descriptor.project_index) ? descriptor.project_index : index,
+          projectIndex,
           identity,
           "dom",
           reason,
-          false);
+          false,
+          {
+            identity_source: identity
+              ? (identity.source || (existing.projectId ? "row_url" : "other"))
+              : undefined
+          });
         if (identity) nonNavigationResolvedCount += 1;
       }
     } else if (output.length > 0) {
@@ -3686,6 +4314,11 @@
       let navigationFallbackSuccess = false;
       let classificationRow = null;
       let sourceStats = null;
+      const identityStartedAt = Date.now();
+      let identityDisclosureWaitMs = 0;
+      let identityChildRegionWaitMs = 0;
+      let identityCandidateSearchMs = 0;
+      let identityRelocationWaitMs = 0;
       const identityCatalog = Array.isArray(options.identityCatalog)
         ? options.identityCatalog
         : [];
@@ -3698,30 +4331,65 @@
         stale_navigation_result_rejected: Boolean(currentIdentity)
       });
       navigationInternalReason = reason || "none";
+      const sidebarCatalog = createIdentitySidebarCatalog(root, baseUrl);
       if (!identity) {
+        const searchStartedAt = Date.now();
+        let relocation = sidebarCatalog.relocate(descriptor, identityCatalog);
+        identityCandidateSearchMs += Math.max(0, Date.now() - searchStartedAt);
+        const connectedMatch = Boolean(relocation.rowFound && relocation.row?.isConnected !== false);
         emitNavigationTelemetry("collector_project_identity_row_relocation_start", {
-          project_index: currentProjectIndex
+          project_index: currentProjectIndex,
+          sidebar_dom_generation_changed: connectedMatch !== true,
+          catalog_reused: relocation.catalogReused === true,
+          identity_candidate_search_ms: Math.max(0, Date.now() - searchStartedAt)
         });
-        const relocation = await relocateProjectRowForIdentityAsync(root, descriptor, {
-          catalog: identityCatalog,
-          baseUrl,
-          navigationSinceDiscovery: true,
-          sidebarDomGenerationChanged: true,
-          telemetry: (event, fields) => emitNavigationTelemetry(event, fields)
-        });
-        const row = relocation.row;
+        if (connectedMatch) {
+          emitNavigationTelemetry("collector_project_identity_row_relocation", {
+            ...projectRowRelocationTelemetryFields(relocation, {
+              relocationAttempted: true,
+              discoveryRowStillConnected: true,
+              discoveryRowReused: true,
+              sidebarDomGenerationChanged: false,
+              staleDiscoveryRowDiscarded: false,
+              rowsReenumeratedAfterNavigation: false,
+              relocationPhase: "cached_catalog",
+              candidateSearchAttempted: true,
+              scrollSearchAttempted: false,
+              scrollSearchStagnated: false,
+              scrollAttempts: 0,
+              moreClickCount: 0
+            }),
+            project_index: currentProjectIndex,
+            candidate_search_attempted: true,
+            catalog_reused: true,
+            relocation_skipped_connected_row: true,
+            scroll_search_attempted: false,
+            more_click_count: 0,
+            relocation_attempt: 0
+          });
+        } else {
+          const relocateStartedAt = Date.now();
+          relocation = await relocateProjectRowForIdentityAsync(root, descriptor, {
+            catalog: identityCatalog,
+            baseUrl,
+            navigationSinceDiscovery: true,
+            sidebarDomGenerationChanged: true,
+            telemetry: (event, fields) => emitNavigationTelemetry(event, fields)
+          });
+          identityRelocationWaitMs += Math.max(0, Date.now() - relocateStartedAt);
+          sidebarCatalog.snapshot(true);
+        }
+        let row = relocation.row;
         classificationRow = row;
         let disclosureResult = null;
         if (row) {
           const relocateRow = () => {
-            const currentSidebar = findIdentitySidebarRoot(root);
-            const currentRows = projectRowsInSidebar(currentSidebar, baseUrl);
-            return projectRowRelocationForIdentityDescriptor(
-              currentSidebar,
-              currentRows,
-              descriptor,
-              baseUrl,
-              { catalog: identityCatalog }).row;
+            if (connectedRowStillMatchesDescriptor(row, descriptor)) return row;
+            sidebarCatalog.snapshot(true);
+            const relocated = sidebarCatalog.relocate(descriptor, identityCatalog);
+            row = relocated.row;
+            classificationRow = row;
+            return row;
           };
           disclosureResult = await resolveProjectIdentityFromDisclosureAsync(
             root,
@@ -3732,6 +4400,12 @@
               navigationTimeoutMs: options.navigationTimeoutMs,
               relocateRow
             });
+          identityDisclosureWaitMs += Number.isSafeInteger(disclosureResult.disclosurePrepMs)
+            ? disclosureResult.disclosurePrepMs
+            : 0;
+          identityChildRegionWaitMs += Number.isSafeInteger(disclosureResult.childRegionWaitMs)
+            ? disclosureResult.childRegionWaitMs
+            : 0;
           const beforeDisclosure = disclosureResult.before || {};
           const afterDisclosure = disclosureResult.after || {};
           const disclosureStateChanged = beforeDisclosure.ariaExpanded
@@ -3828,6 +4502,7 @@
             });
           }
         }
+        if (!identity) {
         targetInfo = projectInteractiveTargetForRow(row, baseUrl);
         const structure = targetInfo.structure || {};
         emitNavigationTelemetry("collector_project_identity_row_structure", {
@@ -4049,6 +4724,7 @@
             reason = clickFailureReason;
             navigationInternalReason = internalReason;
           } else {
+            navigationFallbackAttempted = true;
             const target = targetInfo.target;
             const clickMethod = target === row ? "row.click" : "target.click";
           emitNavigationTelemetry("collector_project_identity_click", {
@@ -4194,6 +4870,7 @@
         }
         }
         }
+        }
       }
       if (classificationRow) {
         sourceStats = projectIdentityCandidateStats(classificationRow, root, baseUrl);
@@ -4274,7 +4951,12 @@
         stale_navigation_result_rejected: Boolean(currentIdentity && !identity),
         current_url_used_as_identity: currentUrlUsedAsIdentity,
         resolution_success: Boolean(identity),
-        unresolved_reason: identity ? "none" : (reason || "missing_stable_identity")
+        unresolved_reason: identity ? "none" : (reason || "missing_stable_identity"),
+        identity_elapsed_ms: Math.max(0, Date.now() - identityStartedAt),
+        identity_disclosure_wait_ms: identityDisclosureWaitMs,
+        identity_child_region_wait_ms: identityChildRegionWaitMs,
+        identity_candidate_search_ms: identityCandidateSearchMs,
+        identity_relocation_wait_ms: identityRelocationWaitMs
       });
       const navigationResultIdentity = observedIdentity || identity;
       const navigationResolved = Boolean(observedIdentity);
@@ -4419,19 +5101,31 @@
     url = globalThis.location?.href,
     options = {}) {
     const merged = { projects: [], conversations: [] };
-    // Resolve the Sidebar and its scroll container exactly once for the root
-    // Project scan. Do not let virtualized DOM updates or final telemetry
-    // replace either object while the monotonic scan is in progress.
-    const sidebar = findIdentitySidebarRoot(root);
-    const scrollContainer = findIdentityScrollContainer(root, sidebar);
-    const canScroll = scrollContainer && typeof scrollContainer.scrollTop === "number"
+    let rootCatalogBuildCount = 0;
+    let rootCatalogReuseCount = 0;
+    let sidebarScrollAttemptCount = 0;
+    let sidebarScrollPositionChangeCount = 0;
+    let sidebarScrollStagnationCount = 0;
+    let rootCatalogBuildMs = 0;
+    let rootHydrationScrollWaitMs = 0;
+    let moreClickWaitMs = 0;
+    let totalDomWaitMs = 0;
+    let domRemountCount = 0;
+    // Reuse the selected containers while they remain valid, but refresh the
+    // references after a genuine Sidebar remount. Caching a disconnected
+    // element would make a virtualized scan silently stop discovering rows.
+    let sidebar = findIdentitySidebarRoot(root);
+    let scrollContainer = findIdentityScrollContainer(root, sidebar);
+    let canScroll = scrollContainer && typeof scrollContainer.scrollTop === "number"
       && typeof scrollContainer.scrollHeight === "number"
       && typeof scrollContainer.clientHeight === "number";
     const originalScrollTop = canScroll ? scrollContainer.scrollTop : null;
     const maxScrolls = Math.max(1, Math.min(128, Number(options.maxScrolls) || 32));
     const maxMoreClicks = Math.max(0, Math.min(32, Number(options.maxMoreClicks) || 8));
     const deadline = Date.now() + Math.max(1000, Math.min(120000, Number(options.timeoutMs) || 30000));
-    const initialSettleMs = options.initialSettleMs === undefined
+    const initialSettleMs = options.rootHydrationCompleted === true
+      ? 0
+      : options.initialSettleMs === undefined
       ? 250
       : Math.max(0, Math.min(2000, Number(options.initialSettleMs) || 0));
     const ensureCollectionActive = () => {
@@ -4454,30 +5148,86 @@
     const clickedMoreControls = new Set();
     let moreControlClicks = 0;
     let observedMoreControl = null;
+    const discoveryStats = createDiscoveryCatalogStats();
+    const observeMoreControls = (controls) => {
+      for (const control of controls || []) {
+        discoveryStats.moreControlSeenCount += 1;
+        const key = sidebarMoreControlKey(control);
+        if (key) discoveryStats.seenMoreLogicalKeys.add(key);
+      }
+    };
     const expandAvailableMoreButtons = async () => {
       if (!allowSidebarControls || moreControlClicks >= maxMoreClicks) return 0;
+      refreshRootContainers();
       const controlsBefore = findMoreButtons(root, sidebar);
+      observeMoreControls(controlsBefore);
       if (controlsBefore[0]) observedMoreControl = controlsBefore[0];
+      const moreWaitStartedAt = Date.now();
       const clicks = await expandSidebarMoreButtons(root, {
         ...options,
         maxMoreClicks: maxMoreClicks - moreControlClicks,
         clickedMoreControls,
-        includeHiddenMore: true
+        includeHiddenMore: true,
+        allowRepeatOnGrowth: true,
+        discoveryStats
       }, sidebar);
+      if (clicks > 0) {
+        const elapsed = Math.max(0, Date.now() - moreWaitStartedAt);
+        moreClickWaitMs += elapsed;
+        totalDomWaitMs += elapsed;
+      }
       moreControlClicks += clicks;
       const controlsAfter = findMoreButtons(root, sidebar);
+      observeMoreControls(controlsAfter);
       if (controlsAfter[0]) observedMoreControl = controlsAfter[0];
       return clicks;
     };
     let result = null;
+    let latestSnapshot = null;
+    let snapshotNeedsCollect = true;
+    let disconnectedContainerObserved = false;
+    const refreshRootContainers = () => {
+      const sidebarWasDisconnected = sidebar?.isConnected === false;
+      const scrollContainerWasDisconnected = scrollContainer?.isConnected === false;
+      if ((sidebarWasDisconnected || scrollContainerWasDisconnected)
+        && !disconnectedContainerObserved) {
+        domRemountCount += 1;
+        disconnectedContainerObserved = true;
+      }
+      const currentSidebar = findIdentitySidebarRoot(root);
+      if (currentSidebar) sidebar = currentSidebar;
+      else if (sidebar?.isConnected === false) sidebar = null;
+      const currentScrollContainer = findIdentityScrollContainer(root, sidebar);
+      if (currentScrollContainer) scrollContainer = currentScrollContainer;
+      else if (scrollContainer?.isConnected === false) scrollContainer = null;
+      if (currentSidebar || currentScrollContainer) disconnectedContainerObserved = false;
+      canScroll = scrollContainer && typeof scrollContainer.scrollTop === "number"
+        && typeof scrollContainer.scrollHeight === "number"
+        && typeof scrollContainer.clientHeight === "number";
+    };
+    const collectSnapshot = () => {
+      refreshRootContainers();
+      const startedAt = Date.now();
+      rootCatalogBuildCount += 1;
+      if (rootCatalogBuildCount > 1) rootCatalogReuseCount += 1;
+      const snapshot = collectContextEntries(root, url, sidebar);
+      rootCatalogBuildMs += Math.max(0, Date.now() - startedAt);
+      return snapshot;
+    };
     try {
       ensureCollectionActive();
-      if (initialSettleMs > 0) await waitForSidebarMutation(root, initialSettleMs);
+      if (initialSettleMs > 0) {
+        const waitStartedAt = Date.now();
+        await waitForSidebarMutation(root, initialSettleMs);
+        totalDomWaitMs += Math.max(0, Date.now() - waitStartedAt);
+      }
       ensureCollectionActive();
-      const initial = collectContextEntries(root, url, sidebar);
-      mergeContextProjectCatalog(merged, initial);
+      const initial = collectSnapshot();
+      latestSnapshot = initial;
+      mergeContextProjectCatalog(merged, initial, discoveryStats);
       mergeContextConversationCatalog(merged, initial);
-      await expandAvailableMoreButtons();
+      const initialMoreClicks = await expandAvailableMoreButtons();
+      snapshotNeedsCollect = initialMoreClicks > 0;
       for (let pass = 0; pass < maxScrolls; pass += 1) {
         if (!ensureCollectionActive()) break;
         const expandedBeforeScan = await expandAvailableMoreButtons();
@@ -4485,9 +5235,12 @@
         const beforeTop = canScroll ? Number(scrollContainer.scrollTop) || 0 : 0;
         const beforeHeight = canScroll ? Number(scrollContainer.scrollHeight) || 0 : 0;
         const clientHeight = canScroll ? Number(scrollContainer.clientHeight) || 0 : 0;
-        const snapshot = collectContextEntries(root, url, sidebar);
-        mergeContextProjectCatalog(merged, snapshot);
-        mergeContextConversationCatalog(merged, snapshot);
+        if (snapshotNeedsCollect || expandedBeforeScan > 0 || !latestSnapshot) {
+          latestSnapshot = collectSnapshot();
+          mergeContextProjectCatalog(merged, latestSnapshot, discoveryStats);
+          mergeContextConversationCatalog(merged, latestSnapshot);
+          snapshotNeedsCollect = false;
+        }
         const added = merged.projects.length + merged.conversations.length - beforeCount;
         const moreRemainingUnclicked = findMoreButtons(root, sidebar, { requireVisible: false })
           .some((candidate) => {
@@ -4509,21 +5262,32 @@
         const step = Math.max(1, Math.floor(Math.max(1, clientHeight) * 0.8));
         const nextTop = Math.min(maxTop, beforeTop + step);
         if (nextTop <= beforeTop) break;
-        try { scrollContainer.scrollTop = nextTop; } catch (_) { break; }
+        sidebarScrollAttemptCount += 1;
+        try { scrollContainer.scrollTop = nextTop; } catch (_) {
+          sidebarScrollStagnationCount += 1;
+          break;
+        }
+        const scrollWaitStartedAt = Date.now();
         await waitForSidebarMutation(root, options.settleMs);
+        const scrollWaitMs = Math.max(0, Date.now() - scrollWaitStartedAt);
+        rootHydrationScrollWaitMs += scrollWaitMs;
+        totalDomWaitMs += scrollWaitMs;
         if (!ensureCollectionActive()) break;
         const expandedAfterScroll = await expandAvailableMoreButtons();
         const afterTop = Number(scrollContainer.scrollTop) || 0;
         const afterHeight = Number(scrollContainer.scrollHeight) || 0;
+        if (afterTop !== beforeTop) sidebarScrollPositionChangeCount += 1;
         if (added === 0
           && expandedBeforeScan === 0
           && expandedAfterScroll === 0
           && afterTop === beforeTop
           && afterHeight === beforeHeight) {
           stagnantPasses += 1;
+          sidebarScrollStagnationCount += 1;
         } else {
           stagnantPasses = 0;
         }
+        snapshotNeedsCollect = true;
         // Keep the old scan order: the next pass collects the rows exposed by
         // this scroll, including the final viewport at the bottom.
         if (stagnantPasses >= 2 && !moreRemainingUnclicked) {
@@ -4533,8 +5297,8 @@
       }
       const trailingMoreClicks = await expandAvailableMoreButtons();
       if (trailingMoreClicks > 0) {
-        const trailing = collectContextEntries(root, url, sidebar);
-        mergeContextProjectCatalog(merged, trailing);
+        const trailing = collectSnapshot();
+        mergeContextProjectCatalog(merged, trailing, discoveryStats);
         mergeContextConversationCatalog(merged, trailing);
       }
       const finalMoreUnclicked = findMoreButtons(root, sidebar, { requireVisible: false })
@@ -4566,17 +5330,31 @@
           sidebar,
           scrollDirection,
           0),
+        root_catalog_build_count: rootCatalogBuildCount,
+        root_catalog_reuse_count: rootCatalogReuseCount,
+        root_catalog_build_ms: rootCatalogBuildMs,
+        root_hydration_scroll_wait_ms: rootHydrationScrollWaitMs,
+        more_click_wait_ms: moreClickWaitMs,
+        total_dom_wait_ms: totalDomWaitMs,
+        dom_remount_count: domRemountCount,
+        sidebar_scroll_attempt_count: sidebarScrollAttemptCount,
+        sidebar_scroll_position_change_count: sidebarScrollPositionChangeCount,
+        sidebar_scroll_stagnation_count: sidebarScrollStagnationCount,
         ...projectMoreControlTelemetry(
           root,
           sidebar,
           observedMoreControl,
           moreControlClicks,
-          merged.projects.length)
+          merged.projects.length),
+        ...discoveryCatalogIntegrityTelemetry(merged.projects, discoveryStats)
       };
     } finally {
-      if (scrollContainer && originalScrollTop !== null) {
+      const restoreScrollContainer = scrollContainer?.isConnected === false
+        ? findIdentityScrollContainer(root, sidebar)
+        : scrollContainer;
+      if (restoreScrollContainer && originalScrollTop !== null) {
         try {
-          scrollContainer.scrollTop = originalScrollTop;
+          restoreScrollContainer.scrollTop = originalScrollTop;
           sidebarRestoreCount = 1;
         } catch (_) { }
       }

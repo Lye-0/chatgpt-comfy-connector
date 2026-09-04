@@ -567,6 +567,7 @@ async function createHarness(options) {
   const runtimeMessages = [];
   const diagnostics = [];
   const context = createContext({
+    __CHATGPT_COMFY_CONNECTOR_DEBUG_TELEMETRY__: options?.debugTelemetry === true,
     console: {
       info(...args) { diagnostics.push(args); },
       warn() {},
@@ -728,6 +729,56 @@ test("Content Script preserves Project identity navigation stages in its safe ru
   assert.equal(Object.hasOwn(target, "project_title"), false);
   assert.equal(result.navigation_failure_reason, "project_row_not_visible");
   assert.equal(result.internal_reason, "project_row_not_visible");
+});
+
+test("Content Script suppresses loop telemetry by default but exposes it in debug mode", async () => {
+  const createIdentityHarness = async (debugTelemetry) => createHarness({
+    url: "https://chatgpt.com/",
+    debugTelemetry,
+    locatorOverrides: {
+      resolveChatGptProjectIdentitiesAsync: async (_root, _url, projects, options) => {
+        options.onTelemetry?.({
+          stage: "collector_project_identity_row_relocation",
+          project_index: 0,
+          candidate_count: 1,
+          row_found: true
+        });
+        return {
+          status: "ok",
+          projects: projects.map((project) => ({
+            ...project,
+            project_id: "g-p-debug",
+            url: "https://chatgpt.com/g/g-p-debug/project"
+          })),
+          conversations: [],
+          current: null
+        };
+      }
+    }
+  });
+  const sendIdentityRequest = (harness) => harness.send({
+    type: "GET_CHATGPT_CONTEXT",
+    requestId: "telemetry-gating-fixture",
+    refreshGeneration: 1,
+    navigationGeneration: "refresh-1-identity-0",
+    collectorTabId: 100,
+    mode: "list",
+    collection: "project_identity",
+    identityMode: "navigation",
+    projects: [{ project_index: 0, title: "Debug Project" }]
+  });
+
+  const quietHarness = await createIdentityHarness(false);
+  await sendIdentityRequest(quietHarness);
+  assert.equal(quietHarness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_project_identity_row_relocation"), false);
+  assert.ok(quietHarness.messages.some((message) =>
+    message.stage === "collector_project_identity_row_relocation"));
+
+  const debugHarness = await createIdentityHarness(true);
+  await sendIdentityRequest(debugHarness);
+  assert.equal(debugHarness.diagnostics.some(([, fields]) =>
+    fields?.stage === "collector_project_identity_row_relocation"), true);
 });
 
 test("Content Script preserves safe diagnostics when Project Chat collection throws", async () => {

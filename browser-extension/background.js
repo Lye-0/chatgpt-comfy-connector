@@ -84,6 +84,7 @@ const COLLECTOR_VIEWPORT_RETRY_DELAY_MS = 250;
 const COLLECTOR_ROOT_HYDRATION_TIMEOUT_MS = 30000;
 const COLLECTOR_ROOT_HYDRATION_QUIET_MS = 600;
 const COLLECTOR_ROOT_HYDRATION_POLL_MS = 100;
+const COLLECTOR_SLOW_IDENTITY_MS = 2000;
 // A replacement Content Script can become ready before ChatGPT has hydrated
 // the newly opened conversation's message list. Keep checking the same
 // marker-bearing user message without ever issuing another Handoff send.
@@ -327,9 +328,622 @@ function bridgeError(message, status = 0, code = "bridge_error") {
   return error;
 }
 
+function collectorDebugTelemetryEnabled() {
+  return globalThis.__CHATGPT_COMFY_CONNECTOR_DEBUG_TELEMETRY__ === true;
+}
+
+function isCollectorTelemetrySummaryStage(stage) {
+  return typeof stage === "string"
+    && (stage.endsWith("_complete")
+      || stage.endsWith("_failure_summary")
+      || stage === "collector_project_discovery_efficiency_summary");
+}
+
+function isHighVolumeCollectorTelemetryStage(stage) {
+  if (typeof stage !== "string") return false;
+  return stage === "collector_project_identity_row_relocation"
+    || stage === "collector_project_identity_row_fingerprint"
+    || stage === "collector_project_identity_relocation_candidates"
+    || stage.endsWith("_navigation_wait")
+    || stage.endsWith("_hydration_probe")
+    || stage.endsWith("_poll");
+}
+
+function createCollectorProjectDiscoveryEfficiencyState(pending) {
+  return {
+    requestId: pending?.requestId || null,
+    refreshGeneration: Number.isSafeInteger(pending?.generation)
+      ? pending.generation
+      : null,
+    startedAt: Date.now(),
+    rootNavigationCount: 0,
+    rootUrlVerificationCount: 0,
+    tabUpdateNavigationRequestCount: 0,
+    tabUpdateRootRequestCount: 0,
+    tabUpdateProjectRequestCount: 0,
+    observedUrlChangeCount: 0,
+    observedLoadingCount: 0,
+    observedCompleteCount: 0,
+    contentScriptBootCount: 0,
+    contentScriptReconnectCount: 0,
+    documentNavigationCount: 0,
+    spaRouteChangeCount: 0,
+    domRemountCount: 0,
+    reloadApiCallCount: 0,
+    rootNavigationRequested: false,
+    rootReturnRequested: false,
+    rootHydrationRunCount: 0,
+    rootHydrationScrollCount: 0,
+    rootCatalogBuildCount: 0,
+    rootCatalogReuseCount: 0,
+    projectIdentityAttemptCount: 0,
+    rowRelocationAttemptCount: 0,
+    rowRelocationSuccessCount: 0,
+    candidateSearchCount: 0,
+    candidateSearchTotalCandidateCount: 0,
+    stableLocatorMatchCount: 0,
+    uniqueTitleMatchCount: 0,
+    ambiguousMatchCount: 0,
+    sidebarScrollAttemptCount: 0,
+    sidebarScrollPositionChangeCount: 0,
+    sidebarScrollStagnationCount: 0,
+    moreClickCount: 0,
+    discoverySnapshotCount: 0,
+    discoverySnapshotProjectCandidateCountTotal: 0,
+    discoveryLogicalProjectCountFinal: 0,
+    descriptorAddedCount: 0,
+    descriptorUpdatedCount: 0,
+    descriptorReplacedCount: 0,
+    descriptorRemovedCount: 0,
+    descriptorDuplicateRejectedCount: 0,
+    descriptorRemountReconciledCount: 0,
+    descriptorAmbiguousReconcileCount: 0,
+    duplicateDiscoveryKeyCount: 0,
+    discoveryKeyChangedForSameLogicalProjectCount: 0,
+    moreControlSeenCount: 0,
+    moreControlLogicalUniqueCount: 0,
+    moreControlDuplicateSuppressedCount: 0,
+    projectCandidateRejectedChildChatCount: 0,
+    projectCandidateRejectedNonProjectCount: 0,
+    finalCatalogIndexCount: 0,
+    finalCatalogIndices: [],
+    descriptorAddedAfterFirstSnapshotIndices: [],
+    disclosureOpenCount: 0,
+    disclosureCloseCount: 0,
+    domGenerationChangeCount: 0,
+    navigationFallbackAttemptCount: 0,
+    navigationFallbackSuccessCount: 0,
+    projectNavigationCount: 0,
+    rootReturnNavigationCount: 0,
+    spaNavigationCount: 0,
+    fullPageNavigationCount: 0,
+    staleNavigationResultRejectedCount: 0,
+    duplicateStableProjectIdCount: 0,
+    missingStableIdentityCount: 0,
+    identityCollisionCount: 0,
+    telemetryEventCountTotal: 0,
+    telemetryEventCountDetail: 0,
+    telemetryEventCountSummary: 0,
+    rootNavigationWaitMs: 0,
+    rootUrlVerificationWaitMs: 0,
+    rootHydrationWaitMs: 0,
+    rootHydrationPollCount: 0,
+    rootHydrationPollWaitMs: 0,
+    rootHydrationPollIntervalMs: 0,
+    rootHydrationScrollWaitMs: 0,
+    moreClickWaitMs: 0,
+    catalogBuildMs: 0,
+    identityResolutionMs: 0,
+    identityDisclosureWaitMs: 0,
+    identityDomRemountWaitMs: 0,
+    identityCandidateSearchMs: 0,
+    identityRelocationWaitMs: 0,
+    identityChildRegionWaitMs: 0,
+    identityNavigationWaitMs: 0,
+    identityMiscWaitMs: 0,
+    identitySourceRowMetadataCount: 0,
+    identitySourceChildChatCount: 0,
+    identitySourceControlledRegionCount: 0,
+    identitySourceNavigationCount: 0,
+    identitySourceNestedUrlCount: 0,
+    navigationFallbackProjectIndices: [],
+    navigationFallbackSuccessProjectIndices: [],
+    navigationFallbackFailureProjectIndices: [],
+    identityProjectElapsedMs: new Map(),
+    observedIdentitySourceProjects: new Set(),
+    rowRelocationMs: 0,
+    navigationFallbackMs: 0,
+    rootReturnWaitMs: 0,
+    collectorRecoveryWaitMs: 0,
+    miscellaneousWaitMs: 0,
+    totalExplicitDelayMs: 0,
+    totalPollWaitMs: 0,
+    totalDomWaitMs: 0,
+    totalNavigationWaitMs: 0,
+    efficiencySummaryEmitted: false,
+    relocationScrollAttempts: new Map(),
+    relocationMoreClickCounts: new Map(),
+    observedStableLocatorProjects: new Set(),
+    observedUniqueTitleProjects: new Set(),
+    observedAmbiguousProjects: new Set(),
+    observedNavigationFallbackAttempts: new Set(),
+    observedNavigationFallbackSuccesses: new Set(),
+    observedProjectNavigations: new Set(),
+    observedSpaNavigations: new Set(),
+    observedDocumentNavigations: new Set(),
+    observedDomRemounts: new Set(),
+    observedDisclosureChanges: new Set()
+  };
+}
+
+function collectorProjectDiscoveryEfficiencyFor(pending) {
+  if (!pending || typeof pending !== "object") return null;
+  if (!pending.projectDiscoveryEfficiency) {
+    pending.projectDiscoveryEfficiency = createCollectorProjectDiscoveryEfficiencyState(pending);
+  }
+  return pending.projectDiscoveryEfficiency;
+}
+
+function incrementCollectorProjectDiscoveryEfficiency(pending, key, amount = 1) {
+  const efficiency = collectorProjectDiscoveryEfficiencyFor(pending);
+  if (!efficiency || !Object.prototype.hasOwnProperty.call(efficiency, key)) return;
+  const normalized = Number.isFinite(Number(amount)) ? Number(amount) : 0;
+  efficiency[key] = Math.max(0, efficiency[key] + normalized);
+}
+
+function addCollectorProjectDiscoveryEfficiencyDuration(pending, key, durationMs) {
+  const efficiency = collectorProjectDiscoveryEfficiencyFor(pending);
+  if (!efficiency || !Object.prototype.hasOwnProperty.call(efficiency, key)) return;
+  const normalized = Number.isFinite(Number(durationMs)) ? Number(durationMs) : 0;
+  efficiency[key] = Math.max(0, efficiency[key] + normalized);
+}
+
+function collectorProjectDiscoveryEfficiencyForRequest(requestId) {
+  if (!requestId) return null;
+  return collectorProjectDiscoveryEfficiencyFor(contextRequests.get(requestId));
+}
+
+function recordCollectorProjectDiscoveryEfficiencyNavigationRequest(
+  requestId,
+  navigationType) {
+  const efficiency = collectorProjectDiscoveryEfficiencyForRequest(requestId);
+  if (!efficiency) return;
+  efficiency.tabUpdateNavigationRequestCount += 1;
+  if (navigationType === "root" || navigationType === "root_return") {
+    efficiency.tabUpdateRootRequestCount += 1;
+    efficiency.rootNavigationRequested = true;
+    if (navigationType === "root_return") efficiency.rootReturnRequested = true;
+  }
+  if (navigationType === "project") efficiency.tabUpdateProjectRequestCount += 1;
+}
+
+function recordCollectorProjectDiscoveryEfficiencyDocumentNavigation(
+  requestId,
+  navigationKey) {
+  const efficiency = collectorProjectDiscoveryEfficiencyForRequest(requestId);
+  if (!efficiency || efficiency.observedDocumentNavigations.has(navigationKey)) return;
+  efficiency.observedDocumentNavigations.add(navigationKey);
+  efficiency.documentNavigationCount += 1;
+  efficiency.fullPageNavigationCount = efficiency.documentNavigationCount;
+}
+
+function recordCollectorIdentitySource(efficiency, source, projectKey) {
+  if (!efficiency || !projectKey || typeof source !== "string" || source === "none") return;
+  if (efficiency.observedIdentitySourceProjects.has(projectKey)) return;
+  efficiency.observedIdentitySourceProjects.add(projectKey);
+  if (source === "child_chat_url") efficiency.identitySourceChildChatCount += 1;
+  else if (source === "controlled_region") efficiency.identitySourceControlledRegionCount += 1;
+  else if (source === "navigation_url") efficiency.identitySourceNavigationCount += 1;
+  else if (source === "nested_url") efficiency.identitySourceNestedUrlCount += 1;
+  else if (source === "row_url" || source === "other") efficiency.identitySourceRowMetadataCount += 1;
+}
+
+function recordCollectorProjectDiscoveryEfficiencyObservedEvent(
+  requestId,
+  key) {
+  const efficiency = collectorProjectDiscoveryEfficiencyForRequest(requestId);
+  if (!efficiency) return;
+  efficiency[key] += 1;
+}
+
+function recordCollectorProjectDiscoveryEfficiencyNavigationWait(
+  pending,
+  navigationStartedAt,
+  isProjectNavigation,
+  navigationType) {
+  if (navigationStartedAt === null) return;
+  const navigationWaitMs = Math.max(0, Date.now() - navigationStartedAt);
+  addCollectorProjectDiscoveryEfficiencyDuration(
+    pending,
+    isProjectNavigation ? "navigationFallbackMs"
+      : navigationType === "root_return" ? "rootReturnWaitMs" : "rootNavigationWaitMs",
+    navigationWaitMs);
+  addCollectorProjectDiscoveryEfficiencyDuration(
+    pending,
+    "totalNavigationWaitMs",
+    navigationWaitMs);
+}
+
+function recordCollectorProjectDiscoveryEfficiencyEvent(fields = {}, options = {}) {
+  const pending = contextRequests.get(fields?.request_id);
+  const efficiency = pending?.projectDiscoveryEfficiency;
+  if (!efficiency) return;
+  const stage = fields?.stage;
+  // Operation counters are updated even when high-volume console output is
+  // gated. Telemetry counters are updated only for events that are emitted.
+  if (options.countTelemetry !== false
+    && stage !== "collector_project_discovery_efficiency_summary") {
+    efficiency.telemetryEventCountTotal += 1;
+    if (isCollectorTelemetrySummaryStage(stage)) efficiency.telemetryEventCountSummary += 1;
+    else efficiency.telemetryEventCountDetail += 1;
+  }
+  const projectIndex = Number.isSafeInteger(fields?.project_index)
+    ? fields.project_index
+    : null;
+  const projectKey = projectIndex === null ? null : String(projectIndex);
+  if (stage === "collector_project_identity_row_relocation_start") {
+    efficiency.rowRelocationAttemptCount += 1;
+    if (fields.sidebar_dom_generation_changed === true) {
+      efficiency.domGenerationChangeCount += 1;
+      const remountKey = `${projectKey ?? "unknown"}:${fields.navigation_generation || ""}`;
+      if (!efficiency.observedDomRemounts.has(remountKey)) {
+        efficiency.observedDomRemounts.add(remountKey);
+        efficiency.domRemountCount += 1;
+      }
+    }
+  }
+  if (stage === "collector_project_identity_row_relocation") {
+    const candidateCount = Number.isSafeInteger(fields.candidate_count)
+      ? fields.candidate_count
+      : 0;
+    efficiency.candidateSearchCount += 1;
+    efficiency.candidateSearchTotalCandidateCount += candidateCount;
+    if (fields.relocation_success === true && projectKey !== null) {
+      efficiency.rowRelocationSuccessCount += 1;
+    }
+    if (fields.stable_fingerprint_match_count > 0 && projectKey !== null
+      && !efficiency.observedStableLocatorProjects.has(projectKey)) {
+      efficiency.observedStableLocatorProjects.add(projectKey);
+      efficiency.stableLocatorMatchCount += 1;
+    }
+    if (fields.selected_match_method === "unique_catalog_title" && projectKey !== null
+      && !efficiency.observedUniqueTitleProjects.has(projectKey)) {
+      efficiency.observedUniqueTitleProjects.add(projectKey);
+      efficiency.uniqueTitleMatchCount += 1;
+    }
+    const ambiguousCount = Number.isSafeInteger(fields.ambiguous_count)
+      ? fields.ambiguous_count
+      : (Number.isSafeInteger(fields.ambiguous_candidate_count)
+        ? fields.ambiguous_candidate_count
+        : 0);
+    if (ambiguousCount > 0 && projectKey !== null
+      && !efficiency.observedAmbiguousProjects.has(projectKey)) {
+      efficiency.observedAmbiguousProjects.add(projectKey);
+      efficiency.ambiguousMatchCount += 1;
+    }
+    if (projectKey !== null) {
+      const scrollAttempts = Number.isSafeInteger(fields.scroll_attempts)
+        ? fields.scroll_attempts
+        : 0;
+      const previousScrollAttempts = efficiency.relocationScrollAttempts.get(projectKey) || 0;
+      if (scrollAttempts > previousScrollAttempts) {
+        efficiency.sidebarScrollAttemptCount += scrollAttempts - previousScrollAttempts;
+        efficiency.relocationScrollAttempts.set(projectKey, scrollAttempts);
+      }
+      const moreClickCount = Number.isSafeInteger(fields.more_click_count)
+        ? fields.more_click_count
+        : 0;
+      const previousMoreClickCount = efficiency.relocationMoreClickCounts.get(projectKey) || 0;
+      if (moreClickCount > previousMoreClickCount) {
+        efficiency.moreClickCount += moreClickCount - previousMoreClickCount;
+        efficiency.relocationMoreClickCounts.set(projectKey, moreClickCount);
+      }
+      if (fields.scroll_position_changed === true) {
+        efficiency.sidebarScrollPositionChangeCount += 1;
+      }
+      if (fields.relocation_stagnated === true || fields.scroll_search_stagnated === true) {
+        efficiency.sidebarScrollStagnationCount += 1;
+      }
+    if ((fields.relocation_success === true
+      || fields.relocation_stagnated === true
+      || fields.scroll_search_stagnated === true)
+      && Number.isSafeInteger(fields.relocation_elapsed_ms)) {
+      efficiency.rowRelocationMs += fields.relocation_elapsed_ms;
+      efficiency.totalDomWaitMs += fields.relocation_elapsed_ms;
+    }
+    }
+  }
+  if ((stage === "collector_project_identity_disclosure_click"
+    || stage === "collector_project_identity_disclosure_structure")
+    && fields.disclosure_state_changed === true
+    && projectKey !== null) {
+    const before = fields.aria_expanded_before;
+    const after = fields.aria_expanded_after;
+    const changeKey = `${projectKey}:${before}:${after}`;
+    if (!efficiency.observedDisclosureChanges.has(changeKey)) {
+      efficiency.observedDisclosureChanges.add(changeKey);
+      if (after === "true" && before !== "true") efficiency.disclosureOpenCount += 1;
+      if (after === "false" && before !== "false") efficiency.disclosureCloseCount += 1;
+    }
+  }
+  if (fields.navigation_fallback_attempted === true && projectKey !== null
+    && !efficiency.observedNavigationFallbackAttempts.has(projectKey)) {
+    efficiency.observedNavigationFallbackAttempts.add(projectKey);
+    efficiency.navigationFallbackAttemptCount += 1;
+    if (!efficiency.navigationFallbackProjectIndices.includes(projectIndex)) {
+      efficiency.navigationFallbackProjectIndices.push(projectIndex);
+    }
+  }
+  if (fields.navigation_fallback_success === true && projectKey !== null
+    && !efficiency.observedNavigationFallbackSuccesses.has(projectKey)) {
+    efficiency.observedNavigationFallbackSuccesses.add(projectKey);
+    efficiency.navigationFallbackSuccessCount += 1;
+    if (!efficiency.navigationFallbackSuccessProjectIndices.includes(projectIndex)) {
+      efficiency.navigationFallbackSuccessProjectIndices.push(projectIndex);
+    }
+  }
+  if (fields.navigation_fallback_attempted === true
+    && fields.navigation_fallback_success === false
+    && projectKey !== null
+    && Number.isSafeInteger(projectIndex)
+    && !efficiency.navigationFallbackFailureProjectIndices.includes(projectIndex)
+    && (stage === "collector_project_identity_source_classification"
+      || stage === "collector_project_identity_navigation_result")) {
+    efficiency.navigationFallbackFailureProjectIndices.push(projectIndex);
+  }
+  if (stage === "collector_project_identity_source_classification") {
+    if (Number.isSafeInteger(fields.identity_disclosure_wait_ms)) {
+      efficiency.identityDisclosureWaitMs += fields.identity_disclosure_wait_ms;
+    }
+    if (Number.isSafeInteger(fields.identity_child_region_wait_ms)) {
+      efficiency.identityChildRegionWaitMs += fields.identity_child_region_wait_ms;
+    }
+    if (Number.isSafeInteger(fields.identity_candidate_search_ms)) {
+      efficiency.identityCandidateSearchMs += fields.identity_candidate_search_ms;
+    }
+    if (Number.isSafeInteger(fields.identity_relocation_wait_ms)) {
+      efficiency.identityRelocationWaitMs += fields.identity_relocation_wait_ms;
+    }
+    if (Number.isSafeInteger(fields.identity_elapsed_ms) && projectKey !== null) {
+      const previous = efficiency.identityProjectElapsedMs.get(projectKey) || 0;
+      efficiency.identityProjectElapsedMs.set(projectKey, previous + fields.identity_elapsed_ms);
+    }
+    recordCollectorIdentitySource(efficiency, fields.identity_source, projectKey);
+  }
+  if (fields.stale_navigation_result_rejected === true) {
+    efficiency.staleNavigationResultRejectedCount += 1;
+  }
+  if (stage === "collector_project_identity_navigation_wait"
+    && fields.navigation_detected === true
+    && projectKey !== null) {
+    if (!efficiency.observedProjectNavigations.has(projectKey)) {
+      efficiency.observedProjectNavigations.add(projectKey);
+      efficiency.projectNavigationCount += 1;
+    }
+    if (fields.content_script_reloaded !== true
+      && !efficiency.observedSpaNavigations.has(projectKey)) {
+      efficiency.observedSpaNavigations.add(projectKey);
+      efficiency.spaNavigationCount += 1;
+      efficiency.spaRouteChangeCount += 1;
+    }
+    if (Number.isSafeInteger(fields.navigation_wait_ms)) {
+      efficiency.navigationFallbackMs += fields.navigation_wait_ms;
+      efficiency.totalNavigationWaitMs += fields.navigation_wait_ms;
+      efficiency.identityNavigationWaitMs += fields.navigation_wait_ms;
+    }
+  }
+}
+
+function recordCollectorProjectDiscoveryEfficiencyNavigation(
+  requestId,
+  navigationType,
+  projectIndex = null,
+  navigationKey = null) {
+  const efficiency = collectorProjectDiscoveryEfficiencyForRequest(requestId);
+  if (!efficiency) return;
+  const key = navigationKey || (projectIndex === null ? String(Date.now()) : String(projectIndex));
+  if (navigationType === "root") {
+    efficiency.rootNavigationCount += 1;
+    efficiency.rootNavigationRequested = true;
+  }
+  if (navigationType === "root_return") {
+    efficiency.rootReturnNavigationCount += 1;
+    efficiency.rootNavigationRequested = true;
+    efficiency.rootReturnRequested = true;
+  }
+  if (navigationType === "project") efficiency.projectNavigationCount += 1;
+  if (navigationType === "full_page") {
+    recordCollectorProjectDiscoveryEfficiencyDocumentNavigation(requestId, key);
+  }
+}
+
+function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = null, errorCode = null) {
+  if (!pending || pending.projectOnly || pending.currentOnly
+    || !isCurrentCollectorRequest(pending)
+    || pending.projectDiscoveryEfficiency?.efficiencySummaryEmitted === true) return;
+  const efficiency = collectorProjectDiscoveryEfficiencyFor(pending);
+  if (!efficiency) return;
+  const projects = Array.isArray(result?.projects)
+    ? result.projects
+    : (Array.isArray(pending.projectIdentityResult?.projects)
+      ? pending.projectIdentityResult.projects
+      : (Array.isArray(pending.projectDiscoveryScanResult?.projects)
+        ? pending.projectDiscoveryScanResult.projects
+        : []));
+  const resolution = collectProjectMetadataResolution({ projects });
+  const collision = stableProjectIdCollisionDetails(projects);
+  efficiency.duplicateStableProjectIdCount =
+    collision?.duplicate_stable_project_id_count || 0;
+  efficiency.identityCollisionCount =
+    collision?.duplicate_stable_project_id_group_count || 0;
+  efficiency.missingStableIdentityCount = resolution.items.filter((item) =>
+    !item.resolved && (item.unresolvedReason || "missing_stable_identity")
+      === "missing_stable_identity").length;
+  efficiency.telemetryEventCountTotal += 1;
+  efficiency.telemetryEventCountSummary += 1;
+  efficiency.efficiencySummaryEmitted = true;
+  for (const project of projects) {
+    const projectIndex = Number.isSafeInteger(project?.project_index)
+      ? project.project_index
+      : null;
+    recordCollectorIdentitySource(
+      efficiency,
+      project?.identity_source,
+      projectIndex === null ? null : String(projectIndex));
+  }
+  const identityElapsedValues = [...efficiency.identityProjectElapsedMs.entries()]
+    .map(([key, value]) => ({ index: Number(key), value }))
+    .filter((item) => Number.isSafeInteger(item.index) && item.index >= 0);
+  const identityElapsedSum = identityElapsedValues.reduce((sum, item) => sum + item.value, 0);
+  const averageIdentityMs = identityElapsedValues.length > 0
+    ? Math.round(identityElapsedSum / identityElapsedValues.length)
+    : 0;
+  const maxIdentityMs = identityElapsedValues.reduce(
+    (max, item) => Math.max(max, item.value),
+    0);
+  const slowIdentityProjectIndices = identityElapsedValues
+    .filter((item) => item.value >= COLLECTOR_SLOW_IDENTITY_MS)
+    .map((item) => item.index)
+    .sort((left, right) => left - right);
+  const identityAccountedMs = efficiency.identityDisclosureWaitMs
+    + efficiency.identityDomRemountWaitMs
+    + efficiency.identityCandidateSearchMs
+    + efficiency.identityRelocationWaitMs
+    + efficiency.identityChildRegionWaitMs
+    + efficiency.identityNavigationWaitMs;
+  efficiency.identityMiscWaitMs = Math.max(0, efficiency.identityResolutionMs - identityAccountedMs);
+  diagnostic("collector project discovery efficiency summary", {
+    request_id: pending.requestId,
+    refresh_generation: pending.generation,
+    discovered_project_count: resolution.discoveredCount,
+    resolved_project_count: resolution.resolvedCount,
+    unresolved_project_count: resolution.unresolvedCount,
+    elapsed_ms: Math.max(0, Date.now() - efficiency.startedAt),
+    root_navigation_count: efficiency.rootNavigationCount,
+    root_url_verification_count: efficiency.rootUrlVerificationCount,
+    root_hydration_run_count: efficiency.rootHydrationRunCount,
+    root_hydration_scroll_count: efficiency.rootHydrationScrollCount,
+    root_catalog_build_count: efficiency.rootCatalogBuildCount,
+    root_catalog_reuse_count: efficiency.rootCatalogReuseCount,
+    project_identity_attempt_count: efficiency.projectIdentityAttemptCount,
+    row_relocation_attempt_count: efficiency.rowRelocationAttemptCount,
+    row_relocation_success_count: efficiency.rowRelocationSuccessCount,
+    candidate_search_count: efficiency.candidateSearchCount,
+    candidate_search_total_candidate_count: efficiency.candidateSearchTotalCandidateCount,
+    stable_locator_match_count: efficiency.stableLocatorMatchCount,
+    unique_title_match_count: efficiency.uniqueTitleMatchCount,
+    ambiguous_match_count: efficiency.ambiguousMatchCount,
+    sidebar_scroll_attempt_count: efficiency.sidebarScrollAttemptCount,
+    sidebar_scroll_position_change_count: efficiency.sidebarScrollPositionChangeCount,
+    sidebar_scroll_stagnation_count: efficiency.sidebarScrollStagnationCount,
+    more_click_count: efficiency.moreClickCount,
+    discovery_snapshot_count: efficiency.discoverySnapshotCount,
+    discovery_snapshot_project_candidate_count_total:
+      efficiency.discoverySnapshotProjectCandidateCountTotal,
+    discovery_logical_project_count_final: efficiency.discoveryLogicalProjectCountFinal,
+    descriptor_added_count: efficiency.descriptorAddedCount,
+    descriptor_updated_count: efficiency.descriptorUpdatedCount,
+    descriptor_replaced_count: efficiency.descriptorReplacedCount,
+    descriptor_removed_count: efficiency.descriptorRemovedCount,
+    descriptor_duplicate_rejected_count: efficiency.descriptorDuplicateRejectedCount,
+    descriptor_remount_reconciled_count: efficiency.descriptorRemountReconciledCount,
+    descriptor_ambiguous_reconcile_count: efficiency.descriptorAmbiguousReconcileCount,
+    duplicate_discovery_key_count: efficiency.duplicateDiscoveryKeyCount,
+    discovery_key_changed_for_same_logical_project_count:
+      efficiency.discoveryKeyChangedForSameLogicalProjectCount,
+    more_control_seen_count: efficiency.moreControlSeenCount,
+    more_control_logical_unique_count: efficiency.moreControlLogicalUniqueCount,
+    more_control_duplicate_suppressed_count: efficiency.moreControlDuplicateSuppressedCount,
+    project_candidate_rejected_child_chat_count:
+      efficiency.projectCandidateRejectedChildChatCount,
+    project_candidate_rejected_non_project_count:
+      efficiency.projectCandidateRejectedNonProjectCount,
+    final_catalog_index_count: efficiency.finalCatalogIndexCount,
+    final_catalog_indices: [...efficiency.finalCatalogIndices],
+    descriptor_added_after_first_snapshot_indices:
+      [...efficiency.descriptorAddedAfterFirstSnapshotIndices],
+    disclosure_open_count: efficiency.disclosureOpenCount,
+    disclosure_close_count: efficiency.disclosureCloseCount,
+    dom_generation_change_count: efficiency.domGenerationChangeCount,
+    navigation_fallback_attempt_count: efficiency.navigationFallbackAttemptCount,
+    navigation_fallback_success_count: efficiency.navigationFallbackSuccessCount,
+    project_navigation_count: efficiency.projectNavigationCount,
+    root_return_navigation_count: efficiency.rootReturnNavigationCount,
+    spa_navigation_count: efficiency.spaNavigationCount,
+    full_page_navigation_count: efficiency.fullPageNavigationCount,
+    stale_navigation_result_rejected_count: efficiency.staleNavigationResultRejectedCount,
+    tab_update_navigation_request_count: efficiency.tabUpdateNavigationRequestCount,
+    tab_update_root_request_count: efficiency.tabUpdateRootRequestCount,
+    tab_update_project_request_count: efficiency.tabUpdateProjectRequestCount,
+    observed_url_change_count: efficiency.observedUrlChangeCount,
+    observed_loading_count: efficiency.observedLoadingCount,
+    observed_complete_count: efficiency.observedCompleteCount,
+    content_script_boot_count: efficiency.contentScriptBootCount,
+    content_script_reconnect_count: efficiency.contentScriptReconnectCount,
+    document_navigation_count: efficiency.documentNavigationCount,
+    spa_route_change_count: efficiency.spaRouteChangeCount,
+    dom_remount_count: efficiency.domRemountCount,
+    reload_api_call_count: efficiency.reloadApiCallCount,
+    root_navigation_requested: efficiency.rootNavigationRequested,
+    root_return_requested: efficiency.rootReturnRequested,
+    duplicate_stable_project_id_count: efficiency.duplicateStableProjectIdCount,
+    missing_stable_identity_count: efficiency.missingStableIdentityCount,
+    identity_collision_count: efficiency.identityCollisionCount,
+    root_navigation_wait_ms: efficiency.rootNavigationWaitMs,
+    root_url_verification_wait_ms: efficiency.rootUrlVerificationWaitMs,
+    root_hydration_wait_ms: efficiency.rootHydrationWaitMs,
+    root_hydration_poll_count: efficiency.rootHydrationPollCount,
+    root_hydration_poll_wait_ms: efficiency.rootHydrationPollWaitMs,
+    root_hydration_poll_interval_ms: efficiency.rootHydrationPollIntervalMs,
+    root_hydration_scroll_wait_ms: efficiency.rootHydrationScrollWaitMs,
+    more_click_wait_ms: efficiency.moreClickWaitMs,
+    catalog_build_ms: efficiency.catalogBuildMs,
+    identity_resolution_ms: efficiency.identityResolutionMs,
+    identity_disclosure_wait_ms: efficiency.identityDisclosureWaitMs,
+    identity_dom_remount_wait_ms: efficiency.identityDomRemountWaitMs,
+    identity_candidate_search_ms: efficiency.identityCandidateSearchMs,
+    identity_relocation_wait_ms: efficiency.identityRelocationWaitMs,
+    identity_child_region_wait_ms: efficiency.identityChildRegionWaitMs,
+    identity_navigation_wait_ms: efficiency.identityNavigationWaitMs,
+    identity_misc_wait_ms: efficiency.identityMiscWaitMs,
+    identity_source_row_metadata_count: efficiency.identitySourceRowMetadataCount,
+    identity_source_child_chat_count: efficiency.identitySourceChildChatCount,
+    identity_source_controlled_region_count: efficiency.identitySourceControlledRegionCount,
+    identity_source_navigation_count: efficiency.identitySourceNavigationCount,
+    identity_source_nested_url_count: efficiency.identitySourceNestedUrlCount,
+    average_identity_ms: averageIdentityMs,
+    max_identity_ms: maxIdentityMs,
+    slow_identity_project_indices: slowIdentityProjectIndices,
+    navigation_fallback_project_indices: efficiency.navigationFallbackProjectIndices,
+    navigation_fallback_success_project_indices: efficiency.navigationFallbackSuccessProjectIndices,
+    navigation_fallback_failure_project_indices: efficiency.navigationFallbackFailureProjectIndices,
+    row_relocation_ms: efficiency.rowRelocationMs,
+    navigation_fallback_ms: efficiency.navigationFallbackMs,
+    root_return_wait_ms: efficiency.rootReturnWaitMs,
+    collector_recovery_wait_ms: efficiency.collectorRecoveryWaitMs,
+    miscellaneous_wait_ms: efficiency.miscellaneousWaitMs,
+    total_explicit_delay_ms: efficiency.totalExplicitDelayMs,
+    total_poll_wait_ms: efficiency.totalPollWaitMs,
+    total_dom_wait_ms: efficiency.totalDomWaitMs,
+    total_navigation_wait_ms: efficiency.totalNavigationWaitMs,
+    telemetry_event_count_total: efficiency.telemetryEventCountTotal,
+    telemetry_event_count_detail: efficiency.telemetryEventCountDetail,
+    telemetry_event_count_summary: efficiency.telemetryEventCountSummary,
+    status: errorCode ? "error" : "completed",
+    ...(errorCode ? { error_code: errorCode } : {}),
+    stage: "collector_project_discovery_efficiency_summary",
+    target_tab_id: pending.tabId
+  });
+}
+
 // Diagnostics deliberately whitelist identifiers and outcome fields. Never
 // include the pairing credential, session token, or Handoff payload here.
 function diagnostic(eventName, fields = {}) {
+  const shouldEmit = collectorDebugTelemetryEnabled()
+    || !isHighVolumeCollectorTelemetryStage(fields?.stage);
+  recordCollectorProjectDiscoveryEfficiencyEvent(fields, {
+    countTelemetry: shouldEmit
+  });
   const safe = {};
   for (const key of [
     "request_id",
@@ -550,6 +1164,7 @@ function diagnostic(eventName, fields = {}) {
     "scroll_required",
     "scroll_position_changed",
     "more_available",
+    "relocation_elapsed_ms",
     "rows_reenumerated_after_navigation",
     "stale_discovery_row_discarded",
     "identity_catalog_count",
@@ -591,6 +1206,9 @@ function diagnostic(eventName, fields = {}) {
     "root_hydration_completed",
     "root_hydration_timeout",
     "hydration_wait_ms",
+    "hydration_poll_count",
+    "hydration_poll_wait_ms",
+    "hydration_poll_interval_ms",
     "document_ready_state",
     "sidebar_root_present",
     "sidebar_scroll_container_present",
@@ -724,6 +1342,108 @@ function diagnostic(eventName, fields = {}) {
     "title_extraction_success_count",
     "title_fallback_used_count",
     "title_observed_chat_count",
+    "root_navigation_count",
+    "root_url_verification_count",
+    "root_hydration_run_count",
+    "root_hydration_scroll_count",
+    "root_catalog_build_count",
+    "root_catalog_reuse_count",
+    "project_identity_attempt_count",
+    "row_relocation_attempt_count",
+    "row_relocation_success_count",
+    "candidate_search_count",
+    "candidate_search_total_candidate_count",
+    "stable_locator_match_count",
+    "unique_title_match_count",
+    "ambiguous_match_count",
+    "sidebar_scroll_attempt_count",
+    "sidebar_scroll_position_change_count",
+    "sidebar_scroll_stagnation_count",
+    "more_click_count",
+    "discovery_snapshot_count",
+    "discovery_snapshot_project_candidate_count_total",
+    "discovery_logical_project_count_final",
+    "descriptor_added_count",
+    "descriptor_updated_count",
+    "descriptor_replaced_count",
+    "descriptor_removed_count",
+    "descriptor_duplicate_rejected_count",
+    "descriptor_remount_reconciled_count",
+    "descriptor_ambiguous_reconcile_count",
+    "duplicate_discovery_key_count",
+    "discovery_key_changed_for_same_logical_project_count",
+    "more_control_seen_count",
+    "more_control_logical_unique_count",
+    "more_control_duplicate_suppressed_count",
+    "project_candidate_rejected_child_chat_count",
+    "project_candidate_rejected_non_project_count",
+    "final_catalog_index_count",
+    "disclosure_open_count",
+    "disclosure_close_count",
+    "dom_generation_change_count",
+    "navigation_fallback_attempt_count",
+    "navigation_fallback_success_count",
+    "project_navigation_count",
+    "root_return_navigation_count",
+    "spa_navigation_count",
+    "full_page_navigation_count",
+    "stale_navigation_result_rejected_count",
+    "tab_update_navigation_request_count",
+    "tab_update_root_request_count",
+    "tab_update_project_request_count",
+    "observed_url_change_count",
+    "observed_loading_count",
+    "observed_complete_count",
+    "content_script_boot_count",
+    "content_script_reconnect_count",
+    "document_navigation_count",
+    "spa_route_change_count",
+    "dom_remount_count",
+    "reload_api_call_count",
+    "root_navigation_requested",
+    "root_return_requested",
+    "identity_collision_count",
+    "missing_stable_identity_count",
+    "root_navigation_wait_ms",
+    "root_url_verification_wait_ms",
+    "root_hydration_wait_ms",
+    "root_hydration_poll_count",
+    "root_hydration_poll_wait_ms",
+    "root_hydration_poll_interval_ms",
+    "root_hydration_scroll_wait_ms",
+    "more_click_wait_ms",
+    "catalog_build_ms",
+    "identity_resolution_ms",
+    "identity_disclosure_wait_ms",
+    "identity_dom_remount_wait_ms",
+    "identity_candidate_search_ms",
+    "identity_relocation_wait_ms",
+    "identity_child_region_wait_ms",
+    "identity_navigation_wait_ms",
+    "identity_misc_wait_ms",
+    "identity_elapsed_ms",
+    "identity_source_row_metadata_count",
+    "identity_source_child_chat_count",
+    "identity_source_controlled_region_count",
+    "identity_source_navigation_count",
+    "identity_source_nested_url_count",
+    "average_identity_ms",
+    "max_identity_ms",
+    "catalog_reused",
+    "relocation_skipped_connected_row",
+    "row_relocation_ms",
+    "navigation_fallback_ms",
+    "root_return_wait_ms",
+    "collector_recovery_wait_ms",
+    "miscellaneous_wait_ms",
+    "total_explicit_delay_ms",
+    "total_poll_wait_ms",
+    "total_dom_wait_ms",
+    "total_navigation_wait_ms",
+    "telemetry_event_count_total",
+    "telemetry_event_count_detail",
+    "telemetry_event_count_summary",
+    "elapsed_ms",
     "scan_iteration",
     "scroll_position_changed",
     "reached_end",
@@ -759,6 +1479,19 @@ function diagnostic(eventName, fields = {}) {
   }
   if (Array.isArray(fields.failed_project_indices)) {
     safe.failed_project_indices = fields.failed_project_indices
+      .filter((value) => Number.isSafeInteger(value) && value >= 0)
+      .slice(0, 5000);
+  }
+  for (const key of [
+    "navigation_fallback_project_indices",
+    "navigation_fallback_success_project_indices",
+    "navigation_fallback_failure_project_indices",
+    "slow_identity_project_indices",
+    "final_catalog_indices",
+    "descriptor_added_after_first_snapshot_indices"
+  ]) {
+    if (!Array.isArray(fields[key])) continue;
+    safe[key] = fields[key]
       .filter((value) => Number.isSafeInteger(value) && value >= 0)
       .slice(0, 5000);
   }
@@ -809,6 +1542,7 @@ function diagnostic(eventName, fields = {}) {
       return sanitized;
     });
   }
+  if (!shouldEmit) return;
   try {
     console.info(`[ChatGPT Comfy Connector] ${eventName}`, safe);
   } catch (_) {
@@ -1816,7 +2550,10 @@ function sendMessageWithTimeout(
   });
 }
 
-function waitForTabReady(tabId, timeoutMs = CONTENT_SCRIPT_READY_TIMEOUT_MS) {
+function waitForTabReady(
+  tabId,
+  timeoutMs = CONTENT_SCRIPT_READY_TIMEOUT_MS,
+  timingPending = null) {
   if (!chrome.tabs?.get) return Promise.resolve(true);
 
   return new Promise((resolve) => {
@@ -1859,7 +2596,14 @@ function waitForTabReady(tabId, timeoutMs = CONTENT_SCRIPT_READY_TIMEOUT_MS) {
         finish(false);
         return;
       }
-      pollTimer = setTimeout(inspect, CONTENT_SCRIPT_READY_POLL_INTERVAL_MS);
+      const pollScheduledAt = Date.now();
+      pollTimer = setTimeout(() => {
+        addCollectorProjectDiscoveryEfficiencyDuration(
+          timingPending,
+          "totalPollWaitMs",
+          Math.max(0, Date.now() - pollScheduledAt));
+        inspect();
+      }, CONTENT_SCRIPT_READY_POLL_INTERVAL_MS);
     };
     const handleUpdated = (updatedTabId, changeInfo) => {
       if (updatedTabId !== tabId || changeInfo?.status !== "complete") return;
@@ -2237,6 +2981,9 @@ function recordCollectorRootHydrationTelemetry(source, pending = null, trace = {
     root_hydration_completed: collectorWindowState.rootHydrationCompleted,
     root_hydration_timeout: collectorWindowState.rootHydrationTimeout,
     hydration_wait_ms: collectorWindowState.hydrationWaitMs,
+    hydration_poll_count: source?.hydration_poll_count,
+    hydration_poll_wait_ms: source?.hydration_poll_wait_ms,
+    hydration_poll_interval_ms: source?.hydration_poll_interval_ms,
     document_ready_state: collectorWindowState.documentReadyState,
     sidebar_root_present: collectorWindowState.sidebarRootPresent,
     sidebar_scroll_container_present: collectorWindowState.sidebarScrollContainerPresent,
@@ -2371,6 +3118,84 @@ function recordCollectorProjectDiscoveryResult(source, pending) {
   const shape = collectorProjectDiscoveryResultShape(source);
   if (pending && typeof pending === "object") {
     pending.collectorProjectDiscoveryResultShape = shape;
+  }
+  const efficiency = collectorProjectDiscoveryEfficiencyFor(pending);
+  if (efficiency) {
+    const nonNegativeInteger = (value) =>
+      Number.isSafeInteger(value) && value >= 0 ? value : null;
+    const assignRootMetric = (key, value) => {
+      const normalized = nonNegativeInteger(value);
+      if (normalized !== null) efficiency[key] = normalized;
+    };
+    const addRootDuration = (key, value) => {
+      const normalized = nonNegativeInteger(value);
+      if (normalized !== null) efficiency[key] += normalized;
+    };
+    assignRootMetric("rootCatalogBuildCount", source?.root_catalog_build_count);
+    assignRootMetric("rootCatalogReuseCount", source?.root_catalog_reuse_count);
+    addRootDuration("catalogBuildMs", source?.root_catalog_build_ms);
+    addRootDuration("rootHydrationScrollWaitMs", source?.root_hydration_scroll_wait_ms);
+    addRootDuration("moreClickWaitMs", source?.more_click_wait_ms);
+    addRootDuration("totalDomWaitMs", source?.total_dom_wait_ms);
+    const remountCount = nonNegativeInteger(source?.dom_remount_count);
+    if (remountCount !== null) efficiency.domRemountCount += remountCount;
+    const scrollAttempts = nonNegativeInteger(source?.sidebar_scroll_attempt_count);
+    if (scrollAttempts !== null) {
+      efficiency.rootHydrationScrollCount = scrollAttempts;
+      efficiency.sidebarScrollAttemptCount += scrollAttempts;
+    }
+    const scrollChanges = nonNegativeInteger(source?.sidebar_scroll_position_change_count);
+    if (scrollChanges !== null) {
+      efficiency.sidebarScrollPositionChangeCount += scrollChanges;
+    }
+    const scrollStagnation = nonNegativeInteger(source?.sidebar_scroll_stagnation_count);
+    if (scrollStagnation !== null) {
+      efficiency.sidebarScrollStagnationCount += scrollStagnation;
+    }
+    const moreClicks = nonNegativeInteger(source?.project_more_control_click_count);
+    if (moreClicks !== null) efficiency.moreClickCount += moreClicks;
+    const assignIntegrityMetric = (stateKey, sourceKey) => {
+      const normalized = nonNegativeInteger(source?.[sourceKey]);
+      if (normalized !== null) efficiency[stateKey] = normalized;
+    };
+    assignIntegrityMetric("discoverySnapshotCount", "discovery_snapshot_count");
+    assignIntegrityMetric(
+      "discoverySnapshotProjectCandidateCountTotal",
+      "discovery_snapshot_project_candidate_count_total");
+    assignIntegrityMetric("discoveryLogicalProjectCountFinal", "discovery_logical_project_count_final");
+    assignIntegrityMetric("descriptorAddedCount", "descriptor_added_count");
+    assignIntegrityMetric("descriptorUpdatedCount", "descriptor_updated_count");
+    assignIntegrityMetric("descriptorReplacedCount", "descriptor_replaced_count");
+    assignIntegrityMetric("descriptorRemovedCount", "descriptor_removed_count");
+    assignIntegrityMetric("descriptorDuplicateRejectedCount", "descriptor_duplicate_rejected_count");
+    assignIntegrityMetric("descriptorRemountReconciledCount", "descriptor_remount_reconciled_count");
+    assignIntegrityMetric("descriptorAmbiguousReconcileCount", "descriptor_ambiguous_reconcile_count");
+    assignIntegrityMetric("duplicateDiscoveryKeyCount", "duplicate_discovery_key_count");
+    assignIntegrityMetric(
+      "discoveryKeyChangedForSameLogicalProjectCount",
+      "discovery_key_changed_for_same_logical_project_count");
+    assignIntegrityMetric("moreControlSeenCount", "more_control_seen_count");
+    assignIntegrityMetric("moreControlLogicalUniqueCount", "more_control_logical_unique_count");
+    assignIntegrityMetric(
+      "moreControlDuplicateSuppressedCount",
+      "more_control_duplicate_suppressed_count");
+    assignIntegrityMetric(
+      "projectCandidateRejectedChildChatCount",
+      "project_candidate_rejected_child_chat_count");
+    assignIntegrityMetric(
+      "projectCandidateRejectedNonProjectCount",
+      "project_candidate_rejected_non_project_count");
+    assignIntegrityMetric("finalCatalogIndexCount", "final_catalog_index_count");
+    const copyIndexList = (stateKey, sourceKey) => {
+      if (!Array.isArray(source?.[sourceKey])) return;
+      efficiency[stateKey] = source[sourceKey]
+        .filter((value) => Number.isSafeInteger(value) && value >= 0)
+        .slice(0, 5000);
+    };
+    copyIndexList("finalCatalogIndices", "final_catalog_indices");
+    copyIndexList(
+      "descriptorAddedAfterFirstSnapshotIndices",
+      "descriptor_added_after_first_snapshot_indices");
   }
   const base = {
     project_discovery_result_received: true,
@@ -2626,6 +3451,7 @@ async function createCollectorTabInWindow(windowId, url, trace = {}) {
 
 async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
   await collectorWindowStateReady;
+  let rootNavigationCreated = false;
   let window = await getCollectorWindow();
   if (!window) {
     if (Number.isSafeInteger(collectorWindowState.windowId)) {
@@ -2661,6 +3487,19 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
       throw bridgeError("ChatGPT Context収集用Windowを作成できません。", 0, "collector_window_create_failed");
     }
     window = await makeCollectorWindowUsable({ ...created, state: created.state || "normal" }, trace);
+    if (isCollectorRootUrl(safeChatGptContextUrl(url))) {
+      rootNavigationCreated = true;
+      recordCollectorProjectDiscoveryEfficiencyNavigation(
+        trace.request_id,
+        "root",
+        null,
+        `${trace.request_id || "collector"}:created-window:${window.id}`);
+      recordCollectorProjectDiscoveryEfficiencyNavigation(
+        trace.request_id,
+        "full_page",
+        null,
+        `${trace.request_id || "collector"}:created-window:${window.id}:root`);
+    }
     diagnostic("collector window created", {
       ...trace,
       collector_window_id: window.id,
@@ -2689,7 +3528,21 @@ async function ensureCollectorWindow(url = COLLECTOR_TAB_URL, trace = {}) {
     await replaceCollectorTab(tab, trace);
     tab = null;
   }
-  if (!tab) tab = await createCollectorTabInWindow(window.id, url, trace);
+  if (!tab) {
+    tab = await createCollectorTabInWindow(window.id, url, trace);
+    if (!rootNavigationCreated && isCollectorRootUrl(safeChatGptContextUrl(url))) {
+      recordCollectorProjectDiscoveryEfficiencyNavigation(
+        trace.request_id,
+        "root",
+        null,
+        `${trace.request_id || "collector"}:created-tab:${tab.id}`);
+      recordCollectorProjectDiscoveryEfficiencyNavigation(
+        trace.request_id,
+        "full_page",
+        null,
+        `${trace.request_id || "collector"}:created-tab:${tab.id}:root`);
+    }
+  }
   else {
     collectorWindowState = { ...collectorWindowState, windowId: window.id, tabId: tab.id };
     collectorWindowLifecycle("PreparingTab", { windowId: window.id, tabId: tab.id });
@@ -2771,6 +3624,7 @@ async function navigateCollectorTab(tab, url, trace = {}) {
     currentProjectUrl: isProjectNavigation ? targetUrl : null,
     collectorNavigationTarget: targetUrl
   };
+  const requestId = trace.request_id;
   collectorWindowState = {
     ...collectorWindowState,
     currentProjectId: navigationTrace.currentProjectId,
@@ -2781,7 +3635,21 @@ async function navigateCollectorTab(tab, url, trace = {}) {
     collectorNavigationTarget: targetUrl
   };
   let updated = tab;
+  let navigationWaitStartedAt = null;
+  let navigationWaitType = null;
+  let navigationKey = null;
   if (currentUrl !== targetUrl && typeof chrome.tabs?.update === "function") {
+    navigationWaitStartedAt = Date.now();
+    navigationWaitType = isProjectNavigation
+      ? "project"
+      : (typeof trace.stage === "string" && trace.stage.includes("root_restore")
+        ? "root_return"
+        : "root");
+    navigationKey =
+      `${requestId || "collector"}:${trace.stage || "navigation"}:${currentUrl || "unknown"}->${targetUrl}`;
+    recordCollectorProjectDiscoveryEfficiencyNavigationRequest(
+      requestId,
+      navigationWaitType);
     const navigationLifecycle = isProjectNavigation ? "NavigatingProject" : "NavigatingRoot";
     const navigationStage = isProjectNavigation
       ? "collector_project_url_navigation"
@@ -2804,13 +3672,44 @@ async function navigateCollectorTab(tab, url, trace = {}) {
         autoDiscardable: false
       }) || { ...tab, url: targetUrl, active: true, autoDiscardable: false };
     } catch (_) {
+      recordCollectorProjectDiscoveryEfficiencyNavigationWait(
+        contextRequests.get(requestId),
+        navigationWaitStartedAt,
+        isProjectNavigation,
+        navigationWaitType);
       throw bridgeError("Collector TabのProjectページ移動に失敗しました。", 0, "collector_tab_navigation_failed");
     }
   }
   updated = await enforceCollectorTab(updated, navigationTrace);
-  if (!(await waitForTabReady(updated.id, COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS))) {
+  const navigationReady = await waitForTabReady(
+    updated.id,
+    COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS,
+    contextRequests.get(requestId));
+  if (!navigationReady) {
+    recordCollectorProjectDiscoveryEfficiencyNavigationWait(
+      contextRequests.get(requestId),
+      navigationWaitStartedAt,
+      isProjectNavigation,
+      navigationWaitType);
     throw bridgeError("Collector TabのProjectページ読み込みがタイムアウトしました。", 0, "collector_tab_navigation_timeout");
   }
+  if (navigationWaitStartedAt !== null) {
+    // A tabs.update call is only a request. Count its document navigation
+    // after the tab has reached the ready state so a rejected or timed-out
+    // request cannot inflate full_page_navigation_count.
+    recordCollectorProjectDiscoveryEfficiencyNavigation(
+      requestId,
+      navigationWaitType,
+      Number.isSafeInteger(trace.project_index) ? trace.project_index : null);
+    recordCollectorProjectDiscoveryEfficiencyDocumentNavigation(
+      requestId,
+      navigationKey);
+  }
+  recordCollectorProjectDiscoveryEfficiencyNavigationWait(
+    contextRequests.get(requestId),
+    navigationWaitStartedAt,
+    isProjectNavigation,
+    navigationWaitType);
   if (!isProjectNavigation) {
     diagnostic("collector root navigation completed", {
       ...navigationTrace,
@@ -2880,6 +3779,7 @@ function validateCollectorRootHydrationResponse(source, pending, tab, navigation
 
 async function waitForRootSidebarHydration(tab, pending, request, attempt = 0) {
   throwIfCollectorRequestSuperseded(pending);
+  incrementCollectorProjectDiscoveryEfficiency(pending, "rootHydrationRunCount");
   const navigationGeneration = "refresh-" + pending.generation + "-root-" + (attempt + 1);
   const startedAt = Date.now();
   pending.rootNavigationGeneration = navigationGeneration;
@@ -2915,6 +3815,7 @@ async function waitForRootSidebarHydration(tab, pending, request, attempt = 0) {
   });
 
   let source;
+  let hydrationWaitRecorded = false;
   try {
     source = await dispatchToContentScript(tab.id, {
       type: "GET_COLLECTOR_ROOT_HYDRATION",
@@ -2937,8 +3838,46 @@ async function waitForRootSidebarHydration(tab, pending, request, attempt = 0) {
       timeoutMs: COLLECTOR_ROOT_HYDRATION_TIMEOUT_MS + 5000,
       timeoutStage: "collector_root_hydration_timeout"
     });
+    // Count an actual root URL verification result, not every caller-side
+    // no-op navigation check. The Content Script has already evaluated the
+    // expected URL as part of this hydration response.
+    incrementCollectorProjectDiscoveryEfficiency(
+      pending,
+      "rootUrlVerificationCount");
+    const hydrationElapsed = Math.max(0, Date.now() - startedAt);
+    if (Number.isSafeInteger(source?.hydration_poll_count) && source.hydration_poll_count >= 0) {
+      pending.projectDiscoveryEfficiency.rootHydrationPollCount += source.hydration_poll_count;
+    }
+    if (Number.isSafeInteger(source?.hydration_poll_wait_ms) && source.hydration_poll_wait_ms >= 0) {
+      pending.projectDiscoveryEfficiency.rootHydrationPollWaitMs += source.hydration_poll_wait_ms;
+      pending.projectDiscoveryEfficiency.totalPollWaitMs += source.hydration_poll_wait_ms;
+    }
+    if (Number.isSafeInteger(source?.hydration_poll_interval_ms)
+      && source.hydration_poll_interval_ms >= 0) {
+      pending.projectDiscoveryEfficiency.rootHydrationPollIntervalMs =
+        source.hydration_poll_interval_ms;
+    }
+    addCollectorProjectDiscoveryEfficiencyDuration(
+      pending,
+      "rootHydrationWaitMs",
+      hydrationElapsed);
+    addCollectorProjectDiscoveryEfficiencyDuration(
+      pending,
+      "totalDomWaitMs",
+      hydrationElapsed);
+    hydrationWaitRecorded = true;
   } catch (error) {
     const elapsed = Math.max(0, Date.now() - startedAt);
+    if (!hydrationWaitRecorded) {
+      addCollectorProjectDiscoveryEfficiencyDuration(
+        pending,
+        "rootHydrationWaitMs",
+        elapsed);
+      addCollectorProjectDiscoveryEfficiencyDuration(
+        pending,
+        "totalDomWaitMs",
+        elapsed);
+    }
     const timeoutLike = error?.code === "send_failed"
       || error?.code === "collector_root_hydration_timeout";
     collectorWindowState = {
@@ -2980,29 +3919,39 @@ async function waitForRootSidebarHydration(tab, pending, request, attempt = 0) {
 
   try {
     validateCollectorRootHydrationResponse(source, pending, tab, navigationGeneration);
-    const currentTab = typeof chrome.tabs?.get === "function"
-      ? await chrome.tabs.get(tab.id)
-      : tab;
-    if (!currentTab || currentTab.windowId !== collectorWindowState.windowId
-      || !isCollectorRootUrl(currentTab.url)
-      || (typeof currentTab.status === "string" && currentTab.status !== "complete")) {
-      throw bridgeError(
-        "Root navigation generationが一致しません。",
-        0,
-        "collector_root_navigation_generation_mismatch");
+    const rootVerificationStartedAt = Date.now();
+    try {
+      const currentTab = typeof chrome.tabs?.get === "function"
+        ? await chrome.tabs.get(tab.id)
+        : tab;
+      if (!currentTab || currentTab.windowId !== collectorWindowState.windowId
+        || !isCollectorRootUrl(currentTab.url)
+        || (typeof currentTab.status === "string" && currentTab.status !== "complete")) {
+        throw bridgeError(
+          "Root navigation generationが一致しません。",
+          0,
+          "collector_root_navigation_generation_mismatch");
+      }
+      recordCollectorRootHydrationTelemetry(source, pending, {
+        request_id: pending.requestId,
+        refresh_generation: pending.generation,
+        root_navigation_generation: navigationGeneration,
+        root_hydration_started: true,
+        root_hydration_completed: true,
+        root_hydration_timeout: false,
+        root_url_verified: true,
+        status: "completed",
+        stage: "collector_root_hydration_complete"
+      });
+      return currentTab;
+    } finally {
+      // This is only the final background-side URL/tab verification phase.
+      // Content Script hydration and its polling are accounted separately.
+      addCollectorProjectDiscoveryEfficiencyDuration(
+        pending,
+        "rootUrlVerificationWaitMs",
+        Math.max(0, Date.now() - rootVerificationStartedAt));
     }
-    recordCollectorRootHydrationTelemetry(source, pending, {
-      request_id: pending.requestId,
-      refresh_generation: pending.generation,
-      root_navigation_generation: navigationGeneration,
-      root_hydration_started: true,
-      root_hydration_completed: true,
-      root_hydration_timeout: false,
-      root_url_verified: true,
-      status: "completed",
-      stage: "collector_root_hydration_complete"
-    });
-    return currentTab;
   } catch (error) {
     const elapsed = Math.max(0, Date.now() - startedAt);
     const errorCode = error?.code || "collector_root_hydration_timeout";
@@ -3161,7 +4110,19 @@ async function ensureCollectorReady(tab, trace = {}) {
         viewportRetryCount
       });
     }
+    const retryWaitStartedAt = Date.now();
     await wait(COLLECTOR_VIEWPORT_RETRY_DELAY_MS);
+    const retryWaitMs = Math.max(0, Date.now() - retryWaitStartedAt);
+    const retryPending = contextRequests.get(
+      trace.request_id || collectorWindowState.requestId);
+    addCollectorProjectDiscoveryEfficiencyDuration(
+      retryPending,
+      "totalExplicitDelayMs",
+      retryWaitMs);
+    addCollectorProjectDiscoveryEfficiencyDuration(
+      retryPending,
+      "miscellaneousWaitMs",
+      retryWaitMs);
     currentTab = await reconcileCollectorWindowTabs(
       collectorWindowState.windowId,
       currentTab.id,
@@ -4403,6 +5364,7 @@ const collectorProjectIdentityNavigationTelemetryKeys = [
   "scroll_search_attempted",
   "scroll_search_stagnated",
   "more_clicked",
+  "more_click_count",
   "more_attempted",
   "scroll_attempts",
   "relocation_phase",
@@ -4433,10 +5395,18 @@ const collectorProjectIdentityNavigationTelemetryKeys = [
   "scroll_required",
   "scroll_position_changed",
   "more_available",
+  "relocation_elapsed_ms",
   "rows_reenumerated_after_navigation",
   "stale_discovery_row_discarded",
   "identity_catalog_count",
-  "total_projects"
+  "total_projects",
+  "identity_elapsed_ms",
+  "identity_disclosure_wait_ms",
+  "identity_child_region_wait_ms",
+  "identity_candidate_search_ms",
+  "identity_relocation_wait_ms",
+  "catalog_reused",
+  "relocation_skipped_connected_row"
 ];
 
 function collectorProjectIdentityNavigationTelemetryFields(source = {}) {
@@ -4897,7 +5867,9 @@ function collectorProjectIdentityFromTab(tab) {
 async function waitForCollectorProjectIdentityTab(
   tabId,
   timeoutMs = COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS,
-  initialUrl = null) {
+  initialUrl = null,
+  timingPending = null) {
+  const startedAt = Date.now();
   const deadline = Date.now() + Math.max(250, Math.min(30000, Number(timeoutMs) || 10000));
   const initialContextUrl = safeChatGptContextUrl(initialUrl);
   while (Date.now() <= deadline) {
@@ -4907,10 +5879,33 @@ async function waitForCollectorProjectIdentityTab(
     const loading = typeof tab?.status === "string" && tab.status !== "complete";
     const currentContextUrl = safeChatGptContextUrl(tab?.url);
     if (identity && !loading && (!initialContextUrl || currentContextUrl !== initialContextUrl)) {
+      const elapsed = Math.max(0, Date.now() - startedAt);
+      addCollectorProjectDiscoveryEfficiencyDuration(
+        timingPending,
+        "navigationFallbackMs",
+        elapsed);
+      addCollectorProjectDiscoveryEfficiencyDuration(
+        timingPending,
+        "totalNavigationWaitMs",
+        elapsed);
       return identity;
     }
+    const pollStartedAt = Date.now();
     await wait(Math.min(100, Math.max(0, deadline - Date.now())));
+    addCollectorProjectDiscoveryEfficiencyDuration(
+      timingPending,
+      "totalPollWaitMs",
+      Math.max(0, Date.now() - pollStartedAt));
   }
+  const elapsed = Math.max(0, Date.now() - startedAt);
+  addCollectorProjectDiscoveryEfficiencyDuration(
+    timingPending,
+    "navigationFallbackMs",
+    elapsed);
+  addCollectorProjectDiscoveryEfficiencyDuration(
+    timingPending,
+    "totalNavigationWaitMs",
+    elapsed);
   return null;
 }
 
@@ -4926,6 +5921,10 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
     discoveryProjects,
     pending.projectIdentityResult?.projects);
   const initialResolution = collectProjectMetadataResolution({ projects });
+  incrementCollectorProjectDiscoveryEfficiency(
+    pending,
+    "projectIdentityAttemptCount",
+    projects.length);
   const initialUnresolvedIndexes = initialResolution.items
     .filter((item) => !item.resolved)
     .map((item) => item.projectIndex);
@@ -5242,7 +6241,8 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
       const fromTab = await waitForCollectorProjectIdentityTab(
         tab.id,
         COLLECTOR_TAB_NAVIGATION_TIMEOUT_MS,
-        navigationInitialUrl);
+        navigationInitialUrl,
+        pending);
       recordCollectorProjectIdentityNavigationTelemetry(
         "collector project identity navigation tab result",
         pending,
@@ -6059,6 +7059,7 @@ async function collectProjectsOnce(tab, pending, request) {
     maxMoreClicks: 12,
     allowSidebarControls: true,
     timeoutMs: COLLECTOR_ROOT_TIMEOUT_MS,
+    rootHydrationCompleted: collectorWindowState.rootHydrationCompleted === true,
     projectDiscoverySource: "existing_project_section_metadata"
   }, request, {
     timeoutMs: COLLECTOR_CONTEXT_TIMEOUT_MS,
@@ -6227,11 +7228,20 @@ function collectCollectorRootResult(tab, pending, request, caller = "refresh_orc
           target_tab_id: pending.tabId
         });
       }
-      const resolvedRootResult = await resolveCollectorProjectIdentities(
-        tab,
-        pending,
-        request,
-        rootResult);
+      const identityResolutionStartedAt = Date.now();
+      let resolvedRootResult;
+      try {
+        resolvedRootResult = await resolveCollectorProjectIdentities(
+          tab,
+          pending,
+          request,
+          rootResult);
+      } finally {
+        addCollectorProjectDiscoveryEfficiencyDuration(
+          pending,
+          "identityResolutionMs",
+          Math.max(0, Date.now() - identityResolutionStartedAt));
+      }
       throwIfCollectorRequestSuperseded(pending);
       const projectResolution = recordCollectorProjectMetadataResolution(resolvedRootResult, pending);
       const unresolvedProjectCount = validateCollectorRootResult(resolvedRootResult, pending);
@@ -6779,13 +7789,16 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
       identityTelemetryActive: false,
       projectChatDiagnostic: null,
       projectChatFailureSummaryEmitted: false,
+      projectDiscoveryEfficiency: null,
       rootNavigationGeneration: null,
       message: request,
       generation
     };
+    collectorProjectDiscoveryEfficiencyFor(pending);
     const projectDiscovery = currentOnly || projectOnly ? null : projectDiscoveryStateFor(pending);
     try {
       throwIfCollectorRequestSuperseded(pending);
+      contextRequests.set(requestId, pending);
       if (bridgeSocket !== socket || bridgeSocket.readyState !== WebSocket.OPEN) {
         await completeContextRequest(
           contextResultError(request, "bridge_disconnected", "Desktop Bridgeに接続されていません。", "bridge_connection"),
@@ -6857,12 +7870,17 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
         rootUrlVerified: false,
         rootNavigationGeneration: null
       };
+      const collectorEnsureStartedAt = Date.now();
       tab = await ensureCollectorWindow(COLLECTOR_TAB_URL, {
-        request_id: requestId,
-        stage: currentOnly
-          ? "context_current_requested"
-          : projectOnly ? "context_project_requested" : "context_list_requested"
-      });
+          request_id: requestId,
+          stage: currentOnly
+            ? "context_current_requested"
+            : projectOnly ? "context_project_requested" : "context_list_requested"
+        });
+      addCollectorProjectDiscoveryEfficiencyDuration(
+        pending,
+        "collectorRecoveryWaitMs",
+        Math.max(0, Date.now() - collectorEnsureStartedAt));
       // Full refreshes enter collectContextWithRecovery with the existing
       // Collector Tab still on whatever page the previous scan used. That
       // orchestration step is the single owner of the root navigation. Do
@@ -6876,7 +7894,6 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
       }
       pending.tabId = tab.id;
       pending.collectorWindowId = collectorWindowState.windowId;
-      contextRequests.set(requestId, pending);
       diagnostic("chatgpt.context request dispatched", {
         request_id: requestId,
         status: "requested",
@@ -6920,6 +7937,7 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
       }
       const errorCode = error?.code || "context_extraction_failed";
       const errorStage = error?.stage || "context_content_script_dispatch";
+      pending.finalErrorCode = errorCode;
       if (!contextRequests.has(requestId)) {
         sendChatGptContextResponseToBridge(
           contextResultError(request, errorCode, "ChatGPT Context収集に失敗しました。", errorStage),
@@ -6930,6 +7948,11 @@ async function requestChatGptContext(message, bridgeSocket, currentOnly) {
           pending);
       }
     } finally {
+      emitCollectorProjectDiscoveryEfficiencySummary(
+        pending,
+        pending.projectDiscoveryResult || pending.projectIdentityResult
+          || pending.projectDiscoveryScanResult,
+        pending.finalErrorCode || null);
       contextRequests.delete(requestId);
       // The Collector Tab is reusable, but a medium-loss recovery can replace
       // its ID while collectContextWithRecovery is running. Release the tab
@@ -9802,10 +10825,37 @@ chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
       tab_status: typeof tab?.status === "string" ? tab.status : changeInfo?.status
     });
   }
+  if (isCollectorWindowTab) {
+    const efficiencyPending = contextRequests.get(collectorWindowState.requestId);
+    if (efficiencyPending?.tabId === tabId) {
+      if (Object.prototype.hasOwnProperty.call(changeInfo || {}, "url")) {
+        recordCollectorProjectDiscoveryEfficiencyObservedEvent(
+          efficiencyPending.requestId,
+          "observedUrlChangeCount");
+      }
+      if (changeInfo?.status === "loading") {
+        recordCollectorProjectDiscoveryEfficiencyObservedEvent(
+          efficiencyPending.requestId,
+          "observedLoadingCount");
+      }
+      if (changeInfo?.status === "complete") {
+        recordCollectorProjectDiscoveryEfficiencyObservedEvent(
+          efficiencyPending.requestId,
+          "observedCompleteCount");
+      }
+    }
+  }
   const identityNavigationPending = isCollectorWindowTab
     ? collectorProjectIdentityPendingForTab(tabId)
     : null;
   if (identityNavigationPending) {
+    if (changeInfo?.status === "loading") {
+      recordCollectorProjectDiscoveryEfficiencyNavigation(
+        identityNavigationPending.requestId,
+        "full_page",
+        identityNavigationPending.identityNavigationProjectIndex,
+        `${identityNavigationPending.requestId}:identity:${identityNavigationPending.identityNavigationGeneration}:loading`);
+    }
     const urlChanged = Object.prototype.hasOwnProperty.call(changeInfo || {}, "url");
     const navigationDetected = Boolean(collectorProjectIdentityFromTab(tab));
     recordCollectorProjectIdentityNavigationTelemetry(
@@ -10259,6 +11309,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (Number.isSafeInteger(_sender?.tab?.id)) {
           const readyTabId = _sender.tab.id;
           const wasReady = contentScriptReadyTabs.has(readyTabId);
+          const efficiencyPending = [...contextRequests.values()]
+            .find((candidate) => candidate?.tabId === readyTabId);
+          if (efficiencyPending) {
+            recordCollectorProjectDiscoveryEfficiencyObservedEvent(
+              efficiencyPending.requestId,
+              wasReady ? "contentScriptReconnectCount" : "contentScriptBootCount");
+          }
           const context = normalizeCurrentContext(message?.context);
           contentScriptReadyTabs.set(readyTabId, {
             readyAt: Date.now(),

@@ -2795,10 +2795,167 @@ test("Background passes the discovered Project array through DOM identity resolu
   assert.equal(identitySummary.navigation_resolved_count, 0);
 });
 
+test("Background emits one request-scoped Project discovery efficiency summary", async () => {
+  const harness = await createHarness();
+  const projects = Array.from({ length: 3 }, (_, index) => ({
+    project_index: index,
+    discovery_index: index,
+    title: `Measured Project ${index}`,
+    project_id: `g-p-measured-${index}`,
+    url: `https://chatgpt.com/g/g-p-measured-${index}/project`,
+    discovery_key: `measured-${index}`
+  }));
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    assert.equal(message.collection, "root");
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects,
+      conversations: [],
+      current: null,
+      project_section_found: true,
+      sidebar_scroll_complete: true,
+      sidebar_scroll_attempt_count: 4,
+      sidebar_scroll_position_change_count: 4,
+      sidebar_scroll_stagnation_count: 0,
+      root_catalog_build_count: 5,
+      root_catalog_reuse_count: 4,
+      project_more_control_click_count: 1,
+      discovery_snapshot_count: 9,
+      discovery_logical_project_count_final: 3,
+      descriptor_added_count: 3,
+      descriptor_remount_reconciled_count: 0,
+      more_control_logical_unique_count: 1,
+      project_candidate_rejected_child_chat_count: 0
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-efficiency-summary"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response"
+      && message.request_id === "collector-efficiency-summary");
+
+  assert.equal(response.status, "ok");
+  const summaries = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_discovery_efficiency_summary");
+  assert.equal(summaries.length, 1);
+  const summary = summaries[0];
+  assert.equal(summary.discovered_project_count, 3);
+  assert.equal(summary.resolved_project_count, 3);
+  assert.equal(summary.unresolved_project_count, 0);
+  assert.equal(summary.root_hydration_run_count, 1);
+  assert.equal(summary.root_url_verification_count, 1);
+  assert.ok(summary.root_url_verification_wait_ms >= 0);
+  assert.equal(summary.root_catalog_build_count, 5);
+  assert.equal(summary.root_catalog_reuse_count, 4);
+  assert.equal(summary.sidebar_scroll_attempt_count, 4);
+  assert.equal(summary.project_identity_attempt_count, 3);
+  assert.equal(summary.discovery_snapshot_count, 9);
+  assert.equal(summary.discovery_logical_project_count_final, 3);
+  assert.equal(summary.descriptor_added_count, 3);
+  assert.equal(summary.more_control_logical_unique_count, 1);
+  assert.equal(summary.navigation_fallback_attempt_count, 0);
+  assert.equal(summary.project_navigation_count, 0);
+  assert.equal(summary.root_return_navigation_count, 0);
+  assert.ok(summary.telemetry_event_count_total >= 1);
+  assert.ok(summary.telemetry_event_count_summary >= 1);
+});
+
+test("Background separates one root tab update from its URL and complete observations", async () => {
+  const harness = await createHarness();
+  harness.setContentHandler((message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type === "GET_COLLECTOR_ROOT_HYDRATION") {
+      return {
+        type: "COLLECTOR_ROOT_HYDRATION_RESULT",
+        requestId: message.requestId,
+        status: "ok",
+        refresh_generation: message.refreshGeneration,
+        navigation_generation: message.navigationGeneration,
+        collector_tab_id: message.collectorTabId,
+        expected_root_url: "https://chatgpt.com/",
+        root_hydration_started: true,
+        root_hydration_completed: true,
+        root_hydration_timeout: false,
+        hydration_wait_ms: 1,
+        document_ready_state: "complete",
+        sidebar_root_present: true,
+        sidebar_scroll_container_present: true,
+        sidebar_shell_present: true,
+        sidebar_sections_stable: true,
+        mutation_count: 0,
+        mutation_quiet_ms: 600,
+        root_url_verified: true
+      };
+    }
+    if (message.type !== "GET_CHATGPT_CONTEXT" || message.collection !== "root") return {};
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [{
+        project_index: 0,
+        discovery_index: 0,
+        title: "Measured root project",
+        project_id: "g-p-measured-root",
+        url: "https://chatgpt.com/g/g-p-measured-root/project"
+      }],
+      conversations: [],
+      current: null,
+      sidebar_scroll_complete: true,
+      project_section_found: true
+    };
+  });
+
+  const run = async (requestId) => {
+    const previousCount = harness.socket.sent.length;
+    harness.context.handleBridgeMessage({
+      type: "chatgpt.context.list.request",
+      request_id: requestId
+    }, harness.socket);
+    return await harness.waitForSocketMessage(
+      previousCount,
+      (message) => message.type === "chatgpt.context.list.response"
+        && message.request_id === requestId);
+  };
+
+  assert.equal((await run("collector-navigation-first")).status, "ok");
+  harness.setTabUrl(harness.createdTabs[0].id, "https://chatgpt.com/c/previous");
+  assert.equal((await run("collector-navigation-second")).status, "ok");
+
+  const summary = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_discovery_efficiency_summary")
+    .at(-1);
+  assert.ok(summary);
+  assert.equal(summary.tab_update_navigation_request_count, 1);
+  assert.equal(summary.tab_update_root_request_count, 1);
+  assert.equal(summary.tab_update_project_request_count, 0);
+  assert.equal(summary.observed_url_change_count, 1);
+  assert.equal(summary.observed_complete_count, 1);
+  assert.equal(summary.document_navigation_count, 1);
+  assert.equal(summary.full_page_navigation_count, 1);
+  assert.equal(summary.root_navigation_count, 1);
+  assert.equal(summary.root_navigation_requested, true);
+  assert.equal(summary.root_return_requested, false);
+  assert.equal(summary.reload_api_call_count, 0);
+});
+
 test("Background resolves only the discovered Projects with navigation fallback, then navigates to their URLs", async () => {
   const harness = await createHarness();
   const identityMessages = [];
-  harness.setContentHandler((message) => {
+  harness.setContentHandler(async (message) => {
     if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
     if (message.type !== "GET_CHATGPT_CONTEXT") return {};
     if (message.collection === "root") {
@@ -2835,6 +2992,22 @@ test("Background resolves only the discovered Projects with navigation fallback,
         };
       }
       const projectIndex = message.projects[0].project_index;
+      await harness.notifyRuntimeMessage({
+        type: "COLLECTOR_PROJECT_IDENTITY_TELEMETRY",
+        request_id: message.requestId,
+        refresh_generation: message.refreshGeneration,
+        navigation_generation: message.navigationGeneration,
+        collector_tab_id: message.collectorTabId,
+        project_index: projectIndex,
+        stage: "collector_project_identity_navigation_wait",
+        navigation_detected: true,
+        content_script_reloaded: false,
+        navigation_wait_ms: 1
+      }, { tab: { id: message.collectorTabId } });
+      harness.setTabStatus(message.collectorTabId, "loading");
+      harness.setTabStatus(message.collectorTabId, "loading");
+      harness.setTabUrl(message.collectorTabId, "https://chatgpt.com/");
+      harness.setTabStatus(message.collectorTabId, "complete");
       return {
         type: "CHATGPT_CONTEXT_RESULT",
         requestId: message.requestId,
@@ -2951,6 +3124,17 @@ test("Background resolves only the discovered Projects with navigation fallback,
   assert.equal(summary.non_navigation_resolved_count, 0);
   assert.equal(summary.navigation_resolved_count, 2);
   assert.equal(summary.unresolved_count, 0);
+  const efficiencySummary = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_discovery_efficiency_summary");
+  assert.ok(efficiencySummary);
+  assert.equal(efficiencySummary.full_page_navigation_count, 3);
+  assert.equal(efficiencySummary.document_navigation_count, 3);
+  assert.equal(efficiencySummary.observed_loading_count, 4);
+  assert.equal(efficiencySummary.observed_url_change_count, 2);
+  assert.equal(efficiencySummary.observed_complete_count, 4);
+  assert.equal(efficiencySummary.project_navigation_count, 2);
+  assert.equal(efficiencySummary.spa_navigation_count, 2);
 });
 
 test("Background identity resolution processes all 28 discovered Projects including indexes 20-27", async () => {
@@ -3092,6 +3276,178 @@ test("Background identity resolution processes all 28 discovered Projects includ
     .filter((fields) => fields?.stage === "context_project_normalization");
   assert.equal(normalization.length, 28);
   assert.equal(normalization.filter((fields) => fields.normalization_status === "kept").length, 28);
+});
+
+test("Background records navigation fallback project index and identity source counts", async () => {
+  const harness = await createHarness();
+  const discoveredProjects = Array.from({ length: 28 }, (_, index) => ({
+    project_index: index,
+    discovery_index: index,
+    title: `Project ${index}`,
+    discovery_key: `source-${index}`
+  }));
+  const identityMessages = [];
+  harness.setContentHandler(async (message) => {
+    if (message.type === "GET_COLLECTOR_VIEWPORT") return {};
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    if (message.collection === "root") {
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: discoveredProjects,
+        conversations: [],
+        current: null
+      };
+    }
+    if (message.collection === "project_identity") {
+      identityMessages.push({
+        mode: message.identityMode,
+        projectIndex: message.projects[0]?.project_index,
+        projectCount: message.projects.length
+      });
+      if (message.identityMode === "dom") {
+        for (const project of message.projects) {
+          if (project.project_index === 20) continue;
+          await harness.notifyRuntimeMessage({
+            type: "COLLECTOR_PROJECT_IDENTITY_TELEMETRY",
+            request_id: message.requestId,
+            refresh_generation: message.refreshGeneration,
+            collector_tab_id: message.collectorTabId,
+            project_index: project.project_index,
+            stage: "collector_project_identity_source_classification",
+            identity_source: "child_chat_url",
+            resolution_success: true,
+            identity_elapsed_ms: 40,
+            identity_disclosure_wait_ms: 5,
+            identity_child_region_wait_ms: 8,
+            identity_candidate_search_ms: 2,
+            identity_relocation_wait_ms: 1
+          }, { tab: { id: message.collectorTabId } });
+        }
+        return {
+          type: "CHATGPT_CONTEXT_RESULT",
+          requestId: message.requestId,
+          mode: "list",
+          status: "ok",
+          projects: message.projects.map((project) => project.project_index === 20
+            ? project
+            : {
+                ...project,
+                project_id: `g-p-dom-${project.project_index}`,
+                url: `https://chatgpt.com/g/g-p-dom-${project.project_index}/project`,
+                identity_source: "child_chat_url"
+              }),
+          conversations: [],
+          current: null,
+          non_navigation_resolved_count: 27,
+          navigation_resolved_count: 0,
+          unresolved_count: 1
+        };
+      }
+      const projectIndex = message.projects[0].project_index;
+      await harness.notifyRuntimeMessage({
+        type: "COLLECTOR_PROJECT_IDENTITY_TELEMETRY",
+        request_id: message.requestId,
+        refresh_generation: message.refreshGeneration,
+        navigation_generation: message.navigationGeneration,
+        collector_tab_id: message.collectorTabId,
+        project_index: projectIndex,
+        stage: "collector_project_identity_source_classification",
+        identity_source: "navigation_url",
+        navigation_fallback_attempted: true,
+        navigation_fallback_success: true,
+        resolution_success: true,
+        identity_elapsed_ms: 2500,
+        identity_disclosure_wait_ms: 12,
+        identity_child_region_wait_ms: 20,
+        identity_candidate_search_ms: 3,
+        identity_relocation_wait_ms: 4
+      }, { tab: { id: message.collectorTabId } });
+      await harness.notifyRuntimeMessage({
+        type: "COLLECTOR_PROJECT_IDENTITY_TELEMETRY",
+        request_id: message.requestId,
+        refresh_generation: message.refreshGeneration,
+        navigation_generation: message.navigationGeneration,
+        collector_tab_id: message.collectorTabId,
+        project_index: projectIndex,
+        stage: "collector_project_identity_navigation_wait",
+        navigation_detected: true,
+        content_script_reloaded: false,
+        navigation_wait_ms: 15
+      }, { tab: { id: message.collectorTabId } });
+      return {
+        type: "CHATGPT_CONTEXT_RESULT",
+        requestId: message.requestId,
+        mode: "list",
+        status: "ok",
+        projects: [{
+          ...message.projects[0],
+          project_id: `g-p-nav-${projectIndex}`,
+          url: `https://chatgpt.com/g/g-p-nav-${projectIndex}/project`,
+          project_index: projectIndex,
+          identity_source: "navigation_url",
+          navigation_fallback_attempted: true,
+          navigation_fallback_success: true
+        }],
+        conversations: [],
+        current: null,
+        navigation_target_verified: true,
+        project_url_pattern_valid: true,
+        project_id_url_match: true
+      };
+    }
+    return {
+      type: "CHATGPT_CONTEXT_RESULT",
+      requestId: message.requestId,
+      mode: "list",
+      status: "ok",
+      projects: [{
+        project_id: message.projectId,
+        title: "Collected",
+        url: `https://chatgpt.com/g/${message.projectId}/project`
+      }],
+      conversations: [],
+      current: null
+    };
+  });
+
+  const previousCount = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({
+    type: "chatgpt.context.list.request",
+    request_id: "collector-identity-source-summary"
+  }, harness.socket);
+  const response = await harness.waitForSocketMessage(
+    previousCount,
+    (message) => message.type === "chatgpt.context.list.response");
+
+  assert.equal(response.status, "ok");
+  assert.equal(identityMessages.filter((item) => item.mode === "navigation").length, 1);
+  assert.equal(identityMessages.find((item) => item.mode === "navigation").projectIndex, 20);
+  const summary = harness.diagnostics
+    .map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_discovery_efficiency_summary");
+  assert.ok(summary);
+  assert.ok(Array.isArray(summary.navigation_fallback_project_indices));
+  assert.equal(summary.navigation_fallback_project_indices.length, 1);
+  assert.equal(summary.navigation_fallback_project_indices[0], 20);
+  assert.ok(Array.isArray(summary.navigation_fallback_success_project_indices));
+  assert.equal(summary.navigation_fallback_success_project_indices.length, 1);
+  assert.equal(summary.navigation_fallback_success_project_indices[0], 20);
+  assert.equal(summary.identity_source_child_chat_count, 27);
+  assert.equal(summary.identity_source_navigation_count, 1);
+  assert.equal(summary.navigation_fallback_attempt_count, 1);
+  assert.equal(summary.navigation_fallback_success_count, 1);
+  assert.ok(summary.identity_disclosure_wait_ms >= 5);
+  assert.ok(summary.identity_child_region_wait_ms >= 8);
+  assert.ok(summary.identity_candidate_search_ms >= 2);
+  assert.ok(summary.identity_relocation_wait_ms >= 1);
+  assert.ok(summary.identity_navigation_wait_ms >= 15);
+  assert.ok(summary.max_identity_ms >= 2500);
+  assert.ok(Array.isArray(summary.slow_identity_project_indices));
+  assert.equal(summary.slow_identity_project_indices.length, 1);
+  assert.equal(summary.slow_identity_project_indices[0], 20);
 });
 
 test("Unsolicited 20-project Content result does not replace a 28-project Collector catalog", async () => {
@@ -3557,6 +3913,14 @@ test("Background does not complete when 1 of 28 discovered Projects stays unreso
   assert.equal(failureSummaries[0].failures.length, 1);
   assert.equal(failureSummaries[0].failures[0].project_index, 27);
   assert.equal(failureSummaries[0].failures[0].unresolved_reason, "missing_stable_identity");
+  const efficiencySummaries = harness.diagnostics
+    .map(([, fields]) => fields)
+    .filter((fields) => fields?.stage === "collector_project_discovery_efficiency_summary");
+  assert.equal(efficiencySummaries.length, 1);
+  assert.equal(efficiencySummaries[0].discovered_project_count, 28);
+  assert.equal(efficiencySummaries[0].resolved_project_count, 27);
+  assert.equal(efficiencySummaries[0].unresolved_project_count, 1);
+  assert.equal(efficiencySummaries[0].missing_stable_identity_count, 1);
 });
 
 test("Identity resolution continues independently after one Project relocation fails", async () => {

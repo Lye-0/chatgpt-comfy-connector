@@ -323,6 +323,44 @@ and probes the Content Script's `window.innerWidth` and sidebar readiness
 before discovery. A bounded zero-Project result is an
 `context_projects_incomplete` error rather than a successful empty catalog;
 the Desktop keeps a known cache visible while marking that refresh as Error.
+
+Root Project identity resolution has a conservative in-memory incremental path
+in `chatgpt-locators.js`. After an owned DOM identity is resolved, the exact row
+object and its raw stable `data-*` attributes can authorize reuse on a subsequent
+refresh in the same document and Sidebar. The stable locator must be unique in
+the logical catalog, the raw attributes must be unique among current rows, and
+the normal descriptor fingerprint checks still apply. Titles, positions, volatile
+DOM attributes and hashed locator keys alone never authorize reuse. Reuse does
+not merge, add or remove catalog descriptors. Provisional observations cannot use
+this path. Remounted rows, replaced Sidebars/documents, changed keys, conflicts
+and entries older than five minutes fall back to normal DOM resolution; a cache
+hit does not extend the lifetime from the last actual DOM proof. Concurrent
+resolver passes cannot let an older pass publish newly learned bindings.
+
+This cache is not persisted or shared between tabs and does not change startup,
+navigation fallback, visibility recovery or selected-Project Chat retrieval.
+The `collector_project_identity_phase_performance_summary` event reports
+`incremental_reuse_eligible_count`, `incremental_reuse_hit_count`,
+`incremental_reuse_miss_count`, `incremental_reuse_rejected_count`,
+`incremental_reuse_learned_count` and `incremental_reuse_no_proof_count`.
+Eligibility/miss/no-proof counts cover unresolved rows inspected in the immediate
+pass; rejection can also occur while checking a row already resolved by Root.
+Compare two manual refreshes with the same Collector page, watching these counts,
+`disclosure_required_count`, child-region wait and total elapsed time. If no row
+has stable attributes or the rows remount, the cache cannot eliminate disclosure
+waits. Chrome measurements are required to establish the actual speedup.
+
+After dispatching a disclosure click, DOM identity resolution allows the bounded
+hydrate budget (normally 2.5 seconds) even when the owned region has not mounted
+yet. The budget starts after dispatch, is not extended by mutation noise, and
+finishes immediately when owned identity evidence arrives. A native click is
+never replayed just because its DOM update is asynchronous; synthetic disclosure
+events are used only if native click dispatch is unavailable or throws. Explicit
+navigation probes retain their short budget. These rules avoid cancelling a
+queued disclosure toggle or abandoning a region that mounts after the probe
+deadline. The owned-evidence, fingerprint and navigation validation rules remain
+in effect.
+
 Before `handoff.send`, the
 Background requires Content Script, Conversation, Composer, and shared
 assistant-response watcher readiness. The watcher is pre-registered with the

@@ -5731,6 +5731,206 @@ function summaryEvent(events) {
   return events.find((event) => event.stage === "collector_project_identity_performance_summary");
 }
 
+function phaseEvent(events) {
+  return events.find((event) => event.stage === "collector_project_identity_phase_performance_summary");
+}
+
+function incrementalIdentityFixture(count = 2, stable = true, globals = {}) {
+  const document = new FakeMetadataDocument("https://chatgpt.com/", null);
+  const names = Array.from({ length: count }, () => "Same title");
+  const sidebar = new FakeSidebar(document, names, [], null, null, []);
+  sidebar.itemWindow = count;
+  document.sidebar = sidebar;
+  const locators = loadLocators(document, globals);
+  let clicks = 0;
+  let regions = [];
+  const collapse = (ids = names.map((_, index) => `g-p-reuse-${index}`)) => {
+    regions = sidebar.projectRows.map((row, index) => {
+      if (stable && !row.attributes.has("data-sidebar-item-id")) {
+        row.attributes.set("data-sidebar-item-id", `durable-row-${index}`);
+      }
+      const region = attachCollapsedDisclosure(document, row, `reuse-region-${index}`, ids[index]);
+      const click = row.click;
+      row.click = () => { clicks += 1; click(); };
+      return region;
+    });
+  };
+  collapse();
+  const catalog = () => locators.collectChatGptContext(document, document.location.href).projects
+    .map((project, index) => ({ ...project, project_index: index, discovery_index: index }));
+  const run = async (projects = catalog()) => {
+    const events = [];
+    const result = await locators.resolveChatGptProjectIdentitiesAsync(
+      document, document.location.href, projects,
+      { identityMode: "dom", identityCatalog: projects, onTelemetry: (event) => events.push(event) });
+    return { result, phase: phaseEvent(events) };
+  };
+  return { document, sidebar, locators, collapse, catalog, run,
+    get clicks() { return clicks; }, get regions() { return regions; } };
+}
+
+test("incremental identity keeps 28 same-title Projects distinct and skips all warm disclosures", async () => {
+  const fixture = incrementalIdentityFixture(28);
+  assert.equal(fixture.catalog().length, 28);
+  const cold = await fixture.run();
+  assert.equal(cold.result.unresolved_count, 0);
+  assert.equal(cold.phase.incremental_reuse_learned_count, 28);
+  assert.equal(fixture.clicks, 28);
+  fixture.collapse();
+  const warm = await fixture.run();
+  assert.equal(warm.result.projects.length, 28);
+  assert.equal(warm.result.non_navigation_resolved_count, 28);
+  assert.equal(warm.result.navigation_resolved_count, 0);
+  assert.equal(warm.result.unresolved_count, 0);
+  assert.equal(new Set(warm.result.projects.map((item) => item.project_id)).size, 28);
+  assert.equal(warm.phase.incremental_reuse_hit_count, 28);
+  assert.equal(warm.phase.disclosure_required_count, 0);
+  assert.equal(fixture.clicks, 28);
+});
+
+test("incremental identity refuses volatile-only evidence across refresh", async () => {
+  const fixture = incrementalIdentityFixture(1, false);
+  await fixture.run();
+  fixture.collapse(["g-p-replacement"]);
+  const warm = await fixture.run();
+  assert.equal(warm.phase.incremental_reuse_hit_count, 0);
+  assert.equal(warm.phase.incremental_reuse_no_proof_count, 1);
+  assert.equal(warm.result.projects[0].project_id, "g-p-replacement");
+  assert.equal(fixture.clicks, 2);
+});
+
+test("incremental identity rehydrates recycled or remounted rows and provisional observations", async () => {
+  for (const change of ["attribute", "remount", "provisional", "fingerprint", "sidebar", "document"]) {
+    const fixture = incrementalIdentityFixture(1);
+    await fixture.run();
+    if (change === "attribute") fixture.sidebar.projectRows[0].attributes.set("data-sidebar-item-id", "changed-durable-row");
+    if (change === "remount") {
+      const old = fixture.sidebar.projectRows[0];
+      old.isConnected = false;
+      const replacement = new FakeSidebar(fixture.document, ["Same title"], [], null, null, []).projectRows[0];
+      fixture.sidebar.projectRows[0] = replacement;
+    }
+    if (change === "sidebar") {
+      const replacement = new FakeSidebar(fixture.document, [], [], null, null, []);
+      replacement.projectRows = fixture.sidebar.projectRows;
+      fixture.document.sidebar = replacement;
+    }
+    fixture.collapse(["g-p-replacement"]);
+    let catalog = fixture.catalog();
+    if (change === "provisional") catalog[0].observation_role = "provisional";
+    if (change === "fingerprint") catalog[0].stable_locator_key = "stable-mismatch";
+    if (change === "document") {
+      const doc = new FakeMetadataDocument("https://chatgpt.com/", null);
+      doc.sidebar = fixture.sidebar;
+      const result = await fixture.locators.resolveChatGptProjectIdentitiesAsync(
+        doc, doc.location.href, catalog, { identityMode: "dom", identityCatalog: catalog });
+      assert.notEqual(result.projects[0].identity_source, "incremental_cache");
+      continue;
+    }
+    const warm = await fixture.run(catalog);
+    assert.equal(warm.phase.incremental_reuse_hit_count, 0, change);
+    assert.notEqual(warm.result.projects[0].project_id, "g-p-reuse-0", change);
+  }
+});
+
+test("incremental identity rejects conflicting current evidence and learns its replacement", async () => {
+  const fixture = incrementalIdentityFixture(1);
+  await fixture.run();
+  fixture.collapse(["g-p-replacement"]);
+  const catalog = fixture.catalog();
+  fixture.sidebar.projectRows[0].click();
+  const changed = await fixture.run(catalog);
+  assert.equal(changed.result.projects[0].project_id, "g-p-replacement");
+  assert.equal(changed.phase.incremental_reuse_hit_count, 0);
+  assert.equal(changed.phase.incremental_reuse_rejected_count, 1);
+  fixture.collapse(["g-p-replacement"]);
+  const warm = await fixture.run();
+  assert.equal(warm.phase.incremental_reuse_hit_count, 0);
+  assert.equal(warm.result.projects[0].project_id, "g-p-replacement");
+  fixture.collapse(["g-p-replacement"]);
+  assert.equal((await fixture.run()).phase.incremental_reuse_hit_count, 1);
+});
+
+test("incremental identity cannot mask an ambiguous child region", async () => {
+  const fixture = incrementalIdentityFixture(1);
+  await fixture.run();
+  fixture.collapse();
+  const catalog = fixture.catalog();
+  attachExclusiveChildChats(fixture.document, fixture.sidebar.projectRows[0], "reuse-region-0", null, 2,
+    ["g-p-reuse-0", "g-p-other"]);
+  const warm = await fixture.run(catalog);
+  assert.equal(warm.phase.incremental_reuse_hit_count, 0);
+  assert.equal(warm.phase.incremental_reuse_rejected_count, 1);
+  assert.equal(warm.result.unresolved_count, 1);
+});
+
+test("incremental identity expires from last DOM proof, not from last reuse", async () => {
+  let now = 0;
+  const fixture = incrementalIdentityFixture(1, true, { Date: { now: () => now } });
+  await fixture.run();
+  now = 4 * 60 * 1000;
+  fixture.collapse();
+  assert.equal((await fixture.run()).phase.incremental_reuse_hit_count, 1);
+  now = 5 * 60 * 1000 + 1;
+  fixture.collapse(["g-p-expired-replacement"]);
+  const expired = await fixture.run();
+  assert.equal(expired.phase.incremental_reuse_hit_count, 0);
+  assert.equal(expired.phase.incremental_reuse_rejected_count, 1);
+  assert.equal(expired.result.projects[0].project_id, "g-p-expired-replacement");
+});
+
+test("incremental identity only hydrates changed rows in a mixed refresh", async () => {
+  const fixture = incrementalIdentityFixture(3);
+  await fixture.run();
+  fixture.sidebar.projectRows[1].attributes.set("data-sidebar-item-id", "new-project-key");
+  fixture.collapse(["g-p-reuse-0", "g-p-new-project", "g-p-reuse-2"]);
+  const mixed = await fixture.run();
+  assert.equal(mixed.phase.incremental_reuse_hit_count, 2);
+  assert.equal(mixed.phase.disclosure_required_count, 1);
+  assert.equal(mixed.result.projects.length, 3);
+  assert.equal(mixed.result.unresolved_count, 0);
+  assert.deepEqual(Array.from(mixed.result.projects, (item) => item.project_id),
+    ["g-p-reuse-0", "g-p-new-project", "g-p-reuse-2"]);
+});
+
+test("incremental identity refuses duplicate locator claims without dropping descriptors", async () => {
+  const fixture = incrementalIdentityFixture(2);
+  await fixture.run();
+  fixture.collapse();
+  const catalog = fixture.catalog();
+  catalog[1].stable_locator_key = catalog[0].stable_locator_key;
+  const duplicate = await fixture.run(catalog);
+  assert.equal(duplicate.phase.incremental_reuse_hit_count, 0);
+  assert.equal(duplicate.result.projects.length, 2);
+});
+
+test("incremental identity invalidates a cache even when Root already resolved the replacement", async () => {
+  const fixture = incrementalIdentityFixture(1);
+  await fixture.run();
+  fixture.collapse(["g-p-new-root-id"]);
+  fixture.sidebar.projectRows[0].click();
+  const direct = await fixture.run();
+  assert.equal(direct.result.projects[0].project_id, "g-p-new-root-id");
+  assert.equal(direct.phase.incremental_reuse_rejected_count, 1);
+  fixture.collapse(["g-p-new-root-id"]);
+  const next = await fixture.run();
+  assert.equal(next.phase.incremental_reuse_hit_count, 0);
+  assert.equal(next.result.projects[0].project_id, "g-p-new-root-id");
+});
+
+test("incremental identity does not learn a row whose durable key changes during disclosure", async () => {
+  const fixture = incrementalIdentityFixture(1);
+  const row = fixture.sidebar.projectRows[0];
+  const click = row.click;
+  row.click = () => { row.attributes.set("data-sidebar-item-id", "changed-during-hydration"); click(); };
+  const first = await fixture.run();
+  assert.equal(first.phase.incremental_reuse_learned_count, 0);
+  fixture.collapse(["g-p-new-binding"]);
+  const next = await fixture.run();
+  assert.equal(next.phase.incremental_reuse_hit_count, 0);
+  assert.equal(next.result.projects[0].project_id, "g-p-new-binding");
+});
+
 test("child region identity early-successes from immediate exclusive Chat hrefs", async () => {
   const rootHref = "https://chatgpt.com/";
   const document = new FakeMetadataDocument(rootHref, null);
@@ -5988,7 +6188,142 @@ test("document hidden false keeps identity performance counters on the visible p
   assert.equal(result.projects[0].project_id, "g-p-visible");
 });
 
-test("empty virtualized-style disclosures escalate before the 2500ms hydrate ceiling", async () => {
+test("disclosure hydration waits for a region and child mounted after the probe deadline", async () => {
+  for (const regionDelay of [40, 280]) {
+    const document = new FakeMetadataDocument("https://chatgpt.com/", null);
+    const sidebar = new FakeSidebar(document, ["Delayed region"], [], null, null, []);
+    document.sidebar = sidebar;
+    const row = sidebar.projectRows[0];
+    row.attributes.set("aria-controls", "async-region");
+    const region = new FakeMetadataNode(document, "DIV", "", { id: "async-region" });
+    let clicks = 0;
+    const timers = [];
+    row.click = () => {
+      clicks += 1;
+      row.attributes.set("aria-expanded", "true");
+      timers.push(setTimeout(() => document.registerElementById(region), regionDelay));
+      timers.push(setTimeout(() => region.appendChild(new FakeMetadataNode(document, "A", "Chat", {
+        href: "/g/g-p-async-region/c/chat"
+      })), 330));
+    };
+    const locators = loadLocators(document, { setTimeout, clearTimeout });
+    try {
+      const result = await locators.resolveChatGptProjectIdentitiesAsync(
+        document, document.location.href, identityCatalogFromSidebar(sidebar),
+        { identityMode: "dom", disclosureTimeoutMs: 800, probeTimeoutMs: 100 });
+      assert.equal(result.projects[0].project_id, "g-p-async-region", `region delay ${regionDelay}`);
+      assert.equal(result.unresolved_count, 0);
+      assert.equal(result.navigation_resolved_count, 0);
+      assert.equal(clicks, 1);
+    } finally { timers.forEach(clearTimeout); }
+  }
+});
+
+test("disclosure hydration never replays a native click awaiting asynchronous DOM commit", async () => {
+  const document = new FakeMetadataDocument("https://chatgpt.com/", null);
+  const sidebar = new FakeSidebar(document, ["Async toggle"], [], null, null, []);
+  document.sidebar = sidebar;
+  const row = sidebar.projectRows[0];
+  row.attributes.set("aria-controls", "async-toggle");
+  const region = new FakeMetadataNode(document, "DIV", "", { id: "async-toggle" });
+  document.registerElementById(region);
+  let clicks = 0;
+  let queuedExpanded = false;
+  const timers = [];
+  row.click = () => {
+    clicks += 1;
+    queuedExpanded = !queuedExpanded;
+    timers.push(setTimeout(() => {
+      row.attributes.set("aria-expanded", String(queuedExpanded));
+      if (queuedExpanded && !region.children.length) region.appendChild(new FakeMetadataNode(document, "A", "Chat", {
+        href: "/g/g-p-async-toggle/c/chat"
+      }));
+    }, 30));
+  };
+  row.dispatchEvent = (event) => { if (event.type === "click") row.click(); };
+  const locators = loadLocators(document, { setTimeout, clearTimeout });
+  try {
+    const result = await locators.resolveChatGptProjectIdentitiesAsync(
+      document, document.location.href, identityCatalogFromSidebar(sidebar),
+      { identityMode: "dom", disclosureTimeoutMs: 500 });
+    assert.equal(clicks, 1);
+    assert.equal(result.projects[0].project_id, "g-p-async-toggle");
+    assert.equal(result.unresolved_count, 0);
+  } finally { timers.forEach(clearTimeout); }
+});
+
+test("28 Projects including 8 late-mounted tail regions resolve in one DOM pass", async () => {
+  const document = new FakeMetadataDocument("https://chatgpt.com/", null);
+  const names = Array.from({ length: 28 }, (_, index) => `Async Project ${index}`);
+  const sidebar = new FakeSidebar(document, names, [], null, null, []);
+  sidebar.itemWindow = 28;
+  document.sidebar = sidebar;
+  const clicks = Array(28).fill(0);
+  const timers = [];
+  for (let index = 0; index < 28; index += 1) {
+    const row = sidebar.projectRows[index];
+    const regionId = `async-tail-${index}`;
+    row.attributes.set("aria-controls", regionId);
+    row.click = () => {
+      clicks[index] += 1;
+      row.attributes.set("aria-expanded", "true");
+      const mount = () => {
+        const region = new FakeMetadataNode(document, "DIV", "", { id: regionId });
+        region.appendChild(new FakeMetadataNode(document, "A", "Chat", {
+          href: `/g/g-p-async-tail-${index}/c/chat-${index}`
+        }));
+        document.registerElementById(region);
+      };
+      if (index < 20) mount();
+      else timers.push(setTimeout(mount, 330));
+    };
+  }
+  const locators = loadLocators(document, { setTimeout, clearTimeout });
+  const root = locators.collectChatGptContext(document, document.location.href);
+  const events = [];
+  assert.equal(root.projects.length, 28);
+  try {
+    const result = await locators.resolveChatGptProjectIdentitiesAsync(
+      document, document.location.href, root.projects,
+      { identityMode: "dom", disclosureTimeoutMs: 1000, onTelemetry: (event) => events.push(event) });
+    assert.equal(result.projects.length, 28);
+    assert.equal(result.non_navigation_resolved_count, 28);
+    assert.equal(result.unresolved_count, 0);
+    assert.equal(result.navigation_resolved_count, 0);
+    assert.equal(new Set(result.projects.map((item) => item.project_id)).size, 28);
+    assert.equal(clicks.every((count) => count === 1), true);
+    assert.equal(phaseEvent(events).incremental_reuse_hit_count, 0);
+    assert.equal(summaryEvent(events).timeout_ceiling_hit_count, 0);
+  } finally { timers.forEach(clearTimeout); }
+});
+
+test("disclosure hydration retains synthetic dispatch when native click is unavailable", async () => {
+  const fixture = incrementalIdentityFixture(1, false);
+  const row = fixture.sidebar.projectRows[0];
+  const nativeClick = row.click;
+  row.click = undefined;
+  row.dispatchEvent = (event) => { if (event.type === "click") nativeClick(); };
+  const resolved = await fixture.run();
+  assert.equal(resolved.result.unresolved_count, 0);
+  assert.equal(resolved.result.projects[0].project_id, "g-p-reuse-0");
+});
+
+test("disclosure hydration remains bounded when an expanded row never mounts a region", async () => {
+  const fixture = incrementalIdentityFixture(1, false, { setTimeout, clearTimeout });
+  fixture.document.elementsById.clear();
+  fixture.sidebar.projectRows[0].click = () => {
+    fixture.sidebar.projectRows[0].attributes.set("aria-expanded", "true");
+  };
+  const events = [];
+  const result = await fixture.locators.resolveChatGptProjectIdentitiesAsync(
+    fixture.document, fixture.document.location.href, fixture.catalog(),
+    { identityMode: "dom", disclosureTimeoutMs: 250, onTelemetry: (event) => events.push(event) });
+  assert.equal(result.unresolved_count, 1);
+  assert.equal(summaryEvent(events).timeout_ceiling_hit_count, 1);
+  assert.ok(summaryEvent(events).child_region_wait_total_ms < 1000);
+});
+
+test("explicit probe policy escalates empty disclosures before the 2500ms hydrate ceiling", async () => {
   const rootHref = "https://chatgpt.com/";
   const document = new FakeMetadataDocument(rootHref, null);
   const names = Array.from({ length: 8 }, (_, index) => `Tail ${index}`);
@@ -6015,6 +6350,7 @@ test("empty virtualized-style disclosures escalate before the 2500ms hydrate cei
     catalog,
     {
       identityMode: "dom",
+      childRegionWaitPolicy: "probe",
       disclosureTimeoutMs: 2500,
       onTelemetry: (event) => events.push(event)
     });
@@ -6129,7 +6465,7 @@ test("delayed child Chat at 500ms still hydrates without shrinking the found-reg
   assert.equal(result.projects[0].project_id, "g-p-late-500");
 });
 
-test("20 immediate plus 8 virtualized identities do not pay 2.5s times 8", async () => {
+test("explicit probe resolves 20 immediate identities and briefly checks 8 absent regions", async () => {
   const rootHref = "https://chatgpt.com/";
   const document = new FakeMetadataDocument(rootHref, null);
   const immediateNames = Array.from({ length: 20 }, (_, index) => `Ready ${index}`);
@@ -6166,6 +6502,7 @@ test("20 immediate plus 8 virtualized identities do not pay 2.5s times 8", async
     catalog,
     {
       identityMode: "dom",
+      childRegionWaitPolicy: "probe",
       disclosureTimeoutMs: 2500,
       onTelemetry: (event) => events.push(event)
     });
@@ -7034,3 +7371,168 @@ function assertProject(projects, projectId) {
   assert.ok(project, `expected Project ${projectId}`);
   return project;
 }
+
+test("batch immediate exclusive child evidence resolves 28 Projects without disclosure click", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const names = Array.from({ length: 28 }, (_, index) => `Batch ${index}`);
+  const sidebar = new FakeSidebar(document, names, [], null, null, []);
+  sidebar.itemWindow = 28;
+  document.sidebar = sidebar;
+  const clicks = Array.from({ length: 28 }, () => 0);
+  names.forEach((_, index) => {
+    attachExclusiveChildChats(
+      document,
+      sidebar.projectRows[index],
+      `batch-${index}`,
+      `g-p-batch-${index}`,
+      1);
+    const row = sidebar.projectRows[index];
+    const original = row.click;
+    row.click = () => {
+      clicks[index] += 1;
+      if (typeof original === "function") original.call(row);
+    };
+  });
+  const events = [];
+  const locators = loadLocators(document);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    identityCatalogFromSidebar(sidebar, "Batch"),
+    { identityMode: "dom", onTelemetry: (event) => events.push(event) });
+  const phase = phaseEvent(events);
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(result.non_navigation_resolved_count, 28);
+  assert.equal(clicks.reduce((sum, value) => sum + value, 0), 0);
+  assert.equal(phase.batch_immediate_resolved_count, 28);
+  assert.equal(phase.disclosure_required_count, 0);
+  assert.equal(phase.observer_wait_count, 0);
+  assert.equal(phase.identity_resolved_before_click_count, 28);
+  assert.equal(summaryEvent(events).child_region_wait_total_ms, 0);
+});
+
+test("20 exclusive rows skip wait while 8 collapsed rows hydrate", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const immediateNames = Array.from({ length: 20 }, (_, index) => `Ready ${index}`);
+  const delayedNames = Array.from({ length: 8 }, (_, index) => `Hydrate ${index}`);
+  const sidebar = new FakeSidebar(document, [...immediateNames, ...delayedNames], [], null, null, []);
+  sidebar.itemWindow = 28;
+  document.sidebar = sidebar;
+  immediateNames.forEach((_, index) => {
+    attachExclusiveChildChats(
+      document,
+      sidebar.projectRows[index],
+      `ready-phase-${index}`,
+      `g-p-ready-phase-${index}`,
+      1);
+  });
+  delayedNames.forEach((_, index) => {
+    attachCollapsedDisclosure(
+      document,
+      sidebar.projectRows[index + 20],
+      `hydrate-phase-${index}`,
+      `g-p-hydrate-phase-${index}`);
+  });
+  const events = [];
+  const locators = loadLocators(document);
+  const catalog = [...immediateNames, ...delayedNames].map((title, index) => ({
+    project_index: index,
+    discovery_index: index,
+    title,
+    discovery_key: `phase-mix-${index}`
+  }));
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    catalog,
+    { identityMode: "dom", onTelemetry: (event) => events.push(event) });
+  const phase = phaseEvent(events);
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(result.non_navigation_resolved_count, 28);
+  assert.equal(phase.batch_immediate_resolved_count, 20);
+  assert.equal(phase.disclosure_required_count, 8);
+  assert.equal(phase.identity_resolved_before_click_count, 20);
+  assert.equal(phase.identity_resolved_immediately_after_click_count, 8);
+  assert.equal(phase.observer_wait_count, 0);
+});
+
+test("zero-chat exclusive Project home evidence still resolves without child Chat", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["Empty Home"], [], null, null, []);
+  sidebar.itemWindow = 1;
+  document.sidebar = sidebar;
+  const row = sidebar.projectRows[0];
+  row.attributes.set("aria-controls", "empty-home");
+  row.attributes.set("aria-expanded", "true");
+  const region = new FakeMetadataNode(document, "DIV", "", { id: "empty-home" });
+  region.appendChild(new FakeMetadataNode(document, "A", "Project", {
+    href: "/g/g-p-empty-home/project"
+  }));
+  document.registerElementById(region);
+  const events = [];
+  const locators = loadLocators(document);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "Empty Home", discovery_key: "empty-home" }],
+    { identityMode: "dom", onTelemetry: (event) => events.push(event) });
+  const phase = phaseEvent(events);
+  assert.equal(result.projects[0].project_id, "g-p-empty-home");
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(phase.batch_immediate_resolved_count, 1);
+  assert.equal(phase.disclosure_required_count, 0);
+});
+
+test("observer noise without owned evidence is not treated as identity progress", async () => {
+  const rootHref = "https://chatgpt.com/";
+  const document = new FakeMetadataDocument(rootHref, null);
+  const sidebar = new FakeSidebar(document, ["Noisy"], [], null, null, []);
+  sidebar.itemWindow = 1;
+  document.sidebar = sidebar;
+  const row = sidebar.projectRows[0];
+  row.attributes.set("aria-controls", "noisy-region");
+  row.attributes.set("aria-expanded", "true");
+  const region = new FakeMetadataNode(document, "DIV", "", { id: "noisy-region" });
+  document.registerElementById(region);
+  document.defaultView = {
+    innerWidth: 1024,
+    innerHeight: 540,
+    getComputedStyle() { return { display: "", visibility: "" }; },
+    MutationObserver: FakeMutationObserver,
+    setTimeout,
+    clearTimeout
+  };
+  FakeMutationObserver.instances.length = 0;
+  const locators = loadLocators(document, {
+    MutationObserver: FakeMutationObserver,
+    setTimeout,
+    clearTimeout
+  });
+  const events = [];
+  const pending = locators.resolveChatGptProjectIdentitiesAsync(
+    document,
+    rootHref,
+    [{ project_index: 0, discovery_index: 0, title: "Noisy", discovery_key: "noisy-0" }],
+    {
+      identityMode: "dom",
+      disclosureTimeoutMs: 800,
+      onTelemetry: (event) => events.push(event)
+    });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  for (let index = 0; index < 8; index += 1) {
+    FakeMutationObserver.instances.at(-1)?.emit([{ type: "childList" }]);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  region.appendChild(new FakeMetadataNode(document, "A", "Chat", {
+    href: "/g/g-p-noisy/c/g-p-noisy-chat"
+  }));
+  FakeMutationObserver.instances.at(-1)?.emit([{ type: "childList" }]);
+  const result = await pending;
+  const phase = phaseEvent(events);
+  assert.equal(result.projects[0].project_id, "g-p-noisy");
+  assert.ok(phase.observer_wake_without_target_progress_count >= 1, phase.observer_wake_without_target_progress_count);
+  assert.equal(phase.identity_resolved_after_observer_count, 1);
+});

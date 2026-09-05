@@ -5,6 +5,112 @@
   "use strict";
 
   const collectorSlowIdentityMs = 2000;
+  // Deliberately document/Sidebar/mount scoped: no durable lineage token exists
+  // for a remounted row. Never promote discovery hashes to persistent identity.
+  const projectIdentityReuseScopes = new WeakMap();
+  const projectIdentityReuseMaxAgeMs = 5 * 60 * 1000;
+
+  function projectIdentityReuseEvidence(row) {
+    if (!row || row.isConnected === false) return null;
+    const tokens = STABLE_PROJECT_ROW_ATTRIBUTE_NAMES.flatMap((name) => {
+      const value = attributeValue(row, name).trim();
+      return value && isRemountStableRowAttribute(name, value) ? [[name, value]] : [];
+    });
+    return tokens.length ? JSON.stringify(tokens) : null;
+  }
+
+  function createProjectIdentityReusePass(root, sidebar, catalog, baseUrl) {
+    const stats = { eligible: 0, reused: 0, missed: 0, rejected: 0, learned: 0, noProof: 0 };
+    const doc = root?.ownerDocument || root;
+    let scope = projectIdentityReuseScopes.get(doc);
+    if (!scope || scope.sidebar !== sidebar || sidebar?.isConnected === false) {
+      scope = { sidebar, rows: new WeakMap(), generation: 0 };
+      projectIdentityReuseScopes.set(doc, scope);
+    }
+    const generation = ++scope.generation;
+    const initialRows = projectRowsInSidebar(sidebar, baseUrl);
+    const locatorCounts = new Map();
+    for (const item of catalog) {
+      const locator = metadataIdentifier(item?.stable_locator_key || item?.stableLocatorKey);
+      if (locator) locatorCounts.set(locator, (locatorCounts.get(locator) || 0) + 1);
+    }
+    const active = () => scope.generation === generation
+      && projectIdentityReuseScopes.get(doc) === scope
+      && sidebar && sidebar.isConnected !== false
+      && findIdentitySidebarRoot(root) === sidebar;
+    const proof = (row, descriptor, afterOwnedResolution = false) => {
+      const key = projectIdentityReuseEvidence(row);
+      const locator = metadataIdentifier(descriptor?.stable_locator_key || descriptor?.stableLocatorKey);
+      if (!key || !locator || descriptor?.observation_role === "provisional"
+        || !metadataTitle(descriptor?.title, "") || !active()) return null;
+      // Require unique durable evidence in the logical catalog and current DOM;
+      // title, index, occupancy and volatile mount locators cannot authorize reuse.
+      if (locatorCounts.get(locator) !== 1) return null;
+      const rows = afterOwnedResolution ? projectRowsInSidebar(sidebar, baseUrl) : initialRows;
+      if (!rows.includes(row) || rows.filter((item) => projectIdentityReuseEvidence(item) === key).length !== 1) return null;
+      // Hydration adds a child Project ID to the derived fingerprint. For
+      // learning only, the captured pre-wait proof plus unchanged raw attributes
+      // and the exact same row are required instead of that derived fingerprint.
+      if (!afterOwnedResolution
+        && (projectRowFingerprint(row, visibleTitleFromElement(row, ""), 0, baseUrl).stable_locator_key !== locator
+          || !connectedRowStillMatchesDescriptor(row, descriptor, baseUrl))) return null;
+      return key;
+    };
+    const invalidate = (row, owned) => {
+      const entry = scope.rows.get(row);
+      if (entry && (entry.key !== projectIdentityReuseEvidence(row)
+        || (owned.identity && owned.identity.projectId !== entry.identity.projectId)
+        || (!owned.identity && !["missing_stable_identity", "controlled_region_not_found", null].includes(owned.reason)))) {
+        scope.rows.delete(row);
+        stats.rejected += 1;
+      }
+    };
+    // Also invalidate rows whose fresh Root descriptor already has a Project ID
+    // and therefore skips the unresolved-only Pass 1 below.
+    for (const row of initialRows) {
+      if (scope.rows.has(row)) invalidate(row, inspectOwnedProjectIdentityFromRow(root, row, {}, baseUrl));
+    }
+    return {
+      stats,
+      capture: proof,
+      inspect(row, owned, key) {
+        invalidate(row, owned);
+        if (!key) { stats.noProof += 1; return null; }
+        stats.eligible += 1;
+        const entry = scope.rows.get(row);
+        if (owned.identity) {
+          // Current owned DOM evidence always wins over a cached binding.
+          return null;
+        }
+        if (!["missing_stable_identity", "controlled_region_not_found", null].includes(owned.reason)) {
+          return null;
+        }
+        if (!entry) { stats.missed += 1; return null; }
+        const ageMs = Date.now() - entry.observedAt;
+        if (entry.key !== key || ageMs < 0 || ageMs > projectIdentityReuseMaxAgeMs) {
+          scope.rows.delete(row);
+          stats.rejected += 1;
+          return null;
+        }
+        stats.reused += 1;
+        return { ...entry.identity, source: "incremental_cache" };
+      },
+      learn(row, descriptor, beforeKey, identity) {
+        // The same row and exact raw attributes must bracket the async wait.
+        // A successful relocation to a replacement node does not inherit proof.
+        if (!identity || identity.source === "incremental_cache" || !beforeKey
+          || proof(row, descriptor, true) !== beforeKey) return;
+        const owned = inspectOwnedProjectIdentityFromRow(root, row, descriptor, baseUrl);
+        if (!owned.identity || owned.identity.projectId !== identity.projectId) return;
+        scope.rows.set(row, {
+          key: beforeKey,
+          identity: { projectId: identity.projectId, projectUrl: identity.projectUrl },
+          observedAt: Date.now()
+        });
+        stats.learned += 1;
+      }
+    };
+  }
 
   function documentVisibilityStateOf(root = globalThis.document) {
     const doc = root?.ownerDocument && root.nodeType !== 9 ? root.ownerDocument : root;
@@ -1602,38 +1708,52 @@
       .filter((element) => isMoreButton(element, options)));
   }
 
-  function waitForSidebarMutation(root, timeoutMs = 150) {
+  function waitForSidebarMutation(root, timeoutMs = 150, options = {}) {
     const waitMs = Math.max(20, Number(timeoutMs) || 150);
     const MutationObserverCtor = root?.ownerDocument?.defaultView?.MutationObserver
       || globalThis.MutationObserver;
+    const emptyResult = { wokeFromMutation: false, timedOut: true, poll: false };
     if (typeof globalThis.setTimeout !== "function") {
-      return Promise.resolve();
+      return Promise.resolve(emptyResult);
     }
     if (typeof MutationObserverCtor !== "function") {
-      return waitForLocatorDelay(waitMs);
+      return waitForLocatorDelay(waitMs).then(() => ({
+        wokeFromMutation: false,
+        timedOut: true,
+        poll: true
+      }));
     }
     return new Promise((resolve) => {
       let settled = false;
       let observer = null;
       let timer = null;
-      const finish = () => {
+      const finish = (fromMutation) => {
         if (settled) return;
         settled = true;
         if (observer) observer.disconnect();
         if (timer !== null) globalThis.clearTimeout?.(timer);
-        resolve();
+        resolve({
+          wokeFromMutation: fromMutation === true,
+          timedOut: fromMutation !== true,
+          poll: false
+        });
       };
       try {
-        observer = new MutationObserverCtor(finish);
-        observer.observe(root, { childList: true, subtree: true, characterData: true });
+        observer = new MutationObserverCtor(() => finish(true));
+        observer.observe(root, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          attributes: options.attributes === true
+        });
       } catch (_) {
         observer = null;
       }
-      timer = globalThis.setTimeout(finish, waitMs);
+      timer = globalThis.setTimeout(() => finish(false), waitMs);
     });
   }
 
-    function identityWaitObservationTarget(root) {
+  function identityWaitObservationTarget(root) {
     try {
       return findSidebarRoot(root)
         || root?.body
@@ -1644,13 +1764,156 @@
     }
   }
 
+  function identityWaitObservationTargetForDisclosure(root, row, region) {
+    try {
+      if (region && region.isConnected !== false) return region;
+    } catch (_) { }
+    try {
+      if (row && row.isConnected !== false && row.parentElement) return row.parentElement;
+    } catch (_) { }
+    return identityWaitObservationTarget(root);
+  }
+
   // Short tick while waiting for a child region. Unrelated document-wide
-  // mutations are ignored by observing the Sidebar when possible. This is
+  // mutations are ignored by observing the owned region when possible. This is
   // not a mutation-quiet gate: the caller inspects first and stops as soon
-  // as a unique Stable Project ID exists.
-  function waitForIdentityChildRegionTick(root, timeoutMs = 50) {
+  // as a unique Stable Project ID exists. Mutation itself is not progress.
+  function waitForIdentityChildRegionTick(root, timeoutMs = 50, observeTarget = null) {
     const waitMs = Math.max(16, Math.min(80, Number(timeoutMs) || 50));
-    return waitForSidebarMutation(identityWaitObservationTarget(root), waitMs);
+    const target = observeTarget || identityWaitObservationTarget(root);
+    return waitForSidebarMutation(target, waitMs, {
+      attributes: Boolean(observeTarget)
+    });
+  }
+
+  // Persistent scoped observer for one disclosure hydrate. Mutation is a
+  // wake signal only; the caller inspects for owned Stable Project ID
+  // evidence and ignores unrelated noise.
+  function createIdentityChildRegionWaiter() {
+    let observer = null;
+    let observedNode = null;
+    let pending = null;
+    let pendingTimer = null;
+    let dirty = false;
+    let mutationWakeCount = 0;
+    const clearPendingTimer = () => {
+      if (pendingTimer !== null) {
+        globalThis.clearTimeout?.(pendingTimer);
+        pendingTimer = null;
+      }
+    };
+    const disconnect = () => {
+      try { observer?.disconnect(); } catch (_) { }
+      observer = null;
+      observedNode = null;
+      clearPendingTimer();
+      pending = null;
+    };
+    const flushWake = (fromMutation) => {
+      if (typeof pending !== "function") return;
+      const resolve = pending;
+      pending = null;
+      clearPendingTimer();
+      resolve({
+        wokeFromMutation: fromMutation === true,
+        timedOut: fromMutation !== true,
+        poll: false
+      });
+    };
+    const mutationObserverCtor = (root) => root?.ownerDocument?.defaultView?.MutationObserver
+      || globalThis.MutationObserver;
+    const ensure = (root, row, region) => {
+      const MutationObserverCtor = mutationObserverCtor(root);
+      if (typeof MutationObserverCtor !== "function") return false;
+      const target = identityWaitObservationTargetForDisclosure(root, row, region);
+      if (!target) return false;
+      if (observer && observedNode === target) return true;
+      try { observer?.disconnect(); } catch (_) { }
+      observer = null;
+      observedNode = null;
+      try {
+        observer = new MutationObserverCtor(() => {
+          mutationWakeCount += 1;
+          dirty = true;
+          flushWake(true);
+        });
+        observer.observe(target, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          attributes: true
+        });
+        observedNode = target;
+        return true;
+      } catch (_) {
+        observer = null;
+        observedNode = null;
+        return false;
+      }
+    };
+    const waitTick = async (root, row, region, timeoutMs) => {
+      const waitMs = Math.max(16, Math.min(80, Number(timeoutMs) || 50));
+      if (dirty) {
+        dirty = false;
+        return { wokeFromMutation: true, timedOut: false, poll: false };
+      }
+      if (!ensure(root, row, region)) {
+        await waitForLocatorDelay(waitMs);
+        return { wokeFromMutation: false, timedOut: true, poll: true };
+      }
+      if (dirty) {
+        dirty = false;
+        return { wokeFromMutation: true, timedOut: false, poll: false };
+      }
+      if (typeof globalThis.setTimeout !== "function") {
+        return { wokeFromMutation: false, timedOut: true, poll: false };
+      }
+      return new Promise((resolve) => {
+        pending = resolve;
+        pendingTimer = globalThis.setTimeout(() => {
+          pendingTimer = null;
+          if (pending !== resolve) return;
+          pending = null;
+          resolve({ wokeFromMutation: false, timedOut: true, poll: false });
+        }, waitMs);
+      });
+    };
+    return {
+      ensure,
+      waitTick,
+      disconnect,
+      mutationWakeCount: () => mutationWakeCount
+    };
+  }
+
+  function inspectOwnedProjectIdentityFromRow(root, row, descriptor, baseUrl) {
+    if (!row) {
+      return { identity: null, structure: null, reason: "project_row_not_found" };
+    }
+    const structure = projectDisclosureStructureForRow(row, root, baseUrl);
+    let identity = structure.identity?.projectId ? structure.identity : null;
+    let reason = structure.controlledRegionFound
+      ? structure.controlledRegionIdentityReason
+      : "controlled_region_not_found";
+    if (!identity) {
+      const rowIdentity = projectIdentityFromElement(row, baseUrl);
+      if (rowIdentity?.projectId) identity = rowIdentity;
+      else if (rowIdentity?.reason && rowIdentity.reason !== "missing_stable_identity") {
+        reason = rowIdentity.reason;
+      }
+    }
+    const expectedProjectId = stableProjectIdFromValue(descriptor?.project_id || descriptor?.projectId);
+    if (identity && expectedProjectId && identity.projectId !== expectedProjectId) {
+      return { identity: null, structure, reason: "project_id_url_mismatch" };
+    }
+    if (identity?.reason === "ambiguous_project_identity" || reason === "ambiguous_project_identity") {
+      return { identity: null, structure, reason: "ambiguous_project_identity" };
+    }
+    if (structure.identity?.reason === "ambiguous_project_identity") {
+      return { identity: null, structure, reason: "ambiguous_project_identity" };
+    }
+    if (identity) reason = "none";
+    return { identity: identity || null, structure, reason };
   }
 
   function waitForMorePaginationSettle(root, options = {}) {
@@ -4763,6 +5026,12 @@
     let earlyEscalation = false;
     let earlyEscalationReason = "";
     let timeoutCeilingHit = false;
+    let resolvedPhase = "none";
+    let observerWaitMs = 0;
+    let pollWaitMs = 0;
+    let observerWakeCount = 0;
+    let observerWakeWithoutTargetProgressCount = 0;
+    let postClickImmediateScanMs = 0;
     const before = projectDisclosureStructureForRow(row, root, baseUrl);
     let after = before;
     let lastReason = before.controlledRegionFound
@@ -4784,15 +5053,10 @@
     };
     const inspect = () => {
       currentRow();
-      after = projectDisclosureStructureForRow(row, root, baseUrl);
-      let identity = after.identity?.projectId ? after.identity : null;
-      if (!identity && row) {
-        const rowIdentity = projectIdentityFromElement(row, baseUrl);
-        if (rowIdentity?.projectId) identity = rowIdentity;
-        else if (rowIdentity?.reason && rowIdentity.reason !== "missing_stable_identity") {
-          lastReason = rowIdentity.reason;
-        }
-      }
+      const owned = inspectOwnedProjectIdentityFromRow(root, row, descriptor, baseUrl);
+      after = owned.structure || after;
+      lastReason = owned.reason || lastReason;
+      let identity = owned.identity;
       const currentUrl = documentHref(root, globalThis.location?.href);
       urlChanged = currentUrl !== initialUrl;
       if (urlChanged && !identity) {
@@ -4800,23 +5064,18 @@
         if (routeIdentity) {
           navigationIdentity = routeIdentity;
           identity = routeIdentity;
+          lastReason = "none";
         }
       }
       if (identity && expectedProjectId && identity.projectId !== expectedProjectId) {
         lastReason = "project_id_url_mismatch";
         return null;
       }
-      if (identity?.reason === "ambiguous_project_identity") {
-        lastReason = "ambiguous_project_identity";
+      if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
         return null;
       }
-      if (identity) {
-        lastReason = "none";
-      } else if (urlChanged) {
-        lastReason = "disclosure_navigation_target_not_project";
-      } else if (after.controlledRegionIdentityReason) {
-        lastReason = after.controlledRegionIdentityReason;
-      }
+      if (identity) lastReason = "none";
+      else if (urlChanged) lastReason = "disclosure_navigation_target_not_project";
       return identity;
     };
     let clickCompletedAt = null;
@@ -4827,7 +5086,7 @@
         ? 0
         : Math.max(0, clickCompletedAt - startedAt);
       const childRegionWaitMs = clickCompletedAt === null
-        ? elapsedMs
+        ? Math.max(0, elapsedMs - disclosurePrepMs)
         : Math.max(0, now - clickCompletedAt);
       const resolvedReason = reason || (identity ? "none" : lastReason || "project_disclosure_identity_not_found");
       const candidateClass = classifyIdentityChildRegionCandidates(after, identity, lastReason);
@@ -4835,6 +5094,12 @@
         && (resolvedReason === "project_disclosure_identity_not_found"
           || resolvedReason === "controlled_region_not_found"
           || resolvedReason === "missing_stable_identity");
+      if (identity && resolvedPhase === "none") {
+        if (observerNeeded) resolvedPhase = "after_observer";
+        else if (pollNeeded) resolvedPhase = "after_poll";
+        else if (clickAttempted) resolvedPhase = "immediately_after_click";
+        else resolvedPhase = "before_click";
+      }
       return {
         isDisclosure: before.rowIsDisclosureControl === true,
         identity: identity || null,
@@ -4862,9 +5127,21 @@
         remountRecoveryWaitMs,
         earlyEscalation,
         earlyEscalationReason: earlyEscalationReason || "",
+        resolvedPhase,
+        observerWaitMs,
+        pollWaitMs,
+        observerWakeCount,
+        observerWakeWithoutTargetProgressCount,
+        postClickImmediateScanMs,
         reason: resolvedReason
       };
     };
+    const ownedEvidenceSignature = () => [
+      after?.controlledRegionFound ? 1 : 0,
+      Number(after?.controlledRegionProjectChatLinkCount) || 0,
+      Number(after?.controlledRegionProjectHomeLinkCount) || 0,
+      after?.identity?.projectId ? 1 : 0
+    ].join(":");
     const childEvidencePresent = () => Boolean(
       after?.controlledRegionFound
       || (after?.controlledRegionProjectChatLinkCount > 0)
@@ -4872,40 +5149,58 @@
     const rowUnavailable = () => !row || row.isConnected === false;
     const hydrateExpected = () => {
       if (waitPolicy === "probe") return false;
-      return childEvidencePresent();
+      // A dispatched disclosure or an already expanded row can hydrate its
+      // region later. Absence of that region is not proof that hydration is
+      // impossible, and must not silently downgrade a DOM pass to a short probe.
+      return clickDispatched || eventFallbackDispatched
+        || after?.ariaExpanded === "true" || childEvidencePresent();
     };
-    const waitDeadlineAt = () => startedAt + (hydrateExpected() ? hydrateTimeoutMs : probeTimeoutMs);
+    const waitDeadlineAt = () => (clickCompletedAt ?? startedAt)
+      + (hydrateExpected() ? hydrateTimeoutMs : probeTimeoutMs);
+    const waiter = createIdentityChildRegionWaiter();
+    const finish = (identity, reason = null) => {
+      waiter.disconnect();
+      return result(identity, reason);
+    };
     const tickWait = async (deadline) => {
       const remaining = Math.max(0, deadline - Date.now());
-      if (remaining <= 0) return;
-      const MutationObserverCtor = root?.ownerDocument?.defaultView?.MutationObserver
-        || globalThis.MutationObserver;
-      if (typeof MutationObserverCtor === "function") {
-        observerNeeded = true;
-        if (waitStrategy === "immediate") waitStrategy = "observer";
-      } else {
+      if (remaining <= 0) return { wokeFromMutation: false, timedOut: true, poll: false };
+      const tickStartedAt = Date.now();
+      const tick = await waiter.waitTick(
+        root,
+        row,
+        after?.region,
+        Math.min(50, Math.max(16, remaining)));
+      const elapsed = Math.max(0, Date.now() - tickStartedAt);
+      if (tick?.poll === true) {
         pollNeeded = true;
         waitStrategy = "poll";
+        pollWaitMs += elapsed;
+      } else {
+        observerNeeded = true;
+        if (waitStrategy === "immediate") waitStrategy = "observer";
+        observerWaitMs += elapsed;
+        if (tick?.wokeFromMutation === true) observerWakeCount += 1;
       }
-      await waitForIdentityChildRegionTick(root, Math.min(50, Math.max(16, remaining)));
+      return tick || { wokeFromMutation: false, timedOut: true, poll: false };
     };
 
-    if (!before.rowIsDisclosureControl) return result(null, "not_a_disclosure_control");
+    if (!before.rowIsDisclosureControl) return finish(null, "not_a_disclosure_control");
     if (rowUnavailable()) {
       earlyEscalation = true;
       earlyEscalationReason = "row_unavailable";
-      return result(null, "row_unavailable");
+      return finish(null, "row_unavailable");
     }
 
     let identity = inspect();
-    if (identity) return result(identity);
+    if (identity) return finish(identity);
     if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
-      return result(null, lastReason);
+      return finish(null, lastReason);
     }
     if (rowUnavailable()) {
       earlyEscalation = true;
       earlyEscalationReason = "row_unavailable";
-      return result(null, "row_unavailable");
+      return finish(null, "row_unavailable");
     }
     // An expanded region may be present but still hydrating. Do not click it
     // again; the bounded wait below gives its metadata a chance to arrive.
@@ -4913,8 +5208,9 @@
       const target = currentRow();
       if (!target || (typeof target.click !== "function"
         && typeof target.dispatchEvent !== "function")) {
-        return result(null, "project_disclosure_not_clickable");
+        return finish(null, "project_disclosure_not_clickable");
       }
+      waiter.ensure(root, row, after?.region);
       clickAttempted = true;
       try {
         if (typeof target.click === "function") {
@@ -4925,63 +5221,70 @@
         clickDispatched = false;
       }
       clickCompletedAt = Date.now();
+      const postClickInspectStartedAt = Date.now();
       identity = inspect();
-      if (identity) return result(identity);
+      postClickImmediateScanMs += Math.max(0, Date.now() - postClickInspectStartedAt);
+      if (identity) return finish(identity);
 
-      const stateChanged = before.ariaExpanded !== after.ariaExpanded
-        || before.controlledRegionFound !== after.controlledRegionFound
-        || before.controlledRegionElementCount !== after.controlledRegionElementCount
-        || before.controlledRegionProjectChatLinkCount !== after.controlledRegionProjectChatLinkCount
-        || before.controlledRegionProjectHomeLinkCount !== after.controlledRegionProjectHomeLinkCount;
+      // A native click returning before React commits is still a dispatched
+      // click. Replaying it can queue a second toggle and close the disclosure.
+      // Use synthetic events only when no native click was dispatched at all.
       if (!identity
-        && !stateChanged
+        && !clickDispatched
         && !urlChanged
         && typeof row?.dispatchEvent === "function") {
         eventFallbackAttempted = true;
         const eventResult = dispatchProjectInteractiveEventSequence(row, row, root, initialUrl);
         eventFallbackDispatched = eventResult.dispatched;
+        clickCompletedAt = Date.now();
         identity = inspect();
       }
     }
 
-    if (identity) return result(identity);
+    if (identity) return finish(identity);
     if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
-      return result(null, lastReason);
+      return finish(null, lastReason);
     }
     if (rowUnavailable()) {
       earlyEscalation = true;
       earlyEscalationReason = "row_unavailable";
-      return result(null, "row_unavailable");
+      return finish(null, "row_unavailable");
     }
+    waiter.ensure(root, row, after?.region);
     const deadline = waitDeadlineAt();
     while (Date.now() <= deadline) {
+      const evidenceBeforeWait = ownedEvidenceSignature();
       identity = inspect();
-      if (identity) return result(identity);
+      if (identity) return finish(identity);
       if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
-        return result(null, lastReason);
+        return finish(null, lastReason);
       }
       if (rowUnavailable()) {
         earlyEscalation = true;
         earlyEscalationReason = "row_unavailable";
-        return result(null, "row_unavailable");
+        return finish(null, "row_unavailable");
       }
-      const nextDeadline = waitDeadlineAt();
-      if (Date.now() > nextDeadline) break;
-      await tickWait(nextDeadline);
+      if (Date.now() > deadline) break;
+      const tick = await tickWait(deadline);
+      identity = inspect();
+      if (tick?.wokeFromMutation === true && ownedEvidenceSignature() === evidenceBeforeWait && !identity) {
+        observerWakeWithoutTargetProgressCount += 1;
+      }
+      if (identity) return finish(identity);
     }
     identity = inspect();
-    if (identity) return result(identity);
+    if (identity) return finish(identity);
     if (!hydrateExpected()) {
       earlyEscalation = true;
       if (rowUnavailable()) earlyEscalationReason = "row_unavailable";
       else if (!after?.controlledRegionFound) earlyEscalationReason = "no_region_possible";
       else earlyEscalationReason = "virtualized";
-      return result(
+      return finish(
         null,
         urlChanged ? "disclosure_navigation_target_not_project" : "project_disclosure_identity_not_found");
     }
     timeoutCeilingHit = true;
-    return result(
+    return finish(
       null,
       urlChanged ? "disclosure_navigation_target_not_project" : "project_disclosure_identity_not_found");
   }
@@ -5133,6 +5436,7 @@
         : index
     }));
     let relocation = null;
+    let identityReuse = null;
     const identityVisibility = {
       identityAttemptsWhileHidden: 0,
       identityAttemptsWhileVisible: 0,
@@ -5166,6 +5470,25 @@
       disclosureOpenWaitTotalMs: 0,
       remountRecoveryWaitTotalMs: 0
     };
+    const identityPhase = {
+      batchImmediateIndices: [],
+      disclosureRequiredIndices: [],
+      disclosureClickTotalMs: 0,
+      postClickImmediateScanTotalMs: 0,
+      observerWaitTotalMs: 0,
+      pollWaitTotalMs: 0,
+      relocationTotalMs: 0,
+      observerWaitCount: 0,
+      observerWakeCount: 0,
+      observerWakeWithoutTargetProgressCount: 0,
+      fixedSettleWaitTotalMs: 0,
+      controlledRegionMaterializedCount: 0,
+      childAnchorMaterializedCount: 0,
+      resolvedBeforeClickCount: 0,
+      resolvedImmediatelyAfterClickCount: 0,
+      resolvedAfterObserverCount: 0,
+      resolvedAfterPollCount: 0
+    };
     const identityWaitPercentile = (values, percentile) => {
       if (!values.length) return 0;
       const sorted = [...values].sort((left, right) => left - right);
@@ -5190,8 +5513,53 @@
         waitStrategy,
         candidateClass,
         relocationMs: Number.isSafeInteger(extras.relocationMs) ? extras.relocationMs : 0,
-        identitySource: extras.identitySource || "none"
+        identitySource: extras.identitySource || "none",
+        resolvedPhase: typeof disclosureResult?.resolvedPhase === "string"
+          ? disclosureResult.resolvedPhase
+          : (extras.resolvedPhase || "none")
       });
+      identityPhase.relocationTotalMs += Number.isSafeInteger(extras.relocationMs) ? extras.relocationMs : 0;
+      identityPhase.disclosureClickTotalMs += Number.isSafeInteger(disclosureResult?.disclosurePrepMs)
+        ? disclosureResult.disclosurePrepMs
+        : 0;
+      identityPhase.postClickImmediateScanTotalMs += Number.isSafeInteger(disclosureResult?.postClickImmediateScanMs)
+        ? disclosureResult.postClickImmediateScanMs
+        : 0;
+      identityPhase.observerWaitTotalMs += Number.isSafeInteger(disclosureResult?.observerWaitMs)
+        ? disclosureResult.observerWaitMs
+        : 0;
+      identityPhase.pollWaitTotalMs += Number.isSafeInteger(disclosureResult?.pollWaitMs)
+        ? disclosureResult.pollWaitMs
+        : 0;
+      identityPhase.observerWakeCount += Number.isSafeInteger(disclosureResult?.observerWakeCount)
+        ? disclosureResult.observerWakeCount
+        : 0;
+      identityPhase.observerWakeWithoutTargetProgressCount +=
+        Number.isSafeInteger(disclosureResult?.observerWakeWithoutTargetProgressCount)
+          ? disclosureResult.observerWakeWithoutTargetProgressCount
+          : 0;
+      identityPhase.fixedSettleWaitTotalMs += Number.isSafeInteger(disclosureResult?.mutationQuietWaitMs)
+        ? disclosureResult.mutationQuietWaitMs
+        : 0;
+      if (disclosureResult?.clickAttempted === true) {
+        identityPhase.disclosureRequiredIndices.push(projectIndex);
+      }
+      if (disclosureResult?.observerNeeded === true) identityPhase.observerWaitCount += 1;
+      if (disclosureResult?.after?.controlledRegionFound === true
+        || extras.controlledRegionFound === true) {
+        identityPhase.controlledRegionMaterializedCount += 1;
+      }
+      if ((Number(disclosureResult?.after?.controlledRegionProjectChatLinkCount) || 0) > 0
+        || extras.childAnchorFound === true) {
+        identityPhase.childAnchorMaterializedCount += 1;
+      }
+      const resolvedPhase = typeof disclosureResult?.resolvedPhase === "string"
+        ? disclosureResult.resolvedPhase
+        : (extras.resolvedPhase || "none");
+      if (resolvedPhase === "before_click") identityPhase.resolvedBeforeClickCount += 1;
+      else if (resolvedPhase === "immediately_after_click") identityPhase.resolvedImmediatelyAfterClickCount += 1;
+      else if (resolvedPhase === "after_poll") identityPhase.resolvedAfterPollCount += 1;
+      else if (resolvedPhase === "after_observer") identityPhase.resolvedAfterObserverCount += 1;
       identityPerformance.mutationQuietWaitTotalMs += Number.isSafeInteger(disclosureResult?.mutationQuietWaitMs)
         ? disclosureResult.mutationQuietWaitMs
         : 0;
@@ -5285,6 +5653,40 @@
         slow_project_indices: slow.map((item) => item.index).join(","),
         slow_project_ms: slow.map((item) => item.ms).join(","),
         slow_project_details: slowDetails.slice(0, 128)
+      });
+      const slowPhases = slow.slice(0, 16).map((item) => {
+        const sample = identityPerformance.samples.find((entry) => entry.projectIndex === item.index);
+        return sample?.resolvedPhase || "none";
+      }).join(",");
+      emitNavigationTelemetry("collector_project_identity_phase_performance_summary", {
+        total_projects: output.length,
+        incremental_reuse_eligible_count: identityReuse?.stats.eligible || 0,
+        incremental_reuse_hit_count: identityReuse?.stats.reused || 0,
+        incremental_reuse_miss_count: identityReuse?.stats.missed || 0,
+        incremental_reuse_rejected_count: identityReuse?.stats.rejected || 0,
+        incremental_reuse_learned_count: identityReuse?.stats.learned || 0,
+        incremental_reuse_no_proof_count: identityReuse?.stats.noProof || 0,
+        batch_immediate_resolved_count: identityPhase.batchImmediateIndices.length,
+        batch_immediate_resolved_indices: identityPhase.batchImmediateIndices.slice(0, 32).join(","),
+        disclosure_required_count: identityPhase.disclosureRequiredIndices.length,
+        disclosure_required_indices: identityPhase.disclosureRequiredIndices.slice(0, 32).join(","),
+        per_project_disclosure_click_total_ms: identityPhase.disclosureClickTotalMs,
+        per_project_post_click_immediate_scan_total_ms: identityPhase.postClickImmediateScanTotalMs,
+        per_project_observer_wait_total_ms: identityPhase.observerWaitTotalMs,
+        per_project_poll_wait_total_ms: identityPhase.pollWaitTotalMs,
+        per_project_relocation_total_ms: identityPhase.relocationTotalMs,
+        observer_wait_count: identityPhase.observerWaitCount,
+        observer_wake_count: identityPhase.observerWakeCount,
+        observer_wake_without_target_progress_count: identityPhase.observerWakeWithoutTargetProgressCount,
+        fixed_settle_wait_total_ms: identityPhase.fixedSettleWaitTotalMs,
+        controlled_region_materialized_count: identityPhase.controlledRegionMaterializedCount,
+        child_anchor_materialized_count: identityPhase.childAnchorMaterializedCount,
+        identity_resolved_before_click_count: identityPhase.resolvedBeforeClickCount,
+        identity_resolved_immediately_after_click_count: identityPhase.resolvedImmediatelyAfterClickCount,
+        identity_resolved_after_observer_count: identityPhase.resolvedAfterObserverCount,
+        identity_resolved_after_poll_count: identityPhase.resolvedAfterPollCount,
+        slow_project_indices: slow.map((item) => item.index).join(","),
+        slow_project_phase: slowPhases.slice(0, 128)
       });
     };
     const noteIdentityVisibility = (hidden, projectIndex, startedAt) => {
@@ -5516,7 +5918,33 @@
       "early_escalation_indices",
       "early_escalation_reason_counts",
       "resolved_identity_skipped_count",
-      "resolved_identity_rechecked_count"
+      "resolved_identity_rechecked_count",
+      "incremental_reuse_eligible_count",
+      "incremental_reuse_hit_count",
+      "incremental_reuse_miss_count",
+      "incremental_reuse_rejected_count",
+      "incremental_reuse_learned_count",
+      "incremental_reuse_no_proof_count",
+      "batch_immediate_resolved_count",
+      "batch_immediate_resolved_indices",
+      "disclosure_required_count",
+      "disclosure_required_indices",
+      "per_project_disclosure_click_total_ms",
+      "per_project_post_click_immediate_scan_total_ms",
+      "per_project_observer_wait_total_ms",
+      "per_project_poll_wait_total_ms",
+      "per_project_relocation_total_ms",
+      "observer_wait_count",
+      "observer_wake_count",
+      "observer_wake_without_target_progress_count",
+      "fixed_settle_wait_total_ms",
+      "controlled_region_materialized_count",
+      "child_anchor_materialized_count",
+      "identity_resolved_before_click_count",
+      "identity_resolved_immediately_after_click_count",
+      "identity_resolved_after_observer_count",
+      "identity_resolved_after_poll_count",
+      "slow_project_phase"
     ];
     const navigationTelemetry = [];
     const emitNavigationTelemetry = (stage, fields = {}) => {
@@ -5540,6 +5968,94 @@
         : output;
       const sidebarCatalog = createIdentitySidebarCatalog(root, baseUrl);
       if (options.resetSidebarCatalog === true) sidebarCatalog.snapshot(true);
+      const pass1Sidebar = findIdentitySidebarRoot(root);
+      identityReuse = createProjectIdentityReusePass(root, pass1Sidebar, identityCatalog, baseUrl);
+      const pass1Rows = projectRowsInSidebar(pass1Sidebar, baseUrl);
+      const pass1Fingerprints = pass1Rows.map((row, index) => projectRowFingerprint(
+        row,
+        visibleTitleFromElement(row, ""),
+        index,
+        baseUrl));
+      for (let index = 0; index < output.length; index += 1) {
+        const descriptor = output[index];
+        const projectIndex = Number.isSafeInteger(descriptor.project_index)
+          ? descriptor.project_index
+          : index;
+        const existing = projectIdentityFromProjectMetadata(descriptor, baseUrl);
+        if (existing.projectId) continue;
+        const projectStartedAt = Date.now();
+        const identityAttemptHidden = documentIsHidden(root);
+        const searchStartedAt = Date.now();
+        const relocation = projectRowRelocationForIdentityDescriptor(
+          pass1Sidebar,
+          pass1Rows,
+          descriptor,
+          baseUrl,
+          { catalog: identityCatalog, fingerprints: pass1Fingerprints });
+        const candidateSearchMs = Math.max(0, Date.now() - searchStartedAt);
+        const row = relocation.rowFound && relocation.row?.isConnected !== false
+          ? relocation.row
+          : null;
+        if (!row) continue;
+        const owned = inspectOwnedProjectIdentityFromRow(root, row, descriptor, baseUrl);
+        const beforeKey = identityReuse.capture(row, descriptor);
+        const reused = identityReuse.inspect(row, owned, beforeKey);
+        if (reused) owned.identity = reused;
+        if (!owned.identity) continue;
+        identityReuse.learn(row, descriptor, beforeKey, owned.identity);
+        identityPhase.batchImmediateIndices.push(projectIndex);
+        output[index] = identityProjectResult(
+          descriptor,
+          projectIndex,
+          owned.identity,
+          "dom",
+          null,
+          false,
+          {
+            identity_source: owned.identity.source || "other"
+          });
+        nonNavigationResolvedCount += 1;
+        emitNavigationTelemetry("collector_project_identity_source_classification", {
+          project_index: projectIndex,
+          identity_source: owned.identity.source || "other",
+          resolution_success: true,
+          identity_elapsed_ms: Math.max(0, Date.now() - projectStartedAt),
+          identity_disclosure_wait_ms: 0,
+          identity_child_region_wait_ms: 0,
+          identity_candidate_search_ms: candidateSearchMs,
+          identity_relocation_wait_ms: 0
+        });
+        recordIdentityPerformance(projectIndex, {
+          childRegionWaitMs: 0,
+          waitStrategy: "immediate",
+          candidateClass: classifyIdentityChildRegionCandidates(
+            owned.structure,
+            owned.identity,
+            owned.reason),
+          observerNeeded: false,
+          pollNeeded: false,
+          earlySuccess: true,
+          timedOut: false,
+          mutationQuietWaitMs: 0,
+          disclosurePrepMs: 0,
+          remountRecoveryWaitMs: 0,
+          postClickImmediateScanMs: 0,
+          observerWaitMs: 0,
+          pollWaitMs: 0,
+          observerWakeCount: 0,
+          observerWakeWithoutTargetProgressCount: 0,
+          clickAttempted: false,
+          resolvedPhase: "before_click",
+          after: owned.structure
+        }, {
+          identitySource: owned.identity.source || "other",
+          relocationMs: 0,
+          resolvedPhase: "before_click",
+          controlledRegionFound: owned.structure?.controlledRegionFound === true,
+          childAnchorFound: (Number(owned.structure?.controlledRegionProjectChatLinkCount) || 0) > 0
+        });
+        noteIdentityVisibility(identityAttemptHidden, projectIndex, projectStartedAt);
+      }
       for (let index = 0; index < output.length; index += 1) {
         const descriptor = output[index];
         const projectIndex = Number.isSafeInteger(descriptor.project_index)
@@ -5549,6 +6065,7 @@
         const identityAttemptHidden = documentIsHidden(root);
         const existing = projectIdentityFromProjectMetadata(descriptor, baseUrl);
         if (existing.projectId) {
+          if (identityPhase.batchImmediateIndices.includes(projectIndex)) continue;
           identityPerformance.resolvedIdentitySkippedCount += 1;
           output[index] = identityProjectResult(
             descriptor,
@@ -5572,6 +6089,8 @@
         let candidateSearchMs = 0;
         let relocationWaitMs = 0;
         let lastDisclosureResult = null;
+        let learningRow = null;
+        let learningKey = null;
         if (!identity) {
           const searchStartedAt = Date.now();
           let relocation = sidebarCatalog.relocate(descriptor, identityCatalog);
@@ -5624,6 +6143,8 @@
             });
           }
           let row = relocation.row;
+          learningRow = row;
+          learningKey = identityReuse.capture(row, descriptor);
           const fromRow = row ? projectIdentityFromElement(row, baseUrl) : { reason: "project_row_not_found" };
           identity = fromRow.projectId ? fromRow : null;
           reason = fromRow.reason || reason;
@@ -5716,6 +6237,7 @@
             }
           }
         }
+        identityReuse.learn(learningRow, descriptor, learningKey, identity);
         emitNavigationTelemetry("collector_project_identity_source_classification", {
           project_index: projectIndex,
           identity_source: identity

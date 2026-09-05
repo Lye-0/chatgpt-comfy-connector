@@ -20,9 +20,15 @@ public static class CreationPipelineLoopText
         if (!isSessionActivated)
         {
             var connection = CreationPipelineStateMachine.EvaluateConnectionGate(connectionState, false);
-            return connection.State == CreationStageState.Completed
-                ? "CONTEXT → 制作設定を確認"
-                : ResolveStageText(connection, idea);
+            if (connection.State != CreationStageState.Completed) return ResolveStageText(connection, idea);
+            if (session is null) return "WORKFLOW → Workflow / Slot Schemaを準備";
+            CreationPipelineStateMachine.EnsureInitialized(session);
+            var workflow = CreationPipelineStateMachine.Get(session, CreationStage.Workflow);
+            if (workflow.State != CreationStageState.Completed)
+                return workflow.State == CreationStageState.NotReached
+                    ? "WORKFLOW → Workflow / Slot Schemaを準備"
+                    : ResolveStageText(workflow, idea);
+            return ResolveStageText(CreationPipelineStateMachine.Get(session, CreationStage.Chat), idea);
         }
 
         if (session is null)
@@ -97,7 +103,8 @@ public static class CreationPipelineLoopText
         => stage switch
         {
             CreationStage.Connect => "CONNECT → MCPへ接続",
-            CreationStage.Context => "CONTEXT → 制作設定を確認",
+            CreationStage.Workflow => "WORKFLOW → Workflow / Slot Schemaを準備",
+            CreationStage.Chat => "CHAT → Project / Chatを確認して制作開始",
             CreationStage.Idea => string.IsNullOrWhiteSpace(idea)
                 ? "IDEA → SEND TO CHATGPT（入力は任意）"
                 : "IDEA → SEND TO CHATGPT",
@@ -138,6 +145,8 @@ public static class CreationPipelineLoopText
         => status.Stage switch
         {
             CreationStage.Connect => "MCP接続中",
+            CreationStage.Workflow => "Workflow / Slot Schemaを読込中",
+            CreationStage.Chat => NormalizeDetail(status.Detail),
             CreationStage.Command => "コマンド確認中",
             CreationStage.Apply => "反映・検証中",
             // Automatic runtime startup is still an active GENERATE stage,
@@ -153,6 +162,8 @@ public static class CreationPipelineLoopText
         => stage switch
         {
             CreationStage.Connect => "MCP接続エラー",
+            CreationStage.Workflow => "Workflow / Slot Schemaを確認・再読込",
+            CreationStage.Chat => "Project / Chatの準備エラーを確認",
             CreationStage.ToChatGpt => "送信エラー · 再送できます",
             CreationStage.Command => "修正が必要",
             CreationStage.Apply => "反映エラー",
@@ -182,7 +193,8 @@ public static class CreationPipelineLoopText
         => stage switch
         {
             CreationStage.Connect => "CONNECT",
-            CreationStage.Context => "CONTEXT",
+            CreationStage.Workflow => "WORKFLOW",
+            CreationStage.Chat => "CHAT",
             CreationStage.Idea => "IDEA",
             CreationStage.ToChatGpt => "TO CHATGPT",
             CreationStage.Command => "COMMAND",

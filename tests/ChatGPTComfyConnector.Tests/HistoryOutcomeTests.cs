@@ -204,7 +204,8 @@ public sealed class HistoryOutcomeTests : IDisposable
             MaximumIterations = maximumIterations,
         };
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
-        CreationPipelineStateMachine.BindContext(session);
+        CreationPipelineStateMachine.BindWorkflow(session, session.BoundWorkflow!, SlotDiscoveryState.Loaded);
+        CreationPipelineStateMachine.BindChat(session);
         return session;
     }
 

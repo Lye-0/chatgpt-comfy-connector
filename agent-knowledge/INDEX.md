@@ -19,7 +19,7 @@
 - type: `constraint`
 - maturity: `reused`
 - tags: `session`, `pipeline`, `iteration`, `review`, `persistence`, `connection-gate`, `reconnect`, `waiting-reason`
-- files: `docs/architecture.md`, `src/ChatGPTComfyConnector.Core/Models/AppModels.cs`, `src/ChatGPTComfyConnector.Core/Services/CreationPipelineStateMachine.cs` …
+- files: `docs/architecture.md`, `src/ChatGPTComfyConnector.Core/Models/AppModels.cs`, `src/ChatGPTComfyConnector.Core/Services/CreationPreparationPolicy.cs` …
 - memory: `agent-knowledge/entries/2026-08-23-creation-session-pipeline-7c4e2a.md`
 
 ## manual-handoff

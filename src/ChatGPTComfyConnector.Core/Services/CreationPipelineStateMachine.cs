@@ -7,7 +7,8 @@ public static class CreationPipelineStateMachine
     public static readonly CreationStage[] OrderedStages =
     [
         CreationStage.Connect,
-        CreationStage.Context,
+        CreationStage.Workflow,
+        CreationStage.Chat,
         CreationStage.Idea,
         CreationStage.ToChatGpt,
         CreationStage.Command,
@@ -19,8 +20,10 @@ public static class CreationPipelineStateMachine
 
     public static void EnsureInitialized(CreationSession session)
     {
-        session.Pipeline ??= new CreationPipelineSnapshot();
-        session.Pipeline.Version = 7;
+        session.Pipeline ??= new CreationPipelineSnapshot { Version = 0 };
+        var legacyContext = session.Pipeline.Stages.FirstOrDefault(item => item.Stage == CreationStage.Context);
+        var migrateLegacy = session.Pipeline.Version < 8 || legacyContext is not null || session.Pipeline.LegacyContextBound;
+        session.Pipeline.Version = 8;
         EnsureRunInitialized(session);
         foreach (var stage in OrderedStages)
         {
@@ -29,11 +32,33 @@ public static class CreationPipelineStateMachine
                 session.Pipeline.Stages.Add(new CreationStageStatus { Stage = stage });
             }
         }
+        session.Pipeline.Stages.RemoveAll(item => item.Stage == CreationStage.Context);
         session.Pipeline.Stages = session.Pipeline.Stages.OrderBy(item => Array.IndexOf(OrderedStages, item.Stage)).ToList();
 
-        if (session.Pipeline.Stages.All(item => item.State == CreationStageState.NotReached))
+        if (migrateLegacy && (session.Pipeline.LegacyContextBound || legacyContext?.State == CreationStageState.Completed)
+            && session.BoundWorkflow is not null && session.HasBoundProjectChat && session.MaximumIterations > 0)
+        {
+            session.Pipeline.WorkflowBound = true;
+            session.Pipeline.ChatBound = true;
+            // Do not refresh event timestamps: migration must not take focus
+            // away from a pending Command, Generate or Review.
+            RestorePreparationStage(session, CreationStage.Workflow, legacyContext, "既存SessionのWorkflow / Slot Schemaを復元");
+            RestorePreparationStage(session, CreationStage.Chat, legacyContext, "既存SessionのProject / Chat Bindingを復元");
+        }
+        session.Pipeline.LegacyContextBound = false;
+
+        if (migrateLegacy && legacyContext is null && session.Pipeline.Stages.All(item => item.State == CreationStageState.NotReached))
         {
             InferLegacyState(session);
+        }
+        else if (migrateLegacy && !session.Pipeline.IsPreparationBound)
+        {
+            // An unfinished combined stage carries no evidence about which
+            // preparation failed. Recheck in order instead of inventing success.
+            Set(session, CreationStage.Workflow,
+                Get(session, CreationStage.Connect).State == CreationStageState.Completed ? CreationStageState.Current : CreationStageState.NotReached,
+                "Workflow / Slot Schemaを再確認してください");
+            Set(session, CreationStage.Chat, CreationStageState.NotReached, string.Empty);
         }
 
         // A confirmed Bootstrap Handoff is a durable pipeline boundary. If a
@@ -42,7 +67,7 @@ public static class CreationPipelineStateMachine
         // restore the waiting state from the same source of truth. Explicit
         // kickoff/context edits clear both markers, so this does not mask a
         // genuine re-send boundary.
-        if (session.Pipeline.ContextBound
+        if (session.Pipeline.IsPreparationBound
             && session.Pipeline.SentIdeaSnapshot is not null
             && session.PendingHandoff is { } pending
             && PendingHandoffReuse.IsBootstrap(pending))
@@ -140,16 +165,42 @@ public static class CreationPipelineStateMachine
     public static void SynchronizeConnectionGate(CreationSession session, ConnectionState connectionState, string? detail = null)
     {
         EnsureInitialized(session);
-        var hasSessionProgress = session.Pipeline.ContextBound
-            || OrderedStages.Skip(2).Any(stage => Get(session, stage).State != CreationStageState.NotReached);
+        var hasSessionProgress = session.Pipeline.WorkflowBound || session.Pipeline.ChatBound
+            || OrderedStages.SkipWhile(stage => stage != CreationStage.Idea).Any(stage => Get(session, stage).State != CreationStageState.NotReached);
         var evaluated = EvaluateConnectionGate(connectionState, hasSessionProgress);
         Set(session, CreationStage.Connect, evaluated.State, detail ?? evaluated.Detail, evaluated.WaitingReason);
-        if (!session.Pipeline.ContextBound)
+        if (!session.Pipeline.WorkflowBound)
         {
-            Set(session, CreationStage.Context,
-                evaluated.State == CreationStageState.Completed ? CreationStageState.Current : CreationStageState.NotReached,
-                evaluated.State == CreationStageState.Completed ? "Workflow / Project / Chat / Maximum Iterations / Slot Schemaを設定してください" : string.Empty);
+            var workflow = Get(session, CreationStage.Workflow);
+            if (workflow.State is CreationStageState.NotReached or CreationStageState.Current)
+                Set(session, CreationStage.Workflow,
+                    evaluated.State == CreationStageState.Completed ? CreationStageState.Current : CreationStageState.NotReached,
+                    evaluated.State == CreationStageState.Completed ? "Workflow / Slot Schemaを準備してください" : string.Empty);
         }
+    }
+
+    /// <summary>Synchronizes only an unbound draft. Live discovery never retargets an active Session.</summary>
+    public static void SynchronizePreparation(CreationSession session, WorkflowPreparation workflow, ChatPreparation chat)
+    {
+        EnsureInitialized(session);
+        if (session.Pipeline.WorkflowBound || session.Pipeline.ChatBound) return;
+        var workflowStatus = CreationPreparationPolicy.EvaluateWorkflow(workflow);
+        var chatStatus = CreationPreparationPolicy.EvaluateChat(chat);
+        var connected = Get(session, CreationStage.Connect).State == CreationStageState.Completed;
+        ApplyPreparationStatus(session, workflowStatus, connected);
+        ApplyPreparationStatus(session, chatStatus, connected && workflowStatus.State == CreationStageState.Completed);
+    }
+
+    private static void ApplyPreparationStatus(CreationSession session, CreationStageStatus status, bool reached)
+    {
+        // Discovery can run before its turn. Preserve its own failure/loading
+        // state while keeping successful downstream inputs behind the gates.
+        if (!reached && status.State is CreationStageState.Current or CreationStageState.Completed)
+            SetIfChanged(session, status.Stage, CreationStageState.NotReached, status.Detail);
+        else
+            SetIfChanged(session, status.Stage,
+                status.Stage == CreationStage.Chat && status.State == CreationStageState.Completed ? CreationStageState.Current : status.State,
+                status.Detail, status.WaitingReason);
     }
 
     public static void RequireConnection(CreationSession session)
@@ -207,7 +258,7 @@ public static class CreationPipelineStateMachine
         Set(session, stage, CreationStageState.Error, detail);
     }
 
-    public static void PrepareContext(CreationSession session, string detail = "CONNECTで制作通信を確認してください")
+    public static void PrepareCreation(CreationSession session, string detail = "CONNECTで制作通信を確認してください")
     {
         EnsureInitialized(session);
         session.PendingHandoff = null;
@@ -216,7 +267,8 @@ public static class CreationPipelineStateMachine
         // registration before calling this boundary; the state machine also
         // clears the persisted projection so stale media is not shown.
         session.Pipeline.ReviewMediaAttachment = null;
-        session.Pipeline.ContextBound = false;
+        session.Pipeline.WorkflowBound = false;
+        session.Pipeline.ChatBound = false;
         session.Pipeline.MaximumIterationSafetyStop = false;
         session.Pipeline.SentIdeaSnapshot = null;
         session.Pipeline.AcceptedCommandAction = null;
@@ -231,31 +283,35 @@ public static class CreationPipelineStateMachine
         session.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
-    public static void BindContext(CreationSession session)
+    public static void BindWorkflow(CreationSession session, WorkflowIdentity workflow, SlotDiscoveryState slotState)
     {
         RequireConnection(session);
-        if (session.BoundWorkflow is null || !session.HasBoundProjectChat || session.MaximumIterations < 1)
+        var ready = CreationPreparationPolicy.EvaluateWorkflow(new(workflow, slotState));
+        if (ready.State != CreationStageState.Completed) throw new InvalidOperationException(ready.Detail);
+        session.BoundWorkflow = workflow;
+        session.Pipeline.WorkflowBound = true;
+        session.Pipeline.ChatBound = false;
+        InvalidateBindingHandoff(session);
+        SetAllFrom(session, CreationStage.Workflow, CreationStageState.NotReached);
+        Set(session, CreationStage.Workflow, CreationStageState.Completed, "Workflow / Slot Schemaを制作SessionへBinding済み");
+        Set(session, CreationStage.Chat, CreationStageState.Current, "Project / Chatを選択してChatGPT Contextを準備してください");
+    }
+
+    public static void BindChat(CreationSession session)
+    {
+        RequireConnection(session);
+        if (!session.Pipeline.WorkflowBound || session.BoundWorkflow is null || Get(session, CreationStage.Workflow).State != CreationStageState.Completed)
+            throw new InvalidOperationException("先にWorkflow / Slot Schemaを準備してください。");
+        if (!session.HasBoundProjectChat || session.MaximumIterations is < 1 or > 1000)
         {
-            throw new InvalidOperationException("Workflow・Project・Chat・Maximum Iterationsをすべて設定してください。");
+            const string detail = "Project・Chat・Maximum Iterationsをすべて設定してください。";
+            ChatBindingFailed(session, detail);
+            throw new InvalidOperationException(detail);
         }
         EnsureInitialized(session);
-        // Rebinding Workflow / Project / Chat / iteration context is an
-        // explicit Handoff boundary. Any response issued for the previous
-        // binding must become stale instead of being accepted against the new
-        // context.
-        session.PendingHandoff = null;
-        // Binding a new context starts a new Review/media boundary. The
-        // Desktop revokes the old process-local registration before this call.
-        session.Pipeline.ReviewMediaAttachment = null;
-        session.Pipeline.ContextBound = true;
+        InvalidateBindingHandoff(session);
+        session.Pipeline.ChatBound = true;
         session.Pipeline.IterationNumber = session.CurrentIteration;
-        session.Pipeline.MaximumIterationSafetyStop = false;
-        session.Pipeline.SentIdeaSnapshot = null;
-        session.Pipeline.AcceptedCommandAction = null;
-        session.Pipeline.AutomaticResponseExecution = null;
-        session.Pipeline.ReviewHandoff = null;
-        session.Pipeline.AutomaticIteration = null;
-        session.Pipeline.DeferredGenerate = null;
         if (session.Pipeline.CurrentRun is null)
         {
             session.Pipeline.CurrentRun = new CreationRunSnapshot
@@ -267,18 +323,46 @@ public static class CreationPipelineStateMachine
                 StartedReason = "initial",
             };
         }
-        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
-        SetAllFrom(session, CreationStage.Context, CreationStageState.NotReached);
-        Set(session, CreationStage.Context, CreationStageState.Completed, "制作セッションへContextをBinding済み");
+        SetAllFrom(session, CreationStage.Chat, CreationStageState.NotReached);
+        Set(session, CreationStage.Chat, CreationStageState.Completed, "Project / Chat・ChatGPT Contextを制作SessionへBinding済み");
         Set(session, CreationStage.Idea, CreationStageState.Current, "開始指示・補足は任意です · SEND TO CHATGPTで開始");
         session.Status = SessionStatus.Active;
         session.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
+    public static void ChatBindingFailed(CreationSession session, string detail)
+    {
+        EnsureInitialized(session);
+        session.Pipeline.ChatBound = false;
+        InvalidateBindingHandoff(session);
+        Set(session, CreationStage.Chat, CreationStageState.Error, $"ChatGPT ContextのBinding・保存に失敗 · {detail}");
+        ResetAfter(session, CreationStage.Chat);
+    }
+
+    private static void InvalidateBindingHandoff(CreationSession session)
+    {
+        // Rebinding Workflow / Project / Chat / iteration context is an
+        // explicit Handoff boundary. Any response issued for the previous
+        // binding must become stale instead of being accepted against the new
+        // context.
+        session.PendingHandoff = null;
+        // Binding a new context starts a new Review/media boundary. The
+        // Desktop revokes the old process-local registration before this call.
+        session.Pipeline.ReviewMediaAttachment = null;
+        session.Pipeline.MaximumIterationSafetyStop = false;
+        session.Pipeline.SentIdeaSnapshot = null;
+        session.Pipeline.AcceptedCommandAction = null;
+        session.Pipeline.AutomaticResponseExecution = null;
+        session.Pipeline.ReviewHandoff = null;
+        session.Pipeline.AutomaticIteration = null;
+        session.Pipeline.DeferredGenerate = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
+    }
+
     public static void IdeaChanged(CreationSession session, string idea)
     {
         EnsureInitialized(session);
-        if (!session.Pipeline.ContextBound) return;
+        if (!session.Pipeline.IsPreparationBound) return;
         if (session.Pipeline.SentIdeaSnapshot is null)
         {
             if (session.PendingHandoff is not null
@@ -398,7 +482,7 @@ public static class CreationPipelineStateMachine
         string handoffDetail,
         CreationWaitingReason waitingReason)
     {
-        RequireContext(session);
+        RequirePreparation(session);
         session.Pipeline.SentIdeaSnapshot = PendingHandoffReuse.NormalizeKickoffInstruction(idea);
         session.Pipeline.AcceptedCommandAction = null;
         // A new transport attempt starts a new assistant-response execution
@@ -416,7 +500,7 @@ public static class CreationPipelineStateMachine
 
     public static void BeginCommandValidation(CreationSession session)
     {
-        RequireContext(session);
+        RequirePreparation(session);
         var handoff = Get(session, CreationStage.ToChatGpt).State;
         // The pending snapshot is the durable response boundary.  In
         // particular, a Review response must remain identifiable even after
@@ -457,7 +541,7 @@ public static class CreationPipelineStateMachine
 
     public static void CommandValidated(CreationSession session, string action)
     {
-        RequireContext(session);
+        RequirePreparation(session);
         var isReviewResponse = IsReviewResponse(session);
 
         if (action == "complete")
@@ -1090,11 +1174,14 @@ public static class CreationPipelineStateMachine
         var bound = session.BoundWorkflow is not null && session.HasBoundProjectChat && session.MaximumIterations > 0;
         if (!bound)
         {
-            Set(session, CreationStage.Context, CreationStageState.NotReached, string.Empty);
+            Set(session, CreationStage.Workflow, CreationStageState.NotReached, string.Empty);
+            Set(session, CreationStage.Chat, CreationStageState.NotReached, string.Empty);
             return;
         }
-        session.Pipeline.ContextBound = true;
-        Set(session, CreationStage.Context, CreationStageState.Completed, "既存SessionのContextを復元");
+        session.Pipeline.WorkflowBound = true;
+        session.Pipeline.ChatBound = true;
+        Set(session, CreationStage.Workflow, CreationStageState.Completed, "既存SessionのWorkflowを復元");
+        Set(session, CreationStage.Chat, CreationStageState.Completed, "既存SessionのProject / Chatを復元");
         Set(session, CreationStage.Idea, CreationStageState.Current, "開始指示・補足は任意です · SEND TO CHATGPTで開始");
         var latest = session.Iterations.LastOrDefault();
         if (latest is null) return;
@@ -1107,11 +1194,11 @@ public static class CreationPipelineStateMachine
         if (session.Status == SessionStatus.Completed) Set(session, CreationStage.Review, CreationStageState.Completed, session.CompletionReason ?? "制作完了");
     }
 
-    private static void RequireContext(CreationSession session)
+    private static void RequirePreparation(CreationSession session)
     {
         RequireConnection(session);
         EnsureInitialized(session);
-        if (!session.Pipeline.ContextBound || Get(session, CreationStage.Context).State != CreationStageState.Completed)
+        if (!IsPreparationComplete(session))
         {
             throw new InvalidOperationException("先に制作ContextをSessionへBindingしてください。");
         }
@@ -1130,6 +1217,32 @@ public static class CreationPipelineStateMachine
         var iteration = FindIteration(session, iterationNumber);
         if (iteration is null || !HasSuccessfulOutput(iteration)) return;
         if (iteration.Outcome == IterationOutcome.Unknown) iteration.Outcome = IterationOutcome.Generated;
+    }
+
+    public static bool IsPreparationComplete(CreationSession session)
+    {
+        EnsureInitialized(session);
+        return session.Pipeline.IsPreparationBound
+            && session.BoundWorkflow is not null && session.HasBoundProjectChat
+            && Get(session, CreationStage.Workflow).State == CreationStageState.Completed
+            && Get(session, CreationStage.Chat).State == CreationStageState.Completed;
+    }
+
+    private static void RestorePreparationStage(CreationSession session, CreationStage stage, CreationStageStatus? legacy, string detail)
+    {
+        var status = session.Pipeline.Stages.Single(item => item.Stage == stage);
+        status.State = CreationStageState.Completed;
+        status.WaitingReason = CreationWaitingReason.None;
+        status.Detail = detail;
+        status.UpdatedAt = legacy?.UpdatedAt ?? session.CreatedAt;
+    }
+
+    private static void SetIfChanged(CreationSession session, CreationStage stage, CreationStageState state, string detail,
+        CreationWaitingReason reason = CreationWaitingReason.None)
+    {
+        var previous = session.Pipeline.Stages.Single(item => item.Stage == stage);
+        if (previous.State != state || previous.Detail != detail || previous.WaitingReason != reason)
+            Set(session, stage, state, detail, reason);
     }
 
     /// <summary>

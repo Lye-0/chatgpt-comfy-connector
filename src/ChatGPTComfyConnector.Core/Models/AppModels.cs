@@ -171,7 +171,7 @@ public enum CreationStage
 {
     // Keep the persisted v1 numeric values stable. Display/execution order is
     // defined by CreationPipelineStateMachine.OrderedStages.
-    Context = 0,
+    Context = 0, // Legacy persisted stage; migrated to Workflow / Chat on load.
     Idea = 1,
     ToChatGpt = 2,
     Command = 3,
@@ -180,6 +180,8 @@ public enum CreationStage
     Output = 6,
     Review = 7,
     Connect = 8,
+    Workflow = 9,
+    Chat = 10,
 }
 
 public enum CreationStageState
@@ -718,9 +720,16 @@ public sealed class CreationStageStatus
 
 public sealed class CreationPipelineSnapshot
 {
-    public int Version { get; set; } = 7;
+    public int Version { get; set; } = 8;
     public int IterationNumber { get; set; }
-    public bool ContextBound { get; set; }
+    public bool WorkflowBound { get; set; }
+    public bool ChatBound { get; set; }
+    [JsonIgnore]
+    public bool IsPreparationBound => WorkflowBound && ChatBound;
+    // Read old snapshots without writing the combined flag into new sessions.
+    [JsonPropertyName("contextBound")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool LegacyContextBound { get; set; }
     public bool MaximumIterationSafetyStop { get; set; }
     public string? SentIdeaSnapshot { get; set; }
     public string? AcceptedCommandAction { get; set; }
@@ -938,8 +947,10 @@ public sealed class SessionIteration : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 
-public sealed class CreationSession
+public sealed class CreationSession : IJsonOnDeserialized
 {
+    private CreationPipelineSnapshot _pipeline = new();
+    private bool _pipelineWasRead;
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Title { get; set; } = "新しい制作";
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -972,7 +983,18 @@ public sealed class CreationSession
     public SessionStatus Status { get; set; } = SessionStatus.New;
     public List<SessionIteration> Iterations { get; set; } = [];
     public List<HandoffMessage> HandoffMessages { get; set; } = [];
-    public CreationPipelineSnapshot Pipeline { get; set; } = new();
+    public CreationPipelineSnapshot Pipeline
+    {
+        get => _pipeline;
+        set { _pipeline = value; _pipelineWasRead = true; }
+    }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        // Sessions predating pipeline persistence need legacy inference. A new
+        // in-memory session must instead pass the explicit preparation gates.
+        if (!_pipelineWasRead) _pipeline.Version = 0;
+    }
     public PendingHandoffSnapshot? PendingHandoff { get; set; }
     public string? LastError { get; set; }
     public string? PauseReason { get; set; }

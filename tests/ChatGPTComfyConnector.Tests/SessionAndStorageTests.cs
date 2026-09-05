@@ -145,11 +145,12 @@ public sealed class SessionAndStorageTests
         };
 
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
-        CreationPipelineStateMachine.BindContext(session);
+        CreationPipelineStateMachine.BindWorkflow(session, session.BoundWorkflow!, SlotDiscoveryState.Loaded);
+        CreationPipelineStateMachine.BindChat(session);
 
         Assert.True(session.HasBoundProjectChat);
         Assert.Equal("browser-extension", session.EffectiveContextProviderId);
         Assert.Equal("project-42", session.EffectiveProjectContextKey);
-        Assert.Equal(CreationStageState.Completed, CreationPipelineStateMachine.Get(session, CreationStage.Context).State);
+        Assert.Equal(CreationStageState.Completed, CreationPipelineStateMachine.Get(session, CreationStage.Chat).State);
     }
 }

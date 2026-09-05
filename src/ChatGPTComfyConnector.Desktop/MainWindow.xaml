@@ -90,6 +90,7 @@
             <StackPanel Orientation="Horizontal"
                         VerticalAlignment="Center"
                         AutomationProperties.Name="{Binding Label}"
+                        AutomationProperties.ItemStatus="{Binding StateLabel}"
                         ToolTip="{Binding Description}">
                 <StackPanel Width="72"
                             HorizontalAlignment="Center">
@@ -120,7 +121,7 @@
                                HorizontalAlignment="Center"
                                Margin="0,2,0,0" />
                 </StackPanel>
-                <Border Width="26"
+                <Border Width="17"
                         Height="2"
                         Background="{Binding VisualState, Converter={StaticResource StateToBrush}}"
                         Opacity="0.68"
@@ -965,6 +966,10 @@
                                        VerticalAlignment="Center"
                                        Margin="7,0,0,0" />
                         </StackPanel>
+                        <TextBlock Text="{Binding WorkflowReadinessText}"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="9" LineHeight="13" TextWrapping="Wrap"
+                                   Margin="0,8,0,0" ToolTip="WORKFLOWの準備状況" />
                     </StackPanel>
                     <Border Grid.Row="1"
                             Background="#0A101C"
@@ -1012,7 +1017,7 @@
                             BorderThickness="1">
                         <StackPanel>
                             <DockPanel LastChildFill="False">
-                                <TextBlock Text="CHATGPT CONTEXT" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                <TextBlock Text="CHAT" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="SemiBold" VerticalAlignment="Center" />
                                 <Button DockPanel.Dock="Right"
                                         Content="↻"
                                         Click="RefreshChatGptContext_Click"
@@ -1021,7 +1026,7 @@
                                         Margin="6,0,0,0"
                                         ToolTip="ChatGPTのProject / Chat履歴を再取得" />
                             </DockPanel>
-                            <TextBlock Text="制作開始前の設定" FontSize="14" FontWeight="SemiBold" Margin="0,3,0,8" />
+                            <TextBlock Text="ChatGPT Contextの準備" FontSize="14" FontWeight="SemiBold" Margin="0,3,0,8" />
                             <TextBlock Text="{Binding ChatGptContextLoadStateText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" Margin="0,0,0,6" />
                             <TextBlock Text="Project" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
                             <Grid Margin="0,3,0,5">
@@ -1074,8 +1079,8 @@
                                 <TextBlock Text="Maximum Iterations" Foreground="{StaticResource MutedTextBrush}" FontSize="9" VerticalAlignment="Center" />
                                 <TextBox Grid.Column="1" Text="{Binding SessionMaximumIterations, UpdateSourceTrigger=PropertyChanged}" HorizontalContentAlignment="Center" Padding="6,4" ToolTip="1〜1000" />
                             </Grid>
-                            <TextBlock Text="{Binding ContextReadinessText}" Foreground="{StaticResource MutedTextBrush}" FontSize="8" LineHeight="12" Margin="0,0,0,6" ToolTip="CONTEXTの準備状況" />
-                            <Button Content="新しい制作を開始" Click="NewSession_Click" IsEnabled="{Binding CanStartNewCreation}" Background="{StaticResource AccentBrush}" Foreground="#071117" FontWeight="SemiBold" Margin="0" ToolTip="{Binding ContextReadinessText}" />
+                            <TextBlock Text="{Binding ChatReadinessText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" LineHeight="13" TextWrapping="Wrap" Margin="0,0,0,6" ToolTip="CHATの準備状況" />
+                            <Button Content="新しい制作を開始" Click="NewSession_Click" IsEnabled="{Binding CanStartNewCreation}" Background="{StaticResource AccentBrush}" Foreground="#071117" FontWeight="SemiBold" Margin="0" ToolTip="{Binding CreationReadinessText}" />
                         </StackPanel>
                     </Border>
                 </Grid>

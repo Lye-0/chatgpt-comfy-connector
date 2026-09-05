@@ -241,7 +241,8 @@ public sealed class RunResumeStateTests : IDisposable
             MaximumIterations = maximumIterations,
         };
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
-        CreationPipelineStateMachine.BindContext(session);
+        CreationPipelineStateMachine.BindWorkflow(session, session.BoundWorkflow!, SlotDiscoveryState.Loaded);
+        CreationPipelineStateMachine.BindChat(session);
         for (var number = 1; number <= count; number++)
         {
             var outputPath = Path.Combine(_tempDirectory, $"output-{number}.mp4");

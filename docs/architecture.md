@@ -73,18 +73,51 @@ this history.
 The pipeline is an ordered state machine:
 
 ```text
-Connect → Context → Idea → ToChatGpt → Command → Apply → Generate → Output → Review
+Connect → Workflow → Chat → Idea → ToChatGpt → Command → Apply → Generate → Output → Review
 ```
 
 Connect is the first production gate, not a duplicate of the header telemetry. It is
 completed when the MCP transport is connected; ComfyUI running state is deliberately not
 part of this gate. Connecting uses `InProgress`; a mid-session MCP disconnect uses
-`WaitingUser`; transport failure uses `Error`. Context can become current while ComfyUI
-is stopped. Workflow-specific slot discovery remains a Context responsibility.
+`WaitingUser`; transport failure uses `Error`. Workflow and Chat can proceed while
+ComfyUI is stopped.
 
-Context binding requires a Workflow whose slot schema loaded successfully, Project,
-Chat, a positive maximum-iteration limit, and successful Session creation/binding. The
-idea must be explicitly copied to ChatGPT before a command can be
+Workflow owns the library/file read, GUI selection, Slot Schema discovery and
+preparation. It becomes complete only for a selected Workflow with successfully
+loaded schema (a successfully discovered empty schema is valid). File and schema
+failures belong to Workflow. The asynchronous discovery generation is checked
+after both schema and backup reads before publishing slots, backups or completion.
+
+Chat owns provider-neutral Project / Chat discovery and selection, target identity
+validation, and ChatGPT Context binding. Catalog loading, selected-Project Chat
+loading, disconnected discovery and errors remain distinct. A ready Project / Chat
+and a 1–1000 maximum-iteration budget permit explicit creation start; Chat becomes
+complete after binding. New sessions are persisted before workspace activation,
+so failed persistence stays a retryable Chat preparation error and does not replace
+an existing workspace. Both `WorkflowBound` and `ChatBound`, and both completed
+stages, are required before Idea/Handoff/Command may advance.
+
+`CreationPreparationPolicy` evaluates Workflow and Chat separately and is shared
+by the start guard and draft pipeline synchronization. Before activation, the
+draft pipeline shows actual discovery loading/errors under their owning stage;
+successful inputs advance in Connect → Workflow → Chat order. Chat stays current
+until creation start. During an active session, selectors/readiness describe the
+next draft; refreshing or changing them cannot rewrite bound pipeline milestones,
+the Handoff target, media registration or downstream history. Explicit rebind uses
+`BindWorkflow` then `BindChat`, invalidates pending handoff/response boundaries,
+and retains iteration/output history. A failed Chat rebind leaves Workflow complete
+and blocks downstream execution until Chat is successfully bound again.
+
+Pipeline snapshot v8 appends Workflow/Chat enum values without renumbering older
+stages. Initialization migrates the legacy `Context` entry and `contextBound` flag
+into independent binding flags and stages; new JSON omits the combined flag.
+Completed legacy bindings preserve downstream states/timestamps, pending Handoff,
+Run and history. An unfinished combined stage cannot identify which preparation
+failed, so it requires preparation checks again without inventing completion.
+Sessions predating pipeline persistence retain legacy restoration; newly constructed
+sessions must pass explicit binding and cannot infer readiness from selected fields.
+
+The initial handoff must be explicitly sent/copied to ChatGPT before a command can be
 validated. A validated `generate` command enters Apply, where slot changes are
 backed up, written, saved, and validated before Generate is enabled. A completed Job
 must produce at least one existing output before Review becomes available. `complete`
@@ -107,7 +140,8 @@ rewriting prior history.
 
 The initial `SEND TO CHATGPT` action is governed by the Core
 `CreationWorkspacePolicy` and is exposed by the ViewModel as
-`CanSendToChatGpt`. It requires an explicitly activated, Context-bound session,
+`CanSendToChatGpt`. It requires an explicitly activated session with both Workflow
+and Chat binding complete,
 loaded slot schema, connected MCP, an IDEA stage that is still current (or
 waiting for user input), and no active Job. The Idea field is an optional
 kickoff/additional instruction, so an empty value is valid and tells ChatGPT to
@@ -555,7 +589,7 @@ endpoint/message/install contract is in
 
 ### ChatGPT Context Sync
 
-The Desktop `CHATGPT CONTEXT` selectors use the authenticated Browser
+The Desktop `CHAT` / ChatGPT Context selectors use the authenticated Browser
 Extension as a metadata-only discovery provider when the default provider is
 used. The Content Script reads visible ChatGPT sidebar metadata and the
 current SPA URL; it does not copy conversation bodies and does not call an
@@ -650,8 +684,9 @@ Creative intensity is concentrated in the production surface: session idea, work
   pairing/bootstrap authentication, Handoff delivery envelope, persistence,
   Managed-Tab routing, Conversation identity, and lifecycle.
 - `tests/ChatGPTComfyConnector.Tests/CreationPipelineStateMachineTests.cs`,
-  `ProtocolTests.cs`, and `SessionAndStorageTests.cs` — state, protocol, provider,
-  persistence, and compatibility behavior.
+  `CreationPreparationTests.cs`, `ProtocolTests.cs`, and `SessionAndStorageTests.cs`
+  — preparation isolation, state, protocol, provider, persistence, and legacy
+  pipeline compatibility behavior.
 - `tests/ChatGPTComfyConnector.Tests/BrowserExtensionBridgeTests.cs` — loopback
   health without token disclosure, pairing/bootstrap, persistence, Origin/CORS,
   process-token rotation, WebSocket, ping/pong, event, and disconnect behavior.

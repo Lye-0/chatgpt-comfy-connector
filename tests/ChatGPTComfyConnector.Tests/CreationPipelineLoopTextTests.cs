@@ -18,7 +18,7 @@ public sealed class CreationPipelineLoopTextTests : IDisposable
 
         var session = new CreationSession();
         Assert.Equal(
-            "CONTEXT → 制作設定を確認",
+            "WORKFLOW → Workflow / Slot Schemaを準備",
             CreationPipelineLoopText.Resolve(session, false, ConnectionState.Connected, null));
     }
 
@@ -190,9 +190,10 @@ public sealed class CreationPipelineLoopTextTests : IDisposable
             ChatLabel = "Chat",
             MaximumIterations = maximumIterations,
         };
-        CreationPipelineStateMachine.PrepareContext(session);
+        CreationPipelineStateMachine.PrepareCreation(session);
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
-        CreationPipelineStateMachine.BindContext(session);
+        CreationPipelineStateMachine.BindWorkflow(session, session.BoundWorkflow!, SlotDiscoveryState.Loaded);
+        CreationPipelineStateMachine.BindChat(session);
         return session;
     }
 

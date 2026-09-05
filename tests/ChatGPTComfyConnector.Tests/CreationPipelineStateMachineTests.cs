@@ -14,21 +14,21 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     public void ConnectionGateControlsContextEntryUsingSharedStageStates()
     {
         var session = new CreationSession();
-        CreationPipelineStateMachine.PrepareContext(session);
+        CreationPipelineStateMachine.PrepareCreation(session);
         AssertStage(session, CreationStage.Connect, CreationStageState.Current);
-        AssertStage(session, CreationStage.Context, CreationStageState.NotReached);
+        AssertStage(session, CreationStage.Workflow, CreationStageState.NotReached);
 
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connecting);
         AssertStage(session, CreationStage.Connect, CreationStageState.InProgress);
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
         AssertStage(session, CreationStage.Connect, CreationStageState.Completed);
-        AssertStage(session, CreationStage.Context, CreationStageState.Current);
+        AssertStage(session, CreationStage.Workflow, CreationStageState.Current);
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Error);
         AssertStage(session, CreationStage.Connect, CreationStageState.Error);
 
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
         AssertStage(session, CreationStage.Connect, CreationStageState.Completed);
-        AssertStage(session, CreationStage.Context, CreationStageState.Current);
+        AssertStage(session, CreationStage.Workflow, CreationStageState.Current);
     }
 
     [Fact]
@@ -739,11 +739,12 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         session.LocalChatContextId = "chat-2";
         session.ChatLabel = "Chat 2";
 
-        CreationPipelineStateMachine.BindContext(session);
+        CreationPipelineStateMachine.BindWorkflow(session, session.BoundWorkflow!, SlotDiscoveryState.Loaded);
+        CreationPipelineStateMachine.BindChat(session);
 
         Assert.Null(session.PendingHandoff);
         Assert.Null(session.Pipeline.SentIdeaSnapshot);
-        AssertStage(session, CreationStage.Context, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Chat, CreationStageState.Completed);
         AssertStage(session, CreationStage.Idea, CreationStageState.Current);
         AssertStage(session, CreationStage.ToChatGpt, CreationStageState.NotReached);
     }
@@ -752,13 +753,14 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     public void ContextCanBindWhenOnlyMcpIsReady()
     {
         var session = ConfiguredSession(2);
-        CreationPipelineStateMachine.PrepareContext(session);
-        Assert.Throws<InvalidOperationException>(() => CreationPipelineStateMachine.BindContext(session));
+        CreationPipelineStateMachine.PrepareCreation(session);
+        Assert.Throws<InvalidOperationException>(() => CreationPipelineStateMachine.BindChat(session));
 
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
-        CreationPipelineStateMachine.BindContext(session);
+        CreationPipelineStateMachine.BindWorkflow(session, session.BoundWorkflow!, SlotDiscoveryState.Loaded);
+        CreationPipelineStateMachine.BindChat(session);
         AssertStage(session, CreationStage.Connect, CreationStageState.Completed);
-        AssertStage(session, CreationStage.Context, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Chat, CreationStageState.Completed);
         AssertStage(session, CreationStage.Idea, CreationStageState.Current);
 
         CreationPipelineStateMachine.IdeaChanged(session, "idea while ComfyUI is stopped");
@@ -817,7 +819,7 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     public void NormalFlowReachesCompletedReviewAndSession()
     {
         var session = BoundSession(maximumIterations: 2);
-        AssertStage(session, CreationStage.Context, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Chat, CreationStageState.Completed);
         AssertStage(session, CreationStage.Idea, CreationStageState.Current);
 
         CreationPipelineStateMachine.IdeaChanged(session, "night drive");
@@ -854,14 +856,14 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     {
         var session = ReadyForReview(maximumIterations: 3);
         CreationPipelineStateMachine.CommandValidated(session, "generate");
-        AssertStage(session, CreationStage.Context, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Chat, CreationStageState.Completed);
         AssertStage(session, CreationStage.Command, CreationStageState.Completed);
         AssertStage(session, CreationStage.Apply, CreationStageState.Current);
         CreationPipelineStateMachine.ApplyCompleted(session);
         CreationPipelineStateMachine.BeginGenerate(session);
         var second = session.StartIteration("second", new Dictionary<string, JsonNode?>());
         Assert.Equal(2, second.Number);
-        Assert.True(session.Pipeline.ContextBound);
+        Assert.True(session.Pipeline.IsPreparationBound);
     }
 
     [Fact]
@@ -870,7 +872,7 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         var session = SentIdeaSession();
         CreationPipelineStateMachine.BeginCommandValidation(session);
         CreationPipelineStateMachine.CommandValidationFailed(session, "invalid json");
-        AssertStage(session, CreationStage.Context, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Chat, CreationStageState.Completed);
         AssertStage(session, CreationStage.Idea, CreationStageState.Completed);
         AssertStage(session, CreationStage.Command, CreationStageState.Error);
         AssertStage(session, CreationStage.Apply, CreationStageState.NotReached);
@@ -923,7 +925,7 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         var history = session.Iterations.Single();
         session.Pipeline.SentIdeaSnapshot = "original";
         CreationPipelineStateMachine.IdeaChanged(session, "modified");
-        AssertStage(session, CreationStage.Context, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Chat, CreationStageState.Completed);
         AssertStage(session, CreationStage.Idea, CreationStageState.Current);
         AssertStage(session, CreationStage.ToChatGpt, CreationStageState.NotReached);
         AssertStage(session, CreationStage.Review, CreationStageState.NotReached);
@@ -967,10 +969,11 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
         var previous = session.Iterations.Single();
         session.LocalChatContextId = "chat-2";
         session.ChatLabel = "Scene 02";
-        CreationPipelineStateMachine.BindContext(session);
+        CreationPipelineStateMachine.BindWorkflow(session, session.BoundWorkflow!, SlotDiscoveryState.Loaded);
+        CreationPipelineStateMachine.BindChat(session);
         Assert.Equal("chat-2", session.LocalChatContextId);
         Assert.Same(previous, session.Iterations.Single());
-        AssertStage(session, CreationStage.Context, CreationStageState.Completed);
+        AssertStage(session, CreationStage.Chat, CreationStageState.Completed);
         AssertStage(session, CreationStage.Idea, CreationStageState.Current);
     }
 
@@ -1002,7 +1005,8 @@ public sealed class CreationPipelineStateMachineTests : IDisposable
     {
         var session = ConfiguredSession(maximumIterations);
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
-        CreationPipelineStateMachine.BindContext(session);
+        CreationPipelineStateMachine.BindWorkflow(session, session.BoundWorkflow!, SlotDiscoveryState.Loaded);
+        CreationPipelineStateMachine.BindChat(session);
         return session;
     }
 

@@ -324,6 +324,49 @@ before discovery. A bounded zero-Project result is an
 `context_projects_incomplete` error rather than a successful empty catalog;
 the Desktop keeps a known cache visible while marking that refresh as Error.
 
+Root discovery keeps confirmed Project descriptors and provisional observations
+separate. Background retains their observation roles and diagnostic provenance
+through Identity dispatch and retries; an Identity response cannot reclassify
+them. A provisional observation joins an existing Project only with duplicate
+identity evidence, becomes a separate Project when it resolves to a distinct
+Stable ID, and keeps the refresh incomplete when it cannot be proven. Title,
+position and predecessor keys alone do not authorize merging or discarding it.
+After resolution and collision checks succeed, Background records the finalized
+catalog count on that request. Final result validation requires that exact count,
+so proven reconciliation can reduce the input count without allowing later
+Project loss or unexpected additions.
+
+After a Root More click, the existing bounded quiet interval observes row
+locator and identity attributes as well as child/text changes. Attribute-only
+pagination hydration restarts that interval before the new snapshot is admitted.
+The quiet interval and timeout limits are unchanged; this gate does not replace
+or discard an observation already in the catalog. More settling reports observed
+attribute mutations, quiet completions and timeout completions. Identity failure
+summaries include these counters and Root provisional provenance so the failed
+rows can be traced from a single diagnostic object, without logging titles or
+raw locator values.
+
+When a More control lies below the containing Sidebar viewport and that
+container can advance, Root defers the click until its ordinary downward scan
+reaches the control. Intermediate snapshots are still collected, and deferral
+does not mark pagination exhausted. If the scan budget ends with More pending,
+Root remains incomplete. Missing geometry, controls already above the viewport
+and containers that cannot advance retain the existing activation behavior.
+Viewport geometry only schedules pagination; it does not establish Project
+identity. Efficiency and failure summaries distinguish deferred checks and
+clicks inside, outside or without measurable viewport bounds.
+
+For each newly created provisional observation, Root also records a bounded
+comparison with the earlier same-title catalog observation. The comparison
+reports snapshot, scroll and More-click counts; whether the row, parent and
+Sidebar nodes are shared; whether the earlier row remains connected; and which
+locator attribute groups changed. It distinguishes remounts, attribute changes
+on a retained row, and position-only fingerprints. These are diagnostic
+relations, not identity evidence. DOM witnesses and raw attribute values stay
+local to that Root scan and are released in its `finally` block. Only numeric,
+boolean and enumerated fields from at most 64 comparisons reach Content Script,
+Background efficiency logs and the consolidated Identity failure summary.
+
 Root Project identity resolution has a conservative in-memory incremental path
 in `chatgpt-locators.js`. After an owned DOM identity is resolved, the exact row
 object and its raw stable `data-*` attributes can authorize reuse on a subsequent
@@ -361,14 +404,86 @@ queued disclosure toggle or abandoning a region that mounts after the probe
 deadline. The owned-evidence, fingerprint and navigation validation rules remain
 in effect.
 
+The initial Root Identity DOM pass may yield after a navigation-eligible row
+exhausts its full hydration budget. The immediate owned-metadata scan still runs
+across the catalog first. The response retains every descriptor and names the
+unresolved trailing rows whose hydration has not started; Background validates
+that list against the requested catalog. It then uses the existing navigation
+fallback before spending successive hydration ceilings on the remaining rows.
+After successful recovery, the existing fresh-Root DOM pass checks all remaining
+unresolved rows. If fallback fails, a `resumed_dom` pass hydrates the deferred rows
+before any of their navigation fallbacks are considered. Post-navigation and
+resumed passes retain the normal hydration budget and do not yield again. A
+failed Project continues to keep the overall catalog incomplete.
+
+After a successful navigation and the normal fresh-Root DOM pass, unresolved
+rows with a fingerprint mismatch or exhausted visibility search receive one
+additional DOM recovery pass per index. This pass re-enumerates only those rows
+against the full original catalog; it does not weaken identity constraints or
+start another navigation. Already resolved rows are skipped. Ambiguous identity
+and ID/URL conflicts are not included, and a repeated failure remains incomplete.
+The `post_navigation_recovery` counters report attempted indices, resolved count
+and elapsed time separately from the original post-navigation retry inputs.
+
+Before hydrating an unresolved disclosure, Identity checks its position in the
+containing Sidebar scrollport. A connected row clipped outside that viewport is
+scrolled into view, followed by a bounded render opportunity (two animation
+frames, at most 100 ms). This wait applies only after an actual scroll and does
+not consume the child hydration budget. The exact mount, header attributes,
+parent and Sidebar are revalidated before reading new owned evidence or clicking.
+Hydration may add a Stable ID to a derived fingerprint while those mount details
+remain unchanged; replacing the row or changing its header requires the normal
+descriptor match. The current expanded state prevents a second toggle. A route
+change during that render wait cannot supply an identity. Immediate owned-ID
+hits and explicit navigation probes do not use this viewport preparation.
+The phase summary exposes `identity_viewport_scroll_count`,
+`identity_viewport_wait_ms` and `identity_viewport_revalidation_failed_count`.
+After navigation/remount, successful relocation also supplies the selected row's
+current fingerprint for this interaction check. A stale discovery fingerprint
+must not reject a mount that the normal relocation policy just selected.
+This interaction fingerprint does not replace the catalog descriptor or any
+existing Stable-ID/stable-locator constraint, authorize a same-title merge, or
+provide a Project ID. Identity still requires owned DOM evidence, and a further
+row change during viewport preparation must pass revalidation.
+Disclosure click diagnostics include the pass kind, before/after expanded state,
+owned-region presence, child Chat link count, identity reason and child wait time.
+The Console sanitizer preserves these fields, including false and zero values.
+A dispatched click alone is not evidence that expansion occurred; these outcomes
+distinguish unaccepted expansion from an expanded region with no child identity.
+
+When an exact fingerprint is absent and only a same-title sibling is visible,
+duplicate titles in the catalog do not by themselves stop visibility recovery.
+The bounded Sidebar search may recover the original fingerprint in another
+viewport; it never clicks or merges the visible sibling based on title. Exact
+fingerprint/Stable-ID collisions and contradictory matched rows remain terminal.
+If the original row is not recovered, its precise failure reason is retained
+through DOM resolution and exposed as `identity_failure_reason` in the failure
+summary. Provisional index/transition diagnostics retain their array types across
+the Content Script boundary.
+
 Within a single synchronous Identity inspection, Sidebar row enumeration,
 controlled-region ownership results and candidate-element lists are shared by
 the fingerprint and owned-identity readers. The sharing scope is released in
 `finally` before any click, await or telemetry callback. A later inspection
 re-reads the DOM, including region owners and all conflicting candidate IDs.
-Only Identity inspection and its immediate-pass fingerprint reads activate this
-scope; selected-Project Chat retrieval does not. This avoids repeating Sidebar
+Identity inspection and its immediate-pass fingerprint reads use this scope;
+selected-Project Chat retrieval does not. This avoids repeating Sidebar
 enumeration for every child Chat without reusing identity across refreshes.
+
+If a Root scan starts with expanded Project rows, each synchronous catalog
+snapshot and container read also uses this sharing scope. Expanded child Chat
+ownership checks otherwise multiply full-Sidebar enumeration during repeat
+refreshes. The scope ends before every scroll, click or wait, and the next
+snapshot reads the DOM afresh. The collapsed Root path keeps its existing read
+behavior; wait budgets, traversal limits and completion criteria are unchanged.
+The efficiency summary reports `root_expanded_project_count_at_start`,
+`root_shared_read_hit_count` and `root_row_enumeration_count` for this path.
+Sidebar pagination excludes More controls contained in a Project row or its
+controlled child region, including retained hidden regions. Those controls page
+Project Chats, so they cannot be clicked by Root discovery or keep its completion
+check pending. Project catalog More controls outside those regions remain eligible.
+The More-control filter shares synchronous ownership reads and releases them
+before any control is activated.
 
 The phase performance summary additionally reports `identity_inspect_count`,
 `identity_inspect_total_ms`, `identity_row_validation_total_ms`,

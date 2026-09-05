@@ -2944,6 +2944,9 @@ test("Background emits one request-scoped Project discovery efficiency summary",
       sidebar_scroll_position_change_count: 4,
       sidebar_scroll_stagnation_count: 0,
       root_catalog_build_count: 5,
+      root_expanded_project_count_at_start: 3,
+      root_shared_read_hit_count: 123,
+      root_row_enumeration_count: 15,
       root_catalog_reuse_count: 4,
       project_more_control_click_count: 1,
       discovery_snapshot_count: 9,
@@ -2971,6 +2974,9 @@ test("Background emits one request-scoped Project discovery efficiency summary",
     .map(([, fields]) => fields)
     .filter((fields) => fields?.stage === "collector_project_discovery_efficiency_summary");
   assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].root_expanded_project_count_at_start, 3);
+  assert.equal(summaries[0].root_shared_read_hit_count, 123);
+  assert.equal(summaries[0].root_row_enumeration_count, 15);
   const summary = summaries[0];
   assert.equal(summary.discovered_project_count, 3);
   assert.equal(summary.resolved_project_count, 3);
@@ -3242,6 +3248,114 @@ test("Background resolves only the discovered Projects with navigation fallback,
   assert.equal(efficiencySummary.project_navigation_count, 2);
   assert.equal(efficiencySummary.spa_navigation_count, 2);
 });
+
+test("Background only accepts reconciled counts from successful request-owned finalization", async () => {
+  const { context } = await createHarness();
+  const projects = Array.from({ length: 28 }, (_, index) => ({
+    title: `Project ${index}`, project_id: `g-p-count-${index}`,
+    url: `https://chatgpt.com/g/g-p-count-${index}/project`
+  }));
+  const pending = {
+    requestId: "final-count", projectDiscoveryScanResult: { projects },
+    projectDiscoveryEfficiency: { identityInputCount: 36 }
+  };
+  const result = { requestId: "final-count", mode: "list", status: "ok",
+    projects, conversations: [], finalizedProjectIdentityCount: 28 };
+  assert.equal(context.validateCollectorRootResult(result, pending), 1,
+    "A Content Script result cannot authorize dropping input observations");
+  pending.finalizedProjectIdentityCount = 28;
+  assert.equal(context.validateCollectorRootResult(result, pending), 0);
+  assert.equal(context.validateCollectorRootResult({ ...result, projects: projects.slice(1) }, pending), 1);
+  assert.equal(context.validateCollectorRootResult({ ...result, projects: [...projects, projects[0]] }, pending), 1);
+  assert.equal(context.validateCollectorRootResult({ ...result, unresolved_project_count: 8 }, pending), 8);
+  assert.equal(context.validateCollectorRootResult({ ...result,
+    projects: projects.map((project, index) => index === 0 ? { ...project, url: "" } : project)
+  }, pending), 1);
+});
+
+for (const outcome of ["same_id", "distinct_id", "unresolved"]) {
+  test(`Background preserves provisional identity roles across repeated refreshes (${outcome})`, async () => {
+    const harness = await createHarness();
+    const identityMessages = [];
+    harness.setContentHandler((message) => {
+      if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+      const envelope = {
+        type: "CHATGPT_CONTEXT_RESULT", requestId: message.requestId,
+        mode: "list", status: "ok", conversations: [], current: null
+      };
+      if (message.collection === "root") {
+        return {
+          ...envelope,
+          projects: Array.from({ length: 28 }, (_, index) => ({
+            title: "Shared name", discovery_key: `row-${index}`, discovery_index: index
+          })),
+          provisional_observations: Array.from({ length: 8 }, (_, index) => ({
+            title: "Shared name", discovery_key: `remount-${index}`,
+            discovery_index: index + 20, observation_role: "provisional",
+            occupancy_source_index: index + 20, snapshot_generation: 3,
+            predecessor_discovery_key: `row-${index + 20}`,
+            unresolved_reason: "title_only_no_stable_evidence"
+          })),
+          discovered_project_count: 28, discovery_logical_project_count_final: 28,
+          project_section_found: true, sidebar_scroll_complete: true
+        };
+      }
+      assert.equal(message.collection, "project_identity", "Project Chat retrieval must not run");
+      assert.equal(message.identityMode, "dom", "No unsafe navigation for unresolved observations");
+      identityMessages.push(message);
+      return {
+        ...envelope,
+        projects: message.projects.map((project) => {
+          const index = project.project_index;
+          if (index >= 28 && outcome === "unresolved") {
+            return { project_index: index, navigation_eligible: false,
+              unresolved_reason: "project_row_fingerprint_mismatch" };
+          }
+          const idIndex = index >= 28 && outcome === "same_id" ? index - 8 : index;
+          // Deliberately omit bookkeeping in the response: Background owns it.
+          return { project_index: index, project_id: `g-p-role-${idIndex}`,
+            url: `https://chatgpt.com/g/g-p-role-${idIndex}/project` };
+        })
+      };
+    });
+    for (let refresh = 0; refresh < 2; refresh += 1) {
+      const requestId = `provisional-${outcome}-${refresh}`;
+      const before = harness.socket.sent.length;
+      harness.context.handleBridgeMessage({
+        type: "chatgpt.context.list.request", request_id: requestId
+      }, harness.socket);
+      const response = await harness.waitForSocketMessage(before,
+        (message) => message.type === "chatgpt.context.list.response" && message.request_id === requestId);
+      const summary = harness.diagnostics.map(([, fields]) => fields).find((fields) =>
+        fields?.stage === "collector_project_discovery_efficiency_summary" && fields.request_id === requestId);
+      assert.ok(summary);
+      assert.equal(summary.confirmed_logical_project_count_before_identity, 28);
+      assert.equal(summary.provisional_observation_count_before_identity, 8);
+      assert.equal(summary.identity_input_count, 36);
+      assert.equal(summary.navigation_fallback_attempt_count, 0);
+      if (outcome === "unresolved") {
+        assert.equal(response.status, "error");
+        assert.equal(summary.error_code, "context_projects_incomplete");
+        assert.equal(summary.provisional_unresolved_kept_count, 8);
+        assert.equal(summary.incomplete_due_to_unresolved_provisional_count, 8);
+        assert.equal(summary.provisional_unresolved_discard_rejected_count, 8);
+      } else {
+        assert.equal(response.status, "ok");
+        assert.equal(response.projects.length, outcome === "same_id" ? 28 : 36);
+        assert.equal(summary.provisional_observation_resolved_count, 8);
+        assert.equal(summary.provisional_observation_merged_existing_count, outcome === "same_id" ? 8 : 0);
+        assert.equal(summary.provisional_observation_promoted_new_project_count, outcome === "distinct_id" ? 8 : 0);
+        assert.equal(summary.unresolved_project_count, 0);
+        assert.equal(response.projects.some((project) => "observation_role" in project), false);
+      }
+      const input = identityMessages.at(-1).projects;
+      assert.equal(input.filter((project) => project.observation_role === "provisional").length, 8);
+      assert.equal(input[28].occupancy_source_index, 20);
+      assert.equal(input[28].predecessor_discovery_key, "row-20");
+    }
+    assert.equal(identityMessages.length, 2);
+  });
+}
 
 test("Background identity resolution processes all 28 discovered Projects including indexes 20-27", async () => {
   const harness = await createHarness();
@@ -3589,7 +3703,8 @@ test("Background retries remaining identities from fresh Root DOM after one navi
         resetSidebarCatalog: message.resetSidebarCatalog === true,
         identityPassKind: message.identityPassKind,
         childRegionWaitPolicy: message.childRegionWaitPolicy,
-        disclosureTimeoutMs: message.disclosureTimeoutMs
+        disclosureTimeoutMs: message.disclosureTimeoutMs,
+        yieldAfterHydrationTimeout: message.yieldAfterHydrationTimeout
       });
       if (message.identityMode === "dom") {
         domPasses += 1;
@@ -3598,6 +3713,11 @@ test("Background retries remaining identities from fresh Root DOM after one navi
           requestId: message.requestId,
           mode: "list",
           status: "ok",
+          ...(domPasses === 1 ? {
+            dom_hydration_yielded: true,
+            dom_hydration_yielded_project_index: 20,
+            dom_hydration_deferred_indices: [21, 22, 23, 24, 25, 26, 27]
+          } : {}),
           projects: message.projects.map((project) => {
             if (domPasses === 1 && project.project_index >= 20) return project;
             return {
@@ -3665,10 +3785,14 @@ test("Background retries remaining identities from fresh Root DOM after one navi
   assert.equal(domMessages[0].resetSidebarCatalog, false);
   assert.equal(domMessages[0].identityPassKind, "initial_dom");
   assert.equal(domMessages[0].projectCount, 28);
+  assert.equal(domMessages[0].yieldAfterHydrationTimeout, true);
+  assert.equal(domMessages[0].disclosureTimeoutMs, 2500);
   assert.equal(domMessages.at(-1).resetSidebarCatalog, true);
   assert.equal(domMessages.at(-1).identityPassKind, "post_navigation");
   assert.equal((domMessages.at(-1).projectIndices || []).join(","), "21,22,23,24,25,26,27");
   assert.equal(domMessages.at(-1).projectCount, 7);
+  assert.equal(domMessages.at(-1).yieldAfterHydrationTimeout, false);
+  assert.equal(domMessages.at(-1).disclosureTimeoutMs, 2500);
   const readyAfterReturn = harness.diagnostics
     .map(([, fields]) => fields)
     .some((fields) => fields?.stage === "collector_project_identity_dom_after_root_return");
@@ -3680,10 +3804,165 @@ test("Background retries remaining identities from fresh Root DOM after one navi
   assert.equal(summary.post_navigation_retry_input_count, 7);
   assert.equal(summary.post_navigation_retry_indices, "21,22,23,24,25,26,27");
   assert.equal(summary.initial_dom_pass_unresolved_indices, "20,21,22,23,24,25,26,27");
+  assert.equal(summary.initial_dom_hydration_yield_count, 1);
+  assert.equal(summary.initial_dom_hydration_yielded_project_index, 20);
+  assert.equal(summary.initial_dom_hydration_deferred_count, 7);
+  assert.equal(Array.from(summary.initial_dom_hydration_deferred_indices).join(","), "21,22,23,24,25,26,27");
+  assert.equal(summary.deferred_dom_resume_count, 0);
   assert.equal(summary.navigation_identity_resolved_index, 20);
   assert.ok(summary.root_return_dom_refresh_count >= 1);
   assert.ok(summary.root_return_cache_invalidation_count >= 1);
   assert.equal((summary.slow_identity_after_navigation_indices || []).length, 0);
+});
+
+test("Background resumes untouched DOM rows after the yielded navigation fallback fails", async () => {
+  const harness = await createHarness();
+  const projects = Array.from({ length: 3 }, (_, index) => ({
+    title: `Resume ${index}`, project_index: index, discovery_index: index, discovery_key: `resume-${index}`
+  }));
+  const identityMessages = [];
+  let rootCalls = 0;
+  harness.setContentHandler((message) => {
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    const base = { type: "CHATGPT_CONTEXT_RESULT", requestId: message.requestId,
+      mode: "list", status: "ok", conversations: [], current: null };
+    if (message.collection === "root") {
+      rootCalls += 1;
+      return { ...base, projects };
+    }
+    if (message.collection !== "project_identity") return {};
+    identityMessages.push(message);
+    if (message.identityPassKind === "initial_dom") {
+      return { ...base, projects: message.projects, dom_hydration_yielded: true,
+        dom_hydration_yielded_project_index: 0, dom_hydration_deferred_indices: [1, 2] };
+    }
+    if (message.identityMode === "navigation") {
+      return { ...base, projects: [{ ...message.projects[0],
+        unresolved_reason: "no_safe_project_navigation_target", navigation_eligible: false }],
+      navigation_target_verified: false, project_url_pattern_valid: false, project_id_url_match: false,
+      navigation_started_for_project: false };
+    }
+    assert.equal(message.identityPassKind, "resumed_dom");
+    return { ...base, projects: message.projects.map((project) => ({ ...project,
+      project_id: `g-p-resume-${project.project_index}`,
+      url: `https://chatgpt.com/g/g-p-resume-${project.project_index}/project` })) };
+  });
+  const count = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({ type: "chatgpt.context.list.request", request_id: "yield-fallback-failed" }, harness.socket);
+  const response = await harness.waitForSocketMessage(count, (message) => message.type === "chatgpt.context.list.response");
+  assert.equal(response.status, "error", "The one inaccessible Project must still prevent a complete result");
+  assert.equal(rootCalls, 1);
+  assert.equal(identityMessages.length, 3);
+  assert.equal(identityMessages[1].identityMode, "navigation");
+  assert.equal(identityMessages[1].projects[0].project_index, 0);
+  const resumed = identityMessages[2];
+  assert.equal(resumed.identityPassKind, "resumed_dom");
+  assert.equal(Array.from(resumed.projects, (project) => project.project_index).join(","), "1,2");
+  assert.equal(resumed.identityCatalog.length, 3);
+  assert.equal(resumed.yieldAfterHydrationTimeout, false);
+  assert.equal(resumed.disclosureTimeoutMs, 2500);
+  assert.equal(resumed.childRegionWaitPolicy, "hydrate");
+  const failure = harness.diagnostics.map(([, fields]) => fields).find((fields) =>
+    fields?.stage === "collector_project_identity_failure_summary");
+  assert.deepEqual(Array.from(failure.failed_project_indices), [0]);
+  const efficiency = harness.diagnostics.map(([, fields]) => fields).find((fields) =>
+    fields?.stage === "collector_project_discovery_efficiency_summary");
+  assert.equal(efficiency.deferred_dom_resume_count, 1);
+  assert.equal(efficiency.deferred_dom_resume_input_count, 2);
+});
+
+for (const recoveryOutcome of ["resolved", "persistent", "ambiguous", "multiple_returns"]) {
+  test(`post-navigation stale-row recovery is bounded when the result is ${recoveryOutcome}`, async () => {
+    const harness = await createHarness();
+    const projects = Array.from({ length: 28 }, (_, index) => ({
+      title: `Recovery ${index}`, project_index: index, discovery_index: index, discovery_key: `recovery-${index}`
+    }));
+    const messages = [];
+    const resolved = (project) => ({ ...project, project_id: `g-p-recovery-${project.project_index}`,
+      url: `https://chatgpt.com/g/g-p-recovery-${project.project_index}/project` });
+    const failed = (project) => ({ ...project, navigation_eligible: false,
+      unresolved_reason: recoveryOutcome === "ambiguous" ? "ambiguous_project_identity"
+        : project.project_index === 26 ? "project_row_fingerprint_mismatch" : "row_visibility_exhausted" });
+    harness.setContentHandler((message) => {
+      if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+      const base = { type: "CHATGPT_CONTEXT_RESULT", requestId: message.requestId,
+        mode: "list", status: "ok", conversations: [], current: null };
+      if (message.collection === "root") return { ...base, projects };
+      if (message.collection !== "project_identity") return {};
+      messages.push(message);
+      if (message.identityPassKind === "initial_dom") {
+        return { ...base, projects: message.projects.map((project) => project.project_index < 20 ? resolved(project) : project),
+          dom_hydration_yielded: true, dom_hydration_yielded_project_index: 20,
+          dom_hydration_deferred_indices: [21, 22, 23, 24, 25, 26, 27] };
+      }
+      if (message.identityMode === "navigation") {
+        return { ...base, projects: message.projects.map(resolved), navigation_target_verified: true,
+          project_url_pattern_valid: true, project_id_url_match: true };
+      }
+      if (message.identityPassKind === "post_navigation_recovery") {
+        return { ...base, projects: message.projects.map(recoveryOutcome === "resolved" ? resolved : failed) };
+      }
+      return { ...base, projects: message.projects.map((project) => {
+        if (recoveryOutcome === "multiple_returns" && project.project_index === 25) {
+          return { ...project, unresolved_reason: "project_disclosure_identity_not_found", navigation_eligible: true };
+        }
+        return project.project_index < 26 ? resolved(project) : failed(project);
+      }) };
+    });
+    const count = harness.socket.sent.length;
+    harness.context.handleBridgeMessage({ type: "chatgpt.context.list.request", request_id: `post-nav-recovery-${recoveryOutcome}` }, harness.socket);
+    const response = await harness.waitForSocketMessage(count, (message) => message.type === "chatgpt.context.list.response");
+    const recoveryMessages = messages.filter((message) => message.identityPassKind === "post_navigation_recovery");
+    assert.equal(recoveryMessages.length, recoveryOutcome === "ambiguous" ? 0 : 1);
+    if (recoveryMessages.length > 0) {
+      const recovery = recoveryMessages[0];
+      assert.equal(Array.from(recovery.projects, (project) => project.project_index).join(","), "26,27");
+      assert.equal(recovery.identityCatalog.length, 28);
+      assert.equal(recovery.resetSidebarCatalog, true);
+      assert.equal(recovery.yieldAfterHydrationTimeout, false);
+      assert.equal(recovery.disclosureTimeoutMs, 2500);
+    }
+    assert.equal(messages.filter((message) => message.identityMode === "navigation").length,
+      recoveryOutcome === "multiple_returns" ? 2 : 1);
+    assert.equal(response.status, recoveryOutcome === "resolved" ? "ok" : "error");
+    if (response.status === "ok") assert.equal(response.projects.length, 28);
+    else {
+      const failure = harness.diagnostics.map(([, fields]) => fields).find((fields) =>
+        fields?.stage === "collector_project_identity_failure_summary");
+      assert.deepEqual(Array.from(failure.failed_project_indices), [26, 27]);
+      assert.equal(failure.post_navigation_recovery_pass_count, recoveryOutcome === "ambiguous" ? 0 : 1);
+    }
+    const efficiency = harness.diagnostics.map(([, fields]) => fields).find((fields) =>
+      fields?.stage === "collector_project_discovery_efficiency_summary");
+    assert.equal(efficiency.post_navigation_retry_input_count, recoveryOutcome === "multiple_returns" ? 2 : 7);
+    assert.equal(efficiency.post_navigation_recovery_pass_count, recoveryOutcome === "ambiguous" ? 0 : 1);
+    assert.equal(efficiency.post_navigation_recovery_input_count, recoveryOutcome === "ambiguous" ? 0 : 2);
+    assert.equal(efficiency.post_navigation_recovery_resolved_count, recoveryOutcome === "resolved" ? 2 : 0);
+    assert.equal(Array.from(efficiency.post_navigation_recovery_indices).join(","), recoveryOutcome === "ambiguous" ? "" : "26,27");
+  });
+}
+
+test("Background rejects hydration deferral indices outside the requested remaining catalog", async () => {
+  const harness = await createHarness();
+  const projects = Array.from({ length: 3 }, (_, index) => ({
+    title: `Validate ${index}`, project_index: index, discovery_key: `validate-${index}`
+  }));
+  let navigationRequests = 0;
+  harness.setContentHandler((message) => {
+    if (message.type !== "GET_CHATGPT_CONTEXT") return {};
+    const base = { type: "CHATGPT_CONTEXT_RESULT", requestId: message.requestId,
+      mode: "list", status: "ok", projects, conversations: [], current: null };
+    if (message.collection === "root") return base;
+    if (message.identityMode === "navigation") navigationRequests += 1;
+    return { ...base, dom_hydration_yielded: true, dom_hydration_yielded_project_index: 0,
+      dom_hydration_deferred_indices: [1, 999] };
+  });
+  const count = harness.socket.sent.length;
+  harness.context.handleBridgeMessage({ type: "chatgpt.context.list.request", request_id: "invalid-yield-indices" }, harness.socket);
+  const response = await harness.waitForSocketMessage(count, (message) => message.type === "chatgpt.context.list.response");
+  assert.equal(response.status, "error");
+  assert.equal(response.error_code, "context_response_invalid");
+  assert.equal(navigationRequests, 0);
 });
 
 test("Background navigates all eight unresolved tail Projects including no_region_possible indices", async () => {
@@ -4586,6 +4865,20 @@ test("Background relays only correlated Project identity navigation telemetry", 
   assert.equal(Object.hasOwn(entry, "prompt"), false);
   assert.equal(Object.hasOwn(entry, "project_title"), false);
 
+  await harness.notifyRuntimeMessage({
+    type: "COLLECTOR_PROJECT_IDENTITY_TELEMETRY",
+    request_id: "collector-identity-telemetry", refresh_generation: 7, collector_tab_id: 100,
+    navigation_generation: "refresh-7-identity-0", project_index: 0,
+    stage: "collector_project_identity_phase_performance_summary",
+    identity_viewport_scroll_count: 8, identity_viewport_wait_ms: 32,
+    identity_viewport_revalidation_failed_count: 0
+  }, { tab: { id: 100, windowId: 200 } });
+  const phase = harness.diagnostics.map(([, fields]) => fields)
+    .find((fields) => fields?.stage === "collector_project_identity_phase_performance_summary");
+  assert.equal(phase.identity_viewport_scroll_count, 8);
+  assert.equal(phase.identity_viewport_wait_ms, 32);
+  assert.equal(phase.identity_viewport_revalidation_failed_count, 0);
+
   const staleGeneration = await harness.notifyRuntimeMessage({
     type: "COLLECTOR_PROJECT_IDENTITY_TELEMETRY",
     request_id: "collector-identity-telemetry",
@@ -4620,6 +4913,137 @@ test("Background relays only correlated Project identity navigation telemetry", 
     contextRequests.get("collector-identity-telemetry").identityDiagnostics.get(0);`)
     .runInContext(harness.context);
   assert.equal(harness.context.identityDiagnosticFixture.match_method, "discovery_fingerprint");
+});
+
+test("Background console retains disclosure acceptance and empty-region evidence", async () => {
+  const harness = await createHarness();
+  new Script(`contextRequests.set("disclosure-state", {
+    requestId: "disclosure-state", tabId: 100, generation: 1,
+    identityTelemetryActive: true
+  });`).runInContext(harness.context);
+  const fields = {
+    type: "COLLECTOR_PROJECT_IDENTITY_TELEMETRY", request_id: "disclosure-state",
+    refresh_generation: 1, collector_tab_id: 100, project_index: 20,
+    row_is_disclosure_control: true, controlled_region_found: true,
+    controlled_region_visible: false, controlled_region_element_count: 0,
+    controlled_region_project_chat_link_count: 0, controlled_region_project_home_link_count: 0,
+    controlled_region_project_identity_present: false, controlled_region_identity_reason: "missing_stable_identity",
+    aria_expanded_before: "false", aria_expanded_after: "false",
+    disclosure_click_attempted: true, disclosure_click_dispatched: true,
+    disclosure_event_fallback_attempted: false, disclosure_event_fallback_dispatched: false,
+    disclosure_state_changed: false, disclosure_url_changed: false, disclosure_resolution_method: "none",
+    identity_pass_kind: "initial_dom", prompt: "must not appear", project_title: "must not appear"
+  };
+  for (const stage of ["collector_project_identity_disclosure_structure", "collector_project_identity_disclosure_click"]) {
+    const response = await harness.notifyRuntimeMessage({ ...fields, stage }, { tab: { id: 100, windowId: 200 } });
+    assert.equal(response.ok, true);
+    const logged = harness.diagnostics.map(([, entry]) => entry).find((entry) => entry?.stage === stage);
+    assert.ok(logged);
+    for (const key of Object.keys(fields).filter((key) => !["type", "prompt", "project_title"].includes(key))) {
+      assert.equal(logged[key], fields[key], key);
+    }
+    assert.equal(Object.hasOwn(logged, "prompt"), false);
+    assert.equal(Object.hasOwn(logged, "project_title"), false);
+  }
+});
+
+test("Project identity failure summary retains the specific row search failure", async () => {
+  const harness = await createHarness();
+  const pending = { requestId: "missing-fingerprint", generation: 1, tabId: 100 };
+  harness.context.updateCollectorProjectIdentityDiagnostic(pending, 0, {
+    unresolved_reason: "project_row_fingerprint_mismatch", scroll_search_attempted: true,
+    relocation_attempted: true, relocation_success: false
+  });
+  harness.context.emitCollectorProjectIdentityFailureSummary(pending, [{ title: "Unresolved" }]);
+  const summary = harness.diagnostics.map(([, fields]) => fields).find((fields) =>
+    fields?.stage === "collector_project_identity_failure_summary");
+  assert.equal(summary.failures[0].unresolved_reason, "missing_stable_identity");
+  assert.equal(summary.failures[0].identity_failure_reason, "project_row_fingerprint_mismatch");
+  assert.equal(summary.failures[0].scroll_search_attempted, true);
+});
+
+test("Project identity failure bundles Root settling and provisional provenance", async () => {
+  const harness = await createHarness();
+  const pending = { requestId: "root-settle-failure", generation: 1, tabId: 100 };
+  const projects = [
+    { title: "Private title", project_id: "g-p-resolved", url: "https://chatgpt.com/g/g-p-resolved/project" },
+    { title: "Private title", discovery_key: "unresolved-mount", observation_role: "provisional",
+      snapshot_generation: 5, occupancy_source_index: 0 }
+  ];
+  harness.context.recordCollectorProjectDiscoveryResult({
+    projects: projects.slice(0, 1), conversations: [],
+    more_settle_attribute_mutation_count: 16, more_settle_quiet_count: 1,
+    more_settle_timeout_count: 0,
+    confirmed_logical_project_count_before_identity: 1, provisional_observation_count: 1,
+    more_viewport_deferred_count: 7, more_click_inside_viewport_count: 1,
+    more_click_outside_viewport_count: 0, more_click_viewport_unknown_count: 0,
+    provisional_created_indices: [0], compact_provisional_transitions: ["0:provisional_created"]
+  }, pending);
+  harness.context.emitCollectorProjectIdentityFailureSummary(pending, projects);
+  const summary = harness.diagnostics.map(([, fields]) => fields).find((fields) =>
+    fields?.stage === "collector_project_identity_failure_summary");
+  assert.equal(summary.more_settle_attribute_mutation_count, 16);
+  assert.equal(summary.more_settle_quiet_count, 1);
+  assert.equal(summary.more_settle_timeout_count, 0);
+  assert.equal(summary.more_viewport_deferred_count, 7);
+  assert.equal(summary.more_click_inside_viewport_count, 1);
+  assert.equal(summary.more_click_outside_viewport_count, 0);
+  assert.equal(summary.more_click_viewport_unknown_count, 0);
+  assert.equal(summary.confirmed_logical_project_count_before_identity, 1);
+  assert.equal(summary.provisional_observation_count_before_identity, 1);
+  assert.equal(summary.provisional_created_indices, "0");
+  assert.equal(summary.compact_provisional_transitions, "0:provisional_created");
+  assert.equal(summary.failures[0].observation_role, "provisional");
+  assert.equal(summary.failures[0].snapshot_generation, 5);
+  assert.equal(summary.failures[0].occupancy_source_index, 0);
+  assert.equal(JSON.stringify(summary).includes("Private title"), false);
+  assert.equal(JSON.stringify(summary).includes("unresolved-mount"), false);
+});
+
+test("Root transition records and all eight compact transitions survive the failure summary", async () => {
+  const harness = await createHarness();
+  const pending = { requestId: "tail-transition-summary", generation: 1, tabId: 100 };
+  const projects = Array.from({ length: 36 }, (_, index) => ({
+    title: `Private Project ${index % 28}`, discovery_key: `private-key-${index}`,
+    observation_role: index < 28 ? "confirmed" : "provisional",
+    ...(index < 20 || index >= 28 ? {
+      project_id: `g-p-summary-${index}`, url: `https://chatgpt.com/g/g-p-summary-${index}/project`
+    } : {})
+  }));
+  const transitions = Array.from({ length: 8 }, (_, index) => ({
+    catalog_index: 20 + index, observation_index: index, witness_available: true,
+    source_snapshot: 2, target_snapshot: 4, source_scroll_count: 0, target_scroll_count: 1,
+    source_more_click_count: 1, target_more_click_count: 1,
+    same_row_node: false, same_parent_node: true, same_sidebar_node: true,
+    previous_row_connected: false, previous_row_visible: false,
+    source_volatile_token_name: "aria-controls", target_volatile_token_name: "aria-controls",
+    aria_controls_changed: true, stable_attributes_changed: false,
+    title: "private raw title", raw_locator: "private-locator", unknown_flag: true
+  }));
+  const compact = transitions.map((entry) => `${entry.catalog_index}:provisional_created`);
+  assert.ok(compact.join(",").length > 128);
+  harness.context.recordCollectorProjectDiscoveryResult({
+    projects: projects.slice(0, 28), conversations: [],
+    confirmed_logical_project_count_before_identity: 28, provisional_observation_count: 8,
+    root_observation_transitions: transitions, compact_provisional_transitions: compact
+  }, pending);
+  harness.context.emitCollectorProjectIdentityFailureSummary(pending, projects);
+  const summary = harness.diagnostics.map(([, fields]) => fields).find((fields) =>
+    fields?.stage === "collector_project_identity_failure_summary");
+  assert.equal(summary.failures.length, 8);
+  assert.equal(summary.root_observation_transitions.length, 8);
+  assert.equal(summary.compact_provisional_transitions, compact.join(","));
+  for (const [index, entry] of summary.root_observation_transitions.entries()) {
+    assert.equal(entry.catalog_index, index + 20);
+    assert.equal(entry.source_scroll_count, 0);
+    assert.equal(entry.same_row_node, false);
+    assert.equal(entry.previous_row_connected, false);
+    assert.equal(entry.source_volatile_token_name, "aria-controls");
+  }
+  const serialized = JSON.stringify(summary);
+  assert.equal(serialized.includes("private raw title"), false);
+  assert.equal(serialized.includes("private-locator"), false);
+  assert.equal(serialized.includes("unknown_flag"), false);
 });
 
 test("Project identity failure summary explains relocation success followed by Stable ID extraction failure", async () => {

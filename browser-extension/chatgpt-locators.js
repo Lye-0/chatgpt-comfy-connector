@@ -1750,9 +1750,19 @@
   }
 
   function findMoreButtons(root = globalThis.document, sidebarOverride = null, options = {}) {
-    const sidebar = sidebarOverride || findSidebarRoot(root);
-    return sortInDocumentOrder(uniqueElements(moreButtonSelectors, sidebar)
-      .filter((element) => isMoreButton(element, options)));
+    return withProjectIdentityReadScope(() => {
+      const sidebar = sidebarOverride || findSidebarRoot(root);
+      const controls = sortInDocumentOrder(uniqueElements(moreButtonSelectors, sidebar)
+        .filter((element) => isMoreButton(element, options)));
+      if (controls.length === 0) return controls;
+      const rows = projectRowsInSidebar(sidebar, documentHref(root));
+      // Root/Sidebar pagination must not page through a Project's child Chats.
+      // Also exclude retained hidden regions: Root may inspect offscreen More
+      // controls, but that does not authorize operating Project Chat controls.
+      return controls.filter((control) => !rows.some((row) => row !== control
+        && (isDescendantOf(control, row)
+          || isDescendantOf(control, projectDisclosureRegionForRow(row, root)))));
+    });
   }
 
   function waitForSidebarMutation(root, timeoutMs = 150, options = {}) {
@@ -1981,26 +1991,47 @@
       let observer = null;
       let quietTimer = null;
       let timeoutTimer = null;
-      const finish = () => {
+      const finish = (reason) => {
         if (settled) return;
         settled = true;
         if (observer) observer.disconnect();
         if (quietTimer !== null) globalThis.clearTimeout?.(quietTimer);
         if (timeoutTimer !== null) globalThis.clearTimeout?.(timeoutTimer);
+        bumpDiscoveryStat(options.discoveryStats, reason === "timeout"
+          ? "moreSettleTimeoutCount" : "moreSettleQuietCount");
         resolve();
       };
       const armQuiet = () => {
         if (quietTimer !== null) globalThis.clearTimeout?.(quietTimer);
-        quietTimer = globalThis.setTimeout(finish, quietMs);
+        quietTimer = globalThis.setTimeout(() => finish("quiet"), quietMs);
       };
       try {
-        observer = new MutationObserverCtor(armQuiet);
-        observer.observe(root, { childList: true, subtree: true, characterData: true });
+        observer = new MutationObserverCtor((records) => {
+          const attributeCount = Array.from(records || [])
+            .filter((record) => record.type === "attributes").length;
+          bumpDiscoveryStat(options.discoveryStats, "moreSettleAttributeMutationCount", attributeCount);
+          armQuiet();
+        });
+        // A page can finish its first paint before React assigns the final row
+        // locators. Those attribute-only updates must restart the same quiet
+        // interval, before the snapshot enters the catalog. Already admitted
+        // observations still require durable evidence to reconcile.
+        observer.observe(root, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          attributes: true,
+          attributeFilter: [
+            ...STABLE_PROJECT_ROW_ATTRIBUTE_NAMES,
+            ...VOLATILE_PROJECT_ROW_ATTRIBUTE_NAMES,
+            "role", "data-sidebar-item", "href", "data-href", "data-url", "data-project-url"
+          ]
+        });
       } catch (_) {
         observer = null;
       }
       armQuiet();
-      timeoutTimer = globalThis.setTimeout(finish, timeoutMs);
+      timeoutTimer = globalThis.setTimeout(() => finish("timeout"), timeoutMs);
     });
   }
 
@@ -2069,6 +2100,32 @@
     return isMoreButton(element, options);
   }
 
+  function moreControlViewportPlacement(root, control, sidebar, scrollContainer) {
+    try {
+      const container = scrollContainer?.isConnected !== false
+        && isDescendantOf(control, scrollContainer)
+        ? scrollContainer : findIdentityScrollContainer(root, sidebar);
+      if (!container || !isDescendantOf(control, container)) return { state: "unknown" };
+      const rect = control?.getBoundingClientRect?.();
+      const bounds = container.getBoundingClientRect?.();
+      if (!rect || !bounds
+        || ![rect.top, rect.bottom, bounds.top, bounds.bottom].every(Number.isFinite)
+        || rect.bottom <= rect.top || bounds.bottom <= bounds.top) return { state: "unknown" };
+      const view = root?.defaultView || root?.ownerDocument?.defaultView;
+      const top = Math.max(0, bounds.top + (Number(container.clientTop) || 0));
+      const bottom = Math.min(bounds.bottom,
+        bounds.top + (Number(container.clientTop) || 0) + container.clientHeight,
+        Number(view?.innerHeight) > 0 ? view.innerHeight : Infinity);
+      if (!(bottom > top)) return { state: "unknown" };
+      return {
+        state: rect.bottom > bottom ? "below" : rect.top < top ? "above" : "inside",
+        canAdvance: scrollContainerCanAdvance(container)
+      };
+    } catch (_) {
+      return { state: "unknown" };
+    }
+  }
+
   async function expandSidebarMoreButtons(root, options = {}, sidebarOverride = null) {
     const maxClicks = Math.max(0, Math.min(32, Number(options.maxMoreClicks) || 8));
     const clicked = options.clickedMoreControls instanceof Set
@@ -2083,6 +2140,7 @@
     let clicks = 0;
     if (stats) stats.moreLastClickHadProgress = false;
     while (clicks < maxClicks) {
+      let viewportPlacement = null;
       const button = findMoreButtons(root, sidebarOverride, findOptions)
         .find((candidate) => {
           if (!isMoreControlActivatable(candidate, findOptions)) return false;
@@ -2093,6 +2151,17 @@
               bumpDiscoveryStat(stats, "moreControlDuplicateSuppressedCount");
               bumpDiscoveryStat(stats, "moreReclickSuppressedCount");
               return false;
+            }
+            if (options.deferOffscreenMore === true) {
+              viewportPlacement = moreControlViewportPlacement(
+                root, candidate, sidebarOverride, options.moreViewportScrollContainer);
+              // Let the Root scan reach a lower pagination control in its
+              // ordinary downward steps, collecting intermediate rows first.
+              // No click, jump, exhaustion mark or catalog mutation occurs here.
+              if (viewportPlacement.state === "below" && viewportPlacement.canAdvance) {
+                bumpDiscoveryStat(stats, "moreViewportDeferredCount");
+                return false;
+              }
             }
             return true;
           }
@@ -2116,6 +2185,12 @@
       if (key && !paginateOnProgress) clicked.add(key);
       try { button.click?.(); } catch (_) { break; }
       clicks += 1;
+      if (options.deferOffscreenMore === true) {
+        bumpDiscoveryStat(stats, viewportPlacement?.state === "inside"
+          ? "moreClickInsideViewportCount"
+          : viewportPlacement?.state === "unknown" || !viewportPlacement
+            ? "moreClickViewportUnknownCount" : "moreClickOutsideViewportCount");
+      }
       bumpDiscoveryStat(stats, "morePaginationRoundCount");
       if (paginateOnProgress && paginationState) paginationState.clickCount += 1;
       if (paginateOnProgress) {
@@ -2208,6 +2283,13 @@
       moreControlDuplicateSuppressedCount: 0,
       morePaginationRoundCount: 0,
       moreClickProgressCount: 0,
+      moreSettleAttributeMutationCount: 0,
+      moreSettleQuietCount: 0,
+      moreSettleTimeoutCount: 0,
+      moreViewportDeferredCount: 0,
+      moreClickInsideViewportCount: 0,
+      moreClickOutsideViewportCount: 0,
+      moreClickViewportUnknownCount: 0,
       moreClickNoProgressCount: 0,
       moreReappearedAfterClickCount: 0,
       moreReclickAllowedCount: 0,
@@ -2370,6 +2452,7 @@
     });
     if (!created) return null;
     provisionals.push(created);
+    recordRootObservationTransition(stats, item, options, provisionals.length - 1);
     if (stats) {
       stats.provisionalObservationCreatedCount += 1;
       stats.titleOnlyObservationPreservedCount += 1;
@@ -2380,6 +2463,53 @@
         "provisional_created");
     }
     return created;
+  }
+
+  function recordRootObservationTransition(stats, item, options, observationIndex) {
+    const trace = stats?.rootRowObservationTrace;
+    if (!trace || trace.transitions.length >= 64) return;
+    const sourceKey = metadataIdentifier(options.predecessorDiscoveryKey);
+    const targetKey = metadataIdentifier(item?.discovery_key || item?.discoveryKey);
+    const source = trace.firstByKey.get(sourceKey);
+    const target = trace.currentByKey.get(targetKey);
+    const event = {
+      catalog_index: options.occupancySourceIndex,
+      observation_index: observationIndex,
+      witness_available: Boolean(source && target)
+    };
+    if (source && target) {
+      for (const [prefix, witness] of [["source", source], ["target", target]]) {
+        event[`${prefix}_snapshot`] = witness.snapshot;
+        event[`${prefix}_row_index`] = witness.rowIndex;
+        event[`${prefix}_scroll_count`] = witness.scrollCount;
+        event[`${prefix}_more_click_count`] = witness.moreClickCount;
+        event[`${prefix}_stable_component_count`] = witness.fingerprint.stable_component_count;
+        event[`${prefix}_volatile_component_count`] = witness.fingerprint.volatile_component_count;
+        event[`${prefix}_volatile_token_name`] = witness.fingerprint.volatile_token_name;
+      }
+      event.same_row_node = source.row === target.row;
+      event.same_parent_node = source.parent === target.parent;
+      event.same_sidebar_node = source.sidebar === target.sidebar;
+      event.previous_row_connected = source.row?.isConnected !== false;
+      try {
+        event.previous_row_in_sidebar = isDescendantOf(source.row, target.sidebar);
+        event.previous_row_visible = source.row?.isConnected !== false && isVisible(source.row);
+      } catch (_) {
+        // A diagnostic read of a stale node must not interrupt collection.
+        event.witness_available = false;
+      }
+      event.stable_locator_changed = source.fingerprint.stable_locator_key !== target.fingerprint.stable_locator_key;
+      event.volatile_locator_changed = source.fingerprint.volatile_locator_key !== target.fingerprint.volatile_locator_key;
+      event.aria_controls_changed = source.volatileAttributes[0] !== target.volatileAttributes[0];
+      event.row_id_changed = source.volatileAttributes[1] !== target.volatileAttributes[1];
+      event.positional_attributes_changed = source.volatileAttributes.slice(2)
+        .some((value, index) => value !== target.volatileAttributes[index + 2]);
+      event.stable_attributes_changed = source.stableAttributes
+        .some((value, index) => value !== target.stableAttributes[index]);
+    }
+    // Diagnostic relations are not identity proof and never affect admission,
+    // descriptor replacement, resolution or provisional reconciliation.
+    trace.transitions.push(event);
   }
 
   function uniqueTitleVolatileRemountTarget(catalog, item, options = {}) {
@@ -2799,6 +2929,13 @@
       more_control_duplicate_suppressed_count: Number(stats?.moreControlDuplicateSuppressedCount) || 0,
       more_pagination_round_count: Number(stats?.morePaginationRoundCount) || 0,
       more_click_progress_count: Number(stats?.moreClickProgressCount) || 0,
+      more_settle_attribute_mutation_count: Number(stats?.moreSettleAttributeMutationCount) || 0,
+      more_settle_quiet_count: Number(stats?.moreSettleQuietCount) || 0,
+      more_settle_timeout_count: Number(stats?.moreSettleTimeoutCount) || 0,
+      more_viewport_deferred_count: Number(stats?.moreViewportDeferredCount) || 0,
+      more_click_inside_viewport_count: Number(stats?.moreClickInsideViewportCount) || 0,
+      more_click_outside_viewport_count: Number(stats?.moreClickOutsideViewportCount) || 0,
+      more_click_viewport_unknown_count: Number(stats?.moreClickViewportUnknownCount) || 0,
       more_click_no_progress_count: Number(stats?.moreClickNoProgressCount) || 0,
       more_reappeared_after_click_count: Number(stats?.moreReappearedAfterClickCount) || 0,
       more_reclick_allowed_count: Number(stats?.moreReclickAllowedCount) || 0,
@@ -2851,6 +2988,7 @@
       stable_evidence_reconcile_count: Number(stats?.stableEvidenceReconcileCount) || 0,
       ambiguous_same_title_reconcile_count: Number(stats?.ambiguousSameTitleReconcileCount) || 0,
       provisional_observation_created_count: Number(stats?.provisionalObservationCreatedCount) || 0,
+      root_observation_transitions: stats?.rootRowObservationTrace?.transitions || [],
       provisional_observation_reused_count: Number(stats?.provisionalObservationReusedCount) || 0,
       unique_title_volatile_remount_count: Number(stats?.uniqueTitleVolatileRemountCount) || 0,
       provisional_folded_same_descriptor_count: Number(stats?.provisionalFoldedSameDescriptorCount) || 0,
@@ -3250,7 +3388,8 @@
   function collectContextEntries(
     root = globalThis.document,
     url = globalThis.location?.href,
-    sidebarOverride = null) {
+    sidebarOverride = null,
+    onProjectRowObserved = null) {
     const projects = [];
     const conversations = [];
     const projectById = new Map();
@@ -3307,6 +3446,7 @@
         fingerprint.discovery_key,
         discoveryIndex,
         { stable_locator_key: fingerprint.stable_locator_key });
+      onProjectRowObserved?.(row, fingerprint, discoveryIndex, sidebarRoot);
     }
 
     // Current ChatGPT Project rows are rendered as expandable buttons and do
@@ -4594,6 +4734,12 @@
         stableFingerprintMatchCount: identityRows.length === 1 || stableLocatorRows.length === 1 ? 1 : 0,
         partialMatchCount: matchingRows.length > 0 && fingerprintRows.length === 0 ? matchingRows.length : 0,
         selectedMatchMethod: "none",
+        // A visible same-title sibling is not proof that the requested row
+        // changed identity. Search other viewports for the original fingerprint
+        // without treating this sibling as a match.
+        missingFingerprintTarget: Boolean((expectedDiscoveryKey || expectedStableLocatorKey || expectedLocatorProjectId)
+          && titleMatchCount === 1 && catalogTitleCount > 1
+          && !ambiguousIdentity && !ambiguousStable && !ambiguousFingerprint),
         reason: ambiguous
           ? "ambiguous_project_row_match"
           : (noVisibleMatch ? "project_row_not_visible" : "project_row_fingerprint_mismatch")
@@ -4652,6 +4798,7 @@
     const rowIndex = (rows || []).indexOf(row);
     return {
       row,
+      matchedFingerprint: candidateFingerprints[rowIndex] || null,
       candidateCount,
       rowFound: true,
       matchMethod,
@@ -4911,8 +5058,9 @@
           return fresh;
         }
       }
-      if (lastRelocation.reason === "ambiguous_project_row_match"
-        || lastRelocation.reason === "project_row_fingerprint_mismatch") {
+      if ((lastRelocation.reason === "ambiguous_project_row_match"
+        || lastRelocation.reason === "project_row_fingerprint_mismatch")
+        && lastRelocation.missingFingerprintTarget !== true) {
         lastRelocation.visibilityRecoveryAttempted = scrollAttempts > 0;
         lastRelocation.visibilityRecoveryScrollAttempts = scrollAttempts;
         lastRelocation.visibilityRecoveryScrollPositionChanges = scrollPositionChanges;
@@ -5066,6 +5214,74 @@
     return "other";
   }
 
+  function revealProjectDisclosureInViewport(root, row, canReveal) {
+    // A connected/rendered row can still be clipped by the Sidebar scrollport.
+    // Only move the containing Sidebar; geometry is never identity evidence.
+    try {
+      const container = findIdentityScrollContainer(root);
+      if (!container?.contains?.(row) || container.isConnected === false) return false;
+      const rect = row?.getBoundingClientRect?.();
+      const bounds = container.getBoundingClientRect?.();
+      if (!rect || !bounds
+        || ![rect.top, rect.bottom, bounds.top, bounds.bottom].every(Number.isFinite)
+        || rect.bottom <= rect.top || bounds.bottom <= bounds.top) return false;
+      const view = root?.defaultView || root?.ownerDocument?.defaultView;
+      const top = Math.max(0, bounds.top + (Number(container.clientTop) || 0));
+      const bottom = Math.min(bounds.bottom,
+        bounds.top + (Number(container.clientTop) || 0) + container.clientHeight,
+        Number(view?.innerHeight) > 0 ? view.innerHeight : Infinity);
+      if (!(bottom > top) || (rect.top >= top && rect.bottom <= bottom)) return false;
+      const previousTop = Number(container.scrollTop);
+      const maxTop = Number(container.scrollHeight) - Number(container.clientHeight);
+      if (!Number.isFinite(previousTop) || !(maxTop > 0)) return false;
+      const nextTop = Math.max(0, Math.min(maxTop,
+        previousTop + (rect.top + rect.bottom) / 2 - (top + bottom) / 2));
+      if (Math.abs(nextTop - previousTop) < 1) return false;
+      if (!canReveal()) return null;
+      if (typeof container.scrollTo === "function") {
+        container.scrollTo({ top: nextTop, behavior: "instant" });
+      } else {
+        container.scrollTop = nextTop;
+      }
+      return Math.abs(Number(container.scrollTop) - previousTop) >= 1;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function projectDisclosureHeaderObservation(row) {
+    const names = new Set([...STABLE_PROJECT_ROW_ATTRIBUTE_NAMES, ...VOLATILE_PROJECT_ROW_ATTRIBUTE_NAMES,
+      ...projectIdentityIdAttributes, ...projectIdentityUrlAttributes]);
+    return JSON.stringify([visibleTitleFromElement(row, ""),
+      ...[...names].map((name) => [name, attributeValue(row, name)])]);
+  }
+
+  function waitForProjectDisclosureViewportRender(root) {
+    const view = root?.defaultView || root?.ownerDocument?.defaultView;
+    if (typeof globalThis.setTimeout !== "function") return Promise.resolve();
+    // Scroll-triggered rendering may replace the row or expand its region.
+    // Two frames allow a render opportunity; the timer bounds hidden-tab rAF.
+    return new Promise((resolve) => {
+      let settled = false;
+      let frame = null;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout?.(timer);
+        try { if (frame !== null) view?.cancelAnimationFrame?.(frame); } catch (_) { }
+        resolve();
+      };
+      const timer = globalThis.setTimeout(finish, 100);
+      try {
+        if (typeof view?.requestAnimationFrame === "function") {
+          frame = view.requestAnimationFrame(() => {
+            if (!settled) frame = view.requestAnimationFrame(finish);
+          });
+        }
+      } catch (_) { finish(); }
+    });
+  }
+
   async function resolveProjectIdentityFromDisclosureAsync(
     root,
     initialRow,
@@ -5115,9 +5331,32 @@
       : "controlled_region_not_found";
 
     const expectedProjectId = stableProjectIdFromValue(descriptor?.project_id || descriptor?.projectId);
+    // Relocation may have verified a new mount after navigation. Use that
+    // mount's fingerprint for interaction continuity, without replacing a
+    // durable identity constraint or promoting this fingerprint to an ID.
+    const matchedFingerprint = options.matchedFingerprint;
+    const interactionDescriptor = matchedFingerprint?.discovery_key
+      && !expectedProjectId
+      && !metadataIdentifier(descriptor?.stable_locator_key || descriptor?.stableLocatorKey)
+      ? { ...descriptor, discovery_key: matchedFingerprint.discovery_key,
+        stable_locator_key: matchedFingerprint.stable_locator_key || undefined }
+      : descriptor;
+    let viewportWitness = null;
+    const rowStillMatches = (candidate) => {
+      if (connectedRowStillMatchesDescriptor(candidate, interactionDescriptor, baseUrl)) return true;
+      // Owned child hydration can add an ID to the derived fingerprint. Keep
+      // only the exact previously validated mount, with unchanged header
+      // attributes, title, parent and Sidebar. This witness never crosses a
+      // remount or refresh and never authorizes an ID without owned evidence.
+      return Boolean(viewportWitness && candidate === viewportWitness.row
+        && candidate?.isConnected !== false && candidate.parentElement === viewportWitness.parent
+        && findIdentitySidebarRoot(root) === viewportWitness.sidebar
+        && viewportWitness.sidebar?.contains?.(candidate)
+        && projectDisclosureHeaderObservation(candidate) === viewportWitness.header);
+    };
     const currentRow = () => {
       try {
-        if (connectedRowStillMatchesDescriptor(row, descriptor, baseUrl)) return row;
+        if (rowStillMatches(row)) return row;
         const relocateStartedAt = Date.now();
         const relocated = options.relocateRow?.();
         if (relocated && relocated !== row) {
@@ -5159,6 +5398,7 @@
       return identity;
     });
     let clickCompletedAt = null;
+    let hydrationReadyAt = startedAt;
     const result = (identity, reason = null) => {
       const now = Date.now();
       const elapsedMs = Math.max(0, now - startedAt);
@@ -5235,7 +5475,7 @@
       return clickDispatched || eventFallbackDispatched
         || after?.ariaExpanded === "true" || childEvidencePresent();
     };
-    const waitDeadlineAt = () => (clickCompletedAt ?? startedAt)
+    const waitDeadlineAt = () => (clickCompletedAt ?? hydrationReadyAt)
       + (hydrateExpected() ? hydrateTimeoutMs : probeTimeoutMs);
     const waiter = createIdentityChildRegionWaiter();
     const finish = (identity, reason = null) => {
@@ -5282,9 +5522,36 @@
       earlyEscalationReason = "row_unavailable";
       return finish(null, "row_unavailable");
     }
+    if (waitPolicy === "hydrate") {
+      const beforeViewport = { row, parent: row.parentElement, sidebar: findIdentitySidebarRoot(root),
+        header: projectDisclosureHeaderObservation(row) };
+      const viewportMoved = revealProjectDisclosureInViewport(root, row,
+        () => connectedRowStillMatchesDescriptor(row, interactionDescriptor, baseUrl));
+      if (viewportMoved === null) return finish(null, "project_row_fingerprint_mismatch");
+      if (viewportMoved) {
+        viewportWitness = beforeViewport;
+        readStats.viewportScrollCount = (readStats.viewportScrollCount || 0) + 1;
+        const viewportWaitStartedAt = Date.now();
+        await waitForProjectDisclosureViewportRender(root);
+        readStats.viewportWaitMs = (readStats.viewportWaitMs || 0) + Math.max(0, Date.now() - viewportWaitStartedAt);
+        hydrationReadyAt = Date.now();
+        if (documentHref(root, globalThis.location?.href) !== initialUrl) {
+          return finish(null, "disclosure_navigation_target_not_project");
+        }
+        if (!rowStillMatches(currentRow())) {
+          readStats.viewportRevalidationFailedCount = (readStats.viewportRevalidationFailedCount || 0) + 1;
+          return finish(null, "project_row_fingerprint_mismatch");
+        }
+        identity = inspect();
+        if (identity) return finish(identity);
+        if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
+          return finish(null, lastReason);
+        }
+      }
+    }
     // An expanded region may be present but still hydrating. Do not click it
     // again; the bounded wait below gives its metadata a chance to arrive.
-    if (before.ariaExpanded !== "true") {
+    if (after.ariaExpanded !== "true") {
       const target = currentRow();
       if (!target || (typeof target.click !== "function"
         && typeof target.dispatchEvent !== "function")) {
@@ -5515,6 +5782,8 @@
         ? project.project_index
         : index
     }));
+    let domHydrationYieldedProjectIndex = null;
+    const domHydrationDeferredIndices = [];
     let relocation = null;
     let identityReuse = null;
     const identityReadStats = {
@@ -5703,6 +5972,9 @@
         identity_pass_kind: typeof options.identityPassKind === "string"
           ? options.identityPassKind.slice(0, 32)
           : (mode === "navigation" ? "navigation" : "dom"),
+        dom_hydration_yielded: domHydrationDeferredIndices.length > 0,
+        dom_hydration_yielded_project_index: domHydrationYieldedProjectIndex,
+        dom_hydration_deferred_count: domHydrationDeferredIndices.length,
         child_chat_resolved_count: identityPerformance.childChatResolvedCount,
         navigation_resolved_count: identityPerformance.navigationResolvedCount,
         child_region_wait_total_ms: totalWait,
@@ -5745,6 +6017,9 @@
       emitNavigationTelemetry("collector_project_identity_phase_performance_summary", {
         total_projects: output.length,
         identity_inspect_count: identityReadStats.inspectCount,
+        identity_viewport_scroll_count: identityReadStats.viewportScrollCount || 0,
+        identity_viewport_wait_ms: identityReadStats.viewportWaitMs || 0,
+        identity_viewport_revalidation_failed_count: identityReadStats.viewportRevalidationFailedCount || 0,
         identity_inspect_total_ms: identityReadStats.inspectMs,
         identity_row_validation_total_ms: identityReadStats.rowValidationMs,
         identity_owned_scan_total_ms: identityReadStats.ownedScanMs,
@@ -6003,6 +6278,9 @@
       "slow_project_details",
       "identity_pass_kind",
       "timeout_ceiling_hit_count",
+      "dom_hydration_yielded",
+      "dom_hydration_yielded_project_index",
+      "dom_hydration_deferred_count",
       "timeout_ceiling_hit_indices",
       "early_escalation_count",
       "early_escalation_indices",
@@ -6010,6 +6288,9 @@
       "resolved_identity_skipped_count",
       "resolved_identity_rechecked_count",
       "identity_inspect_count",
+      "identity_viewport_scroll_count",
+      "identity_viewport_wait_ms",
+      "identity_viewport_revalidation_failed_count",
       "identity_inspect_total_ms",
       "identity_row_validation_total_ms",
       "identity_owned_scan_total_ms",
@@ -6199,7 +6480,8 @@
             sidebar_dom_generation_changed: connectedMatch !== true
           });
           if (!connectedMatch && (relocation.reason === "project_row_not_visible"
-            || relocation.reason === "project_row_not_found")) {
+            || relocation.reason === "project_row_not_found"
+            || relocation.missingFingerprintTarget === true)) {
             const relocateStartedAt = Date.now();
             relocation = await relocateProjectRowForIdentityAsync(root, descriptor, {
               catalog: identityCatalog,
@@ -6243,7 +6525,8 @@
           let row = relocation.row;
           learningRow = row;
           learningKey = identityReuse.capture(row, descriptor);
-          const fromRow = row ? projectIdentityFromElement(row, baseUrl) : { reason: "project_row_not_found" };
+          const fromRow = row ? projectIdentityFromElement(row, baseUrl)
+            : { reason: relocation.reason || "project_row_not_found" };
           identity = fromRow.projectId ? fromRow : null;
           reason = fromRow.reason || reason;
           if (!identity && row) {
@@ -6254,6 +6537,7 @@
               baseUrl,
               {
                 identityReadStats,
+                matchedFingerprint: relocation.matchedFingerprint,
                 navigationTimeoutMs: options.navigationTimeoutMs,
                 disclosureTimeoutMs: options.disclosureTimeoutMs,
                 childRegionWaitPolicy: options.childRegionWaitPolicy || "hydrate",
@@ -6288,6 +6572,8 @@
             if (disclosureResult.isDisclosure) {
               emitNavigationTelemetry("collector_project_identity_disclosure_structure", {
                 project_index: projectIndex,
+                identity_pass_kind: ["post_navigation", "post_navigation_recovery", "resumed_dom"].includes(options.identityPassKind)
+                  ? options.identityPassKind : "initial_dom",
                 row_is_disclosure_control: beforeDisclosure.rowIsDisclosureControl,
                 row_aria_controls_present: beforeDisclosure.ariaControlsPresent,
                 row_aria_expanded: beforeDisclosure.ariaExpanded,
@@ -6310,6 +6596,14 @@
             if (disclosureResult.clickAttempted || disclosureResult.eventFallbackAttempted) {
               emitNavigationTelemetry("collector_project_identity_disclosure_click", {
                 project_index: projectIndex,
+                identity_pass_kind: ["post_navigation", "post_navigation_recovery", "resumed_dom"].includes(options.identityPassKind)
+                  ? options.identityPassKind : "initial_dom",
+                aria_expanded_before: beforeDisclosure.ariaExpanded,
+                aria_expanded_after: afterDisclosure.ariaExpanded,
+                controlled_region_found: afterDisclosure.controlledRegionFound,
+                controlled_region_project_chat_link_count: afterDisclosure.controlledRegionProjectChatLinkCount,
+                controlled_region_identity_reason: afterDisclosure.controlledRegionIdentityReason,
+                identity_child_region_wait_ms: disclosureResult.childRegionWaitMs,
                 clickable_element_found: Boolean(
                   typeof disclosureResult.row?.click === "function"
                   || typeof disclosureResult.row?.dispatchEvent === "function"),
@@ -6339,6 +6633,7 @@
         identityReuse.learn(learningRow, descriptor, learningKey, identity);
         emitNavigationTelemetry("collector_project_identity_source_classification", {
           project_index: projectIndex,
+          unresolved_reason: identity ? "none" : (reason || "missing_stable_identity"),
           identity_source: identity
             ? (identity.source || (existing.projectId ? "row_url" : "other"))
             : "none",
@@ -6369,6 +6664,22 @@
           });
         if (identity) nonNavigationResolvedCount += 1;
         noteIdentityVisibility(identityAttemptHidden, projectIndex, projectStartedAt);
+        if (!identity && options.yieldAfterHydrationTimeout === true
+          && !["post_navigation", "post_navigation_recovery", "resumed_dom"].includes(options.identityPassKind)
+          && options.childRegionWaitPolicy !== "probe"
+          && lastDisclosureResult?.timeoutCeilingHit === true
+          && projectIdentityNavigationEligible(reason)) {
+          const deferred = output.slice(index + 1).filter((project) =>
+            !projectIdentityFromProjectMetadata(project, baseUrl).projectId);
+          if (deferred.length > 0) {
+            domHydrationYieldedProjectIndex = projectIndex;
+            domHydrationDeferredIndices.push(...deferred.map((project) => project.project_index));
+            // Preserve the complete catalog, including rows not yet hydrated.
+            // Background tries the exhausted row's existing navigation fallback
+            // before resuming these rows with their full hydration budgets.
+            break;
+          }
+        }
       }
     } else if (output.length > 0) {
       const descriptor = output[0];
@@ -6498,6 +6809,7 @@
               navigationTimeoutMs: options.navigationTimeoutMs,
               disclosureTimeoutMs: options.disclosureTimeoutMs,
               childRegionWaitPolicy: options.childRegionWaitPolicy || "probe",
+              matchedFingerprint: relocation.matchedFingerprint,
               probeTimeoutMs: options.probeTimeoutMs,
               relocateRow
             });
@@ -6521,6 +6833,7 @@
             !== afterDisclosure.controlledRegionProjectHomeLinkCount;
           emitNavigationTelemetry("collector_project_identity_disclosure_structure", {
             project_index: currentProjectIndex,
+            identity_pass_kind: "navigation",
             row_is_disclosure_control: beforeDisclosure.rowIsDisclosureControl,
             row_aria_controls_present: beforeDisclosure.ariaControlsPresent,
             row_aria_expanded: beforeDisclosure.ariaExpanded,
@@ -6542,6 +6855,13 @@
           if (disclosureResult.clickAttempted || disclosureResult.eventFallbackAttempted) {
             emitNavigationTelemetry("collector_project_identity_disclosure_click", {
               project_index: currentProjectIndex,
+              identity_pass_kind: "navigation",
+              aria_expanded_before: beforeDisclosure.ariaExpanded,
+              aria_expanded_after: afterDisclosure.ariaExpanded,
+              controlled_region_found: afterDisclosure.controlledRegionFound,
+              controlled_region_project_chat_link_count: afterDisclosure.controlledRegionProjectChatLinkCount,
+              controlled_region_identity_reason: afterDisclosure.controlledRegionIdentityReason,
+              identity_child_region_wait_ms: disclosureResult.childRegionWaitMs,
               clickable_element_found: Boolean(
                 typeof disclosureResult.row?.click === "function"
                 || typeof disclosureResult.row?.dispatchEvent === "function"),
@@ -7150,7 +7470,11 @@
       conversations: [],
       current: null,
       project_identity_resolution_started: true,
-      project_identity_resolution_completed: true,
+      project_identity_resolution_completed: domHydrationDeferredIndices.length === 0,
+      dom_hydration_yielded: domHydrationDeferredIndices.length > 0,
+      ...(domHydrationYieldedProjectIndex !== null
+        ? { dom_hydration_yielded_project_index: domHydrationYieldedProjectIndex } : {}),
+      dom_hydration_deferred_indices: domHydrationDeferredIndices,
       non_navigation_resolved_count: nonNavigationResolvedCount,
       navigation_resolved_count: navigationResolvedCount,
       unresolved_count: unresolvedCount,
@@ -7323,7 +7647,16 @@
     // references after a genuine Sidebar remount. Caching a disconnected
     // element would make a virtualized scan silently stop discovering rows.
     let sidebar = findIdentitySidebarRoot(root);
-    let scrollContainer = findIdentityScrollContainer(root, sidebar);
+    const expandedProjectsAtStart = withProjectIdentityReadScope(() => projectRowsInSidebar(sidebar, url)
+      .filter((row) => attributeValue(row, "aria-expanded") === "true").length);
+    const rootReadStats = { sharedReadHits: 0, rowEnumerations: 0 };
+    // Expanded child Chats make ownership checks repeatedly enumerate the whole
+    // Sidebar. Share only each synchronous read, and only on this expanded path.
+    // No reads survive a scroll, click, await or the next snapshot/refresh.
+    const readExpandedRoot = (read) => expandedProjectsAtStart > 0
+      ? withProjectIdentityReadScope(read, rootReadStats)
+      : read();
+    let scrollContainer = readExpandedRoot(() => findIdentityScrollContainer(root, sidebar));
     let canScroll = scrollContainer && typeof scrollContainer.scrollTop === "number"
       && typeof scrollContainer.scrollHeight === "number"
       && typeof scrollContainer.clientHeight === "number";
@@ -7357,6 +7690,22 @@
     let moreControlClicks = 0;
     let observedMoreControl = null;
     const discoveryStats = createDiscoveryCatalogStats();
+    const rowObservationTrace = { firstByKey: new Map(), currentByKey: new Map(), transitions: [] };
+    discoveryStats.rootRowObservationTrace = rowObservationTrace;
+    const observeProjectRow = (row, fingerprint, rowIndex, observedSidebar) => {
+      const witness = {
+        row, fingerprint, rowIndex, sidebar: observedSidebar, parent: row.parentElement,
+        snapshot: rootCatalogBuildCount,
+        scrollCount: sidebarScrollAttemptCount,
+        moreClickCount: discoveryStats.morePaginationRoundCount,
+        stableAttributes: STABLE_PROJECT_ROW_ATTRIBUTE_NAMES.map((name) => attributeValue(row, name)),
+        volatileAttributes: VOLATILE_PROJECT_ROW_ATTRIBUTE_NAMES.map((name) => attributeValue(row, name))
+      };
+      rowObservationTrace.currentByKey.set(fingerprint.discovery_key, witness);
+      if (!rowObservationTrace.firstByKey.has(fingerprint.discovery_key)) {
+        rowObservationTrace.firstByKey.set(fingerprint.discovery_key, witness);
+      }
+    };
     const observeMoreControls = (controls) => {
       for (const control of controls || []) {
         discoveryStats.moreControlSeenCount += 1;
@@ -7400,6 +7749,8 @@
         clickedMoreControls,
         includeHiddenMore: true,
         paginateOnProgress: true,
+        deferOffscreenMore: true,
+        moreViewportScrollContainer: scrollContainer,
         catalog: merged,
         discoveryStats,
         afterMoreClick: async () => {
@@ -7431,7 +7782,7 @@
     let latestSnapshot = null;
     let collectAfterProgress = true;
     let disconnectedContainerObserved = false;
-    const refreshRootContainers = () => {
+    const refreshRootContainers = () => readExpandedRoot(() => {
       const sidebarWasDisconnected = sidebar?.isConnected === false;
       const scrollContainerWasDisconnected = scrollContainer?.isConnected === false;
       if ((sidebarWasDisconnected || scrollContainerWasDisconnected)
@@ -7449,13 +7800,14 @@
       canScroll = scrollContainer && typeof scrollContainer.scrollTop === "number"
         && typeof scrollContainer.scrollHeight === "number"
         && typeof scrollContainer.clientHeight === "number";
-    };
+    });
     const collectSnapshot = () => {
       refreshRootContainers();
       const startedAt = Date.now();
       rootCatalogBuildCount += 1;
       if (rootCatalogBuildCount > 1) rootCatalogReuseCount += 1;
-      const snapshot = collectContextEntries(root, url, sidebar);
+      rowObservationTrace.currentByKey.clear();
+      const snapshot = readExpandedRoot(() => collectContextEntries(root, url, sidebar, observeProjectRow));
       rootCatalogBuildMs += Math.max(0, Date.now() - startedAt);
       return snapshot;
     };
@@ -7719,7 +8071,7 @@
         conversations: merged.conversations,
         current: getCurrentChatGptContextFromEntries(merged, root, url),
         project_discovery_source: projectDiscoverySource,
-        ...sidebarScrollTelemetry(
+        ...readExpandedRoot(() => sidebarScrollTelemetry(
           root,
           scrollContainer,
           stagnantPasses,
@@ -7727,10 +8079,13 @@
           sidebarScrollComplete,
           sidebar,
           scrollDirection,
-          0),
+          0)),
         root_catalog_build_count: rootCatalogBuildCount,
         root_catalog_reuse_count: rootCatalogReuseCount,
         root_catalog_build_ms: rootCatalogBuildMs,
+        root_expanded_project_count_at_start: expandedProjectsAtStart,
+        root_shared_read_hit_count: rootReadStats.sharedReadHits,
+        root_row_enumeration_count: rootReadStats.rowEnumerations,
         root_hydration_scroll_wait_ms: rootHydrationScrollWaitMs,
         more_click_wait_ms: moreClickWaitMs,
         total_dom_wait_ms: totalDomWaitMs,
@@ -7785,6 +8140,10 @@
           || documentVisibilityStateOf(root) === "hidden"
       };
     } finally {
+      // Keep DOM witnesses only for this Root scan. The result contains bounded
+      // primitive diagnostics, never nodes, raw attributes or a reusable cache.
+      rowObservationTrace.firstByKey.clear();
+      rowObservationTrace.currentByKey.clear();
       const restoreScrollContainer = scrollContainer?.isConnected === false
         ? findIdentityScrollContainer(root, sidebar)
         : scrollContainer;

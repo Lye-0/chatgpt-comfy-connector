@@ -765,6 +765,133 @@ test("Content Script preserves Project identity navigation stages in its safe ru
   assert.equal(result.internal_reason, "row_visibility_exhausted");
 });
 
+test("Content Script preserves provisional transition arrays in Root results", async () => {
+  const harness = await createHarness({ url: "https://chatgpt.com/", locatorOverrides: {
+    collectChatGptContextAsync: async () => ({ projects: [], conversations: [],
+      root_expanded_project_count_at_start: 28, root_shared_read_hit_count: 1200,
+      root_row_enumeration_count: 20,
+      more_settle_attribute_mutation_count: 16, more_settle_quiet_count: 1,
+      more_settle_timeout_count: 0,
+      more_viewport_deferred_count: 7, more_click_inside_viewport_count: 1,
+      more_click_outside_viewport_count: 0, more_click_viewport_unknown_count: 0,
+      provisional_created_indices: [20, 21, -1, "22"], provisional_merged_existing_indices: [20],
+      confirmed_fingerprint_changed_indices: [21], stable_locator_changed_indices: [21],
+      discovery_key_changed_indices: [21],
+      compact_provisional_transitions: ["20:provisional_created>same_descriptor_fold", 21, "private title"]
+    })
+  } });
+  const result = await harness.send({ type: "GET_CHATGPT_CONTEXT", requestId: "provisional-arrays",
+    mode: "list", collection: "root" });
+  assert.deepEqual(Array.from(result.provisional_created_indices), [20, 21]);
+  assert.equal(result.root_expanded_project_count_at_start, 28);
+  assert.equal(result.root_shared_read_hit_count, 1200);
+  assert.equal(result.root_row_enumeration_count, 20);
+  assert.equal(result.more_settle_attribute_mutation_count, 16);
+  assert.equal(result.more_settle_quiet_count, 1);
+  assert.equal(result.more_settle_timeout_count, 0);
+  assert.equal(result.more_viewport_deferred_count, 7);
+  assert.equal(result.more_click_inside_viewport_count, 1);
+  assert.equal(result.more_click_outside_viewport_count, 0);
+  assert.equal(result.more_click_viewport_unknown_count, 0);
+  for (const key of ["provisional_merged_existing_indices", "confirmed_fingerprint_changed_indices",
+    "stable_locator_changed_indices", "discovery_key_changed_indices"]) assert.equal(result[key].length, 1);
+  assert.deepEqual(Array.from(result.compact_provisional_transitions), ["20:provisional_created>same_descriptor_fold"]);
+});
+
+test("Content Script bounds Root observation diagnostics and removes raw DOM data", async () => {
+  const records = Array.from({ length: 70 }, (_, index) => ({
+    catalog_index: index, observation_index: index, witness_available: true,
+    source_snapshot: 1, target_snapshot: 3, source_scroll_count: 0, target_scroll_count: 1,
+    same_row_node: false, same_sidebar_node: true, previous_row_connected: false,
+    source_volatile_token_name: "aria-controls", target_volatile_token_name: "private value",
+    aria_controls_changed: true, title: "private project title", row: { outerHTML: "private DOM" },
+    raw_aria_controls: "private locator", unsupported_numeric_field: 4
+  }));
+  const harness = await createHarness({ url: "https://chatgpt.com/", locatorOverrides: {
+    collectChatGptContextAsync: async () => ({ projects: [], conversations: [],
+      root_observation_transitions: records })
+  } });
+  const result = await harness.send({ type: "GET_CHATGPT_CONTEXT", requestId: "root-observation-trace",
+    mode: "list", collection: "root" });
+  assert.equal(result.root_observation_transitions.length, 64);
+  const entry = result.root_observation_transitions[0];
+  assert.equal(entry.source_scroll_count, 0);
+  assert.equal(entry.same_row_node, false);
+  assert.equal(entry.previous_row_connected, false);
+  assert.equal(entry.source_volatile_token_name, "aria-controls");
+  assert.equal(Object.hasOwn(entry, "target_volatile_token_name"), false);
+  const serialized = JSON.stringify(result.root_observation_transitions);
+  assert.equal(serialized.includes("private"), false);
+  assert.equal(serialized.includes("outerHTML"), false);
+  assert.equal(serialized.includes("unsupported_numeric_field"), false);
+});
+
+test("Content Script relays the cooperative DOM hydration yield without losing pending indices", async () => {
+  let receivedOptions;
+  const harness = await createHarness({ url: "https://chatgpt.com/", locatorOverrides: {
+    resolveChatGptProjectIdentitiesAsync: async (_document, _url, projects, options) => {
+      receivedOptions = options;
+      options.onTelemetry({ stage: "collector_project_identity_performance_summary", identity_pass_kind: "initial_dom",
+        dom_hydration_yielded: true, dom_hydration_yielded_project_index: 20, dom_hydration_deferred_count: 7 });
+      return { projects, conversations: [], dom_hydration_yielded: true,
+        dom_hydration_yielded_project_index: 20, dom_hydration_deferred_indices: [21, 22, 23, 24, 25, 26, 27] };
+    }
+  } });
+  const result = await harness.send({ type: "GET_CHATGPT_CONTEXT", requestId: "hydration-yield",
+    collectorTabId: 100, refreshGeneration: 1, mode: "list", collection: "project_identity", identityMode: "dom",
+    yieldAfterHydrationTimeout: true, disclosureTimeoutMs: 2500,
+    projects: Array.from({ length: 28 }, (_, index) => ({ title: `Pending ${index}`, project_index: index })) });
+  assert.equal(receivedOptions.yieldAfterHydrationTimeout, true);
+  assert.equal(receivedOptions.disclosureTimeoutMs, 2500);
+  assert.equal(result.dom_hydration_yielded, true);
+  assert.equal(result.dom_hydration_yielded_project_index, 20);
+  assert.equal(Array.from(result.dom_hydration_deferred_indices).join(","), "21,22,23,24,25,26,27");
+  assert.equal(result.projects.length, 28);
+  const telemetry = await harness.waitForRuntimeMessage((message) =>
+    message.type === "COLLECTOR_PROJECT_IDENTITY_TELEMETRY" && message.dom_hydration_yielded === true);
+  assert.equal(telemetry.dom_hydration_yielded_project_index, 20);
+  assert.equal(telemetry.dom_hydration_deferred_count, 7);
+});
+
+test("Content Script retains false and zero disclosure outcome fields", async () => {
+  const fields = {
+    stage: "collector_project_identity_disclosure_click", project_index: 20,
+    identity_pass_kind: "initial_dom", aria_expanded_before: "false", aria_expanded_after: "false",
+    controlled_region_found: true, controlled_region_project_chat_link_count: 0,
+    controlled_region_identity_reason: "missing_stable_identity", disclosure_state_changed: false,
+    disclosure_url_changed: false, disclosure_click_dispatched: true, identity_child_region_wait_ms: 2500
+  };
+  const harness = await createHarness({ url: "https://chatgpt.com/", locatorOverrides: {
+    resolveChatGptProjectIdentitiesAsync: async (_root, _url, projects, options) => {
+      options.onTelemetry(fields);
+      return { status: "ok", projects, conversations: [] };
+    }
+  } });
+  await harness.send({ type: "GET_CHATGPT_CONTEXT", requestId: "disclosure-outcome",
+    mode: "list", collection: "project_identity", identityMode: "dom", projects: [] });
+  const message = await harness.waitForRuntimeMessage((message) => message.stage === fields.stage);
+  for (const [key, value] of Object.entries(fields)) assert.equal(message[key], value, key);
+});
+
+test("Content Script relays Identity viewport phase counters", async () => {
+  const harness = await createHarness({ url: "https://chatgpt.com/", locatorOverrides: {
+    resolveChatGptProjectIdentitiesAsync: async (_root, _url, projects, options) => {
+      options.onTelemetry({ stage: "collector_project_identity_phase_performance_summary",
+        identity_viewport_scroll_count: 8, identity_viewport_wait_ms: 32,
+        identity_viewport_revalidation_failed_count: 0 });
+      return { status: "ok", projects, conversations: [] };
+    }
+  } });
+  await harness.send({ type: "GET_CHATGPT_CONTEXT", requestId: "viewport-counters",
+    mode: "list", collection: "project_identity", identityMode: "dom",
+    projects: [{ project_index: 0, title: "Project" }] });
+  const phase = await harness.waitForRuntimeMessage((message) =>
+    message.stage === "collector_project_identity_phase_performance_summary");
+  assert.equal(phase.identity_viewport_scroll_count, 8);
+  assert.equal(phase.identity_viewport_wait_ms, 32);
+  assert.equal(phase.identity_viewport_revalidation_failed_count, 0);
+});
+
 test("Content Script suppresses loop telemetry by default but exposes it in debug mode", async () => {
   const createIdentityHarness = async (debugTelemetry) => createHarness({
     url: "https://chatgpt.com/",

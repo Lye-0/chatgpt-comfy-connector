@@ -683,6 +683,9 @@
     "slow_project_details",
     "identity_pass_kind",
     "timeout_ceiling_hit_count",
+    "dom_hydration_yielded",
+    "dom_hydration_yielded_project_index",
+    "dom_hydration_deferred_count",
     "timeout_ceiling_hit_indices",
     "early_escalation_count",
     "early_escalation_indices",
@@ -690,6 +693,9 @@
     "resolved_identity_skipped_count",
     "resolved_identity_rechecked_count",
     "identity_inspect_count",
+    "identity_viewport_scroll_count",
+    "identity_viewport_wait_ms",
+    "identity_viewport_revalidation_failed_count",
     "identity_inspect_total_ms",
     "identity_row_validation_total_ms",
     "identity_owned_scan_total_ms",
@@ -1291,6 +1297,7 @@
       "navigation_resolved_count",
       "unresolved_count",
       "current_project_index",
+      "dom_hydration_yielded_project_index",
       "project_index",
       "total_projects"
     ]) {
@@ -1299,6 +1306,7 @@
     for (const key of [
       "project_identity_resolution_started",
       "project_identity_resolution_completed",
+      "dom_hydration_yielded",
       "navigation_target_verified",
       "project_url_pattern_valid",
       "project_id_url_match"
@@ -1348,6 +1356,9 @@
       "no_growth_count",
       "sidebar_restore_count",
       "root_catalog_build_count",
+      "root_expanded_project_count_at_start",
+      "root_shared_read_hit_count",
+      "root_row_enumeration_count",
       "root_catalog_reuse_count",
       "root_catalog_build_ms",
       "root_hydration_scroll_wait_ms",
@@ -1374,6 +1385,13 @@
       "more_control_duplicate_suppressed_count",
       "more_pagination_round_count",
       "more_click_progress_count",
+      "more_settle_attribute_mutation_count",
+      "more_settle_quiet_count",
+      "more_settle_timeout_count",
+      "more_viewport_deferred_count",
+      "more_click_inside_viewport_count",
+      "more_click_outside_viewport_count",
+      "more_click_viewport_unknown_count",
       "more_click_no_progress_count",
       "more_reappeared_after_click_count",
       "more_reclick_allowed_count",
@@ -1426,12 +1444,6 @@
       "provisional_same_project_id_proof_count",
       "provisional_same_stable_locator_proof_count",
       "provisional_lineage_proof_count",
-      "provisional_created_indices",
-      "provisional_merged_existing_indices",
-      "confirmed_fingerprint_changed_indices",
-      "stable_locator_changed_indices",
-      "discovery_key_changed_indices",
-      "compact_provisional_transitions",
       "provisional_observation_count",
       "confirmed_logical_project_count_before_identity",
       "final_catalog_index_count",
@@ -1585,13 +1597,51 @@
     ]) {
       if (typeof data[key] === "string" && data[key].length <= 128) result[key] = data[key];
     }
-    for (const key of ["final_catalog_indices", "descriptor_added_after_first_snapshot_indices"]) {
+    for (const key of ["final_catalog_indices", "descriptor_added_after_first_snapshot_indices",
+      "dom_hydration_deferred_indices",
+      "provisional_created_indices", "provisional_merged_existing_indices",
+      "confirmed_fingerprint_changed_indices", "stable_locator_changed_indices", "discovery_key_changed_indices"]) {
       if (!Array.isArray(data[key])) continue;
       result[key] = data[key]
         .filter((value) => Number.isSafeInteger(value) && value >= 0)
         .slice(0, 5000);
     }
+    if (Array.isArray(data.compact_provisional_transitions)) {
+      result.compact_provisional_transitions = data.compact_provisional_transitions
+        .filter((value) => typeof value === "string" && /^\d+:[a-z_]+(?:>[a-z_]+)*$/.test(value))
+        .map((value) => value.slice(0, 256)).slice(0, 5000);
+    }
+    if (Array.isArray(data.root_observation_transitions)) {
+      result.root_observation_transitions = safeRootObservationTransitions(data.root_observation_transitions);
+    }
     return result;
+  }
+
+  function safeRootObservationTransitions(value) {
+    if (!Array.isArray(value)) return [];
+    const numbers = ["catalog_index", "observation_index", "source_snapshot", "target_snapshot",
+      "source_row_index", "target_row_index", "source_scroll_count", "target_scroll_count",
+      "source_more_click_count", "target_more_click_count", "source_stable_component_count",
+      "target_stable_component_count", "source_volatile_component_count", "target_volatile_component_count"];
+    const booleans = ["witness_available", "same_row_node", "same_parent_node", "same_sidebar_node",
+      "previous_row_connected", "previous_row_in_sidebar", "previous_row_visible",
+      "stable_locator_changed", "volatile_locator_changed", "aria_controls_changed", "row_id_changed",
+      "positional_attributes_changed", "stable_attributes_changed"];
+    const tokenNames = ["none", "aria-controls", "id", "data-index", "data-item-index", "aria-posinset"];
+    return value.slice(0, 64).filter((entry) => entry && typeof entry === "object"
+      && Number.isSafeInteger(entry.catalog_index) && entry.catalog_index >= 0).map((entry) => {
+      const safe = {};
+      for (const key of numbers) {
+        if (Number.isSafeInteger(entry[key]) && entry[key] >= 0) safe[key] = entry[key];
+      }
+      for (const key of booleans) {
+        if (typeof entry[key] === "boolean") safe[key] = entry[key];
+      }
+      for (const key of ["source_volatile_token_name", "target_volatile_token_name"]) {
+        if (tokenNames.includes(entry[key])) safe[key] = entry[key];
+      }
+      return safe;
+    });
   }
 
   const projectChatErrorCodes = new Set([
@@ -1929,6 +1979,7 @@
             childRegionWaitPolicy: message.childRegionWaitPolicy || message.child_region_wait_policy,
             probeTimeoutMs: message.probeTimeoutMs,
             identityPassKind: message.identityPassKind || message.identity_pass_kind,
+            yieldAfterHydrationTimeout: message.yieldAfterHydrationTimeout === true,
             totalProjects: Number.isSafeInteger(message.totalProjects)
               ? message.totalProjects
               : (Array.isArray(message.identityCatalog) ? message.identityCatalog.length : undefined),

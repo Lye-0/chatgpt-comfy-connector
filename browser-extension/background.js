@@ -412,6 +412,9 @@ function createCollectorProjectDiscoveryEfficiencyState(pending) {
     rootHydrationRunCount: 0,
     rootHydrationScrollCount: 0,
     rootCatalogBuildCount: 0,
+    rootExpandedProjectCountAtStart: 0,
+    rootSharedReadHitCount: 0,
+    rootRowEnumerationCount: 0,
     rootCatalogReuseCount: 0,
     projectIdentityAttemptCount: 0,
     rowRelocationAttemptCount: 0,
@@ -464,6 +467,7 @@ function createCollectorProjectDiscoveryEfficiencyState(pending) {
     identityCatalogInvariantPassed: false,
     identityDuplicateDescriptorCount: 0,
     compactProvisionalTransitions: "",
+    rootObservationTransitions: [],
     provisionalCreatedIndices: "",
     provisionalMergedExistingIndices: "",
     confirmedFingerprintChangedIndices: "",
@@ -542,6 +546,13 @@ function createCollectorProjectDiscoveryEfficiencyState(pending) {
     moreControlDuplicateSuppressedCount: 0,
     morePaginationRoundCount: 0,
     moreClickProgressCount: 0,
+    moreSettleAttributeMutationCount: 0,
+    moreSettleQuietCount: 0,
+    moreSettleTimeoutCount: 0,
+    moreViewportDeferredCount: 0,
+    moreClickInsideViewportCount: 0,
+    moreClickOutsideViewportCount: 0,
+    moreClickViewportUnknownCount: 0,
     moreClickNoProgressCount: 0,
     moreReappearedAfterClickCount: 0,
     moreReclickAllowedCount: 0,
@@ -586,9 +597,19 @@ function createCollectorProjectDiscoveryEfficiencyState(pending) {
     postNavigationRetryInputCount: 0,
     postNavigationRetryIndices: [],
     postNavigationRetryMs: 0,
+    postNavigationRecoveryPassCount: 0,
+    postNavigationRecoveryInputCount: 0,
+    postNavigationRecoveryResolvedCount: 0,
+    postNavigationRecoveryIndices: [],
+    postNavigationRecoveryMs: 0,
     initialDomPassChildRegionWaitMs: 0,
     initialDomPassResolvedCount: 0,
     initialDomPassUnresolvedIndices: [],
+    initialDomHydrationYieldCount: 0,
+    initialDomHydrationYieldedProjectIndex: -1,
+    initialDomHydrationDeferredIndices: [],
+    deferredDomResumeCount: 0,
+    deferredDomResumeInputCount: 0,
     navigationIdentityResolutionMs: 0,
     navigationIdentityResolvedIndex: -1,
     navigationSuccessDomWaitMs: 0,
@@ -1233,6 +1254,9 @@ async function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = 
     root_hydration_run_count: efficiency.rootHydrationRunCount,
     root_hydration_scroll_count: efficiency.rootHydrationScrollCount,
     root_catalog_build_count: efficiency.rootCatalogBuildCount,
+    root_expanded_project_count_at_start: efficiency.rootExpandedProjectCountAtStart,
+    root_shared_read_hit_count: efficiency.rootSharedReadHitCount,
+    root_row_enumeration_count: efficiency.rootRowEnumerationCount,
     root_catalog_reuse_count: efficiency.rootCatalogReuseCount,
     project_identity_attempt_count: efficiency.projectIdentityAttemptCount,
     row_relocation_attempt_count: efficiency.rowRelocationAttemptCount,
@@ -1289,6 +1313,7 @@ async function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = 
     provisional_folded_same_descriptor_count: efficiency.provisionalFoldedSameDescriptorCount,
     identity_input_count: efficiency.identityInputCount,
     compact_provisional_transitions: efficiency.compactProvisionalTransitions,
+    root_observation_transitions: efficiency.rootObservationTransitions,
     provisional_created_indices: efficiency.provisionalCreatedIndices,
     provisional_merged_existing_indices: efficiency.provisionalMergedExistingIndices,
     confirmed_fingerprint_changed_indices: efficiency.confirmedFingerprintChangedIndices,
@@ -1336,6 +1361,13 @@ async function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = 
     more_control_duplicate_suppressed_count: efficiency.moreControlDuplicateSuppressedCount,
     more_pagination_round_count: efficiency.morePaginationRoundCount,
     more_click_progress_count: efficiency.moreClickProgressCount,
+    more_settle_attribute_mutation_count: efficiency.moreSettleAttributeMutationCount,
+    more_settle_quiet_count: efficiency.moreSettleQuietCount,
+    more_settle_timeout_count: efficiency.moreSettleTimeoutCount,
+    more_viewport_deferred_count: efficiency.moreViewportDeferredCount,
+    more_click_inside_viewport_count: efficiency.moreClickInsideViewportCount,
+    more_click_outside_viewport_count: efficiency.moreClickOutsideViewportCount,
+    more_click_viewport_unknown_count: efficiency.moreClickViewportUnknownCount,
     more_click_no_progress_count: efficiency.moreClickNoProgressCount,
     more_reappeared_after_click_count: efficiency.moreReappearedAfterClickCount,
     more_reclick_allowed_count: efficiency.moreReclickAllowedCount,
@@ -1519,8 +1551,19 @@ async function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = 
     post_navigation_retry_input_count: efficiency.postNavigationRetryInputCount,
     post_navigation_retry_indices: (efficiency.postNavigationRetryIndices || []).join(","),
     post_navigation_retry_ms: efficiency.postNavigationRetryMs,
+    post_navigation_recovery_pass_count: efficiency.postNavigationRecoveryPassCount,
+    post_navigation_recovery_input_count: efficiency.postNavigationRecoveryInputCount,
+    post_navigation_recovery_resolved_count: efficiency.postNavigationRecoveryResolvedCount,
+    post_navigation_recovery_indices: efficiency.postNavigationRecoveryIndices,
+    post_navigation_recovery_ms: efficiency.postNavigationRecoveryMs,
     initial_dom_pass_ms: efficiency.initialDomPassChildRegionWaitMs,
     initial_dom_pass_resolved_count: efficiency.initialDomPassResolvedCount,
+    initial_dom_hydration_yield_count: efficiency.initialDomHydrationYieldCount,
+    initial_dom_hydration_yielded_project_index: efficiency.initialDomHydrationYieldedProjectIndex,
+    initial_dom_hydration_deferred_count: efficiency.initialDomHydrationDeferredIndices.length,
+    initial_dom_hydration_deferred_indices: efficiency.initialDomHydrationDeferredIndices,
+    deferred_dom_resume_count: efficiency.deferredDomResumeCount,
+    deferred_dom_resume_input_count: efficiency.deferredDomResumeInputCount,
     initial_dom_pass_unresolved_indices: (efficiency.initialDomPassUnresolvedIndices || []).join(","),
     navigation_identity_resolution_ms: efficiency.navigationIdentityResolutionMs,
     navigation_identity_resolved_index: efficiency.navigationIdentityResolvedIndex,
@@ -1559,6 +1602,33 @@ async function emitCollectorProjectDiscoveryEfficiencySummary(pending, result = 
 
 // Diagnostics deliberately whitelist identifiers and outcome fields. Never
 // include the pairing credential, session token, or Handoff payload here.
+function safeRootObservationTransitions(value) {
+  if (!Array.isArray(value)) return [];
+  const numbers = ["catalog_index", "observation_index", "source_snapshot", "target_snapshot",
+    "source_row_index", "target_row_index", "source_scroll_count", "target_scroll_count",
+    "source_more_click_count", "target_more_click_count", "source_stable_component_count",
+    "target_stable_component_count", "source_volatile_component_count", "target_volatile_component_count"];
+  const booleans = ["witness_available", "same_row_node", "same_parent_node", "same_sidebar_node",
+    "previous_row_connected", "previous_row_in_sidebar", "previous_row_visible",
+    "stable_locator_changed", "volatile_locator_changed", "aria_controls_changed", "row_id_changed",
+    "positional_attributes_changed", "stable_attributes_changed"];
+  const tokenNames = ["none", "aria-controls", "id", "data-index", "data-item-index", "aria-posinset"];
+  return value.slice(0, 64).filter((entry) => entry && typeof entry === "object"
+    && Number.isSafeInteger(entry.catalog_index) && entry.catalog_index >= 0).map((entry) => {
+    const safe = {};
+    for (const key of numbers) {
+      if (Number.isSafeInteger(entry[key]) && entry[key] >= 0) safe[key] = entry[key];
+    }
+    for (const key of booleans) {
+      if (typeof entry[key] === "boolean") safe[key] = entry[key];
+    }
+    for (const key of ["source_volatile_token_name", "target_volatile_token_name"]) {
+      if (tokenNames.includes(entry[key])) safe[key] = entry[key];
+    }
+    return safe;
+  });
+}
+
 function diagnostic(eventName, fields = {}) {
   const shouldEmit = collectorDebugTelemetryEnabled()
     || !isHighVolumeCollectorTelemetryStage(fields?.stage);
@@ -1724,6 +1794,23 @@ function diagnostic(eventName, fields = {}) {
     "nearest_interactive_ancestor_role",
     "row_is_menu_control",
     "row_is_overflow_control",
+    "row_is_disclosure_control",
+    "controlled_region_found",
+    "controlled_region_visible",
+    "controlled_region_element_count",
+    "controlled_region_project_chat_link_count",
+    "controlled_region_project_home_link_count",
+    "controlled_region_project_identity_present",
+    "controlled_region_identity_reason",
+    "aria_expanded_before",
+    "aria_expanded_after",
+    "disclosure_click_attempted",
+    "disclosure_click_dispatched",
+    "disclosure_event_fallback_attempted",
+    "disclosure_event_fallback_dispatched",
+    "disclosure_state_changed",
+    "disclosure_url_changed",
+    "disclosure_resolution_method",
     "row_interactive_evidence",
     "navigation_wait_started",
     "url_changed",
@@ -2016,6 +2103,9 @@ function diagnostic(eventName, fields = {}) {
     "root_hydration_run_count",
     "root_hydration_scroll_count",
     "root_catalog_build_count",
+    "root_expanded_project_count_at_start",
+    "root_shared_read_hit_count",
+    "root_row_enumeration_count",
     "root_catalog_reuse_count",
     "project_identity_attempt_count",
     "row_relocation_attempt_count",
@@ -2163,6 +2253,13 @@ function diagnostic(eventName, fields = {}) {
     "more_control_duplicate_suppressed_count",
     "more_pagination_round_count",
     "more_click_progress_count",
+    "more_settle_attribute_mutation_count",
+    "more_settle_quiet_count",
+    "more_settle_timeout_count",
+    "more_viewport_deferred_count",
+    "more_click_inside_viewport_count",
+    "more_click_outside_viewport_count",
+    "more_click_viewport_unknown_count",
     "more_click_no_progress_count",
     "more_reappeared_after_click_count",
     "more_reclick_allowed_count",
@@ -2266,6 +2363,9 @@ function diagnostic(eventName, fields = {}) {
     "slow_project_details",
     "identity_pass_kind",
     "timeout_ceiling_hit_count",
+    "dom_hydration_yielded",
+    "dom_hydration_yielded_project_index",
+    "dom_hydration_deferred_count",
     "timeout_ceiling_hit_indices",
     "early_escalation_count",
     "early_escalation_indices",
@@ -2273,6 +2373,9 @@ function diagnostic(eventName, fields = {}) {
     "resolved_identity_skipped_count",
     "resolved_identity_rechecked_count",
     "identity_inspect_count",
+    "identity_viewport_scroll_count",
+    "identity_viewport_wait_ms",
+    "identity_viewport_revalidation_failed_count",
     "identity_inspect_total_ms",
     "identity_row_validation_total_ms",
     "identity_owned_scan_total_ms",
@@ -2307,8 +2410,17 @@ function diagnostic(eventName, fields = {}) {
     "post_navigation_retry_input_count",
     "post_navigation_retry_indices",
     "post_navigation_retry_ms",
+    "post_navigation_recovery_pass_count",
+    "post_navigation_recovery_input_count",
+    "post_navigation_recovery_resolved_count",
+    "post_navigation_recovery_ms",
     "initial_dom_pass_ms",
     "initial_dom_pass_resolved_count",
+    "initial_dom_hydration_yield_count",
+    "initial_dom_hydration_yielded_project_index",
+    "initial_dom_hydration_deferred_count",
+    "deferred_dom_resume_count",
+    "deferred_dom_resume_input_count",
     "initial_dom_pass_unresolved_indices",
     "navigation_identity_resolution_ms",
     "navigation_identity_resolved_index",
@@ -2438,8 +2550,18 @@ function diagnostic(eventName, fields = {}) {
       .filter((value) => Number.isSafeInteger(value) && value >= 0)
       .slice(0, 5000);
   }
+  if (Array.isArray(fields.root_observation_transitions)) {
+    safe.root_observation_transitions = safeRootObservationTransitions(fields.root_observation_transitions);
+  }
+  if (typeof fields.compact_provisional_transitions === "string"
+    && fields.compact_provisional_transitions.length <= 16384
+    && /^\d+:(?:provisional_created|same_descriptor_fold)(?:>(?:provisional_created|same_descriptor_fold))*(?:,\d+:(?:provisional_created|same_descriptor_fold)(?:>(?:provisional_created|same_descriptor_fold))*)*$/.test(fields.compact_provisional_transitions)) {
+    safe.compact_provisional_transitions = fields.compact_provisional_transitions;
+  }
   for (const key of [
     "navigation_fallback_project_indices",
+    "initial_dom_hydration_deferred_indices",
+    "post_navigation_recovery_indices",
     "navigation_fallback_success_project_indices",
     "navigation_fallback_failure_project_indices",
     "slow_identity_project_indices",
@@ -2474,7 +2596,11 @@ function diagnostic(eventName, fields = {}) {
   if (Array.isArray(fields.failures)) {
     const failureKeys = new Set([
       "project_index",
+      "observation_role",
+      "snapshot_generation",
+      "occupancy_source_index",
       "unresolved_reason",
+      "identity_failure_reason",
       "identity_source",
       "stable_identity_candidate_count",
       "distinct_candidate_project_id_count",
@@ -4899,6 +5025,9 @@ function recordCollectorProjectDiscoveryResult(source, pending) {
       if (normalized !== null) efficiency[key] += normalized;
     };
     assignRootMetric("rootCatalogBuildCount", source?.root_catalog_build_count);
+    assignRootMetric("rootExpandedProjectCountAtStart", source?.root_expanded_project_count_at_start);
+    assignRootMetric("rootSharedReadHitCount", source?.root_shared_read_hit_count);
+    assignRootMetric("rootRowEnumerationCount", source?.root_row_enumeration_count);
     assignRootMetric("rootCatalogReuseCount", source?.root_catalog_reuse_count);
     addRootDuration("catalogBuildMs", source?.root_catalog_build_ms);
     addRootDuration("rootHydrationScrollWaitMs", source?.root_hydration_scroll_wait_ms);
@@ -4953,6 +5082,9 @@ function recordCollectorProjectDiscoveryResult(source, pending) {
     if (Array.isArray(source?.compact_provisional_transitions)) {
       efficiency.compactProvisionalTransitions = source.compact_provisional_transitions.join(",");
     }
+    if (Array.isArray(source?.root_observation_transitions)) {
+      efficiency.rootObservationTransitions = safeRootObservationTransitions(source.root_observation_transitions);
+    }
     if (Array.isArray(source?.provisional_created_indices)) {
       efficiency.provisionalCreatedIndices = source.provisional_created_indices.join(",");
     }
@@ -4985,6 +5117,13 @@ function recordCollectorProjectDiscoveryResult(source, pending) {
       "more_control_duplicate_suppressed_count");
     assignIntegrityMetric("morePaginationRoundCount", "more_pagination_round_count");
     assignIntegrityMetric("moreClickProgressCount", "more_click_progress_count");
+    assignIntegrityMetric("moreSettleAttributeMutationCount", "more_settle_attribute_mutation_count");
+    assignIntegrityMetric("moreSettleQuietCount", "more_settle_quiet_count");
+    assignIntegrityMetric("moreSettleTimeoutCount", "more_settle_timeout_count");
+    assignIntegrityMetric("moreViewportDeferredCount", "more_viewport_deferred_count");
+    assignIntegrityMetric("moreClickInsideViewportCount", "more_click_inside_viewport_count");
+    assignIntegrityMetric("moreClickOutsideViewportCount", "more_click_outside_viewport_count");
+    assignIntegrityMetric("moreClickViewportUnknownCount", "more_click_viewport_unknown_count");
     assignIntegrityMetric("moreClickNoProgressCount", "more_click_no_progress_count");
     assignIntegrityMetric("moreReappearedAfterClickCount", "more_reappeared_after_click_count");
     assignIntegrityMetric("moreReclickAllowedCount", "more_reclick_allowed_count");
@@ -6824,13 +6963,17 @@ function validateCollectorRootResult(source, pending) {
     pending?.projectDiscoveryEfficiency?.identityInputCount)
     ? pending.projectDiscoveryEfficiency.identityInputCount
     : 0;
-  const expectedLogicalCount = identityInputCount > 0
+  // Only the request-owned, successfully finalized catalog may reduce the
+  // expected count after proven duplicate observations have been reconciled.
+  const finalizedCount = pending?.finalizedProjectIdentityCount;
+  const hasFinalizedCount = Number.isSafeInteger(finalizedCount) && finalizedCount >= 0;
+  const expectedLogicalCount = hasFinalizedCount ? finalizedCount : identityInputCount > 0
     ? identityInputCount
     : scanCount;
-  if (expectedLogicalCount > 0) {
+  if (hasFinalizedCount || expectedLogicalCount > 0) {
     const finalCount = source.projects.length;
     if (finalCount < expectedLogicalCount
-      || finalCount > expectedLogicalCount + Math.max(0, provisionalCount)) {
+      || finalCount > expectedLogicalCount + (hasFinalizedCount ? 0 : Math.max(0, provisionalCount))) {
       return Math.max(
         1,
         Math.max(reportedUnresolved, resolution.unresolvedCount));
@@ -7107,6 +7250,19 @@ function collectorProjectIdentityDescriptor(project, projectIndex) {
       ? project.discovery_index
       : projectIndex
   };
+  // Background owns the observation role through DOM/navigation retries and
+  // finalization. Losing it turns a provisional observation into a confirmed
+  // Project. Position and lineage remain diagnostics, never duplicate proof.
+  if (project?.observation_role === "confirmed" || project?.observation_role === "provisional") {
+    descriptor.observation_role = project.observation_role;
+  }
+  for (const key of ["snapshot_generation", "occupancy_source_index"]) {
+    if (Number.isSafeInteger(project?.[key]) && project[key] >= 0) {
+      descriptor[key] = project[key];
+    }
+  }
+  const predecessorKey = safeContextIdentifier(project?.predecessor_discovery_key);
+  if (predecessorKey) descriptor.predecessor_discovery_key = predecessorKey;
   if (typeof project?.title === "string" && project.title.trim().length > 0) {
     descriptor.title = project.title.trim().slice(0, 512);
   }
@@ -7539,6 +7695,9 @@ const collectorProjectIdentityNavigationTelemetryKeys = [
   "slow_project_details",
   "identity_pass_kind",
   "timeout_ceiling_hit_count",
+  "dom_hydration_yielded",
+  "dom_hydration_yielded_project_index",
+  "dom_hydration_deferred_count",
   "timeout_ceiling_hit_indices",
   "early_escalation_count",
   "early_escalation_indices",
@@ -7546,6 +7705,9 @@ const collectorProjectIdentityNavigationTelemetryKeys = [
   "resolved_identity_skipped_count",
   "resolved_identity_rechecked_count",
   "identity_inspect_count",
+  "identity_viewport_scroll_count",
+  "identity_viewport_wait_ms",
+  "identity_viewport_revalidation_failed_count",
   "identity_inspect_total_ms",
   "identity_row_validation_total_ms",
   "identity_owned_scan_total_ms",
@@ -7625,6 +7787,7 @@ function recordCollectorProjectIdentityNavigationTelemetry(eventName, pending, f
 
 function emitCollectorProjectIdentityFailureSummary(pending, projects, errorCode = "context_projects_incomplete", collision = null) {
   if (!pending || pending.identityFailureSummaryEmitted === true) return;
+  const efficiency = pending.projectDiscoveryEfficiency || {};
   const resolution = collectProjectMetadataResolution({ projects });
   const collisionDetails = collision || stableProjectIdCollisionDetails(projects);
   const duplicateProjectIndices = typeof collisionDetails?.duplicate_project_indices === "string"
@@ -7649,12 +7812,17 @@ function emitCollectorProjectIdentityFailureSummary(pending, projects, errorCode
     const collisionDetected = collisionIndexes.includes(projectIndex);
     return {
       project_index: projectIndex,
+      observation_role: project?.observation_role === "provisional" ? "provisional" : "confirmed",
+      snapshot_generation: project?.snapshot_generation,
+      occupancy_source_index: project?.occupancy_source_index,
       unresolved_reason: collisionDetected
         ? "duplicate_stable_project_id"
         : (item?.unresolvedReason
           || (detail.unresolved_reason && detail.unresolved_reason !== "none"
             ? detail.unresolved_reason
             : "missing_stable_identity")),
+      identity_failure_reason: collisionDetected ? "duplicate_stable_project_id"
+        : (project?.unresolved_reason || detail.unresolved_reason || item?.unresolvedReason || "missing_stable_identity"),
       identity_source: detail.identity_source
         || project?.identity_source
         || "none",
@@ -7707,6 +7875,23 @@ function emitCollectorProjectIdentityFailureSummary(pending, projects, errorCode
     unresolved_project_count: resolution.unresolvedCount,
     unique_stable_project_id_count: collisionDetails?.unique_stable_project_id_count || 0,
     duplicate_stable_project_id_count: collisionDetails?.duplicate_stable_project_id_count || 0,
+    confirmed_logical_project_count_before_identity: efficiency.confirmedLogicalProjectCountBeforeIdentity || 0,
+    provisional_observation_count_before_identity: efficiency.provisionalObservationCountBeforeIdentity || 0,
+    provisional_created_indices: efficiency.provisionalCreatedIndices || "",
+    compact_provisional_transitions: efficiency.compactProvisionalTransitions || "",
+    root_observation_transitions: efficiency.rootObservationTransitions || [],
+    more_settle_attribute_mutation_count: efficiency.moreSettleAttributeMutationCount || 0,
+    more_settle_quiet_count: efficiency.moreSettleQuietCount || 0,
+    more_settle_timeout_count: efficiency.moreSettleTimeoutCount || 0,
+    more_viewport_deferred_count: efficiency.moreViewportDeferredCount || 0,
+    more_click_inside_viewport_count: efficiency.moreClickInsideViewportCount || 0,
+    more_click_outside_viewport_count: efficiency.moreClickOutsideViewportCount || 0,
+    more_click_viewport_unknown_count: efficiency.moreClickViewportUnknownCount || 0,
+    post_navigation_recovery_pass_count: efficiency.postNavigationRecoveryPassCount || 0,
+    post_navigation_recovery_input_count: efficiency.postNavigationRecoveryInputCount || 0,
+    post_navigation_recovery_resolved_count: efficiency.postNavigationRecoveryResolvedCount || 0,
+    post_navigation_recovery_indices: efficiency.postNavigationRecoveryIndices || [],
+    post_navigation_recovery_ms: efficiency.postNavigationRecoveryMs || 0,
     failed_project_indices: failedIndexes,
     failures,
     status: "error",
@@ -8421,20 +8606,34 @@ async function applyCollectorDomIdentityPass(
   request,
   rootResult,
   projects,
-  { resetSidebarCatalog = false, afterNavigation = false, identityCatalog = null } = {}) {
+  { resetSidebarCatalog = false, afterNavigation = false, identityCatalog = null,
+    yieldAfterHydrationTimeout = false, projectIndexes = null, identityPassKind = null } = {}) {
   const efficiency = collectorProjectDiscoveryEfficiencyFor(pending);
   const startedAt = Date.now();
+  const passKind = identityPassKind || (afterNavigation ? "post_navigation" : "initial_dom");
   const catalog = Array.isArray(identityCatalog) && identityCatalog.length > 0
     ? identityCatalog
     : projects;
   const unresolvedProjects = (Array.isArray(projects) ? projects : [])
     .filter((project) => !collectorProjectTarget(project));
-  const dispatchProjects = unresolvedProjects.length > 0 ? unresolvedProjects : projects;
-  if (efficiency && afterNavigation) {
+  const requestedIndexes = Array.isArray(projectIndexes) ? new Set(projectIndexes) : null;
+  const dispatchProjects = (unresolvedProjects.length > 0 ? unresolvedProjects : projects)
+    .filter((project) => !requestedIndexes || requestedIndexes.has(project.project_index));
+  if (dispatchProjects.length === 0) {
+    return { projects, newlyResolved: 0, yieldedProjectIndex: null, deferredProjectIndexes: [] };
+  }
+  if (efficiency && afterNavigation && passKind !== "post_navigation_recovery") {
     efficiency.postNavigationRetryInputCount = dispatchProjects.length;
     efficiency.postNavigationRetryIndices = dispatchProjects
       .map((project) => project?.project_index)
       .filter((index) => Number.isSafeInteger(index));
+  }
+  if (efficiency && passKind === "post_navigation_recovery") {
+    efficiency.postNavigationRecoveryPassCount += 1;
+    efficiency.postNavigationRecoveryInputCount += dispatchProjects.length;
+    efficiency.postNavigationRecoveryIndices.push(...dispatchProjects.map((project) => project.project_index));
+    efficiency.rootReturnDomRefreshCount += 1;
+    efficiency.rootReturnCacheInvalidationCount += 1;
   }
   pending.identityTelemetryActive = true;
   let domResult;
@@ -8451,7 +8650,8 @@ async function applyCollectorDomIdentityPass(
       identityCatalog: catalog,
       totalProjects: catalog.length,
       resetSidebarCatalog: resetSidebarCatalog === true,
-      identityPassKind: afterNavigation ? "post_navigation" : "initial_dom",
+      identityPassKind: passKind,
+      yieldAfterHydrationTimeout: yieldAfterHydrationTimeout === true,
       navigationTimeoutMs: 10000,
       disclosureTimeoutMs: 2500,
       childRegionWaitPolicy: "hydrate",
@@ -8462,12 +8662,44 @@ async function applyCollectorDomIdentityPass(
     });
   } finally {
     pending.identityTelemetryActive = false;
+    if (efficiency && passKind === "post_navigation_recovery") {
+      efficiency.postNavigationRecoveryMs += Math.max(0, Date.now() - startedAt);
+    }
   }
   throwIfCollectorRequestSuperseded(pending);
   validateCollectorProjectIdentityResponse(domResult, pending);
   const beforeDom = projects;
   const merged = mergeCollectorProjectIdentityResponse(projects, domResult);
-  if (efficiency && !afterNavigation) {
+  let yieldedProjectIndex = null;
+  let deferredProjectIndexes = [];
+  if (domResult.dom_hydration_yielded === true) {
+    yieldedProjectIndex = domResult.dom_hydration_yielded_project_index;
+    const yieldedPosition = dispatchProjects.findIndex((project) => project.project_index === yieldedProjectIndex);
+    const expectedDeferred = dispatchProjects.slice(yieldedPosition + 1)
+      .filter((project) => !collectorProjectTarget(merged[project.project_index]))
+      .map((project) => project.project_index);
+    const deferred = domResult.dom_hydration_deferred_indices;
+    const valid = yieldAfterHydrationTimeout === true && passKind === "initial_dom"
+      && Number.isSafeInteger(yieldedProjectIndex) && yieldedPosition >= 0
+      && collectorProjectNavigationEligible(merged[yieldedProjectIndex])
+      && Array.isArray(deferred) && deferred.length > 0
+      && deferred.length === expectedDeferred.length
+      && deferred.every((index, position) => index === expectedDeferred[position]
+        && collectorProjectIdentityResponseItem(domResult.projects, index, projects.length));
+    if (!valid) {
+      throw bridgeError("Project Identityの保留対象が要求と一致しません。", 0, "context_response_invalid");
+    }
+    deferredProjectIndexes = [...deferred];
+    if (efficiency) {
+      efficiency.initialDomHydrationYieldCount += 1;
+      efficiency.initialDomHydrationYieldedProjectIndex = yieldedProjectIndex;
+      efficiency.initialDomHydrationDeferredIndices = [...deferred];
+    }
+  } else if (Array.isArray(domResult.dom_hydration_deferred_indices)
+    && domResult.dom_hydration_deferred_indices.length > 0) {
+    throw bridgeError("Project Identityの保留状態が不正です。", 0, "context_response_invalid");
+  }
+  if (efficiency && passKind === "initial_dom") {
     efficiency.initialDomPassUnresolvedIndices = collectProjectMetadataResolution({ projects: merged }).items
       .filter((item) => !item.resolved)
       .map((item) => item.projectIndex);
@@ -8485,7 +8717,14 @@ async function applyCollectorDomIdentityPass(
     efficiency.postNavigationIdentityWaitMs += Math.max(0, Date.now() - startedAt);
     efficiency.postNavigationRetryMs += Math.max(0, Date.now() - startedAt);
   }
-  return { projects: merged, newlyResolved };
+  if (efficiency && passKind === "resumed_dom") {
+    efficiency.deferredDomResumeCount += 1;
+    efficiency.deferredDomResumeInputCount += dispatchProjects.length;
+  }
+  if (efficiency && passKind === "post_navigation_recovery") {
+    efficiency.postNavigationRecoveryResolvedCount += newlyResolved;
+  }
+  return { projects: merged, newlyResolved, yieldedProjectIndex, deferredProjectIndexes };
 }
 
 async function resolveCollectorProjectIdentities(tab, pending, request, rootResult) {
@@ -8587,14 +8826,19 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
   let nonNavigationResolvedCount = initialResolution.resolvedCount;
   let navigationResolvedCount = 0;
   let domChecked = initialResolution.resolvedCount > 0;
+  let deferredDomProjectIndexes = [];
+  let yieldedDomProjectIndex = null;
   if (initialUnresolvedIndexes.length > 0) {
     const domPass = await applyCollectorDomIdentityPass(
       tab,
       pending,
       request,
       rootResult,
-      projects);
+      projects,
+      { yieldAfterHydrationTimeout: true });
     projects = domPass.projects;
+    deferredDomProjectIndexes = domPass.deferredProjectIndexes;
+    yieldedDomProjectIndex = domPass.yieldedProjectIndex;
     nonNavigationResolvedCount += domPass.newlyResolved;
     domChecked = true;
     const efficiencyAfterDom = collectorProjectDiscoveryEfficiencyFor(pending);
@@ -8632,6 +8876,7 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
   const visibilityRecoverySuccessIndexes = [];
   const visibilityRecoveryFailureIndexes = [];
   const terminalNavigationIndexes = new Set();
+  const postNavigationRecoveryAttemptedIndexes = new Set();
   const navigationNotStartedIndexes = [];
   const selectedForNavigationIndexes = new Set();
   let visibilityRecoveryScrollAttemptCount = 0;
@@ -8655,6 +8900,34 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
   let navigationLoopIterationCount = 0;
   const navigationAttemptLimit = projects.length;
   while (true) {
+    const yieldedFallbackPending = Number.isSafeInteger(yieldedDomProjectIndex)
+      && !navigationStartedIndexes.has(yieldedDomProjectIndex)
+      && !terminalNavigationIndexes.has(yieldedDomProjectIndex)
+      && collectorProjectNavigationEligible(projects[yieldedDomProjectIndex]);
+    if (deferredDomProjectIndexes.length > 0 && !yieldedFallbackPending) {
+      // A failed/ineligible fallback must not send untouched rows directly to
+      // navigation or leave them untested. Resume their full DOM hydration first.
+      tab = await navigateCollectorTab(tab, COLLECTOR_TAB_URL, {
+        request_id: pending.requestId,
+        stage: "collector_project_identity_deferred_dom_root"
+      });
+      tab = await ensureCollectorReady(tab, {
+        request_id: pending.requestId,
+        stage: "collector_project_identity_deferred_dom_ready"
+      });
+      pending.tabId = tab.id;
+      if (!isCollectorRootUrl(tab?.url)) {
+        throw bridgeError("Project Identity用のRootページを確認できませんでした。", 0,
+          "collector_project_identity_root_not_verified");
+      }
+      const resumed = await applyCollectorDomIdentityPass(tab, pending, request, rootResult, projects, {
+        resetSidebarCatalog: true, identityCatalog: projects,
+        identityPassKind: "resumed_dom", projectIndexes: deferredDomProjectIndexes
+      });
+      projects = resumed.projects;
+      nonNavigationResolvedCount += resumed.newlyResolved;
+      deferredDomProjectIndexes = [];
+    }
     const unresolvedItems = collectProjectMetadataResolution({ projects }).items
       .filter((item) => !item.resolved);
     const unresolvedIndexes = unresolvedItems.map((item) => item.projectIndex);
@@ -9184,6 +9457,7 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
         projects,
         { resetSidebarCatalog: true, afterNavigation: true, identityCatalog: projects });
       projects = retry.projects;
+      deferredDomProjectIndexes = [];
       nonNavigationResolvedCount += retry.newlyResolved;
       recordCollectorProjectIdentityResolution(
         "collector project identity DOM resolution observed",
@@ -9202,7 +9476,31 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
           status: "observed",
           stage: "collector_project_identity_dom_after_root_return"
         });
+      const recoveryIndexes = projects.flatMap((project, index) =>
+        !collectorProjectTarget(project)
+        && !postNavigationRecoveryAttemptedIndexes.has(index)
+        && (project?.unresolved_reason === "project_row_fingerprint_mismatch"
+          || project?.unresolved_reason === "row_visibility_exhausted") ? [index] : []);
+      if (recoveryIndexes.length > 0) {
+        recoveryIndexes.forEach((index) => postNavigationRecoveryAttemptedIndexes.add(index));
+        // Root can replace a row during the first disclosure/scroll pass. A
+        // fresh invocation re-enumerates the affected rows under the original
+        // catalog constraints. Each index gets at most one such extra pass.
+        const recovery = await applyCollectorDomIdentityPass(tab, pending, request, rootResult, projects, {
+          resetSidebarCatalog: true, afterNavigation: true, identityCatalog: projects,
+          identityPassKind: "post_navigation_recovery", projectIndexes: recoveryIndexes
+        });
+        projects = recovery.projects;
+        nonNavigationResolvedCount += recovery.newlyResolved;
+        recordCollectorProjectIdentityResolution("collector project identity DOM recovery observed", pending, projects, {
+          project_identity_resolution_started: true, project_identity_resolution_completed: false,
+          non_navigation_resolved_count: nonNavigationResolvedCount, navigation_resolved_count: navigationResolvedCount,
+          current_project_index: -1, resolution_method: "dom", status: "observed",
+          stage: "collector_project_identity_dom_recovery"
+        });
+      }
     }
+    if (remainingAfterReturn.length === 0) deferredDomProjectIndexes = [];
     } catch (error) {
       if (!isCurrentCollectorRequest(pending)) throw error;
       const exitReason = navigationFailureReason
@@ -9468,6 +9766,7 @@ async function resolveCollectorProjectIdentities(tab, pending, request, rootResu
       status: "completed",
       stage: "collector_project_identity_resolution_complete"
     });
+  pending.finalizedProjectIdentityCount = projects.length;
   return {
     ...rootResult,
     projects,

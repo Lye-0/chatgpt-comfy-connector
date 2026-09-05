@@ -5,6 +5,41 @@
   "use strict";
 
   const collectorSlowIdentityMs = 2000;
+  // Read sharing lives only on this synchronous stack. Never keep it across a
+  // click, await, scroll, telemetry callback or a subsequent DOM inspection.
+  let projectIdentityReadScope = null;
+
+  function withProjectIdentityReadScope(read, stats = null) {
+    if (projectIdentityReadScope) return read();
+    projectIdentityReadScope = { reads: new Map(), stats };
+    try { return read(); }
+    finally { projectIdentityReadScope = null; }
+  }
+
+  function sharedProjectIdentityRead(kind, args, read) {
+    const scope = projectIdentityReadScope;
+    if (!scope) return read();
+    let entries = scope.reads;
+    for (const key of [kind, ...args]) {
+      if (!entries.has(key)) entries.set(key, new Map());
+      entries = entries.get(key);
+    }
+    if (entries.has("value")) {
+      if (scope.stats) scope.stats.sharedReadHits += 1;
+      return entries.get("value");
+    }
+    if (kind === "row_candidates" && scope.stats) scope.stats.rowEnumerations += 1;
+    const value = read();
+    entries.set("value", value);
+    return value;
+  }
+
+  function measureProjectIdentityInspection(stats, read) {
+    const startedAt = Date.now();
+    stats.inspectCount += 1;
+    try { return withProjectIdentityReadScope(read, stats); }
+    finally { stats.inspectMs += Math.max(0, Date.now() - startedAt); }
+  }
   // Deliberately document/Sidebar/mount scoped: no durable lineage token exists
   // for a remounted row. Never promote discovery hashes to persistent identity.
   const projectIdentityReuseScopes = new WeakMap();
@@ -1015,12 +1050,20 @@
   }
 
   function findSidebarRoot(root = globalThis.document) {
+    return sharedProjectIdentityRead("sidebar", [root], () => readSidebarRoot(root));
+  }
+
+  function readSidebarRoot(root) {
     const matches = uniqueElements(sidebarRootSelectors, root)
       .filter((element) => element !== root);
     return matches[0] || root;
   }
 
   function projectRowCandidatesInSidebar(sidebar) {
+    return sharedProjectIdentityRead("row_candidates", [sidebar], () => readProjectRowCandidatesInSidebar(sidebar));
+  }
+
+  function readProjectRowCandidatesInSidebar(sidebar) {
     if (!sidebar?.querySelectorAll) return [];
     return sortInDocumentOrder(uniqueElements(projectRowSelectors, sidebar)
       .filter((element) => element?.isConnected !== false && !isMoreButton(element)));
@@ -1056,6 +1099,10 @@
   }
 
   function projectRowsInSidebar(sidebar, baseUrl = globalThis.location?.href) {
+    return sharedProjectIdentityRead("rows", [sidebar, baseUrl], () => readProjectRowsInSidebar(sidebar));
+  }
+
+  function readProjectRowsInSidebar(sidebar) {
     const classified = classifySidebarProjectRowCandidates(projectRowCandidatesInSidebar(sidebar));
     return classified.accepted.filter((element) => isVisible(element));
   }
@@ -1887,6 +1934,10 @@
   }
 
   function inspectOwnedProjectIdentityFromRow(root, row, descriptor, baseUrl) {
+    return withProjectIdentityReadScope(() => readOwnedProjectIdentityFromRow(root, row, descriptor, baseUrl));
+  }
+
+  function readOwnedProjectIdentityFromRow(root, row, descriptor, baseUrl) {
     if (!row) {
       return { identity: null, structure: null, reason: "project_row_not_found" };
     }
@@ -3500,6 +3551,10 @@
   }
 
   function projectDisclosureRegionForRow(row, root = row?.ownerDocument || globalThis.document) {
+    return sharedProjectIdentityRead("region", [row, root], () => readProjectDisclosureRegionForRow(row, root));
+  }
+
+  function readProjectDisclosureRegionForRow(row, root) {
     const controls = attributeValue(row, "aria-controls").trim();
     if (!controls) return null;
     const baseUrl = documentHref(root);
@@ -3519,6 +3574,10 @@
   }
 
   function projectExclusiveAdjacentListElements(row, root = row?.ownerDocument || globalThis.document, baseUrl = documentHref(root)) {
+    return sharedProjectIdentityRead("adjacent", [row, root, baseUrl], () => readProjectExclusiveAdjacentListElements(row, root, baseUrl));
+  }
+
+  function readProjectExclusiveAdjacentListElements(row, root, baseUrl) {
     const elements = [];
     const seen = new Set();
     if (!row) return elements;
@@ -3580,6 +3639,10 @@
   }
 
   function projectDisclosureElements(region) {
+    return sharedProjectIdentityRead("region_elements", [region], () => readProjectDisclosureElements(region));
+  }
+
+  function readProjectDisclosureElements(region) {
     if (!region) return [];
     const elements = [region];
     try { elements.push(...Array.from(region.querySelectorAll?.("*") || [])); } catch (_) { }
@@ -3641,6 +3704,10 @@
   }
 
   function projectIdentityPrimaryElementsForRow(row, baseUrl = globalThis.location?.href) {
+    return sharedProjectIdentityRead("primary_elements", [row, baseUrl], () => readProjectIdentityPrimaryElementsForRow(row, baseUrl));
+  }
+
+  function readProjectIdentityPrimaryElementsForRow(row, baseUrl) {
     const elements = [];
     const seen = new Set();
     addProjectIdentityElement(elements, seen, row);
@@ -3680,6 +3747,10 @@
   }
 
   function projectIdentityShellElementsForRow(row, baseUrl = globalThis.location?.href) {
+    return sharedProjectIdentityRead("shell_elements", [row, baseUrl], () => readProjectIdentityShellElementsForRow(row, baseUrl));
+  }
+
+  function readProjectIdentityShellElementsForRow(row, baseUrl) {
     const primary = new Set(projectIdentityPrimaryElementsForRow(row, baseUrl));
     const elements = [];
     const seen = new Set(primary);
@@ -5032,7 +5103,12 @@
     let observerWakeCount = 0;
     let observerWakeWithoutTargetProgressCount = 0;
     let postClickImmediateScanMs = 0;
-    const before = projectDisclosureStructureForRow(row, root, baseUrl);
+    const readStats = options.identityReadStats || {
+      inspectCount: 0, inspectMs: 0, rowValidationMs: 0, ownedScanMs: 0,
+      sharedReadHits: 0, rowEnumerations: 0
+    };
+    const before = withProjectIdentityReadScope(
+      () => projectDisclosureStructureForRow(row, root, baseUrl), readStats);
     let after = before;
     let lastReason = before.controlledRegionFound
       ? before.controlledRegionIdentityReason
@@ -5051,9 +5127,13 @@
       } catch (_) { }
       return row;
     };
-    const inspect = () => {
+    const inspect = () => measureProjectIdentityInspection(readStats, () => {
+      const validationStartedAt = Date.now();
       currentRow();
+      readStats.rowValidationMs += Math.max(0, Date.now() - validationStartedAt);
+      const ownedStartedAt = Date.now();
       const owned = inspectOwnedProjectIdentityFromRow(root, row, descriptor, baseUrl);
+      readStats.ownedScanMs += Math.max(0, Date.now() - ownedStartedAt);
       after = owned.structure || after;
       lastReason = owned.reason || lastReason;
       let identity = owned.identity;
@@ -5077,7 +5157,7 @@
       if (identity) lastReason = "none";
       else if (urlChanged) lastReason = "disclosure_navigation_target_not_project";
       return identity;
-    };
+    });
     let clickCompletedAt = null;
     const result = (identity, reason = null) => {
       const now = Date.now();
@@ -5437,6 +5517,10 @@
     }));
     let relocation = null;
     let identityReuse = null;
+    const identityReadStats = {
+      inspectCount: 0, inspectMs: 0, rowValidationMs: 0, ownedScanMs: 0,
+      sharedReadHits: 0, rowEnumerations: 0
+    };
     const identityVisibility = {
       identityAttemptsWhileHidden: 0,
       identityAttemptsWhileVisible: 0,
@@ -5660,6 +5744,12 @@
       }).join(",");
       emitNavigationTelemetry("collector_project_identity_phase_performance_summary", {
         total_projects: output.length,
+        identity_inspect_count: identityReadStats.inspectCount,
+        identity_inspect_total_ms: identityReadStats.inspectMs,
+        identity_row_validation_total_ms: identityReadStats.rowValidationMs,
+        identity_owned_scan_total_ms: identityReadStats.ownedScanMs,
+        identity_shared_read_hit_count: identityReadStats.sharedReadHits,
+        identity_row_enumeration_count: identityReadStats.rowEnumerations,
         incremental_reuse_eligible_count: identityReuse?.stats.eligible || 0,
         incremental_reuse_hit_count: identityReuse?.stats.reused || 0,
         incremental_reuse_miss_count: identityReuse?.stats.missed || 0,
@@ -5919,6 +6009,12 @@
       "early_escalation_reason_counts",
       "resolved_identity_skipped_count",
       "resolved_identity_rechecked_count",
+      "identity_inspect_count",
+      "identity_inspect_total_ms",
+      "identity_row_validation_total_ms",
+      "identity_owned_scan_total_ms",
+      "identity_shared_read_hit_count",
+      "identity_row_enumeration_count",
       "incremental_reuse_eligible_count",
       "incremental_reuse_hit_count",
       "incremental_reuse_miss_count",
@@ -5971,11 +6067,8 @@
       const pass1Sidebar = findIdentitySidebarRoot(root);
       identityReuse = createProjectIdentityReusePass(root, pass1Sidebar, identityCatalog, baseUrl);
       const pass1Rows = projectRowsInSidebar(pass1Sidebar, baseUrl);
-      const pass1Fingerprints = pass1Rows.map((row, index) => projectRowFingerprint(
-        row,
-        visibleTitleFromElement(row, ""),
-        index,
-        baseUrl));
+      const pass1Fingerprints = pass1Rows.map((row, index) => withProjectIdentityReadScope(
+        () => projectRowFingerprint(row, visibleTitleFromElement(row, ""), index, baseUrl), identityReadStats));
       for (let index = 0; index < output.length; index += 1) {
         const descriptor = output[index];
         const projectIndex = Number.isSafeInteger(descriptor.project_index)
@@ -5997,7 +6090,12 @@
           ? relocation.row
           : null;
         if (!row) continue;
-        const owned = inspectOwnedProjectIdentityFromRow(root, row, descriptor, baseUrl);
+        const owned = measureProjectIdentityInspection(identityReadStats, () => {
+          const startedAt = Date.now();
+          const result = inspectOwnedProjectIdentityFromRow(root, row, descriptor, baseUrl);
+          identityReadStats.ownedScanMs += Math.max(0, Date.now() - startedAt);
+          return result;
+        });
         const beforeKey = identityReuse.capture(row, descriptor);
         const reused = identityReuse.inspect(row, owned, beforeKey);
         if (reused) owned.identity = reused;
@@ -6155,6 +6253,7 @@
               descriptor,
               baseUrl,
               {
+                identityReadStats,
                 navigationTimeoutMs: options.navigationTimeoutMs,
                 disclosureTimeoutMs: options.disclosureTimeoutMs,
                 childRegionWaitPolicy: options.childRegionWaitPolicy || "hydrate",

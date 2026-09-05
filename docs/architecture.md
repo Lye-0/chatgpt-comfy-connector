@@ -361,6 +361,25 @@ queued disclosure toggle or abandoning a region that mounts after the probe
 deadline. The owned-evidence, fingerprint and navigation validation rules remain
 in effect.
 
+Within a single synchronous Identity inspection, Sidebar row enumeration,
+controlled-region ownership results and candidate-element lists are shared by
+the fingerprint and owned-identity readers. The sharing scope is released in
+`finally` before any click, await or telemetry callback. A later inspection
+re-reads the DOM, including region owners and all conflicting candidate IDs.
+Only Identity inspection and its immediate-pass fingerprint reads activate this
+scope; selected-Project Chat retrieval does not. This avoids repeating Sidebar
+enumeration for every child Chat without reusing identity across refreshes.
+
+The phase performance summary additionally reports `identity_inspect_count`,
+`identity_inspect_total_ms`, `identity_row_validation_total_ms`,
+`identity_owned_scan_total_ms`, `identity_shared_read_hit_count` and
+`identity_row_enumeration_count`. Row validation and owned scan are components
+of inspection time, not extra durations to add to it. Shared-read and enumeration
+counts include immediate-pass fingerprint and pre-disclosure structure reads;
+inspection time covers the immediate owned scan and each disclosure inspection.
+`identity_child_region_wait_ms` remains the full elapsed interval after click,
+including inspection and event-loop scheduling, rather than pure observer wait.
+
 Before `handoff.send`, the
 Background requires Content Script, Conversation, Composer, and shared
 assistant-response watcher readiness. The watcher is pre-registered with the

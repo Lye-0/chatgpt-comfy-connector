@@ -7372,6 +7372,89 @@ function assertProject(projects, projectId) {
   return project;
 }
 
+test("one synchronous identity inspection shares Sidebar enumeration across child candidates", async (t) => {
+  const document = new FakeMetadataDocument("https://chatgpt.com/", null);
+  const sidebar = new FakeSidebar(document, Array.from({ length: 28 }, (_, index) => `Shared ${index}`), [], null, null, []);
+  sidebar.itemWindow = 28;
+  document.sidebar = sidebar;
+  sidebar.projectRows.forEach((row, index) => {
+    attachExclusiveChildChats(document, row, `shared-${index}`, `g-p-shared-${index}`, 8);
+  });
+  let rowQueries = 0;
+  const query = sidebar.querySelectorAll.bind(sidebar);
+  sidebar.querySelectorAll = (selector) => {
+    if (selector.includes("data-sidebar-item")) rowQueries += 1;
+    return query(selector);
+  };
+  const locators = loadLocators(document);
+  const result = await locators.resolveChatGptProjectIdentitiesAsync(
+    document, document.location.href, identityCatalogFromSidebar(sidebar), { identityMode: "dom" });
+  assert.equal(result.unresolved_count, 0);
+  assert.equal(result.projects.length, 28);
+  assert.equal(new Set(result.projects.map((project) => project.project_id)).size, 28);
+  // Bound actual expensive DOM enumeration, not elapsed machine time. Adding
+  // child candidates must not repeatedly enumerate the entire Sidebar.
+  assert.ok(rowQueries < 200, `Sidebar row queries: ${rowQueries}`);
+  t.diagnostic(`Sidebar row queries: ${rowQueries}`);
+});
+
+test("synchronous identity reads revalidate shared-region ownership after an await", async () => {
+  const fixture = incrementalIdentityFixture(2, false, { setTimeout, clearTimeout });
+  const catalog = fixture.catalog();
+  const firstRow = fixture.sidebar.projectRows[0];
+  let timer;
+  firstRow.click = () => {
+    firstRow.attributes.set("aria-expanded", "true");
+    timer = setTimeout(() => {
+      // The same physical region gains a second owner while the first row waits.
+      fixture.sidebar.projectRows[1].attributes.set("aria-controls", "reuse-region-0");
+      fixture.regions[0].appendChild(new FakeMetadataNode(fixture.document, "A", "Chat", {
+        href: "/g/g-p-shared-foreign/c/chat"
+      }));
+    }, 30);
+  };
+  try {
+    const result = await fixture.locators.resolveChatGptProjectIdentitiesAsync(
+      fixture.document, fixture.document.location.href, catalog,
+      { identityMode: "dom", identityCatalog: catalog, disclosureTimeoutMs: 250 });
+    assert.equal(result.projects.some((project) => project.project_id === "g-p-shared-foreign"), false);
+    assert.equal(result.unresolved_count, 2);
+  } finally { clearTimeout(timer); }
+});
+
+test("synchronous identity reads recheck a new conflicting child on the next resolver call", async () => {
+  const fixture = incrementalIdentityFixture(1, false);
+  const catalog = fixture.catalog();
+  fixture.sidebar.projectRows[0].click();
+  assert.equal((await fixture.run(catalog)).result.unresolved_count, 0);
+  fixture.regions[0].appendChild(new FakeMetadataNode(fixture.document, "A", "Other", {
+    href: "/g/g-p-conflicting-new-child/c/chat"
+  }));
+  const next = await fixture.run(catalog);
+  assert.equal(next.result.unresolved_count, 1);
+  assert.equal(next.result.projects[0].project_id, undefined);
+});
+
+test("identity inspection telemetry separates synchronous inspection from observer waiting", async () => {
+  const fixture = incrementalIdentityFixture(1, false, { setTimeout, clearTimeout });
+  const row = fixture.sidebar.projectRows[0];
+  const click = row.click;
+  let timer;
+  row.click = () => {
+    row.attributes.set("aria-expanded", "true");
+    timer = setTimeout(click, 50);
+  };
+  try {
+    const { result, phase } = await fixture.run();
+    assert.equal(result.unresolved_count, 0);
+    assert.ok(phase.identity_inspect_count >= 3);
+    assert.ok(phase.identity_shared_read_hit_count > 0);
+    assert.ok(phase.identity_row_enumeration_count > 0);
+    assert.ok(phase.identity_inspect_total_ms >= phase.identity_row_validation_total_ms + phase.identity_owned_scan_total_ms);
+    assert.ok(phase.per_project_poll_wait_total_ms >= 30);
+  } finally { clearTimeout(timer); }
+});
+
 test("batch immediate exclusive child evidence resolves 28 Projects without disclosure click", async () => {
   const rootHref = "https://chatgpt.com/";
   const document = new FakeMetadataDocument(rootHref, null);

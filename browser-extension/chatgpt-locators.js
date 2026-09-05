@@ -560,8 +560,10 @@
       ? `stable:${stableParts.join("|")}`
       : (volatileParts.length > 0 ? `volatile:${volatileParts.join("|")}` : `position:${position}`);
     const discoveryKey = stableMetadataKey("project", `${identityToken}:${titleKey}`);
+    // Title is a current-mount observation aid only. A remount-stable locator
+    // must survive title extraction jitter and must not treat title as identity.
     const stableLocatorKey = stableParts.length > 0
-      ? stableMetadataKey("stable", `${stableParts.join("|")}:${titleKey}`)
+      ? stableMetadataKey("stable", stableParts.join("|"))
       : null;
     const volatileLocatorKey = volatileParts.length > 0
       ? stableMetadataKey("volatile", `${volatileParts.join("|")}:${titleKey}`)
@@ -1501,6 +1503,17 @@
     return height > client && top < Math.max(0, height - client) - 1;
   }
 
+  function scrollContainerCanRetreat(container) {
+    if (!container || typeof container.scrollTop !== "number") return false;
+    return (Number(container.scrollTop) || 0) > 1;
+  }
+
+  function scrollContainerCanMove(container, direction) {
+    return direction < 0
+      ? scrollContainerCanRetreat(container)
+      : scrollContainerCanAdvance(container);
+  }
+
   function findIdentityScrollContainer(root = globalThis.document, sidebarOverride = null) {
     const sidebar = sidebarOverride || findIdentitySidebarRoot(root);
     const connectedRows = projectRowCandidatesInSidebar(sidebar);
@@ -1933,8 +1946,48 @@
       stableEvidenceReconcileCount: 0,
       ambiguousSameTitleReconcileCount: 0,
       provisionalObservationCreatedCount: 0,
-      provisionalObservationReusedCount: 0
+      provisionalObservationReusedCount: 0,
+      uniqueTitleVolatileRemountCount: 0,
+      provisionalFoldedSameDescriptorCount: 0,
+      provisionalSameProjectIdProofCount: 0,
+      provisionalSameStableLocatorProofCount: 0,
+      provisionalLineageProofCount: 0,
+      provisionalCreatedIndices: [],
+      provisionalMergedExistingIndices: [],
+      confirmedFingerprintChangedIndices: [],
+      stableLocatorChangedIndices: [],
+      discoveryKeyChangedIndices: [],
+      compactProvisionalTransitions: []
     };
+  }
+
+  function snapshotDiscoveryKeySet(projects) {
+    const keys = new Set();
+    for (const project of projects || []) {
+      const key = metadataIdentifier(project?.discovery_key || project?.discoveryKey);
+      if (key) keys.add(key);
+    }
+    return keys;
+  }
+
+  function recordCatalogIndex(list, index) {
+    if (!Array.isArray(list) || !Number.isSafeInteger(index) || index < 0) return;
+    if (!list.includes(index)) list.push(index);
+  }
+
+  function recordProvisionalTransition(stats, catalogIndex, token) {
+    if (!stats || !Number.isSafeInteger(catalogIndex) || catalogIndex < 0 || !token) return;
+    if (!Array.isArray(stats.compactProvisionalTransitions)) stats.compactProvisionalTransitions = [];
+    const prefix = `${catalogIndex}:`;
+    const existing = stats.compactProvisionalTransitions.find((entry) =>
+      typeof entry === "string" && entry.startsWith(prefix));
+    if (existing) {
+      const next = `${existing}>${token}`;
+      const position = stats.compactProvisionalTransitions.indexOf(existing);
+      stats.compactProvisionalTransitions[position] = next;
+      return;
+    }
+    stats.compactProvisionalTransitions.push(`${prefix}${token}`);
   }
 
   function observationIdentityKey(item) {
@@ -1995,6 +2048,7 @@
         && options.occupancySourceIndex >= 0
         ? options.occupancySourceIndex
         : null,
+      predecessor_discovery_key: metadataIdentifier(options.predecessorDiscoveryKey) || null,
       row_metadata_present: Boolean(metadataIdentifier(item?.discovery_key || item?.discoveryKey)),
       child_identity_candidate_available: Boolean(
         stableProjectIdFromValue(item?.project_id || item?.projectId)
@@ -2005,8 +2059,72 @@
     if (stats) {
       stats.provisionalObservationCreatedCount += 1;
       stats.titleOnlyObservationPreservedCount += 1;
+      recordCatalogIndex(stats.provisionalCreatedIndices, options.occupancySourceIndex);
+      recordProvisionalTransition(
+        stats,
+        options.occupancySourceIndex,
+        "provisional_created");
     }
     return created;
+  }
+
+  function uniqueTitleVolatileRemountTarget(catalog, item, options = {}) {
+    if (!Array.isArray(catalog) || catalog.length < 2) return null;
+    const titleKey = metadataTextKey(metadataTitle(item?.title));
+    if (!titleKey) return null;
+    if (stableProjectIdFromValue(item?.project_id || item?.projectId)) return null;
+    if (metadataIdentifier(item?.stable_locator_key || item?.stableLocatorKey)) return null;
+    const snapshotTitleCounts = options.snapshotTitleCounts instanceof Map
+      ? options.snapshotTitleCounts
+      : countProjectsByTitleKey([item]);
+    if ((snapshotTitleCounts.get(titleKey) || 0) !== 1) return null;
+    const observedTitleMaxConcurrent = options.observedTitleMaxConcurrent instanceof Map
+      ? options.observedTitleMaxConcurrent
+      : snapshotTitleCounts;
+    if ((observedTitleMaxConcurrent.get(titleKey) || 0) > 1) return null;
+    const matches = catalog.filter((candidate) => metadataTextKey(candidate.title) === titleKey);
+    if (matches.length !== 1) return null;
+    const uniqueConfirmed = matches[0];
+    if (stableProjectIdFromValue(uniqueConfirmed.project_id || uniqueConfirmed.projectId)) return null;
+    if (metadataIdentifier(uniqueConfirmed.stable_locator_key || uniqueConfirmed.stableLocatorKey)) {
+      return null;
+    }
+    const oldKey = metadataIdentifier(uniqueConfirmed.discovery_key || uniqueConfirmed.discoveryKey);
+    const newKey = metadataIdentifier(item?.discovery_key || item?.discoveryKey);
+    if (!newKey || (oldKey && oldKey === newKey)) return null;
+    const snapshotKeys = options.snapshotDiscoveryKeys;
+    if (oldKey && snapshotKeys instanceof Set && snapshotKeys.has(oldKey)) return null;
+    return uniqueConfirmed;
+  }
+
+  function foldUniqueTitleVolatileRemountProvisionals(catalog, provisionals, options = {}) {
+    if (!Array.isArray(provisionals) || provisionals.length === 0) return;
+    const stats = options.stats && typeof options.stats === "object" ? options.stats : null;
+    const kept = [];
+    for (const observation of provisionals) {
+      const currentKey = metadataIdentifier(observation?.discovery_key || observation?.discoveryKey);
+      const sameDescriptor = currentKey
+        ? catalog.filter((candidate) =>
+          metadataIdentifier(candidate?.discovery_key || candidate?.discoveryKey) === currentKey)
+        : [];
+      if (sameDescriptor.length === 1) {
+        if (stats) {
+          stats.provisionalFoldedSameDescriptorCount =
+            (stats.provisionalFoldedSameDescriptorCount || 0) + 1;
+          recordCatalogIndex(
+            stats.provisionalMergedExistingIndices,
+            catalog.indexOf(sameDescriptor[0]));
+          recordProvisionalTransition(
+            stats,
+            catalog.indexOf(sameDescriptor[0]),
+            "same_descriptor_fold");
+        }
+        continue;
+      }
+      kept.push(observation);
+    }
+    provisionals.length = 0;
+    provisionals.push(...kept);
   }
 
   function countProjectsByTitleKey(projects) {
@@ -2131,6 +2249,12 @@
       return existing;
     }
     if (!title || (!projectId && !discoveryKey)) return null;
+    if (!discoveryKey && !stableLocatorKey) {
+      const hasRowBackedCatalog = projects.some((candidate) =>
+        metadataIdentifier(candidate.discovery_key || candidate.discoveryKey)
+        || metadataIdentifier(candidate.stable_locator_key || candidate.stableLocatorKey));
+      if (hasRowBackedCatalog) return null;
+    }
     const entry = {
       ...(projectId ? { project_id: projectId } : {}),
       title,
@@ -2192,19 +2316,21 @@
     const hasStableEvidence = Boolean(projectId || stableLocatorKey);
     if (titleKey && stats) stats.titleHintUsedCount += 1;
     if (!existing && !hasStableEvidence && titleKey && snapshotTitleCount === 1 && catalogTitleCount === 1) {
-      // Title is never proof of identity. Keep the confirmed descriptor
-      // unchanged, but preserve this observation as provisional so a
-      // same-title sibling that never co-appears is not dropped.
+      // Title is never proof of identity. Unique-title + dead volatile key
+      // is also not remount proof: same-title Projects can alternate in a
+      // virtualized slot. Keep the observation provisional.
       if (stats) {
         stats.titleOnlyReconcileAttemptCount += 1;
         stats.titleOnlyReconcileRejectedCount += 1;
       }
       const occupyingIndex = projects.findIndex((candidate) =>
         metadataTextKey(candidate.title) === titleKey);
+      const occupant = occupyingIndex >= 0 ? projects[occupyingIndex] : null;
       upsertProvisionalObservation(options.provisionals, item, {
         stats,
         snapshotGeneration: options.snapshotGeneration,
-        occupancySourceIndex: occupyingIndex
+        occupancySourceIndex: occupyingIndex,
+        predecessorDiscoveryKey: occupant?.discovery_key || occupant?.discoveryKey
       });
       return null;
     }
@@ -2216,6 +2342,20 @@
           stats.ambiguousSameTitleReconcileCount += 1;
         }
         return null;
+      }
+    }
+    if (!existing && hasStableEvidence && titleKey && catalogTitleCount === 1) {
+      const occupant = available().find((candidate) => metadataTextKey(candidate.title) === titleKey);
+      const occupantId = stableProjectIdFromValue(occupant?.project_id || occupant?.projectId);
+      const occupantLocator = metadataIdentifier(
+        occupant?.stable_locator_key || occupant?.stableLocatorKey);
+      if (occupant
+        && (!occupantId || !projectId || occupantId === projectId)
+        && (!occupantLocator || !stableLocatorKey || occupantLocator === stableLocatorKey)) {
+        existing = occupant;
+        remounted = Boolean(discoveryKey
+          && occupant.discovery_key
+          && occupant.discovery_key !== discoveryKey);
       }
     }
 
@@ -2237,6 +2377,11 @@
         }
         if (applied.discoveryKeyChanged) {
           stats.discoveryKeyChangedForSameLogicalProjectCount += 1;
+          recordCatalogIndex(stats.discoveryKeyChangedIndices, projects.indexOf(existing));
+          recordCatalogIndex(stats.confirmedFingerprintChangedIndices, projects.indexOf(existing));
+        }
+        if (stableLocatorKey && existing.stable_locator_key === stableLocatorKey && remounted) {
+          recordCatalogIndex(stats.stableLocatorChangedIndices, projects.indexOf(existing));
         }
       }
       return existing;
@@ -2291,16 +2436,27 @@
     }
     const reserved = new Set();
     const snapshotGeneration = stats ? (stats.discoverySnapshotCount || 0) : 0;
+    const snapshotDiscoveryKeys = snapshotDiscoveryKeySet(snapshotProjects);
     for (const project of snapshotProjects) {
       reconcileCatalogProject(destination.projects, project, {
         snapshotTitleCounts,
         reserved,
         stats,
         snapshotGeneration,
+        snapshotDiscoveryKeys,
         provisionals: destination.provisional_observations,
         observedTitleMaxConcurrent: stats?.observedTitleMaxConcurrent
       });
     }
+    foldUniqueTitleVolatileRemountProvisionals(
+      destination.projects,
+      destination.provisional_observations,
+      {
+        snapshotTitleCounts,
+        snapshotDiscoveryKeys,
+        observedTitleMaxConcurrent: stats?.observedTitleMaxConcurrent,
+        stats
+      });
   }
 
   function discoveryCatalogIntegrityTelemetry(projects, stats, provisionals = []) {
@@ -2382,6 +2538,29 @@
       ambiguous_same_title_reconcile_count: Number(stats?.ambiguousSameTitleReconcileCount) || 0,
       provisional_observation_created_count: Number(stats?.provisionalObservationCreatedCount) || 0,
       provisional_observation_reused_count: Number(stats?.provisionalObservationReusedCount) || 0,
+      unique_title_volatile_remount_count: Number(stats?.uniqueTitleVolatileRemountCount) || 0,
+      provisional_folded_same_descriptor_count: Number(stats?.provisionalFoldedSameDescriptorCount) || 0,
+      provisional_same_project_id_proof_count: Number(stats?.provisionalSameProjectIdProofCount) || 0,
+      provisional_same_stable_locator_proof_count: Number(stats?.provisionalSameStableLocatorProofCount) || 0,
+      provisional_lineage_proof_count: Number(stats?.provisionalLineageProofCount) || 0,
+      provisional_created_indices: Array.isArray(stats?.provisionalCreatedIndices)
+        ? [...stats.provisionalCreatedIndices]
+        : [],
+      provisional_merged_existing_indices: Array.isArray(stats?.provisionalMergedExistingIndices)
+        ? [...stats.provisionalMergedExistingIndices]
+        : [],
+      confirmed_fingerprint_changed_indices: Array.isArray(stats?.confirmedFingerprintChangedIndices)
+        ? [...stats.confirmedFingerprintChangedIndices]
+        : [],
+      stable_locator_changed_indices: Array.isArray(stats?.stableLocatorChangedIndices)
+        ? [...stats.stableLocatorChangedIndices]
+        : [],
+      discovery_key_changed_indices: Array.isArray(stats?.discoveryKeyChangedIndices)
+        ? [...stats.discoveryKeyChangedIndices]
+        : [],
+      compact_provisional_transitions: Array.isArray(stats?.compactProvisionalTransitions)
+        ? [...stats.compactProvisionalTransitions]
+        : [],
       provisional_observation_count: pending.length,
       confirmed_logical_project_count_before_identity: catalog.length,
       final_catalog_index_count: catalog.length,
@@ -2404,6 +2583,7 @@
     delete copy.unresolved_reason;
     delete copy.snapshot_generation;
     delete copy.occupancy_source_index;
+    delete copy.predecessor_discovery_key;
     delete copy.row_metadata_present;
     delete copy.child_identity_candidate_available;
     delete copy._unresolved_confirmed_index;
@@ -2420,7 +2600,7 @@
     if (unresolvedId && resolvedId && unresolvedId === resolvedId) return "project_id";
     const left = remountSafeLocatorKey(unresolved);
     const right = remountSafeLocatorKey(resolved);
-    if (left && right && left === right && resolvedId) return "stable_locator";
+    if (left && right && left === right) return "stable_locator";
     return null;
   }
 
@@ -2429,13 +2609,163 @@
     for (const resolved of resolvedItems || []) {
       const proof = remountSafeDuplicateProof(unresolved, resolved);
       if (!proof) continue;
-      const id = stableIdentityIdFromProject(resolved);
-      if (!id) continue;
-      matches.push({ proof, id });
+      matches.push({
+        proof,
+        id: stableIdentityIdFromProject(resolved),
+        resolved
+      });
     }
-    const uniqueIds = [...new Set(matches.map((item) => item.id))];
-    if (uniqueIds.length !== 1) return null;
-    return matches[0];
+    const withIds = matches.filter((item) => item.id);
+    if (withIds.length > 0) {
+      const uniqueIds = [...new Set(withIds.map((item) => item.id))];
+      if (uniqueIds.length !== 1) return null;
+      return withIds[0];
+    }
+    const locatorMatches = matches.filter((item) => item.proof === "stable_locator");
+    if (locatorMatches.length === 1) return locatorMatches[0];
+    return null;
+  }
+
+  function foldProvisionalIntoConfirmed(confirmed, observation, stats = null) {
+    const id = stableIdentityIdFromProject(observation);
+    if (id) {
+      const matches = confirmed.filter((candidate) => stableIdentityIdFromProject(candidate) === id);
+      if (matches.length === 1) {
+        applyContextProjectFields(matches[0], observation, { replaceDiscoveryKey: true });
+        if (stats) {
+          stats.provisionalSameProjectIdProofCount = (stats.provisionalSameProjectIdProofCount || 0) + 1;
+          recordCatalogIndex(stats.provisionalMergedExistingIndices, confirmed.indexOf(matches[0]));
+        }
+        return "project_id";
+      }
+      if (matches.length > 1) return null;
+    }
+    const locator = remountSafeLocatorKey(observation);
+    if (locator) {
+      const matches = confirmed.filter((candidate) => remountSafeLocatorKey(candidate) === locator);
+      if (matches.length === 1) {
+        applyContextProjectFields(matches[0], observation, { replaceDiscoveryKey: true });
+        if (stats) {
+          stats.provisionalSameStableLocatorProofCount =
+            (stats.provisionalSameStableLocatorProofCount || 0) + 1;
+          recordCatalogIndex(stats.provisionalMergedExistingIndices, confirmed.indexOf(matches[0]));
+        }
+        return "stable_locator";
+      }
+    }
+    const currentKey = metadataIdentifier(observation?.discovery_key || observation?.discoveryKey);
+    if (currentKey) {
+      const matches = confirmed.filter((candidate) =>
+        metadataIdentifier(candidate?.discovery_key || candidate?.discoveryKey) === currentKey);
+      if (matches.length === 1) {
+        if (stats) {
+          stats.provisionalFoldedSameDescriptorCount =
+            (stats.provisionalFoldedSameDescriptorCount || 0) + 1;
+          recordCatalogIndex(stats.provisionalMergedExistingIndices, confirmed.indexOf(matches[0]));
+        }
+        return "same_current_descriptor";
+      }
+    }
+    return null;
+  }
+
+  function durableConfirmedIdentityProof(left, right) {
+    const leftId = stableIdentityIdFromProject(left);
+    const rightId = stableIdentityIdFromProject(right);
+    if (leftId && rightId && leftId !== rightId) return null;
+    if (leftId && rightId && leftId === rightId) return "project_id";
+    const leftLocator = remountSafeLocatorKey(left);
+    const rightLocator = remountSafeLocatorKey(right);
+    if (leftLocator && rightLocator && leftLocator === rightLocator) return "stable_locator";
+    const leftKey = metadataIdentifier(left?.discovery_key || left?.discoveryKey);
+    const rightKey = metadataIdentifier(right?.discovery_key || right?.discoveryKey);
+    if (leftKey && rightKey && leftKey === rightKey) return "current_discovery_key";
+    return null;
+  }
+
+  function compactConfirmedIdentityDescriptors(confirmed, stats = null) {
+    const source = Array.isArray(confirmed) ? confirmed : [];
+    const kept = [];
+    const duplicateIndices = [];
+    const sourceCounts = {
+      project_id: 0,
+      stable_locator: 0,
+      current_discovery_key: 0
+    };
+    for (let index = 0; index < source.length; index += 1) {
+      const item = source[index];
+      let owner = null;
+      let proof = null;
+      for (const candidate of kept) {
+        proof = durableConfirmedIdentityProof(candidate, item);
+        if (proof) {
+          owner = candidate;
+          break;
+        }
+      }
+      if (!owner) {
+        kept.push(item);
+        continue;
+      }
+      applyContextProjectFields(owner, item, { replaceDiscoveryKey: false });
+      duplicateIndices.push(index);
+      if (proof === "project_id") sourceCounts.project_id += 1;
+      else if (proof === "stable_locator") sourceCounts.stable_locator += 1;
+      else sourceCounts.current_discovery_key += 1;
+    }
+    if (stats) {
+      stats.identityDuplicateDescriptorCount = duplicateIndices.length;
+      stats.duplicateSameProjectIdCount = sourceCounts.project_id;
+      stats.duplicateSameStableLocatorCount = sourceCounts.stable_locator;
+      stats.duplicateSameCurrentDiscoveryKeyCount = sourceCounts.current_discovery_key;
+      stats.duplicateDescriptorIndices = duplicateIndices;
+      stats.duplicateDescriptorSourceCounts = sourceCounts;
+      stats.rawConfirmedCountBeforeCompact = source.length;
+    }
+    return kept;
+  }
+
+  function prepareIdentityProjectCatalog(confirmed, provisionals) {
+    const stats = {
+      provisionalSameProjectIdProofCount: 0,
+      provisionalSameStableLocatorProofCount: 0,
+      provisionalLineageProofCount: 0,
+      provisionalFoldedSameDescriptorCount: 0,
+      provisionalMergedExistingIndices: [],
+      remainingProvisionalCount: 0,
+      identityDuplicateDescriptorCount: 0,
+      duplicateSameProjectIdCount: 0,
+      duplicateSameStableLocatorCount: 0,
+      duplicateSameCurrentDiscoveryKeyCount: 0,
+      duplicateDescriptorIndices: [],
+      duplicateDescriptorSourceCounts: {
+        project_id: 0,
+        stable_locator: 0,
+        current_discovery_key: 0
+      },
+      rawConfirmedCountBeforeCompact: 0
+    };
+    const projects = compactConfirmedIdentityDescriptors(
+      Array.isArray(confirmed) ? confirmed : [],
+      stats);
+    for (const project of projects) {
+      project.observation_role = "confirmed";
+    }
+    const kept = [];
+    for (const observation of Array.isArray(provisionals) ? provisionals : []) {
+      const proof = foldProvisionalIntoConfirmed(projects, observation, stats);
+      if (proof) continue;
+      kept.push({
+        ...observation,
+        observation_role: "provisional"
+      });
+    }
+    stats.remainingProvisionalCount = kept.length;
+    return {
+      identityCatalog: [...projects, ...kept],
+      remainingProvisionals: kept,
+      ...stats
+    };
   }
 
   function createProvisionalFinalizeStats(items) {
@@ -2494,17 +2824,13 @@
     const mergeOrAdd = (item, role) => {
       const id = stableIdentityIdFromProject(item);
       if (id && byId.has(id)) {
-        if (role !== "provisional") {
-          const published = publish(item);
-          logical.push(published);
-          rememberTitleId(item?.title, id);
-          return published;
-        }
         applyContextProjectFields(byId.get(id), item, { replaceDiscoveryKey: true });
         if (item?.url && !byId.get(id).url) byId.get(id).url = item.url;
-        stats.provisionalObservationMergedExistingCount += 1;
-        stats.provisionalResolvedSameExistingCount += 1;
-        stats.sameTitleIdentitySameProjectCount += 1;
+        if (role === "provisional") {
+          stats.provisionalObservationMergedExistingCount += 1;
+          stats.provisionalResolvedSameExistingCount += 1;
+          stats.sameTitleIdentitySameProjectCount += 1;
+        }
         return byId.get(id);
       }
       const published = publish(item);
@@ -2529,14 +2855,20 @@
       }
     });
 
-    const resolvedPool = items.filter((candidate) => stableIdentityIdFromProject(candidate));
+    const resolvedPool = items.filter((candidate) =>
+      stableIdentityIdFromProject(candidate) || remountSafeLocatorKey(candidate));
     for (const item of items) {
       if (item?.observation_role !== "provisional") continue;
       const id = stableIdentityIdFromProject(item);
       if (!id) {
         const proof = provenDuplicateAgainstResolved(item, resolvedPool);
         if (proof) {
+          if (proof.resolved) {
+            applyContextProjectFields(proof.resolved, item, { replaceDiscoveryKey: true });
+          }
           stats.provisionalUnresolvedDiscardedAsProvenDuplicateCount += 1;
+          stats.provisionalObservationMergedExistingCount += 1;
+          stats.provisionalResolvedSameExistingCount += 1;
           recordDuplicateProof(stats, proof.proof);
           continue;
         }
@@ -3879,7 +4211,6 @@
       : 0;
     let row = null;
     let matchMethod = "none";
-    const uniqueVisibleTitle = matchingRows.length === 1 && titleUniqueInCatalog !== false;
     if (fingerprintRows.length === 1) {
       row = fingerprintRows[0];
       matchMethod = "discovery_fingerprint";
@@ -3889,7 +4220,7 @@
     } else if (stableLocatorRows.length === 1) {
       row = stableLocatorRows[0];
       matchMethod = "stable_row_locator";
-    } else if (uniqueVisibleTitle) {
+    } else if (matchingRows.length === 1 && titleUniqueInCatalog !== false) {
       row = matchingRows[0];
       matchMethod = titleUniqueInCatalog === true
         ? "unique_catalog_title"
@@ -4018,7 +4349,7 @@
   async function relocateProjectRowForIdentityAsync(root, descriptor, options = {}) {
     const relocationStartedAt = Date.now();
     const catalog = Array.isArray(options.catalog) ? options.catalog : [];
-    const maxAttempts = Math.max(1, Math.min(80, Number(options.maxAttempts) || 48));
+    const maxAttempts = Math.max(1, Math.min(24, Number(options.maxAttempts) || 24));
     const clickedMoreControls = new Set();
     const catalogTitleCount = catalogTitleMatchCount(catalog, descriptor?.title);
     const catalogEntryFound = catalog.some((item) => {
@@ -4036,17 +4367,6 @@
     const descriptorProjectIndex = Number.isSafeInteger(descriptor?.project_index)
       ? descriptor.project_index
       : (Number.isSafeInteger(descriptor?.discovery_index) ? descriptor.discovery_index : 0);
-    const relocationCandidateKey = (current) => {
-      const baseUrl = options.baseUrl || globalThis.location?.href;
-      const keys = (current.visibleRows || []).map((row, index) =>
-        projectDiscoveryKeyForRow(row, visibleTitleFromElement(row, ""), index, baseUrl) || `i${index}`);
-      return [
-        current.visibleRows.length,
-        current.connectedRows.length,
-        current.moreAvailable ? 1 : 0,
-        keys.join(",")
-      ].join("|");
-    };
     const emitRelocation = (relocation, extra = {}) => {
       try {
         const projectIndex = descriptorProjectIndex;
@@ -4159,11 +4479,34 @@
       projectSectionFound: current.section.projectSectionFound === true,
       projectScrollContainerFound: Boolean(current.scrollContainer),
       scrollRequired: scrollContainerCanAdvance(current.scrollContainer)
+        || scrollContainerCanRetreat(current.scrollContainer)
         || current.visibleRows.length === 0,
       scrollPositionChanged: scrolled,
       moreAvailable: current.moreAvailable,
       catalogEntryFound
     });
+    const visibilityProgressSignature = (current) => {
+      const baseUrl = options.baseUrl || globalThis.location?.href;
+      const stableTokens = [];
+      for (let index = 0; index < (current.visibleRows || []).length; index += 1) {
+        const fingerprint = projectRowFingerprint(
+          current.visibleRows[index],
+          visibleTitleFromElement(current.visibleRows[index], ""),
+          index,
+          baseUrl);
+        if (fingerprint?.stable_locator_key) stableTokens.push(`l:${fingerprint.stable_locator_key}`);
+        if (fingerprint?.locator_project_id) stableTokens.push(`id:${fingerprint.locator_project_id}`);
+      }
+      const scrollTop = Number(current.scrollContainer?.scrollTop) || 0;
+      return [
+        Math.round(scrollTop),
+        stableTokens.sort().join(",")
+      ].join("|");
+    };
+    const connectedRelocation = (relocation) => Boolean(
+      relocation?.rowFound
+      && relocation.row
+      && relocation.row.isConnected !== false);
 
     // Remounted Sidebars often paint an empty Project section first. Wait a
     // bounded number of mutation passes before treating 0 rows as terminal.
@@ -4179,24 +4522,34 @@
       rowFound: false,
       matchMethod: "none",
       sectionVerified: false,
-      reason: "project_row_not_found"
+      reason: "project_row_not_found",
+      visibilityRecoveryAttempted: false,
+      visibilityRecoveryScrollAttempts: 0,
+      visibilityRecoveryScrollPositionChanges: 0,
+      visibilityRecoveryStagnationCount: 0,
+      visibilityRecoverySuccess: false
     };
     let moreClicked = false;
     let moreAttempted = false;
     let moreClickCount = 0;
     let scrollAttempts = 0;
-    let stagnantCandidatePasses = 0;
-    let previousTop = null;
+    let scrollPositionChanges = 0;
+    let stagnantProgressPasses = 0;
+    let direction = 1;
+    let reversed = false;
     let phase = "initial_fingerprint";
+    const maxScrollAttempts = Math.max(8, Math.min(32, Number(options.maxScrollAttempts) || 24));
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const current = snapshot();
       lastRelocation = matchFromSnapshot(current);
+      if (lastRelocation.row?.isConnected === false) {
+        lastRelocation.row = null;
+        lastRelocation.rowFound = false;
+      }
       if (attempt === 0) phase = "initial_fingerprint";
-      else if (lastRelocation.matchMethod === "unique_catalog_title"
-        || lastRelocation.matchMethod === "discovery_stable_identity"
-        || lastRelocation.matchMethod === "stable_row_locator") phase = "catalog_title_visible_scan";
+      else if (connectedRelocation(lastRelocation)) phase = "fresh_relocate";
       else if (moreAttempted && scrollAttempts === 0) phase = "more_expand";
-      else if (scrollAttempts > 0) phase = "sidebar_scroll_scan";
+      else if (scrollAttempts > 0) phase = "visibility_recovery";
       else phase = "catalog_title_visible_scan";
       emitRelocation(lastRelocation, {
         ...extraFromSnapshot(current, phase, false),
@@ -4206,15 +4559,36 @@
         more_clicked: moreClicked,
         more_attempted: moreAttempted,
         more_available: current.moreAvailable,
-        scroll_attempts: scrollAttempts
+        scroll_attempts: scrollAttempts,
+        visibility_recovery_attempted: scrollAttempts > 0,
+        visibility_recovery_scroll_attempt_count: scrollAttempts,
+        visibility_recovery_scroll_position_change_count: scrollPositionChanges,
+        visibility_recovery_stagnation_count: stagnantProgressPasses
       });
-      if (lastRelocation.rowFound && lastRelocation.row) return lastRelocation;
-      if (lastRelocation.reason === "ambiguous_project_row_match") return lastRelocation;
-      if (lastRelocation.row?.isConnected === false) lastRelocation.row = null;
+      if (connectedRelocation(lastRelocation)) {
+        const freshSnapshot = snapshot();
+        const fresh = matchFromSnapshot(freshSnapshot);
+        if (connectedRelocation(fresh)) {
+          fresh.visibilityRecoveryAttempted = scrollAttempts > 0;
+          fresh.visibilityRecoveryScrollAttempts = scrollAttempts;
+          fresh.visibilityRecoveryScrollPositionChanges = scrollPositionChanges;
+          fresh.visibilityRecoveryStagnationCount = stagnantProgressPasses;
+          fresh.visibilityRecoverySuccess = scrollAttempts > 0;
+          return fresh;
+        }
+      }
+      if (lastRelocation.reason === "ambiguous_project_row_match"
+        || lastRelocation.reason === "project_row_fingerprint_mismatch") {
+        lastRelocation.visibilityRecoveryAttempted = scrollAttempts > 0;
+        lastRelocation.visibilityRecoveryScrollAttempts = scrollAttempts;
+        lastRelocation.visibilityRecoveryScrollPositionChanges = scrollPositionChanges;
+        lastRelocation.visibilityRecoveryStagnationCount = stagnantProgressPasses;
+        return lastRelocation;
+      }
 
       moreAttempted = true;
       phase = "more_expand";
-      const beforeCandidateKey = relocationCandidateKey(current);
+      const beforeProgress = visibilityProgressSignature(current);
       const moreClicks = await expandSidebarMoreButtons(root, {
         maxMoreClicks: 1,
         clickedMoreControls,
@@ -4227,43 +4601,99 @@
       const afterMore = snapshot();
       let scrolled = false;
       const scrollContainer = afterMore.scrollContainer;
-      if (scrollContainerCanAdvance(scrollContainer)) {
-        phase = "sidebar_scroll_scan";
+      if (scrollAttempts >= maxScrollAttempts) {
+        lastRelocation = matchFromSnapshot(snapshot());
+        lastRelocation.reason = lastRelocation.reason === "project_row_fingerprint_mismatch"
+          || lastRelocation.reason === "ambiguous_project_row_match"
+          ? lastRelocation.reason
+          : "row_visibility_exhausted";
+        lastRelocation.visibilityRecoveryAttempted = true;
+        lastRelocation.visibilityRecoveryScrollAttempts = scrollAttempts;
+        lastRelocation.visibilityRecoveryScrollPositionChanges = scrollPositionChanges;
+        lastRelocation.visibilityRecoveryStagnationCount = stagnantProgressPasses;
+        emitRelocation(lastRelocation, {
+          ...extraFromSnapshot(afterMore, "exhausted", false),
+          relocation_stagnated: true,
+          visibility_recovery_attempted: true,
+          scroll_attempts: scrollAttempts
+        });
+        return lastRelocation;
+      }
+      if (scrollContainerCanMove(scrollContainer, direction)) {
+        phase = "visibility_recovery";
         const beforeTop = Number(scrollContainer.scrollTop) || 0;
-        const clientHeight = Number(scrollContainer.clientHeight) || 240;
-        const scrollHeight = Number(scrollContainer.scrollHeight) || 0;
-        const maxTop = Math.max(0, scrollHeight - clientHeight);
+        const step = Math.max(Number(scrollContainer.clientHeight) || 240, 80);
         try {
-          scrollContainer.scrollTop = Math.min(maxTop, beforeTop + Math.max(48, clientHeight));
+          scrollContainer.scrollTop = Math.max(0, beforeTop + (direction * step));
         } catch (_) { }
         const afterTop = Number(scrollContainer.scrollTop) || 0;
         if (afterTop !== beforeTop) {
           scrolled = true;
           scrollAttempts += 1;
+          scrollPositionChanges += 1;
+        } else {
+          scrollAttempts += 1;
         }
-        previousTop = afterTop;
+      } else if (!reversed) {
+        direction *= -1;
+        reversed = true;
+        scrollAttempts += 1;
+      } else {
+        lastRelocation = matchFromSnapshot(snapshot());
+        lastRelocation.reason = lastRelocation.reason === "project_row_fingerprint_mismatch"
+          || lastRelocation.reason === "ambiguous_project_row_match"
+          ? lastRelocation.reason
+          : "row_visibility_exhausted";
+        lastRelocation.visibilityRecoveryAttempted = true;
+        lastRelocation.visibilityRecoveryScrollAttempts = scrollAttempts;
+        lastRelocation.visibilityRecoveryScrollPositionChanges = scrollPositionChanges;
+        lastRelocation.visibilityRecoveryStagnationCount = stagnantProgressPasses;
+        emitRelocation(lastRelocation, {
+          ...extraFromSnapshot(afterMore, "exhausted", false),
+          relocation_stagnated: true,
+          visibility_recovery_attempted: true,
+          scroll_attempts: scrollAttempts
+        });
+        return lastRelocation;
       }
       const afterScroll = snapshot();
-      const afterCandidateKey = relocationCandidateKey(afterScroll);
-      const candidateSetChanged = afterCandidateKey !== beforeCandidateKey;
-      if (candidateSetChanged) stagnantCandidatePasses = 0;
-      else stagnantCandidatePasses += 1;
-      const advanced = moreClicks > 0
+      const afterProgress = visibilityProgressSignature(afterScroll);
+      const progressed = moreClicks > 0
         || scrolled
-        || candidateSetChanged;
-      if (!advanced || stagnantCandidatePasses >= 2) {
+        || afterProgress !== beforeProgress;
+      if (progressed) stagnantProgressPasses = 0;
+      else stagnantProgressPasses += 1;
+      if (!progressed || stagnantProgressPasses >= 2) {
+        if (!reversed && scrollContainerCanMove(afterScroll.scrollContainer, -direction)) {
+          direction *= -1;
+          reversed = true;
+          stagnantProgressPasses = 0;
+          await waitForSidebarMutation(root, options.settleMs === undefined ? 50 : options.settleMs);
+          continue;
+        }
         lastRelocation = matchFromSnapshot(afterScroll);
+        lastRelocation.reason = lastRelocation.reason === "project_row_fingerprint_mismatch"
+          || lastRelocation.reason === "ambiguous_project_row_match"
+          ? lastRelocation.reason
+          : "row_visibility_exhausted";
+        lastRelocation.visibilityRecoveryAttempted = true;
+        lastRelocation.visibilityRecoveryScrollAttempts = scrollAttempts;
+        lastRelocation.visibilityRecoveryScrollPositionChanges = scrollPositionChanges;
+        lastRelocation.visibilityRecoveryStagnationCount = stagnantProgressPasses;
         emitRelocation(lastRelocation, {
           ...extraFromSnapshot(afterScroll, "exhausted", scrolled),
           sampleRow: lastRelocation.row || afterScroll.visibleRows[0] || null,
-          candidateSetChanged,
           relocation_attempt: attempt,
           more_clicked: moreClicked,
           more_attempted: moreAttempted,
           more_available: afterScroll.moreAvailable,
           scroll_attempts: scrollAttempts,
           scroll_position_changed: scrolled,
-          relocation_stagnated: true
+          relocation_stagnated: true,
+          visibility_recovery_attempted: true,
+          visibility_recovery_scroll_attempt_count: scrollAttempts,
+          visibility_recovery_scroll_position_change_count: scrollPositionChanges,
+          visibility_recovery_stagnation_count: stagnantProgressPasses
         });
         return lastRelocation;
       }
@@ -4271,13 +4701,24 @@
     }
     const finalSnapshot = snapshot();
     lastRelocation = matchFromSnapshot(finalSnapshot);
+    if (!connectedRelocation(lastRelocation)) {
+      lastRelocation.reason = lastRelocation.reason === "project_row_fingerprint_mismatch"
+        || lastRelocation.reason === "ambiguous_project_row_match"
+        ? lastRelocation.reason
+        : "row_visibility_exhausted";
+    }
+    lastRelocation.visibilityRecoveryAttempted = scrollAttempts > 0;
+    lastRelocation.visibilityRecoveryScrollAttempts = scrollAttempts;
+    lastRelocation.visibilityRecoveryScrollPositionChanges = scrollPositionChanges;
+    lastRelocation.visibilityRecoveryStagnationCount = stagnantProgressPasses;
     emitRelocation(lastRelocation, {
       ...extraFromSnapshot(finalSnapshot, "exhausted", false),
       relocation_attempt: maxAttempts - 1,
       more_clicked: moreClicked,
       more_attempted: moreAttempted,
       more_available: finalSnapshot.moreAvailable,
-      scroll_attempts: scrollAttempts
+      scroll_attempts: scrollAttempts,
+      visibility_recovery_attempted: scrollAttempts > 0
     });
     return lastRelocation;
   }
@@ -4299,11 +4740,15 @@
     options = {}) {
     let row = initialRow || null;
     const initialUrl = documentHref(root, globalThis.location?.href);
-    const timeoutMs = Math.max(
+    const hydrateTimeoutMs = Math.max(
       250,
       Math.min(10000, Number(options.disclosureTimeoutMs)
         || Number(options.navigationTimeoutMs)
         || 2500));
+    const probeTimeoutMs = Math.max(
+      50,
+      Math.min(400, Number(options.probeTimeoutMs) || 200));
+    const waitPolicy = options.childRegionWaitPolicy === "probe" ? "probe" : "hydrate";
     const startedAt = Date.now();
     let clickAttempted = false;
     let clickDispatched = false;
@@ -4315,6 +4760,9 @@
     let observerNeeded = false;
     let pollNeeded = false;
     let remountRecoveryWaitMs = 0;
+    let earlyEscalation = false;
+    let earlyEscalationReason = "";
+    let timeoutCeilingHit = false;
     const before = projectDisclosureStructureForRow(row, root, baseUrl);
     let after = before;
     let lastReason = before.controlledRegionFound
@@ -4408,12 +4856,25 @@
         pollNeeded,
         earlySuccess: Boolean(identity) && lastReason !== "ambiguous_project_identity",
         timedOut,
+        timeoutCeilingHit,
         candidateClass,
         mutationQuietWaitMs: 0,
         remountRecoveryWaitMs,
+        earlyEscalation,
+        earlyEscalationReason: earlyEscalationReason || "",
         reason: resolvedReason
       };
     };
+    const childEvidencePresent = () => Boolean(
+      after?.controlledRegionFound
+      || (after?.controlledRegionProjectChatLinkCount > 0)
+      || (after?.controlledRegionProjectHomeLinkCount > 0));
+    const rowUnavailable = () => !row || row.isConnected === false;
+    const hydrateExpected = () => {
+      if (waitPolicy === "probe") return false;
+      return childEvidencePresent();
+    };
+    const waitDeadlineAt = () => startedAt + (hydrateExpected() ? hydrateTimeoutMs : probeTimeoutMs);
     const tickWait = async (deadline) => {
       const remaining = Math.max(0, deadline - Date.now());
       if (remaining <= 0) return;
@@ -4430,11 +4891,21 @@
     };
 
     if (!before.rowIsDisclosureControl) return result(null, "not_a_disclosure_control");
+    if (rowUnavailable()) {
+      earlyEscalation = true;
+      earlyEscalationReason = "row_unavailable";
+      return result(null, "row_unavailable");
+    }
 
     let identity = inspect();
     if (identity) return result(identity);
     if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
       return result(null, lastReason);
+    }
+    if (rowUnavailable()) {
+      earlyEscalation = true;
+      earlyEscalationReason = "row_unavailable";
+      return result(null, "row_unavailable");
     }
     // An expanded region may be present but still hydrating. Do not click it
     // again; the bounded wait below gives its metadata a chance to arrive.
@@ -4477,17 +4948,39 @@
     if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
       return result(null, lastReason);
     }
-    const deadline = startedAt + timeoutMs;
+    if (rowUnavailable()) {
+      earlyEscalation = true;
+      earlyEscalationReason = "row_unavailable";
+      return result(null, "row_unavailable");
+    }
+    const deadline = waitDeadlineAt();
     while (Date.now() <= deadline) {
       identity = inspect();
       if (identity) return result(identity);
       if (lastReason === "ambiguous_project_identity" || lastReason === "project_id_url_mismatch") {
         return result(null, lastReason);
       }
-      await tickWait(deadline);
+      if (rowUnavailable()) {
+        earlyEscalation = true;
+        earlyEscalationReason = "row_unavailable";
+        return result(null, "row_unavailable");
+      }
+      const nextDeadline = waitDeadlineAt();
+      if (Date.now() > nextDeadline) break;
+      await tickWait(nextDeadline);
     }
     identity = inspect();
     if (identity) return result(identity);
+    if (!hydrateExpected()) {
+      earlyEscalation = true;
+      if (rowUnavailable()) earlyEscalationReason = "row_unavailable";
+      else if (!after?.controlledRegionFound) earlyEscalationReason = "no_region_possible";
+      else earlyEscalationReason = "virtualized";
+      return result(
+        null,
+        urlChanged ? "disclosure_navigation_target_not_project" : "project_disclosure_identity_not_found");
+    }
+    timeoutCeilingHit = true;
     return result(
       null,
       urlChanged ? "disclosure_navigation_target_not_project" : "project_disclosure_identity_not_found");
@@ -4556,6 +5049,26 @@
     return null;
   }
 
+  function relocationMatchAllowsNavigationClick(matchMethod) {
+    return matchMethod === "discovery_fingerprint"
+      || matchMethod === "discovery_stable_identity"
+      || matchMethod === "stable_row_locator";
+  }
+
+  function projectIdentityNavigationEligible(reason) {
+    if (!reason || reason === "none") return false;
+    if (reason === "ambiguous_project_identity"
+      || reason === "project_id_url_mismatch"
+      || reason === "same_id_multi_candidate"
+      || reason === "distinct_id_collision"
+      || reason === "row_visibility_exhausted"
+      || reason === "project_row_fingerprint_mismatch"
+      || reason === "ambiguous_project_row_match") {
+      return false;
+    }
+    return true;
+  }
+
   function identityProjectResult(project, projectIndex, identity, method, reason, navigationVerified, extras = {}) {
     const resolved = Boolean(
       metadataTitle(project?.title, "")
@@ -4564,6 +5077,8 @@
     const effectiveReason = !metadataTitle(project?.title, "")
       ? "missing_title"
       : reason;
+    const navigationEligible = resolved !== true
+      && projectIdentityNavigationEligible(effectiveReason || "missing_stable_identity");
     return {
       ...(project && typeof project === "object" ? project : {}),
       project_index: projectIndex,
@@ -4578,10 +5093,20 @@
       ...(typeof extras.navigation_fallback_success === "boolean"
         ? { navigation_fallback_success: extras.navigation_fallback_success }
         : {}),
+      ...(typeof extras.navigation_started_for_project === "boolean"
+        ? { navigation_started_for_project: extras.navigation_started_for_project }
+        : {}),
+      ...(typeof extras.visibility_recovery_attempted === "boolean"
+        ? { visibility_recovery_attempted: extras.visibility_recovery_attempted }
+        : {}),
+      ...(typeof extras.visibility_recovery_success === "boolean"
+        ? { visibility_recovery_success: extras.visibility_recovery_success }
+        : {}),
       ...(typeof extras.identity_candidate_consistent === "boolean"
         ? { identity_candidate_consistent: extras.identity_candidate_consistent }
         : {}),
       resolution_method: method,
+      navigation_eligible: navigationEligible,
       navigation_target_verified: navigationVerified === true,
       project_url_pattern_valid: Boolean(identity?.projectId
         && identity?.projectUrl
@@ -4607,6 +5132,7 @@
         ? project.project_index
         : index
     }));
+    let relocation = null;
     const identityVisibility = {
       identityAttemptsWhileHidden: 0,
       identityAttemptsWhileVisible: 0,
@@ -4624,6 +5150,13 @@
       pollNeededCount: 0,
       earlySuccessCount: 0,
       timeoutCount: 0,
+      timeoutCeilingHitCount: 0,
+      timeoutCeilingHitIndices: [],
+      earlyEscalationCount: 0,
+      earlyEscalationIndices: [],
+      earlyEscalationReasonCounts: {},
+      resolvedIdentitySkippedCount: 0,
+      resolvedIdentityRecheckedCount: 0,
       ambiguousCount: 0,
       candidateZeroCount: 0,
       uniqueCandidateCount: 0,
@@ -4655,7 +5188,9 @@
         projectIndex,
         childRegionWaitMs,
         waitStrategy,
-        candidateClass
+        candidateClass,
+        relocationMs: Number.isSafeInteger(extras.relocationMs) ? extras.relocationMs : 0,
+        identitySource: extras.identitySource || "none"
       });
       identityPerformance.mutationQuietWaitTotalMs += Number.isSafeInteger(disclosureResult?.mutationQuietWaitMs)
         ? disclosureResult.mutationQuietWaitMs
@@ -4676,6 +5211,17 @@
         identityPerformance.earlySuccessCount += 1;
       }
       if (disclosureResult?.timedOut === true) identityPerformance.timeoutCount += 1;
+      if (disclosureResult?.timeoutCeilingHit === true) {
+        identityPerformance.timeoutCeilingHitCount += 1;
+        identityPerformance.timeoutCeilingHitIndices.push(projectIndex);
+      }
+      if (disclosureResult?.earlyEscalation === true) {
+        identityPerformance.earlyEscalationCount += 1;
+        identityPerformance.earlyEscalationIndices.push(projectIndex);
+        const reason = disclosureResult.earlyEscalationReason || "other";
+        identityPerformance.earlyEscalationReasonCounts[reason] =
+          (identityPerformance.earlyEscalationReasonCounts[reason] || 0) + 1;
+      }
       if (candidateClass === "distinct_id_collision") identityPerformance.distinctCollisionCount += 1;
       else if (candidateClass === "same_id_multi_candidate") identityPerformance.sameIdMultiCount += 1;
       else if (candidateClass === "unique_candidate") identityPerformance.uniqueCandidateCount += 1;
@@ -4692,8 +5238,19 @@
       const slow = identityPerformance.samples
         .filter((sample) => sample.childRegionWaitMs >= 250)
         .map((sample) => ({ index: sample.projectIndex, ms: sample.childRegionWaitMs }));
+      const reasonCounts = Object.entries(identityPerformance.earlyEscalationReasonCounts)
+        .map(([reason, count]) => `${reason}:${count}`)
+        .join(",");
+      const slowDetails = slow.slice(0, 12).map((item) => {
+        const sample = identityPerformance.samples.find((entry) => entry.projectIndex === item.index);
+        const source = sample?.identitySource || "none";
+        return `${item.index}:${item.ms}:${source}`;
+      }).join(",");
       emitNavigationTelemetry("collector_project_identity_performance_summary", {
         project_count: output.length,
+        identity_pass_kind: typeof options.identityPassKind === "string"
+          ? options.identityPassKind.slice(0, 32)
+          : (mode === "navigation" ? "navigation" : "dom"),
         child_chat_resolved_count: identityPerformance.childChatResolvedCount,
         navigation_resolved_count: identityPerformance.navigationResolvedCount,
         child_region_wait_total_ms: totalWait,
@@ -4708,6 +5265,13 @@
         child_region_poll_needed_count: identityPerformance.pollNeededCount,
         child_region_early_success_count: identityPerformance.earlySuccessCount,
         child_region_timeout_count: identityPerformance.timeoutCount,
+        timeout_ceiling_hit_count: identityPerformance.timeoutCeilingHitCount,
+        timeout_ceiling_hit_indices: identityPerformance.timeoutCeilingHitIndices.slice(0, 16).join(","),
+        early_escalation_count: identityPerformance.earlyEscalationCount,
+        early_escalation_indices: identityPerformance.earlyEscalationIndices.slice(0, 16).join(","),
+        early_escalation_reason_counts: reasonCounts.slice(0, 128),
+        resolved_identity_skipped_count: identityPerformance.resolvedIdentitySkippedCount,
+        resolved_identity_rechecked_count: identityPerformance.resolvedIdentityRecheckedCount,
         child_region_ambiguous_count: identityPerformance.ambiguousCount
           + identityPerformance.distinctCollisionCount,
         child_region_candidate_zero_count: identityPerformance.candidateZeroCount,
@@ -4719,7 +5283,8 @@
         remount_recovery_wait_total_ms: identityPerformance.remountRecoveryWaitTotalMs,
         slow_project_count: slow.length,
         slow_project_indices: slow.map((item) => item.index).join(","),
-        slow_project_ms: slow.map((item) => item.ms).join(",")
+        slow_project_ms: slow.map((item) => item.ms).join(","),
+        slow_project_details: slowDetails.slice(0, 128)
       });
     };
     const noteIdentityVisibility = (hidden, projectIndex, startedAt) => {
@@ -4871,6 +5436,11 @@
       "candidate_search_attempted",
       "scroll_search_attempted",
       "scroll_search_stagnated",
+      "visibility_recovery_attempted",
+      "visibility_recovery_scroll_attempt_count",
+      "visibility_recovery_scroll_position_change_count",
+      "visibility_recovery_stagnation_count",
+      "visibility_recovery_success",
       "more_clicked",
       "more_click_count",
       "more_attempted",
@@ -4937,7 +5507,16 @@
       "remount_recovery_wait_total_ms",
       "slow_project_count",
       "slow_project_indices",
-      "slow_project_ms"
+      "slow_project_ms",
+      "slow_project_details",
+      "identity_pass_kind",
+      "timeout_ceiling_hit_count",
+      "timeout_ceiling_hit_indices",
+      "early_escalation_count",
+      "early_escalation_indices",
+      "early_escalation_reason_counts",
+      "resolved_identity_skipped_count",
+      "resolved_identity_rechecked_count"
     ];
     const navigationTelemetry = [];
     const emitNavigationTelemetry = (stage, fields = {}) => {
@@ -4969,7 +5548,24 @@
         const projectStartedAt = Date.now();
         const identityAttemptHidden = documentIsHidden(root);
         const existing = projectIdentityFromProjectMetadata(descriptor, baseUrl);
-        let identity = existing.projectId ? existing : null;
+        if (existing.projectId) {
+          identityPerformance.resolvedIdentitySkippedCount += 1;
+          output[index] = identityProjectResult(
+            descriptor,
+            projectIndex,
+            existing,
+            "dom",
+            null,
+            false,
+            {
+              identity_source: existing.source
+                || descriptor.identity_source
+                || "other"
+            });
+          nonNavigationResolvedCount += 1;
+          continue;
+        }
+        let identity = null;
         let reason = existing.reason;
         let disclosureWaitMs = 0;
         let childRegionWaitMs = 0;
@@ -4993,6 +5589,9 @@
               baseUrl,
               navigationSinceDiscovery: false,
               sidebarDomGenerationChanged: true,
+              maxAttempts: options.maxAttempts,
+              maxScrollAttempts: options.maxScrollAttempts,
+              settleMs: options.settleMs,
               telemetry: (event, fields) => emitNavigationTelemetry(event, fields)
             });
             relocationWaitMs += Math.max(0, Date.now() - relocateStartedAt);
@@ -5037,6 +5636,8 @@
               {
                 navigationTimeoutMs: options.navigationTimeoutMs,
                 disclosureTimeoutMs: options.disclosureTimeoutMs,
+                childRegionWaitPolicy: options.childRegionWaitPolicy || "hydrate",
+                probeTimeoutMs: options.probeTimeoutMs,
                 relocateRow: () => {
                   if (connectedRowStillMatchesDescriptor(row, descriptor, baseUrl)) return row;
                   sidebarCatalog.snapshot(true);
@@ -5130,7 +5731,8 @@
         recordIdentityPerformance(projectIndex, lastDisclosureResult, {
           identitySource: identity
             ? (identity.source || (existing.projectId ? "row_url" : "other"))
-            : "none"
+            : "none",
+          relocationMs: relocationWaitMs
         });
         output[index] = identityProjectResult(
           descriptor,
@@ -5191,6 +5793,7 @@
       let identityCandidateSearchMs = 0;
       let identityRelocationWaitMs = 0;
       let disclosureResult = null;
+      relocation = null;
       const identityCatalog = Array.isArray(options.identityCatalog)
         ? options.identityCatalog
         : [];
@@ -5206,7 +5809,7 @@
       const sidebarCatalog = createIdentitySidebarCatalog(root, baseUrl);
       if (!identity) {
         const searchStartedAt = Date.now();
-        let relocation = sidebarCatalog.relocate(descriptor, identityCatalog);
+        relocation = sidebarCatalog.relocate(descriptor, identityCatalog);
         identityCandidateSearchMs += Math.max(0, Date.now() - searchStartedAt);
         const connectedMatch = Boolean(relocation.rowFound && relocation.row?.isConnected !== false);
         emitNavigationTelemetry("collector_project_identity_row_relocation_start", {
@@ -5246,6 +5849,9 @@
             baseUrl,
             navigationSinceDiscovery: true,
             sidebarDomGenerationChanged: true,
+            maxAttempts: options.maxAttempts,
+            maxScrollAttempts: options.maxScrollAttempts,
+            settleMs: options.settleMs,
             telemetry: (event, fields) => emitNavigationTelemetry(event, fields)
           });
           identityRelocationWaitMs += Math.max(0, Date.now() - relocateStartedAt);
@@ -5270,6 +5876,8 @@
             {
               navigationTimeoutMs: options.navigationTimeoutMs,
               disclosureTimeoutMs: options.disclosureTimeoutMs,
+              childRegionWaitPolicy: options.childRegionWaitPolicy || "probe",
+              probeTimeoutMs: options.probeTimeoutMs,
               relocateRow
             });
           identityDisclosureWaitMs += Number.isSafeInteger(disclosureResult.disclosurePrepMs)
@@ -5375,6 +5983,22 @@
           }
         }
         if (!identity) {
+        if (!row) {
+          reason = reason || relocation.reason || "row_visibility_exhausted";
+          navigationInternalReason = reason;
+          emitNavigationTelemetry("collector_project_identity_click_target", {
+            project_index: currentProjectIndex,
+            interactive_candidate_count: 0,
+            safe_candidate_count: 0,
+            visible_safe_candidate_count: 0,
+            selected_target_type: "none",
+            selection_reason: "no_safe_project_navigation_target",
+            selected_target_has_href: false,
+            selected_target_inside_project_row: false,
+            selected_target_is_menu_control: false,
+            selected_target_is_overflow_control: false
+          });
+        } else {
         targetInfo = projectInteractiveTargetForRow(row, baseUrl);
         const structure = targetInfo.structure || {};
         emitNavigationTelemetry("collector_project_identity_row_structure", {
@@ -5433,10 +6057,6 @@
           controlled_region_project_identity_present: structure.controlledRegionProjectIdentityPresent,
           row_interactive_evidence: structure.rowInteractiveEvidence
         });
-        if (!row) {
-          reason = reason || relocation.reason || "project_row_not_found";
-          navigationInternalReason = reason;
-        } else {
           // A Project href or explicit Project data attribute is a stable
           // identity. Resolve it without clicking, even in navigation mode.
           // This keeps the fallback limited to rows that discovery already
@@ -5533,36 +6153,16 @@
                 menuControlReason: fallbackTarget.menuControlReason
               };
             }
-            if (disclosureResult?.isDisclosure && !distinctFallback) {
-            const disclosureFailureReason = disclosureResult.reason
-              || "project_disclosure_identity_not_found";
-            emitNavigationTelemetry("collector_project_identity_click", {
-              project_index: currentProjectIndex,
-              clickable_element_found: Boolean(targetInfo.target),
-              click_attempted: disclosureResult.clickAttempted,
-              click_dispatched: disclosureResult.clickDispatched,
-              click_method: disclosureResult.eventFallbackAttempted
-                ? "event_sequence"
-                : "disclosure.click",
-              click_target_is_project_row: true,
-              click_target_section_verified: relocation.sectionVerified,
-              disclosure_click_attempted: disclosureResult.clickAttempted,
-              disclosure_click_dispatched: disclosureResult.clickDispatched,
-              disclosure_event_fallback_attempted: disclosureResult.eventFallbackAttempted,
-              disclosure_event_fallback_dispatched: disclosureResult.eventFallbackDispatched,
-              disclosure_url_changed: disclosureResult.urlChanged,
-              unresolved_reason: disclosureFailureReason,
-              exit_reason: disclosureFailureReason,
-              internal_reason: "project_row_disclosure_identity_unresolved",
-              navigation_failure_reason: disclosureFailureReason
-            });
-            reason = disclosureFailureReason;
-            navigationInternalReason = "project_row_disclosure_identity_unresolved";
-        } else if (targetInfo.targetIsMenuControl
-          || targetInfo.targetIsOverflowControl
-          || !targetInfo.target
-            || (typeof targetInfo.target.click !== "function"
-              && typeof targetInfo.target.dispatchEvent !== "function")) {
+            // A disclosure probe that ends in no_region_possible / virtualized /
+            // empty child evidence is not a final identity. ChatGPT Project
+            // rows often have no nested home link; the row itself is the
+            // navigation target. waitForProjectHomeNavigation still rejects
+            // no-URL-change and never adopts a stale Root URL.
+            if (targetInfo.targetIsMenuControl
+              || targetInfo.targetIsOverflowControl
+              || !targetInfo.target
+              || (typeof targetInfo.target.click !== "function"
+                && typeof targetInfo.target.dispatchEvent !== "function")) {
           const noSafeTarget = targetInfo.targetIsMenuControl
             || targetInfo.targetIsOverflowControl
             || targetInfo.selectionReason === "no_safe_project_navigation_target";
@@ -5595,6 +6195,21 @@
           });
             reason = clickFailureReason;
             navigationInternalReason = internalReason;
+          } else if (!relocationMatchAllowsNavigationClick(relocation?.matchMethod)
+            && (!targetInfo.target || targetInfo.target === row)) {
+            emitNavigationTelemetry("collector_project_identity_click", {
+              project_index: currentProjectIndex,
+              clickable_element_found: Boolean(targetInfo.target),
+              click_attempted: false,
+              click_dispatched: false,
+              click_method: "title_only_click_rejected",
+              click_target_is_project_row: Boolean(row),
+              click_target_section_verified: relocation.sectionVerified,
+              selected_match_method: relocation?.matchMethod || "none",
+              unresolved_reason: "project_row_fingerprint_mismatch"
+            });
+            reason = "project_row_fingerprint_mismatch";
+            navigationInternalReason = reason;
           } else {
             navigationFallbackAttempted = true;
             const target = targetInfo.target;
@@ -5739,9 +6354,9 @@
             reason = "project_navigation_failed";
             navigationInternalReason = reason;
           }
-        }
-        }
-        }
+          }
+          }
+          }
         }
       }
       if (classificationRow) {
@@ -5833,9 +6448,9 @@
       const navigationResultIdentity = observedIdentity || identity;
       const navigationResolved = Boolean(observedIdentity);
       recordIdentityPerformance(currentProjectIndex, disclosureResult, {
-        identitySource: identity ? (identitySource || identity.source || "other") : "none"
+        identitySource: identity ? (identitySource || identity.source || "other") : "none",
+        relocationMs: identityRelocationWaitMs
       });
-      emitIdentityPerformanceSummary();
       emitNavigationTelemetry("collector_project_identity_navigation_result", {
         project_index: currentProjectIndex,
         navigation_target_verified: navigationResolved,
@@ -5865,7 +6480,15 @@
         internal_reason: identity
           ? "none"
           : (navigationInternalReason || reason || "missing_stable_identity"),
-        navigation_failure_reason: identity ? "none" : (reason || "missing_stable_identity")
+        navigation_failure_reason: identity ? "none" : (reason || "missing_stable_identity"),
+        ...(relocation?.visibilityRecoveryAttempted === true ? {
+          visibility_recovery_attempted: true,
+          visibility_recovery_scroll_attempt_count: Number(relocation?.visibilityRecoveryScrollAttempts) || 0,
+          visibility_recovery_scroll_position_change_count:
+            Number(relocation?.visibilityRecoveryScrollPositionChanges) || 0,
+          visibility_recovery_stagnation_count: Number(relocation?.visibilityRecoveryStagnationCount) || 0,
+          visibility_recovery_success: relocation?.visibilityRecoverySuccess === true
+        } : {})
       });
       output[0] = identityProjectResult(
         descriptor,
@@ -5880,7 +6503,11 @@
           identity_candidate_consistent: sourceStats
             ? sourceStats.identityCandidateConsistent === true
             : true,
-          identity_source: identity ? (identitySource || identity.source || "other") : undefined
+          identity_source: identity ? (identitySource || identity.source || "other") : undefined,
+          navigation_started_for_project: navigationFallbackAttempted === true
+            || Boolean(observedIdentity),
+          visibility_recovery_attempted: relocation?.visibilityRecoveryAttempted === true,
+          visibility_recovery_success: relocation?.visibilityRecoverySuccess === true
         });
       if (identity) {
         if (navigationResolved) navigationResolvedCount = 1;
@@ -5912,6 +6539,13 @@
       project_url_pattern_valid: projectUrlPatternValid,
       project_id_url_match: projectIdUrlMatch,
       navigation_failure_reason: output.find((project) => project?.unresolved_reason)?.unresolved_reason || "none",
+      navigation_started_for_project: output.some((project) => project?.navigation_started_for_project === true),
+      visibility_recovery_attempted: output.some((project) => project?.visibility_recovery_attempted === true),
+      visibility_recovery_success: output.some((project) => project?.visibility_recovery_success === true),
+      visibility_recovery_scroll_attempt_count: Number(relocation?.visibilityRecoveryScrollAttempts) || 0,
+      visibility_recovery_scroll_position_change_count:
+        Number(relocation?.visibilityRecoveryScrollPositionChanges) || 0,
+      visibility_recovery_stagnation_count: Number(relocation?.visibilityRecoveryStagnationCount) || 0,
       internal_reason: output.find((project) => project?.unresolved_reason)
         ? (navigationInternalReason || "missing_stable_identity")
         : "none",
@@ -9151,8 +9785,10 @@
     collectChatGptContext,
     collectChatGptContextAsync,
     finalizeProvisionalProjectObservations,
+    prepareIdentityProjectCatalog,
     collectProjectContextEntries,
     resolveChatGptProjectIdentitiesAsync,
+    projectIdentityNavigationEligible,
     collectChatGptProjectContextAsync,
     getCurrentChatGptContext,
     getChatGptCollectorViewport,

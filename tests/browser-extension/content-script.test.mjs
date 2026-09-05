@@ -761,8 +761,8 @@ test("Content Script preserves Project identity navigation stages in its safe ru
   assert.equal(target.safe_candidate_count, 0);
   assert.equal(target.selection_reason, "no_safe_project_navigation_target");
   assert.equal(Object.hasOwn(target, "project_title"), false);
-  assert.equal(result.navigation_failure_reason, "project_row_not_visible");
-  assert.equal(result.internal_reason, "project_row_not_visible");
+  assert.equal(result.navigation_failure_reason, "row_visibility_exhausted");
+  assert.equal(result.internal_reason, "row_visibility_exhausted");
 });
 
 test("Content Script suppresses loop telemetry by default but exposes it in debug mode", async () => {

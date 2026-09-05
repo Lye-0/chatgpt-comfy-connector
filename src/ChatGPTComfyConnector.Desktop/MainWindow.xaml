@@ -17,6 +17,20 @@
         Loaded="Window_Loaded"
         Closing="Window_Closing">
     <Window.Resources>
+        <DataTemplate x:Key="ContextSelectorItemTemplate">
+            <TextBlock Text="{Binding DisplayName}">
+                <TextBlock.Style>
+                    <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+                        <Style.Triggers>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <!-- Hide the display element while retaining selection and layout. -->
+                                <Setter Property="Visibility" Value="Hidden" />
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </TextBlock.Style>
+            </TextBlock>
+        </DataTemplate>
         <DataTemplate x:Key="SlotEditorTemplate">
             <Border x:Name="SlotChrome"
                     Background="{StaticResource PanelSoftBrush}"
@@ -1030,8 +1044,24 @@
                             <TextBlock Text="{Binding ChatGptContextLoadStateText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" Margin="0,0,0,6" />
                             <TextBlock Text="Project" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
                             <Grid Margin="0,3,0,5">
-                                <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" DisplayMemberPath="DisplayName" ToolTip="ChatGPTのProjectを選択" />
+                                <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" ItemTemplate="{StaticResource ContextSelectorItemTemplate}" IsEnabled="{Binding CanSelectProject}" ToolTip="ChatGPTのProjectを選択" />
                                 <TextBlock Text="{Binding ProjectPlaceholderText}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="10,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False" />
+                                <StackPanel Orientation="Horizontal"
+                                            Margin="10,0,30,0"
+                                            VerticalAlignment="Center"
+                                            IsHitTestVisible="False"
+                                            Visibility="{Binding IsChatGptContextLoading, Converter={StaticResource BoolToVisibility}}">
+                                    <ProgressBar Width="52"
+                                                 Height="3"
+                                                 IsIndeterminate="True"
+                                                 Foreground="{StaticResource AccentBrush}"
+                                                 Background="#1A3140"
+                                                 Margin="0,0,8,0" />
+                                    <TextBlock Text="プロジェクトを取得中…"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="11"
+                                               VerticalAlignment="Center" />
+                                </StackPanel>
                             </Grid>
                             <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsProjectCreateVisible, Converter={StaticResource BoolToVisibility}}">
                                 <StackPanel>
@@ -1045,23 +1075,33 @@
                             </Border>
                             <TextBlock Text="Chat" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
                             <Grid Margin="0,3,0,5">
-                                <ComboBox ItemsSource="{Binding ChatOptions}" SelectedItem="{Binding SelectedChat}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanSelectChat}" ToolTip="選択したProject内のChat" />
+                                <ComboBox ItemsSource="{Binding ChatOptions}" SelectedItem="{Binding SelectedChat}" ItemTemplate="{StaticResource ContextSelectorItemTemplate}" IsEnabled="{Binding CanSelectChat}" ToolTip="選択したProject内のChat" />
                                 <TextBlock Text="{Binding ChatPlaceholderText}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="10,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False" />
                                 <StackPanel Orientation="Horizontal"
                                             Margin="10,0,30,0"
                                             VerticalAlignment="Center"
                                             IsHitTestVisible="False"
-                                            Visibility="{Binding IsProjectChatListLoading, Converter={StaticResource BoolToVisibility}}">
+                                            Visibility="{Binding IsChatSelectorLoading, Converter={StaticResource BoolToVisibility}}">
                                     <ProgressBar Width="52"
                                                  Height="3"
                                                  IsIndeterminate="True"
                                                  Foreground="{StaticResource AccentBrush}"
                                                  Background="#1A3140"
                                                  Margin="0,0,8,0" />
-                                    <TextBlock Text="Chatを取得中…"
-                                               Foreground="{StaticResource MutedTextBrush}"
+                                    <TextBlock Foreground="{StaticResource MutedTextBrush}"
                                                FontSize="11"
-                                               VerticalAlignment="Center" />
+                                               VerticalAlignment="Center">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Text" Value="Chatを取得中…" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsChatGptContextLoading}" Value="True">
+                                                        <Setter Property="Text" Value="プロジェクトを取得中…" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
                                 </StackPanel>
                             </Grid>
                             <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsChatCreateVisible, Converter={StaticResource BoolToVisibility}}">

@@ -853,6 +853,26 @@ test("Content Script relays the cooperative DOM hydration yield without losing p
   assert.equal(telemetry.dom_hydration_deferred_count, 7);
 });
 
+test("Content Script preserves row-search coverage diagnostics", async () => {
+  const fields = {
+    stage: "collector_project_identity_row_relocation", project_index: 27,
+    scroll_search_direction: "up", scroll_reversed: true, scroll_top: 0, scroll_max_top: 2400,
+    scroll_search_limit_reached: false, scroll_attempts: 7, relocation_phase: "exhausted"
+  };
+  const harness = await createHarness({ url: "https://chatgpt.com/", locatorOverrides: {
+    resolveChatGptProjectIdentitiesAsync: async (_root, _url, projects, options) => {
+      options.onTelemetry({ ...fields, project_title: "private title", row: { outerHTML: "private DOM" } });
+      return { projects, conversations: [] };
+    }
+  } });
+  await harness.send({ type: "GET_CHATGPT_CONTEXT", requestId: "row-search-coverage",
+    mode: "list", collection: "project_identity", identityMode: "dom", projects: [] });
+  const message = await harness.waitForRuntimeMessage((message) => message.stage === fields.stage);
+  for (const [key, value] of Object.entries(fields)) assert.equal(message[key], value, key);
+  assert.equal(Object.hasOwn(message, "project_title"), false);
+  assert.equal(Object.hasOwn(message, "row"), false);
+});
+
 test("Content Script retains false and zero disclosure outcome fields", async () => {
   const fields = {
     stage: "collector_project_identity_disclosure_click", project_index: 20,

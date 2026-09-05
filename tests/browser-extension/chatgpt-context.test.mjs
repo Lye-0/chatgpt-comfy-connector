@@ -6790,6 +6790,55 @@ test("a fresh DOM recovery pass re-enumerates a previously unavailable tail row"
   assert.equal(recovery.projects[0].project_id, "g-p-appearing-tail");
 });
 
+for (const startAtBottom of [false, true]) {
+  test(`DOM recovery searches above a missing row after reaching the bottom (startAtBottom=${startAtBottom})`, async () => {
+    const href = "https://chatgpt.com/";
+    const document = new FakeMetadataDocument(href, null);
+    const names = Array.from({ length: 28 }, (_, index) => `Reordered ${index}`);
+    const catalog = names.map((title, index) => ({ title, project_index: index,
+      discovery_index: index, discovery_key: `original-${index}` }));
+    // A fresh mount has moved the last discovered Project into the first
+    // viewport. Its catalog position is not its current scroll position.
+    const reordered = [...names];
+    reordered.splice(1, 0, reordered.pop());
+    const sidebar = new VirtualizedProjectSidebar(document, reordered, {
+      nestedScroll: true, itemWindow: 8,
+      projectIds: reordered.map((title) => `g-p-reordered-${names.indexOf(title)}`)
+    });
+    document.sidebar = sidebar;
+    sidebar.scrollport.clientHeight = 800;
+    Object.defineProperty(sidebar, "currentProjectRows", { get: () => {
+      const start = Math.min(20, Math.floor(sidebar.scrollport.scrollTop / 100));
+      return sidebar.projectRows.slice(start, start + 8);
+    } });
+    const nativeScroll = Object.getOwnPropertyDescriptor(sidebar.scrollport, "scrollTop");
+    Object.defineProperty(sidebar.scrollport, "scrollTop", {
+      get: nativeScroll.get,
+      set: (value) => nativeScroll.set(Math.max(0, Math.min(2000, Number(value))))
+    });
+    sidebar.scrollport.scrollTop = startAtBottom ? 2000 : 800;
+    const locators = loadLocators(document);
+    const events = [];
+    const result = await locators.resolveChatGptProjectIdentitiesAsync(document, href, [catalog[27]], {
+      identityMode: "dom", identityPassKind: "post_navigation_recovery",
+      identityCatalog: catalog, resetSidebarCatalog: true, settleMs: 0,
+      onTelemetry: (event) => events.push(event)
+    });
+    assert.equal(result.unresolved_count, 0);
+    assert.equal(result.projects[0].project_id, "g-p-reordered-27");
+    assert.equal(result.projects[0].discovery_key, catalog[27].discovery_key);
+    assert.ok(sidebar.scrollHistory.some((top, index, positions) => index > 0 && top < positions[index - 1]),
+      "recovery must actually scroll upward after reversing direction");
+    const recovered = events.find((event) => event.stage === "collector_project_identity_row_relocation"
+      && event.relocation_success === true);
+    assert.equal(recovered.scroll_reversed, true);
+    assert.equal(recovered.scroll_search_direction, "up");
+    assert.equal(recovered.scroll_search_limit_reached, false);
+    assert.equal(recovered.scroll_max_top, 2000);
+    assert.ok(recovered.scroll_top < 800);
+  });
+}
+
 test("fresh interaction fingerprint cannot override an existing durable locator constraint", async () => {
   const fixture = viewportDisclosureFixture(1);
   const row = fixture.sidebar.projectRows[0];

@@ -387,6 +387,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsBrowserExtensionConnected => _browserExtensionBridge.Status.ConnectionState == BrowserExtensionConnectionState.Connected;
     public bool IsBrowserExtensionBridgeRunning => _browserExtensionBridge.Status.IsRunning;
     public ProjectChatCatalogLoadState ChatGptContextLoadState => _contextCatalog.LoadState;
+    public bool IsChatGptContextLoading => ChatGptContextLoadState == ProjectChatCatalogLoadState.Loading;
+    public bool IsChatSelectorLoading => IsChatGptContextLoading || IsProjectChatListLoading;
     public string ChatGptContextLoadStateText => ChatGptContextLoadState switch
     {
         ProjectChatCatalogLoadState.NotLoaded => "未取得",
@@ -544,12 +546,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ? string.Empty
         : "保留中のgenerateがあります。RESUMEで同じCommandを一度だけAPPLY・GENERATEします。";
     public string CurrentSessionContextText => CurrentSession is null ? "制作セッションなし" : $"{BlankFallback(CurrentSession.ProjectLabel, "Project未設定")}  ·  {BlankFallback(CurrentSession.ChatLabel, "Chat未設定")}";
-    public string ProjectPlaceholderText => HasSelectedProject || IsProjectCreateVisible ? string.Empty : "Projectを選択…";
-    public string ChatPlaceholderText => !HasSelectedProject
-        ? "先にProjectを選択してください"
-        : IsProjectChatListLoading || HasChatValidationMessage || HasSelectedChat || IsChatCreateVisible
-            ? string.Empty
-            : "Chatを選択…";
+    public string ProjectPlaceholderText => IsChatGptContextLoading || HasSelectedProject || IsProjectCreateVisible ? string.Empty : "Projectを選択…";
+    public string ChatPlaceholderText => IsChatSelectorLoading
+        ? string.Empty
+        : !HasSelectedProject
+            ? "先にProjectを選択してください"
+            : HasChatValidationMessage || HasSelectedChat || IsChatCreateVisible
+                ? string.Empty
+                : "Chatを選択…";
     private WorkflowPreparation SelectedWorkflowPreparation => new(
         SelectedWorkflow, SlotDiscoveryState, SlotLoadError ?? (SelectedWorkflow is null ? _workflowCatalogError : null));
     private ChatPreparation SelectedChatPreparation => new(
@@ -595,12 +599,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (_isProjectChatListLoading == value) return;
             _isProjectChatListLoading = value;
             OnPropertyChanged();
+            OnPropertyChanged(nameof(IsChatSelectorLoading));
             OnPropertyChanged(nameof(CanSelectChat));
             OnPropertyChanged(nameof(ChatPlaceholderText));
             NotifyContextSelectionChanged();
         }
     }
-    public bool CanSelectChat => HasSelectedProject && !IsProjectChatListLoading;
+    public bool CanSelectProject => !IsChatGptContextLoading;
+    public bool CanSelectChat => HasSelectedProject && !IsChatSelectorLoading;
     public bool CanCreateChat => HasSelectedProject
         && string.Equals(_contextProvider.ProviderId, ContextProviderIds.LocalJson, StringComparison.OrdinalIgnoreCase);
     public bool HasProjectValidationMessage => !string.IsNullOrWhiteSpace(ProjectValidationMessage);
@@ -1833,19 +1839,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // Bind later Review media to the exact tab that accepted this
                 // Session's initial Handoff. It must not depend on the tab
                 // that happens to be active when ComfyUI finishes.
-                CurrentSession.BrowserExtensionTargetTabId = result.TargetTabId;
-                CurrentSession.BrowserExtensionTargetTabUrl = result.TargetTabId.HasValue ? result.TargetTabUrl : null;
-                if (!string.IsNullOrWhiteSpace(result.TargetConversationId))
-                {
-                    CurrentSession.ConversationId = result.TargetConversationId;
-                    CurrentSession.ConversationUrl = result.TargetConversationUrl ?? CurrentSession.ConversationUrl;
-                    CurrentSession.ChatContextKey = result.TargetConversationId;
-                }
-                if (!string.IsNullOrWhiteSpace(result.TargetProjectId))
-                {
-                    CurrentSession.ProjectId = result.TargetProjectId;
-                    CurrentSession.ProjectContextKey = result.TargetProjectId;
-                }
+                var selectedChat = BrowserExtensionSentTargetBinding.Apply(
+                    CurrentSession, result, _contextCatalog.Projects, SelectedProject, SelectedChat);
+                if (!ReferenceEquals(selectedChat, SelectedChat))
+                    RefreshChatOptions(SelectedProject?.Key, selectedChat?.Key);
+                OnPropertyChanged(nameof(ChatLabel));
+                OnPropertyChanged(nameof(SessionTitle));
+                OnPropertyChanged(nameof(CurrentSessionContextText));
+                NotifyContextSelectionChanged();
                 await SaveActiveSessionAsync();
                 await DrainQueuedBrowserExtensionResponseAsync(request.RequestId);
             }
@@ -5181,6 +5182,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void NotifyContextCatalogChanged()
     {
         OnPropertyChanged(nameof(ChatGptContextLoadState));
+        OnPropertyChanged(nameof(IsChatGptContextLoading));
+        OnPropertyChanged(nameof(IsChatSelectorLoading));
+        OnPropertyChanged(nameof(CanSelectProject));
+        OnPropertyChanged(nameof(CanSelectChat));
+        OnPropertyChanged(nameof(ProjectPlaceholderText));
+        OnPropertyChanged(nameof(ChatPlaceholderText));
         OnPropertyChanged(nameof(ChatGptContextLoadStateText));
         OnPropertyChanged(nameof(ChatGptContextProjectCount));
         OnPropertyChanged(nameof(ChatGptContextProjectOptionCount));

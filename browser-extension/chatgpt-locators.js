@@ -4872,7 +4872,7 @@
           candidate_search_attempted: true,
           scroll_search_attempted: scrollAttempts > 0,
           scroll_search_stagnated: extra.scrollSearchStagnated === true
-            || extra.relocationStagnated === true,
+            || extra.relocationStagnated === true || extra.relocation_stagnated === true,
           more_click_count: moreClickCount,
           ...extra
         });
@@ -4928,7 +4928,7 @@
           candidate_search_attempted: true,
           scroll_search_attempted: scrollAttempts > 0,
           scroll_search_stagnated: extra.relocationStagnated === true
-            || extra.scrollSearchStagnated === true
+            || extra.scrollSearchStagnated === true || extra.relocation_stagnated === true
         });
       } catch (_) { }
     };
@@ -4964,7 +4964,13 @@
         || current.visibleRows.length === 0,
       scrollPositionChanged: scrolled,
       moreAvailable: current.moreAvailable,
-      catalogEntryFound
+      catalogEntryFound,
+      scroll_search_direction: direction < 0 ? "up" : "down",
+      scroll_reversed: reversed,
+      scroll_top: Math.max(0, Math.round(Number(current.scrollContainer?.scrollTop) || 0)),
+      scroll_max_top: Math.max(0, Math.round((Number(current.scrollContainer?.scrollHeight) || 0)
+        - (Number(current.scrollContainer?.clientHeight) || 0))),
+      scroll_search_limit_reached: false
     });
     const visibilityProgressSignature = (current) => {
       const baseUrl = options.baseUrl || globalThis.location?.href;
@@ -5095,6 +5101,7 @@
         lastRelocation.visibilityRecoveryStagnationCount = stagnantProgressPasses;
         emitRelocation(lastRelocation, {
           ...extraFromSnapshot(afterMore, "exhausted", false),
+          scroll_search_limit_reached: true,
           relocation_stagnated: true,
           visibility_recovery_attempted: true,
           scroll_attempts: scrollAttempts
@@ -5120,6 +5127,12 @@
         direction *= -1;
         reversed = true;
         scrollAttempts += 1;
+        // Changing direction does not move the scrollport. Give the next
+        // iteration a chance to search/move upward instead of treating this
+        // intentional stationary turn as exhausted visibility recovery.
+        stagnantProgressPasses = 0;
+        await waitForSidebarMutation(root, options.settleMs === undefined ? 50 : options.settleMs);
+        continue;
       } else {
         lastRelocation = matchFromSnapshot(snapshot());
         lastRelocation.reason = lastRelocation.reason === "project_row_fingerprint_mismatch"
@@ -5195,6 +5208,7 @@
     lastRelocation.visibilityRecoveryStagnationCount = stagnantProgressPasses;
     emitRelocation(lastRelocation, {
       ...extraFromSnapshot(finalSnapshot, "exhausted", false),
+      scroll_search_limit_reached: !connectedRelocation(lastRelocation),
       relocation_attempt: maxAttempts - 1,
       more_clicked: moreClicked,
       more_attempted: moreAttempted,
@@ -6203,6 +6217,11 @@
       "candidate_search_attempted",
       "scroll_search_attempted",
       "scroll_search_stagnated",
+      "scroll_search_direction",
+      "scroll_reversed",
+      "scroll_top",
+      "scroll_max_top",
+      "scroll_search_limit_reached",
       "visibility_recovery_attempted",
       "visibility_recovery_scroll_attempt_count",
       "visibility_recovery_scroll_position_change_count",

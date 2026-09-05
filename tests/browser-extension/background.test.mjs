@@ -4952,7 +4952,10 @@ test("Project identity failure summary retains the specific row search failure",
   const pending = { requestId: "missing-fingerprint", generation: 1, tabId: 100 };
   harness.context.updateCollectorProjectIdentityDiagnostic(pending, 0, {
     unresolved_reason: "project_row_fingerprint_mismatch", scroll_search_attempted: true,
-    relocation_attempted: true, relocation_success: false
+    relocation_attempted: true, relocation_success: false,
+    scroll_search_direction: "up", scroll_reversed: true, scroll_top: 0, scroll_max_top: 2200,
+    scroll_search_limit_reached: false, relocation_phase: "exhausted", relocation_attempt: 8,
+    relocation_elapsed_ms: 550, scroll_attempts: 8, visible_project_row_count: 6, more_available: false
   });
   harness.context.emitCollectorProjectIdentityFailureSummary(pending, [{ title: "Unresolved" }]);
   const summary = harness.diagnostics.map(([, fields]) => fields).find((fields) =>
@@ -4960,6 +4963,17 @@ test("Project identity failure summary retains the specific row search failure",
   assert.equal(summary.failures[0].unresolved_reason, "missing_stable_identity");
   assert.equal(summary.failures[0].identity_failure_reason, "project_row_fingerprint_mismatch");
   assert.equal(summary.failures[0].scroll_search_attempted, true);
+  assert.equal(summary.failures[0].scroll_search_direction, "up");
+  assert.equal(summary.failures[0].scroll_reversed, true);
+  assert.equal(summary.failures[0].scroll_top, 0);
+  assert.equal(summary.failures[0].scroll_max_top, 2200);
+  assert.equal(summary.failures[0].scroll_search_limit_reached, false);
+  assert.equal(summary.failures[0].relocation_phase, "exhausted");
+  assert.equal(summary.failures[0].relocation_attempt, 8);
+  assert.equal(summary.failures[0].relocation_elapsed_ms, 550);
+  assert.equal(summary.failures[0].scroll_attempts, 8);
+  assert.equal(summary.failures[0].visible_project_row_count, 6);
+  assert.equal(summary.failures[0].more_available, false);
 });
 
 test("Project identity failure bundles Root settling and provisional provenance", async () => {

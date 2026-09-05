@@ -1889,6 +1889,11 @@ function diagnostic(eventName, fields = {}) {
     "candidate_search_attempted",
     "scroll_search_attempted",
     "scroll_search_stagnated",
+    "scroll_search_direction",
+    "scroll_reversed",
+    "scroll_top",
+    "scroll_max_top",
+    "scroll_search_limit_reached",
     "more_clicked",
     "more_attempted",
     "scroll_attempts",
@@ -2613,6 +2618,17 @@ function diagnostic(eventName, fields = {}) {
       "candidate_search_attempted",
       "scroll_search_attempted",
       "scroll_search_stagnated",
+      "scroll_search_direction",
+      "scroll_reversed",
+      "scroll_top",
+      "scroll_max_top",
+      "scroll_search_limit_reached",
+      "relocation_phase",
+      "relocation_attempt",
+      "relocation_elapsed_ms",
+      "scroll_attempts",
+      "visible_project_row_count",
+      "more_available",
       "fingerprint_match",
       "stable_fingerprint_match_count",
       "title_match_count",
@@ -7059,7 +7075,9 @@ function updateCollectorProjectIdentityDiagnostic(pending, projectIndex, fields 
     "match_method",
     "navigation_failure_reason",
     "internal_reason",
-    "relocation_skip_reason"
+    "relocation_skip_reason",
+    "scroll_search_direction",
+    "relocation_phase"
   ]) {
     if (typeof fields[key] === "string" && fields[key].length <= 128) next[key] = fields[key];
   }
@@ -7072,7 +7090,13 @@ function updateCollectorProjectIdentityDiagnostic(pending, projectIndex, fields 
     "catalog_title_match_count",
     "child_chat_count",
     "child_project_url_count",
-    "navigation_owner_project_index"
+    "navigation_owner_project_index",
+    "scroll_top",
+    "scroll_max_top",
+    "relocation_attempt",
+    "relocation_elapsed_ms",
+    "scroll_attempts",
+    "visible_project_row_count"
   ]) {
     if (Number.isSafeInteger(fields[key]) && fields[key] >= 0) next[key] = fields[key];
   }
@@ -7098,7 +7122,10 @@ function updateCollectorProjectIdentityDiagnostic(pending, projectIndex, fields 
     "scroll_search_attempted",
     "scroll_search_stagnated",
     "visibility_recovery_attempted",
-    "visibility_recovery_success"
+    "visibility_recovery_success",
+    "scroll_reversed",
+    "scroll_search_limit_reached",
+    "more_available"
   ]) {
     if (typeof fields[key] === "boolean") next[key] = fields[key];
   }
@@ -7626,6 +7653,11 @@ const collectorProjectIdentityNavigationTelemetryKeys = [
   "candidate_search_attempted",
   "scroll_search_attempted",
   "scroll_search_stagnated",
+  "scroll_search_direction",
+  "scroll_reversed",
+  "scroll_top",
+  "scroll_max_top",
+  "scroll_search_limit_reached",
   "more_clicked",
   "more_click_count",
   "more_attempted",
@@ -7840,6 +7872,17 @@ function emitCollectorProjectIdentityFailureSummary(pending, projects, errorCode
       candidate_search_attempted: detail.candidate_search_attempted === true,
       scroll_search_attempted: detail.scroll_search_attempted === true,
       scroll_search_stagnated: detail.scroll_search_stagnated === true,
+      scroll_search_direction: detail.scroll_search_direction,
+      scroll_reversed: detail.scroll_reversed === true,
+      scroll_top: detail.scroll_top,
+      scroll_max_top: detail.scroll_max_top,
+      scroll_search_limit_reached: detail.scroll_search_limit_reached === true,
+      relocation_phase: detail.relocation_phase,
+      relocation_attempt: detail.relocation_attempt,
+      relocation_elapsed_ms: detail.relocation_elapsed_ms,
+      scroll_attempts: detail.scroll_attempts,
+      visible_project_row_count: detail.visible_project_row_count,
+      more_available: detail.more_available,
       fingerprint_match: detail.fingerprint_match === true,
       stable_fingerprint_match_count: detail.stable_fingerprint_match_count || 0,
       title_match_count: detail.title_match_count

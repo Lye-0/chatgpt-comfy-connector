@@ -495,6 +495,13 @@ through DOM resolution and exposed as `identity_failure_reason` in the failure
 summary. Provisional index/transition diagnostics retain their array types across
 the Content Script boundary.
 
+Reaching a scroll boundary changes the row-search direction once. This stationary
+turn is not stagnation: the next iteration must actually scan in the reversed
+direction within the existing attempt limits. Failure summaries retain search
+direction, reversal, scroll position/range, attempt count and limit exhaustion so
+a bounded search can be distinguished from a missing row without a separate
+efficiency log.
+
 Within a single synchronous Identity inspection, Sidebar row enumeration,
 controlled-region ownership results and candidate-element lists are shared by
 the fingerprint and owned-identity readers. The sharing scope is released in
@@ -605,6 +612,14 @@ fallback. Project routes are identified from stable `g-p-*` routes such as
 `/c/{conversationId}` identity. A conversation outside a Project is grouped
 under `Projectなし`, and `＋ 新しいChat` represents a new-chat target whose
 conversation ID is not known until the first Handoff is accepted.
+
+On a successful Bootstrap acknowledgement, Desktop binds that conversation
+to the Session and adds or reuses its Chat catalog entry before processing a
+queued assistant response. The selector follows the resolved conversation
+only if it still matches the Session's original Project/Chat selection. A
+user's intervening selection change remains detectable by the normal Context
+guard. The new-Chat placeholder stays available for later creations, and the
+issued PendingHandoff identity and payload remain immutable.
 
 The list request uses a locator-owned Collector discovery helper. Project
 discovery reuses the previously successful metadata-only route exactly once

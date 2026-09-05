@@ -915,7 +915,7 @@ public sealed class BrowserExtensionBridgeTests
         Assert.Contains("Content=\"{Binding SendToChatGptButtonText}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("IsEnabled=\"{Binding CanSendToChatGpt}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Chatを取得中…", xaml, StringComparison.Ordinal);
-        Assert.Contains("IsProjectChatListLoading", xaml, StringComparison.Ordinal);
+        Assert.Contains("IsChatSelectorLoading", xaml, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -10,7 +10,10 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using ChatGPTComfyConnector.Core.Models;
+using ChatGPTComfyConnector.Core.Services;
 using ChatGPTComfyConnector.Desktop.ViewModels;
+using ChatGPTComfyConnector.Infrastructure.Bridge;
+using ChatGPTComfyConnector.Infrastructure.Storage;
 
 namespace ChatGPTComfyConnector.Desktop;
 
@@ -29,12 +32,20 @@ public partial class MainWindow : Window
     private string? _lastCurrentOutputVideoPath;
     private string? _requestedHistoryPlaybackPath;
     private readonly Dictionary<string, BitmapSource> _videoThumbnailCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _videoThumbnailCaptureInProgress = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _videoThumbnailCaptureRetryRequested = new(StringComparer.OrdinalIgnoreCase);
     private MainViewModel ViewModel => (MainViewModel)DataContext;
 
     public MainWindow()
+        : this(new BrowserExtensionBridge(
+            pairingStore: new PortableStore(new PortableLayout(AppContext.BaseDirectory))))
+    {
+    }
+
+    public MainWindow(IBrowserExtensionBridge browserExtensionBridge)
     {
         InitializeComponent();
-        DataContext = new MainViewModel(AppContext.BaseDirectory);
+        DataContext = new MainViewModel(AppContext.BaseDirectory, browserExtensionBridge: browserExtensionBridge);
         ViewModel.PropertyChanged += ViewModel_PropertyChanged;
         IdeaInputBox.AddHandler(TextCompositionManager.PreviewTextInputStartEvent,
             new TextCompositionEventHandler(IdeaInput_TextInputStart), true);
@@ -53,6 +64,9 @@ public partial class MainWindow : Window
         IdeaInputBox.LostKeyboardFocus += IdeaInput_LostKeyboardFocus;
         IdeaInputBox.IsEnabledChanged += IdeaInput_IsEnabledChanged;
         _comfyUiStatusTimer.Tick += ComfyUiStatusTimer_Tick;
+        AddHandler(Keyboard.GotKeyboardFocusEvent, new KeyboardFocusChangedEventHandler(GuideFocusChanged), true);
+        AddHandler(Keyboard.LostKeyboardFocusEvent, new KeyboardFocusChangedEventHandler(GuideFocusChanged), true);
+        AddHandler(Keyboard.PreviewKeyDownEvent, new KeyEventHandler(GuidePreviewKeyDown), true);
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
@@ -86,7 +100,7 @@ public partial class MainWindow : Window
         _disconnectingForClose = true;
         try
         {
-            await ViewModel.DisconnectAsync();
+            await ViewModel.ShutdownAsync();
             _closeAfterDisconnect = true;
             Application.Current.Shutdown();
         }
@@ -99,11 +113,14 @@ public partial class MainWindow : Window
 
     private async void SaveSetup_Click(object sender, RoutedEventArgs e) => await Run("設定保存", ViewModel.SaveSetupAsync);
     private void Setup_Click(object sender, RoutedEventArgs e) => ViewModel.ShowSetup();
+    private void CloseSetup_Click(object sender, RoutedEventArgs e) => ViewModel.CloseSetupWithoutSaving();
     private void OpenWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.ShowWorkflowEditor();
     private void CloseWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.HideWorkflowEditor();
     private async void Connect_Click(object sender, RoutedEventArgs e) => await Run("MCP接続", ViewModel.ConnectAsync);
     private async void StartComfy_Click(object sender, RoutedEventArgs e) => await Run("ComfyUI起動", ViewModel.StartComfyUiAsync);
     private void Refresh_Click(object sender, RoutedEventArgs e) => ViewModel.RefreshWorkflowTree();
+    private async void RefreshChatGptContext_Click(object sender, RoutedEventArgs e)
+        => await Run("ChatGPT履歴更新", () => ViewModel.RefreshChatGptContextAsync());
     private void OpenWorkflowFolder_Click(object sender, RoutedEventArgs e) => OpenFolder(ViewModel.WorkflowRoot);
     private async void RetryWorkflow_Click(object sender, RoutedEventArgs e)
     {
@@ -174,17 +191,44 @@ public partial class MainWindow : Window
     private async void CreateChat_Click(object sender, RoutedEventArgs e) => await Run("Chat作成", ViewModel.CreateChatAsync);
     private void CancelChatCreation_Click(object sender, RoutedEventArgs e) => ViewModel.CancelChatCreation();
     private async void Resume_Click(object sender, RoutedEventArgs e) => await Run("セッション再開", ViewModel.ResumeSessionAsync);
-    private async void ImportCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド検証", ViewModel.ImportCommandAsync);
+    private async void ImportCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド検証", () => ViewModel.ImportCommandAsync());
     private async void ApplyCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド適用", () => ViewModel.ApplyCommandAsync(false));
     private async void ApplyGenerateCommand_Click(object sender, RoutedEventArgs e) => await Run("コマンド適用 + 生成", () => ViewModel.ApplyCommandAsync(true));
     private async void CopyBootstrap_Click(object sender, RoutedEventArgs e)
     {
         await Run("ChatGPTへ送信", async () =>
         {
-            var payload = await ViewModel.PrepareBootstrapHandoffAsync();
+            // The legacy method names are retained as the single UI entry
+            // point.  The view-model routes a saved Review Handoff through
+            // the same methods, so the Clipboard fallback remains below the
+            // transport result for both Bootstrap and Review sends.
+            var payload = await ViewModel.PrepareBootstrapHandoffForSendAsync();
+            var result = await ViewModel.TrySendPreparedBootstrapHandoffAsync(payload);
+            if (result is not null)
+            {
+                if (result.IsSent)
+                {
+                    ViewModel.StatusMessage = ViewModel.ReviewHandoff is not null
+                        ? "Review HandoffをChatGPTへ再送しました。レビュー返答を待っています。"
+                        : "制作コンテキストをChatGPTへ送信しました。ChatGPTの返答を待っています。";
+                    return;
+                }
+
+                // Keep the exact prepared payload and PendingHandoff when the
+                // automatic route fails. The same SEND button can retry that
+                // saved payload, while the timeline copy action remains the
+                // explicit Clipboard fallback; neither path issues a new ID.
+                var failureCode = result.ErrorCode ?? "send_failed";
+                var failureStage = string.IsNullOrWhiteSpace(result.Stage) ? string.Empty : $", stage={result.Stage}";
+                ViewModel.StatusMessage = $"自動送信に失敗しました。同じHandoffを再送するか、TimelineのコピーでClipboard fallbackを使用できます。({failureCode}{failureStage})";
+                return;
+            }
+
             Clipboard.SetText(payload);
-            await ViewModel.ConfirmBootstrapCopiedAsync(payload);
-            ViewModel.StatusMessage = "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。";
+            await ViewModel.ConfirmHandoffCopiedAsync(payload);
+            ViewModel.StatusMessage = ViewModel.ReviewHandoff is not null
+                ? "Review Handoffをコピーしました。ChatGPTへ貼り付けてください。"
+                : "制作コンテキストをコピーしました。ChatGPTへ貼り付けてください。";
         });
     }
     private async void CopyHandoff_Click(object sender, RoutedEventArgs e)
@@ -206,6 +250,8 @@ public partial class MainWindow : Window
             ViewModel.StatusMessage = "生成結果をChatGPT用にコピーしました。必要な画像・動画を手動で添付してください。";
         });
     }
+    private async void AttachReviewOutput_Click(object sender, RoutedEventArgs e)
+        => await Run("生成結果をChatGPTへ添付", ViewModel.AttachReviewOutputAsync);
     private void OpenOutput_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { Tag: string path }) RunSync("出力を開く", () => ViewModel.OpenOutputFile(path));
@@ -477,9 +523,15 @@ public partial class MainWindow : Window
         ViewModel.StatusMessage = "動画プレビューに対応していません。OPENでOSの既定アプリを使用できます。";
     }
 
-    private async void HistoryVideoMediaOpened(object sender, RoutedEventArgs e)
+    private void HistoryVideoMediaLoaded(object sender, RoutedEventArgs e)
+        => RequestHistoryVideoThumbnailCapture(sender as MediaElement);
+
+    private void HistoryVideoMediaOpened(object sender, RoutedEventArgs e)
+        => RequestHistoryVideoThumbnailCapture(sender as MediaElement);
+
+    private void RequestHistoryVideoThumbnailCapture(MediaElement? media)
     {
-        if (sender is not MediaElement media) return;
+        if (media is null) return;
         if (media.DataContext is not GenerationHistoryItem item
             || item.PrimaryOutput is not { IsVideo: true } output
             || output.IsMissing)
@@ -487,35 +539,82 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_videoThumbnailCache.TryGetValue(output.FullPath, out var cachedThumbnail))
+        var outputPath = output.FullPath;
+        if (_videoThumbnailCache.TryGetValue(outputPath, out var cachedThumbnail))
         {
             item.SetThumbnail(cachedThumbnail);
             return;
         }
 
+        if (media.Source is null) return;
+        if (!_videoThumbnailCaptureInProgress.Add(outputPath))
+        {
+            // Loaded and MediaOpened can be raised close together. Keep the
+            // later signal so a premature Loaded capture gets another chance
+            // after the decoder has published its natural video dimensions.
+            _videoThumbnailCaptureRetryRequested.Add(outputPath);
+            return;
+        }
+
+        _ = CaptureHistoryVideoThumbnailAsync(media, item, outputPath);
+    }
+
+    private async Task CaptureHistoryVideoThumbnailAsync(
+        MediaElement media,
+        GenerationHistoryItem item,
+        string outputPath)
+    {
+        var source = media.Source;
         try
         {
-            var source = media.Source;
             // ScrubbingEnabled lets a paused MediaElement render a seeked
             // frame. This keeps HISTORY cards static instead of using them as
             // miniature players.
             media.ScrubbingEnabled = true;
             var position = GetThumbnailPosition(media);
+            if (!media.IsLoaded) return;
             media.Position = position;
             media.Pause();
             var thumbnail = await CaptureMediaFrameWhenReadyAsync(media, position, allowPlaybackFallback: true);
-            if (thumbnail is null || !media.IsLoaded || !Equals(media.Source, source)) return;
-            StoreVideoThumbnail(output.FullPath, thumbnail);
+            if (thumbnail is not null && media.IsLoaded && Equals(media.Source, source))
+            {
+                StoreVideoThumbnail(outputPath, thumbnail);
+                return;
+            }
+
+            // Do not leave a failed MediaElement as a permanent black card.
+            // A later Loaded/MediaOpened signal can still clear this state when
+            // virtualization or decoder startup was the transient cause.
+            if (media.IsLoaded && Equals(media.Source, source) && !item.HasThumbnail)
+                item.MarkThumbnailUnavailable();
         }
         catch (InvalidOperationException)
         {
             // The card may have been virtualized/unloaded while the media was
             // opening; the history item itself remains usable.
+            if (media.IsLoaded && Equals(media.Source, source) && !item.HasThumbnail)
+                item.MarkThumbnailUnavailable();
+        }
+        finally
+        {
+            _videoThumbnailCaptureInProgress.Remove(outputPath);
+            if (_videoThumbnailCaptureRetryRequested.Remove(outputPath)
+                && !_videoThumbnailCache.ContainsKey(outputPath)
+                && !Dispatcher.HasShutdownStarted)
+            {
+                _ = Dispatcher.BeginInvoke(
+                    DispatcherPriority.ContextIdle,
+                    new Action(() => RequestHistoryVideoThumbnailCapture(media)));
+            }
         }
     }
 
     private void HistoryVideoMediaFailed(object sender, ExceptionRoutedEventArgs e)
-        => ViewModel.StatusMessage = "履歴の動画サムネイルを読み込めません。OUTPUT VIEWERまたはOPENで確認できます。";
+    {
+        if (sender is MediaElement { DataContext: GenerationHistoryItem item })
+            item.MarkThumbnailUnavailable();
+        ViewModel.StatusMessage = "履歴の動画サムネイルを読み込めません。OUTPUT VIEWERまたはOPENで確認できます。";
+    }
 
     private void QueueCurrentOutputThumbnailCapture()
     {
@@ -560,15 +659,20 @@ public partial class MainWindow : Window
         bool allowPlaybackFallback,
         Func<bool>? shouldAbort = null)
     {
-        for (var attempt = 0; attempt < 6; attempt++)
+        for (var attempt = 0; attempt < 10; attempt++)
         {
             if (shouldAbort?.Invoke() == true) return null;
             if (!media.IsLoaded) return null;
+            if (!IsMediaReadyForThumbnail(media))
+            {
+                await Task.Delay(100);
+                continue;
+            }
             await media.Dispatcher.InvokeAsync(media.UpdateLayout, DispatcherPriority.Render);
             var frame = CaptureVisualFrame(media);
             if (frame is not null && !IsLikelyBlankFrame(frame)) return frame;
 
-            await Task.Delay(120);
+            await Task.Delay(100);
             if (shouldAbort?.Invoke() == true) return null;
             try { media.Position = position; }
             catch (InvalidOperationException) { return null; }
@@ -579,19 +683,44 @@ public partial class MainWindow : Window
         try
         {
             // Some Windows decoders do not paint a seeked paused frame until
-            // playback has advanced. Decode briefly, then freeze the captured
-            // bitmap; the MediaElement itself is never used for interaction.
+            // playback has advanced. Decode briefly, polling rendered frames
+            // until one is non-blank; the MediaElement itself is never used
+            // for interaction.
+            if (shouldAbort?.Invoke() == true || !media.IsLoaded) return null;
+            media.Position = position;
             media.Play();
-            await Task.Delay(700);
+            for (var attempt = 0; attempt < 10; attempt++)
+            {
+                await Task.Delay(100);
+                if (shouldAbort?.Invoke() == true || !media.IsLoaded) return null;
+                await media.Dispatcher.InvokeAsync(media.UpdateLayout, DispatcherPriority.Render);
+                var frame = CaptureVisualFrame(media);
+                if (frame is not null && !IsLikelyBlankFrame(frame))
+                {
+                    media.Pause();
+                    return frame;
+                }
+
+                if (media.NaturalDuration.HasTimeSpan
+                    && media.Position >= media.NaturalDuration.TimeSpan - TimeSpan.FromMilliseconds(40))
+                {
+                    media.Position = position;
+                    media.Play();
+                }
+            }
             media.Pause();
-            await media.Dispatcher.InvokeAsync(media.UpdateLayout, DispatcherPriority.Render);
-            return CaptureVisualFrame(media);
+            return null;
         }
         catch (InvalidOperationException)
         {
             return null;
         }
     }
+
+    private static bool IsMediaReadyForThumbnail(MediaElement media)
+        => media.NaturalVideoWidth > 0
+            && media.NaturalVideoHeight > 0
+            && (!media.NaturalDuration.HasTimeSpan || media.NaturalDuration.TimeSpan > TimeSpan.Zero);
 
     private void StoreVideoThumbnail(string outputPath, BitmapSource thumbnail)
     {
@@ -798,8 +927,10 @@ public partial class MainWindow : Window
 
     private async Task Run(string title, Func<Task> operation)
     {
+        ViewModel.BeginGuidedOperation();
         try { await operation(); }
         catch (Exception ex) { MessageBox.Show(ex.Message, title, MessageBoxButton.OK, MessageBoxImage.Warning); }
+        finally { ViewModel.EndGuidedOperation(); }
     }
 
     private void RunSync(string title, Action operation)

@@ -54,6 +54,13 @@ public enum SessionStatus
     Stopped,
     Paused,
     Error,
+    /// <summary>
+    /// The current automatic Run reached its per-run iteration budget while
+    /// ChatGPT still returned a valid generate decision.  This is distinct
+    /// from Completed: the user can explicitly resume the deferred command.
+    /// Appended at the end to preserve the numeric values of persisted states.
+    /// </summary>
+    LimitReached,
 }
 
 public enum JobStatus
@@ -65,6 +72,25 @@ public enum JobStatus
     Cancelled,
 }
 
+/// <summary>
+/// Durable user-facing outcome of an iteration. This is intentionally
+/// independent from <see cref="JobStatus"/>: a completed ComfyUI job can
+/// later be stopped at a Run limit or be the iteration ChatGPT marked as
+/// complete.
+/// </summary>
+public enum IterationOutcome
+{
+    /// <summary>
+    /// No terminal history outcome has been recorded yet. This value also
+    /// allows older session snapshots to be migrated without guessing while
+    /// an iteration is still in progress.
+    /// </summary>
+    Unknown,
+    Generated,
+    LimitReached,
+    ChatGptComplete,
+}
+
 public enum ContextBindingMode
 {
     Local,
@@ -74,6 +100,17 @@ public enum ContextBindingMode
 public static class ContextProviderIds
 {
     public const string LocalJson = "local-json";
+    public const string ChatGptExtension = "chatgpt-extension";
+}
+
+public enum ProjectChatCatalogLoadState
+{
+    NotLoaded,
+    Loading,
+    Loaded,
+    Empty,
+    Disconnected,
+    Error,
 }
 
 public enum HandoffDirection
@@ -100,7 +137,9 @@ public enum HandoffTransportState
     Received,
     Copied,
     Sent,
+    Attached,
     Failed,
+    Completed,
 }
 
 /// <summary>
@@ -113,14 +152,26 @@ public enum PendingHandoffPurpose
 {
     Unknown,
     Bootstrap,
+    /// <summary>
+    /// The immutable ComfyUI output context shown in the Timeline.  It is not
+    /// the Review request that follows it; a Review request must receive a
+    /// fresh handoff/boundary identity.
+    /// </summary>
+    GenerationResult,
     Review,
+    /// <summary>
+    /// A user-directed Handoff issued after a completed Session was resumed.
+    /// It deliberately permits only the first generate decision of the new
+    /// Run; later iteration Reviews use <see cref="Review"/>.
+    /// </summary>
+    Resume,
 }
 
 public enum CreationStage
 {
     // Keep the persisted v1 numeric values stable. Display/execution order is
     // defined by CreationPipelineStateMachine.OrderedStages.
-    Context = 0,
+    Context = 0, // Legacy persisted stage; migrated to Workflow / Chat on load.
     Idea = 1,
     ToChatGpt = 2,
     Command = 3,
@@ -129,6 +180,8 @@ public enum CreationStage
     Output = 6,
     Review = 7,
     Connect = 8,
+    Workflow = 9,
+    Chat = 10,
 }
 
 public enum CreationStageState
@@ -154,10 +207,77 @@ public enum CreationWaitingReason
     ComfyUiStartRequired,
     ReconnectRequired,
     ConnectionCheckRequired,
+    ChatGptPasteRequired,
     ChatGptResponseRequired,
     ReviewResponseRequired,
     ContinueDecisionRequired,
     UserActionRequired,
+}
+
+/// <summary>
+/// Internal execution state for the automatic Response -> APPLY -> GENERATE
+/// path. This is deliberately separate from the persisted pipeline stages so
+/// a duplicate assistant.response can be ignored without rewriting the
+/// user-visible Handoff timeline.
+/// </summary>
+public enum AutomaticResponseExecutionState
+{
+    None,
+    Validating,
+    Applying,
+    Generating,
+    Completed,
+    Failed,
+}
+
+/// <summary>
+/// Durable transport state for the Review Handoff that follows a completed
+/// generation.  It is deliberately separate from media attachment and
+/// assistant-response state: an attachment being present does not mean that
+/// the Review Handoff was sent.
+/// </summary>
+public enum ReviewHandoffState
+{
+    None,
+    Preparing,
+    Sending,
+    Sent,
+    WaitingResponse,
+    Received,
+    Failed,
+    Stopped,
+    Completed,
+}
+
+/// <summary>
+/// State of the standard automatic iteration loop.  There is no user-facing
+/// ON/OFF switch; this snapshot exists to make cancellation, restart recovery
+/// and stale-response rejection durable and idempotent.
+/// </summary>
+public enum AutomaticIterationState
+{
+    None,
+    Running,
+    WaitingForReviewResponse,
+    Stopped,
+    Failed,
+    Completed,
+    // Appended to preserve the numeric values of the v0.2 snapshots.
+    LimitReached,
+}
+
+/// <summary>
+/// User-facing substate of the existing GENERATE stage. No permanent pipeline
+/// stage is added for ComfyUI startup/waiting; these states only describe the
+/// current generation request.
+/// </summary>
+public enum GenerateExecutionState
+{
+    ReadyToGenerate,
+    StartingComfyUi,
+    WaitingForComfyUi,
+    Generating,
+    GenerationFailed,
 }
 
 public sealed class AppSettings : INotifyPropertyChanged
@@ -209,6 +329,7 @@ public sealed class PortableLayout
         Backups = Path.Combine(Root, "backups");
         Cache = Path.Combine(Root, "cache");
         ContextsFile = Path.Combine(Data, "chatgpt-contexts.json");
+        ChatGptContextCacheFile = Path.Combine(Cache, "chatgpt-context-cache.json");
     }
 
     public string Root { get; }
@@ -219,7 +340,9 @@ public sealed class PortableLayout
     public string Backups { get; }
     public string Cache { get; }
     public string ContextsFile { get; }
+    public string ChatGptContextCacheFile { get; }
     public string SettingsFile => Path.Combine(Config, "settings.json");
+    public string BrowserExtensionPairingFile => Path.Combine(Config, "browser-extension-pairing.json");
     public string LogFile => Path.Combine(Logs, "connector.log");
 
     public void EnsureDirectories()
@@ -410,6 +533,13 @@ public sealed class PendingHandoffSnapshot
     public List<HandoffSlotSnapshot> Slots { get; set; } = [];
     public int Iteration { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    /// <summary>
+    /// Request identity for the latest authenticated Browser Extension send.
+    /// This is transport metadata only; retrying a Handoff may rotate this
+    /// value while Session/Handoff/Boundary and the rendered body remain
+    /// unchanged.
+    /// </summary>
+    public string? LastBrowserExtensionRequestId { get; set; }
 }
 
 public sealed class OutputArtifact
@@ -474,6 +604,8 @@ public sealed class ProjectChatBindingSnapshot
     public string? ChatKey { get; init; }
     public string? ProjectExternalId { get; init; }
     public string? ChatExternalId { get; init; }
+    public string? ProjectExternalUrl { get; init; }
+    public string? ChatExternalUrl { get; init; }
     public string ProjectLabel { get; init; } = string.Empty;
     public string ChatLabel { get; init; } = string.Empty;
 }
@@ -485,10 +617,13 @@ public sealed class ChatContextOption
     public string Key { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public string? ExternalId { get; set; }
+    public string? Url { get; set; }
     public ContextBindingMode Mode { get; set; } = ContextBindingMode.Local;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     [JsonIgnore]
     public bool IsCreateAction { get; set; }
+    [JsonIgnore]
+    public bool IsNewConversation { get; set; }
 }
 
 public sealed class ProjectContextOption
@@ -497,16 +632,30 @@ public sealed class ProjectContextOption
     public string Key { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public string? ExternalId { get; set; }
+    public string? Url { get; set; }
     public ContextBindingMode Mode { get; set; } = ContextBindingMode.Local;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<ChatContextOption> Chats { get; set; } = [];
     [JsonIgnore]
     public bool IsCreateAction { get; set; }
+    [JsonIgnore]
+    public bool IsNoProject { get; set; }
+    [JsonIgnore]
+    public bool IsTargetResolvable
+        => Mode == ContextBindingMode.Local || IsNoProject || ExternalId is not null || Url is not null;
+    [JsonIgnore]
+    public bool IsNewConversationTargetResolvable
+        => Mode == ContextBindingMode.Local
+            || IsNoProject
+            || ExternalId is not null && Url is not null && !string.Equals(Url, "https://chatgpt.com/", StringComparison.OrdinalIgnoreCase);
 }
 
 public sealed class ProjectChatCatalog
 {
     public string ProviderId { get; set; } = string.Empty;
+    public ProjectChatCatalogLoadState LoadState { get; set; } = ProjectChatCatalogLoadState.Loaded;
+    public string? ErrorCode { get; set; }
+    public string? ErrorMessage { get; set; }
     public List<ProjectContextOption> Projects { get; set; } = [];
 }
 
@@ -552,6 +701,11 @@ public sealed class HandoffMessage
     // Summary is retained for sessions written before the content-first card model.
     public string Summary { get; set; } = string.Empty;
     public string Payload { get; set; } = string.Empty;
+    // Transport diagnostics are intentionally limited to safe identifiers.
+    // They let a FAILED card explain which Bridge/Content Script stage failed
+    // without persisting the credential or duplicating the Handoff body.
+    public string? TransportErrorCode { get; set; }
+    public string? TransportErrorStage { get; set; }
     public int? IterationNumber { get; set; }
 }
 
@@ -566,13 +720,163 @@ public sealed class CreationStageStatus
 
 public sealed class CreationPipelineSnapshot
 {
-    public int Version { get; set; } = 3;
+    public int Version { get; set; } = 8;
     public int IterationNumber { get; set; }
-    public bool ContextBound { get; set; }
+    public bool WorkflowBound { get; set; }
+    public bool ChatBound { get; set; }
+    [JsonIgnore]
+    public bool IsPreparationBound => WorkflowBound && ChatBound;
+    // Read old snapshots without writing the combined flag into new sessions.
+    [JsonPropertyName("contextBound")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool LegacyContextBound { get; set; }
     public bool MaximumIterationSafetyStop { get; set; }
     public string? SentIdeaSnapshot { get; set; }
     public string? AcceptedCommandAction { get; set; }
+    public GenerateExecutionState GenerateExecutionState { get; set; } = GenerateExecutionState.ReadyToGenerate;
+    public AutomaticResponseExecutionSnapshot? AutomaticResponseExecution { get; set; }
+    public ReviewHandoffSnapshot? ReviewHandoff { get; set; }
+    public AutomaticIterationSnapshot? AutomaticIteration { get; set; }
+    public ReviewMediaAttachmentSnapshot? ReviewMediaAttachment { get; set; }
+    /// <summary>
+    /// The automatic-generation budget is scoped to this Run.  Iteration
+    /// history remains session-wide and is never renumbered by Resume.
+    /// </summary>
+    public CreationRunSnapshot? CurrentRun { get; set; }
+    /// <summary>
+    /// A validated generate command that was intentionally deferred because
+    /// the current Run reached its limit.  The raw command is retained so a
+    /// later Resume can APPLY/GENERATE it without re-sending a Handoff.
+    /// </summary>
+    public DeferredGenerateSnapshot? DeferredGenerate { get; set; }
     public List<CreationStageStatus> Stages { get; set; } = [];
+}
+
+/// <summary>
+/// Durable per-Run accounting.  Run numbers are user-visible history
+/// context, while RunId is used for idempotency and stale-response guards.
+/// </summary>
+public sealed class CreationRunSnapshot
+{
+    public string RunId { get; set; } = Guid.NewGuid().ToString("N");
+    public int Number { get; set; } = 1;
+    public int StartIteration { get; set; }
+    public int IterationCount { get; set; }
+    public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
+    public string StartedReason { get; set; } = "initial";
+}
+
+/// <summary>
+/// Persisted, already validated generate Response waiting for an explicit
+/// user Resume after LIMIT_REACHED.  CommandText is intentionally not logged;
+/// it is stored only to make recovery deterministic across restarts.
+/// </summary>
+public sealed class DeferredGenerateSnapshot
+{
+    public string RunId { get; set; } = string.Empty;
+    /// <summary>
+    /// The recovery Run created by the first Resume.  Keeping this value makes
+    /// repeated Resume clicks/restarts reuse one Run instead of creating a
+    /// chain of empty Runs.
+    /// </summary>
+    public string? RecoveryRunId { get; set; }
+    public string SessionId { get; set; } = string.Empty;
+    public string RequestId { get; set; } = string.Empty;
+    public string HandoffId { get; set; } = string.Empty;
+    public string BoundaryId { get; set; } = string.Empty;
+    public string CommandText { get; set; } = string.Empty;
+    public int Iteration { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public enum ReviewMediaAttachmentState
+{
+    None,
+    Preparing,
+    Attaching,
+    Attached,
+    Failed,
+}
+
+/// <summary>
+/// Durable UI/operation state for the temporary Primary Output attachment.
+/// It deliberately contains no local filesystem path or media bytes.
+/// </summary>
+public sealed class ReviewMediaAttachmentSnapshot
+{
+    public ReviewMediaAttachmentState State { get; set; } = ReviewMediaAttachmentState.None;
+    public string SessionId { get; set; } = string.Empty;
+    public int Iteration { get; set; }
+    public string RequestId { get; set; } = string.Empty;
+    public string MediaId { get; set; } = string.Empty;
+    public string OutputIdentity { get; set; } = string.Empty;
+    public string FileName { get; set; } = string.Empty;
+    public string MimeType { get; set; } = string.Empty;
+    public long Size { get; set; }
+    public int? TargetTabId { get; set; }
+    public string? TargetTabUrl { get; set; }
+    public string? ErrorCode { get; set; }
+    public string? ErrorStage { get; set; }
+    public string? ErrorMessage { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// Durable identity and terminal state for one automatically processed
+/// assistant response. It contains identifiers only, never the Response body,
+/// credential, or session token.
+/// </summary>
+public sealed class AutomaticResponseExecutionSnapshot
+{
+    public string ResponseKey { get; set; } = string.Empty;
+    public string RequestId { get; set; } = string.Empty;
+    public string SessionId { get; set; } = string.Empty;
+    public string HandoffId { get; set; } = string.Empty;
+    public string BoundaryId { get; set; } = string.Empty;
+    public string Action { get; set; } = string.Empty;
+    public AutomaticResponseExecutionState State { get; set; } = AutomaticResponseExecutionState.None;
+    public string? ErrorCode { get; set; }
+    public string? ErrorStage { get; set; }
+    public string? ErrorMessage { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// Identity and terminal state for the current Review Handoff transport.
+/// This contains identifiers only and never the rendered Handoff body.
+/// </summary>
+public sealed class ReviewHandoffSnapshot
+{
+    public ReviewHandoffState State { get; set; } = ReviewHandoffState.None;
+    public string SessionId { get; set; } = string.Empty;
+    public int Iteration { get; set; }
+    public string RequestId { get; set; } = string.Empty;
+    public string HandoffId { get; set; } = string.Empty;
+    public string BoundaryId { get; set; } = string.Empty;
+    public int? TargetTabId { get; set; }
+    public string? TargetTabUrl { get; set; }
+    public string? ErrorCode { get; set; }
+    public string? ErrorStage { get; set; }
+    public string? ErrorMessage { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// Durable loop state.  The response body remains in CHATGPT COMMAND and in
+/// the timeline; this projection only records the identity needed to prevent
+/// a duplicate response from starting APPLY/GENERATE twice.
+/// </summary>
+public sealed class AutomaticIterationSnapshot
+{
+    public AutomaticIterationState State { get; set; } = AutomaticIterationState.None;
+    public string SessionId { get; set; } = string.Empty;
+    public int Iteration { get; set; }
+    public string ReviewHandoffId { get; set; } = string.Empty;
+    public string ReviewBoundaryId { get; set; } = string.Empty;
+    public string? ErrorCode { get; set; }
+    public string? ErrorStage { get; set; }
+    public string? ErrorMessage { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class SessionIteration : INotifyPropertyChanged
@@ -580,6 +884,8 @@ public sealed class SessionIteration : INotifyPropertyChanged
     private List<OutputArtifact> _outputs = [];
     private JobStatus _status = JobStatus.Queued;
     private string? _error;
+    private IterationOutcome _outcome = IterationOutcome.Unknown;
+    private bool _isFinal;
     public int Number { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public string Prompt { get; set; } = string.Empty;
@@ -605,6 +911,26 @@ public sealed class SessionIteration : INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new(nameof(Error)));
         }
     }
+    public IterationOutcome Outcome
+    {
+        get => _outcome;
+        set
+        {
+            if (_outcome == value) return;
+            _outcome = value;
+            PropertyChanged?.Invoke(this, new(nameof(Outcome)));
+        }
+    }
+    public bool IsFinal
+    {
+        get => _isFinal;
+        set
+        {
+            if (_isFinal == value) return;
+            _isFinal = value;
+            PropertyChanged?.Invoke(this, new(nameof(IsFinal)));
+        }
+    }
     public List<OutputArtifact> Outputs
     {
         get => _outputs;
@@ -621,8 +947,10 @@ public sealed class SessionIteration : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 
-public sealed class CreationSession
+public sealed class CreationSession : IJsonOnDeserialized
 {
+    private CreationPipelineSnapshot _pipeline = new();
+    private bool _pipelineWasRead;
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Title { get; set; } = "新しい制作";
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -637,13 +965,36 @@ public sealed class CreationSession
     public string? LocalChatContextId { get; set; }
     public string? ProjectId { get; set; }
     public string? ConversationId { get; set; }
+    /// <summary>
+    /// Stable external metadata retained for ChatGPT context recovery. The
+    /// URL is only used as a validated same-conversation recovery hint.
+    /// </summary>
+    public string? ProjectUrl { get; set; }
+    public string? ConversationUrl { get; set; }
+    /// <summary>
+    /// Legacy execution-medium metadata returned by the Extension. Conversation
+    /// identity is authoritative; the Managed Tab may be recreated later.
+    /// </summary>
+    public int? BrowserExtensionTargetTabId { get; set; }
+    public string? BrowserExtensionTargetTabUrl { get; set; }
     public WorkflowIdentity? BoundWorkflow { get; set; }
     public int CurrentIteration { get; set; }
     public int MaximumIterations { get; set; } = 10;
     public SessionStatus Status { get; set; } = SessionStatus.New;
     public List<SessionIteration> Iterations { get; set; } = [];
     public List<HandoffMessage> HandoffMessages { get; set; } = [];
-    public CreationPipelineSnapshot Pipeline { get; set; } = new();
+    public CreationPipelineSnapshot Pipeline
+    {
+        get => _pipeline;
+        set { _pipeline = value; _pipelineWasRead = true; }
+    }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        // Sessions predating pipeline persistence need legacy inference. A new
+        // in-memory session must instead pass the explicit preparation gates.
+        if (!_pipelineWasRead) _pipeline.Version = 0;
+    }
     public PendingHandoffSnapshot? PendingHandoff { get; set; }
     public string? LastError { get; set; }
     public string? PauseReason { get; set; }
@@ -665,12 +1016,26 @@ public sealed class CreationSession
         ChatKey = EffectiveChatContextKey,
         ProjectExternalId = ProjectId,
         ChatExternalId = ConversationId,
+        ProjectExternalUrl = ProjectUrl,
+        ChatExternalUrl = ConversationUrl,
         ProjectLabel = ProjectLabel,
         ChatLabel = ChatLabel,
     };
 
     public bool CanGenerate => Status is SessionStatus.New or SessionStatus.Active or SessionStatus.Paused or SessionStatus.Error;
-    public bool AtIterationLimit => CurrentIteration >= MaximumIterations;
+
+    /// <summary>
+    /// Compatibility name retained for existing callers.  The value now means
+    /// the current Run has consumed its per-Run budget, not that the Session's
+    /// lifetime history has reached a permanent ceiling.
+    /// </summary>
+    [JsonIgnore]
+    public bool AtIterationLimit => AtRunIterationLimit;
+
+    [JsonIgnore]
+    public bool AtRunIterationLimit
+        => MaximumIterations > 0
+            && (Pipeline.CurrentRun?.IterationCount ?? CurrentIteration) >= MaximumIterations;
 
     public void Resume()
     {
@@ -681,11 +1046,37 @@ public sealed class CreationSession
         UpdatedAt = DateTimeOffset.UtcNow;
     }
 
+    /// <summary>
+    /// Starts a new automatic Run without touching the Session identity or
+    /// historical iteration numbers.  Callers are responsible for clearing or
+    /// re-arming the pipeline stages for the specific Resume path.
+    /// </summary>
+    public CreationRunSnapshot StartNewRun(string reason)
+    {
+        var previous = Pipeline.CurrentRun;
+        var run = new CreationRunSnapshot
+        {
+            RunId = Guid.NewGuid().ToString("N"),
+            Number = (previous?.Number ?? 0) + 1,
+            StartIteration = CurrentIteration,
+            IterationCount = 0,
+            StartedAt = DateTimeOffset.UtcNow,
+            StartedReason = string.IsNullOrWhiteSpace(reason) ? "resume" : reason,
+        };
+        Pipeline.CurrentRun = run;
+        Status = SessionStatus.Active;
+        PauseReason = null;
+        LastError = null;
+        CompletionReason = null;
+        UpdatedAt = run.StartedAt;
+        return run;
+    }
+
     public SessionIteration StartIteration(string prompt, IDictionary<string, JsonNode?> parameters)
     {
-        if (AtIterationLimit)
+        if (AtRunIterationLimit)
         {
-            throw new InvalidOperationException("最大反復回数に達しています。続行する場合は上限を明示的に変更してください。");
+            throw new InvalidOperationException("このRunの最大反復回数に達しています。RESUMEで次のRunを開始してください。");
         }
 
         Status = SessionStatus.Active;
@@ -697,6 +1088,14 @@ public sealed class CreationSession
             Parameters = new Dictionary<string, JsonNode?>(parameters, StringComparer.OrdinalIgnoreCase),
         };
         Iterations.Add(iteration);
+        var run = Pipeline.CurrentRun ??= new CreationRunSnapshot
+        {
+            RunId = Guid.NewGuid().ToString("N"),
+            Number = 1,
+            StartIteration = 0,
+            StartedReason = "initial",
+        };
+        run.IterationCount = Math.Max(0, CurrentIteration - run.StartIteration);
         UpdatedAt = DateTimeOffset.UtcNow;
         return iteration;
     }
@@ -704,6 +1103,8 @@ public sealed class CreationSession
     public void Complete(string reason)
     {
         Status = SessionStatus.Completed;
+        Pipeline.DeferredGenerate = null;
+        Pipeline.MaximumIterationSafetyStop = false;
         CompletionReason = reason;
         UpdatedAt = DateTimeOffset.UtcNow;
     }

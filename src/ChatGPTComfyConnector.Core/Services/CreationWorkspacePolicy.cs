@@ -31,8 +31,7 @@ public static class CreationWorkspacePolicy
         }
 
         CreationPipelineStateMachine.EnsureInitialized(session);
-        if (!session.Pipeline.ContextBound ||
-            CreationPipelineStateMachine.Get(session, CreationStage.Context).State != CreationStageState.Completed)
+        if (!CreationPipelineStateMachine.IsPreparationComplete(session))
         {
             return false;
         }

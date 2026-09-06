@@ -7,7 +7,8 @@ public static class CreationPipelineStateMachine
     public static readonly CreationStage[] OrderedStages =
     [
         CreationStage.Connect,
-        CreationStage.Context,
+        CreationStage.Workflow,
+        CreationStage.Chat,
         CreationStage.Idea,
         CreationStage.ToChatGpt,
         CreationStage.Command,
@@ -19,8 +20,11 @@ public static class CreationPipelineStateMachine
 
     public static void EnsureInitialized(CreationSession session)
     {
-        session.Pipeline ??= new CreationPipelineSnapshot();
-        session.Pipeline.Version = 3;
+        session.Pipeline ??= new CreationPipelineSnapshot { Version = 0 };
+        var legacyContext = session.Pipeline.Stages.FirstOrDefault(item => item.Stage == CreationStage.Context);
+        var migrateLegacy = session.Pipeline.Version < 8 || legacyContext is not null || session.Pipeline.LegacyContextBound;
+        session.Pipeline.Version = 8;
+        EnsureRunInitialized(session);
         foreach (var stage in OrderedStages)
         {
             if (session.Pipeline.Stages.All(item => item.Stage != stage))
@@ -28,11 +32,33 @@ public static class CreationPipelineStateMachine
                 session.Pipeline.Stages.Add(new CreationStageStatus { Stage = stage });
             }
         }
+        session.Pipeline.Stages.RemoveAll(item => item.Stage == CreationStage.Context);
         session.Pipeline.Stages = session.Pipeline.Stages.OrderBy(item => Array.IndexOf(OrderedStages, item.Stage)).ToList();
 
-        if (session.Pipeline.Stages.All(item => item.State == CreationStageState.NotReached))
+        if (migrateLegacy && (session.Pipeline.LegacyContextBound || legacyContext?.State == CreationStageState.Completed)
+            && session.BoundWorkflow is not null && session.HasBoundProjectChat && session.MaximumIterations > 0)
+        {
+            session.Pipeline.WorkflowBound = true;
+            session.Pipeline.ChatBound = true;
+            // Do not refresh event timestamps: migration must not take focus
+            // away from a pending Command, Generate or Review.
+            RestorePreparationStage(session, CreationStage.Workflow, legacyContext, "既存SessionのWorkflow / Slot Schemaを復元");
+            RestorePreparationStage(session, CreationStage.Chat, legacyContext, "既存SessionのProject / Chat Bindingを復元");
+        }
+        session.Pipeline.LegacyContextBound = false;
+
+        if (migrateLegacy && legacyContext is null && session.Pipeline.Stages.All(item => item.State == CreationStageState.NotReached))
         {
             InferLegacyState(session);
+        }
+        else if (migrateLegacy && !session.Pipeline.IsPreparationBound)
+        {
+            // An unfinished combined stage carries no evidence about which
+            // preparation failed. Recheck in order instead of inventing success.
+            Set(session, CreationStage.Workflow,
+                Get(session, CreationStage.Connect).State == CreationStageState.Completed ? CreationStageState.Current : CreationStageState.NotReached,
+                "Workflow / Slot Schemaを再確認してください");
+            Set(session, CreationStage.Chat, CreationStageState.NotReached, string.Empty);
         }
 
         // A confirmed Bootstrap Handoff is a durable pipeline boundary. If a
@@ -41,16 +67,41 @@ public static class CreationPipelineStateMachine
         // restore the waiting state from the same source of truth. Explicit
         // kickoff/context edits clear both markers, so this does not mask a
         // genuine re-send boundary.
-        if (session.Pipeline.ContextBound
+        if (session.Pipeline.IsPreparationBound
             && session.Pipeline.SentIdeaSnapshot is not null
-            && PendingHandoffReuse.IsBootstrap(session.PendingHandoff))
+            && session.PendingHandoff is { } pending
+            && PendingHandoffReuse.IsBootstrap(pending))
         {
             var handoff = session.Pipeline.Stages.Single(item => item.Stage == CreationStage.ToChatGpt);
             if (handoff.State == CreationStageState.NotReached)
             {
-                Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTからの返答待ち", CreationWaitingReason.ChatGptResponseRequired);
+                var delivery = session.HandoffMessages.LastOrDefault(item =>
+                    item.Direction == HandoffDirection.ConnectorToChatGpt
+                    && item.Kind == HandoffMessageKind.CreationRequest
+                    && PendingHandoffReuse.MatchesPayload(pending, item.Payload));
+                if (delivery?.State is HandoffTransportState.Waiting or HandoffTransportState.Failed)
+                {
+                    Set(session, CreationStage.Idea, CreationStageState.Current, "送信エラー · 同じHandoffを再送できます");
+                    Set(session, CreationStage.ToChatGpt, CreationStageState.Error, "自動送信が完了していません · 同じHandoffを再送できます");
+                    ResetAfter(session, CreationStage.ToChatGpt);
+                }
+                else
+                {
+                    var wasSent = delivery?.State == HandoffTransportState.Sent;
+                    var detail = wasSent
+                        ? "Handoff送信済み · ChatGPTからの返答待ち"
+                        : "Clipboardへコピー済み · ChatGPTへ貼り付け待ち";
+                    Set(
+                        session,
+                        CreationStage.ToChatGpt,
+                        CreationStageState.WaitingUser,
+                        detail,
+                        wasSent ? CreationWaitingReason.ChatGptResponseRequired : CreationWaitingReason.ChatGptPasteRequired);
+                }
             }
         }
+
+        EnsureIterationHistoryMetadata(session);
     }
 
     public static CreationStageStatus Get(CreationSession session, CreationStage stage)
@@ -97,6 +148,7 @@ public static class CreationPipelineStateMachine
             CreationWaitingReason.ComfyUiStartRequired => "ComfyUI起動待ち",
             CreationWaitingReason.ReconnectRequired => "再接続待ち",
             CreationWaitingReason.ConnectionCheckRequired => "接続確認待ち",
+            CreationWaitingReason.ChatGptPasteRequired => "ChatGPTへ貼り付け待ち",
             CreationWaitingReason.ChatGptResponseRequired => "ChatGPT返答待ち",
             CreationWaitingReason.ReviewResponseRequired => "レビュー返答待ち",
             CreationWaitingReason.ContinueDecisionRequired => "続行判断待ち",
@@ -113,16 +165,42 @@ public static class CreationPipelineStateMachine
     public static void SynchronizeConnectionGate(CreationSession session, ConnectionState connectionState, string? detail = null)
     {
         EnsureInitialized(session);
-        var hasSessionProgress = session.Pipeline.ContextBound
-            || OrderedStages.Skip(2).Any(stage => Get(session, stage).State != CreationStageState.NotReached);
+        var hasSessionProgress = session.Pipeline.WorkflowBound || session.Pipeline.ChatBound
+            || OrderedStages.SkipWhile(stage => stage != CreationStage.Idea).Any(stage => Get(session, stage).State != CreationStageState.NotReached);
         var evaluated = EvaluateConnectionGate(connectionState, hasSessionProgress);
         Set(session, CreationStage.Connect, evaluated.State, detail ?? evaluated.Detail, evaluated.WaitingReason);
-        if (!session.Pipeline.ContextBound)
+        if (!session.Pipeline.WorkflowBound)
         {
-            Set(session, CreationStage.Context,
-                evaluated.State == CreationStageState.Completed ? CreationStageState.Current : CreationStageState.NotReached,
-                evaluated.State == CreationStageState.Completed ? "Workflow / Project / Chat / Maximum Iterations / Slot Schemaを設定してください" : string.Empty);
+            var workflow = Get(session, CreationStage.Workflow);
+            if (workflow.State is CreationStageState.NotReached or CreationStageState.Current)
+                Set(session, CreationStage.Workflow,
+                    evaluated.State == CreationStageState.Completed ? CreationStageState.Current : CreationStageState.NotReached,
+                    evaluated.State == CreationStageState.Completed ? "Workflow / Slot Schemaを準備してください" : string.Empty);
         }
+    }
+
+    /// <summary>Synchronizes only an unbound draft. Live discovery never retargets an active Session.</summary>
+    public static void SynchronizePreparation(CreationSession session, WorkflowPreparation workflow, ChatPreparation chat)
+    {
+        EnsureInitialized(session);
+        if (session.Pipeline.WorkflowBound || session.Pipeline.ChatBound) return;
+        var workflowStatus = CreationPreparationPolicy.EvaluateWorkflow(workflow);
+        var chatStatus = CreationPreparationPolicy.EvaluateChat(chat);
+        var connected = Get(session, CreationStage.Connect).State == CreationStageState.Completed;
+        ApplyPreparationStatus(session, workflowStatus, connected);
+        ApplyPreparationStatus(session, chatStatus, connected && workflowStatus.State == CreationStageState.Completed);
+    }
+
+    private static void ApplyPreparationStatus(CreationSession session, CreationStageStatus status, bool reached)
+    {
+        // Discovery can run before its turn. Preserve its own failure/loading
+        // state while keeping successful downstream inputs behind the gates.
+        if (!reached && status.State is CreationStageState.Current or CreationStageState.Completed)
+            SetIfChanged(session, status.Stage, CreationStageState.NotReached, status.Detail);
+        else
+            SetIfChanged(session, status.Stage,
+                status.Stage == CreationStage.Chat && status.State == CreationStageState.Completed ? CreationStageState.Current : status.State,
+                status.Detail, status.WaitingReason);
     }
 
     public static void RequireConnection(CreationSession session)
@@ -157,7 +235,15 @@ public static class CreationPipelineStateMachine
     public static void BeginComfyUiStartup(CreationSession session, CreationStage stage)
     {
         RequireConnection(session);
+        SetGenerateExecutionState(session, GenerateExecutionState.StartingComfyUi);
         Set(session, stage, CreationStageState.InProgress, "ComfyUI起動中");
+    }
+
+    public static void WaitingForComfyUi(CreationSession session, CreationStage stage)
+    {
+        RequireConnection(session);
+        SetGenerateExecutionState(session, GenerateExecutionState.WaitingForComfyUi);
+        Set(session, stage, CreationStageState.InProgress, "ComfyUIのREADYを待機中");
     }
 
     /// <summary>
@@ -168,51 +254,115 @@ public static class CreationPipelineStateMachine
     public static void ComfyUiStartupFailed(CreationSession session, CreationStage stage, string detail)
     {
         EnsureInitialized(session);
+        SetGenerateExecutionState(session, GenerateExecutionState.GenerationFailed);
         Set(session, stage, CreationStageState.Error, detail);
     }
 
-    public static void PrepareContext(CreationSession session, string detail = "CONNECTで制作通信を確認してください")
+    public static void PrepareCreation(CreationSession session, string detail = "CONNECTで制作通信を確認してください")
     {
         EnsureInitialized(session);
         session.PendingHandoff = null;
-        session.Pipeline.ContextBound = false;
+        // A new context cannot reuse a media registration or its Review
+        // attachment evidence. The Desktop revokes the process-local media
+        // registration before calling this boundary; the state machine also
+        // clears the persisted projection so stale media is not shown.
+        session.Pipeline.ReviewMediaAttachment = null;
+        session.Pipeline.WorkflowBound = false;
+        session.Pipeline.ChatBound = false;
         session.Pipeline.MaximumIterationSafetyStop = false;
         session.Pipeline.SentIdeaSnapshot = null;
         session.Pipeline.AcceptedCommandAction = null;
+        session.Pipeline.AutomaticResponseExecution = null;
+        session.Pipeline.ReviewHandoff = null;
+        session.Pipeline.AutomaticIteration = null;
+        session.Pipeline.CurrentRun = null;
+        session.Pipeline.DeferredGenerate = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         SetAllFrom(session, CreationStage.Connect, CreationStageState.NotReached);
         Set(session, CreationStage.Connect, CreationStageState.Current, detail);
         session.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
-    public static void BindContext(CreationSession session)
+    public static void BindWorkflow(CreationSession session, WorkflowIdentity workflow, SlotDiscoveryState slotState)
     {
         RequireConnection(session);
-        if (session.BoundWorkflow is null || !session.HasBoundProjectChat || session.MaximumIterations < 1)
+        var ready = CreationPreparationPolicy.EvaluateWorkflow(new(workflow, slotState));
+        if (ready.State != CreationStageState.Completed) throw new InvalidOperationException(ready.Detail);
+        session.BoundWorkflow = workflow;
+        session.Pipeline.WorkflowBound = true;
+        session.Pipeline.ChatBound = false;
+        InvalidateBindingHandoff(session);
+        SetAllFrom(session, CreationStage.Workflow, CreationStageState.NotReached);
+        Set(session, CreationStage.Workflow, CreationStageState.Completed, "Workflow / Slot Schemaを制作SessionへBinding済み");
+        Set(session, CreationStage.Chat, CreationStageState.Current, "Project / Chatを選択してChatGPT Contextを準備してください");
+    }
+
+    public static void BindChat(CreationSession session)
+    {
+        RequireConnection(session);
+        if (!session.Pipeline.WorkflowBound || session.BoundWorkflow is null || Get(session, CreationStage.Workflow).State != CreationStageState.Completed)
+            throw new InvalidOperationException("先にWorkflow / Slot Schemaを準備してください。");
+        if (!session.HasBoundProjectChat || session.MaximumIterations is < 1 or > 1000)
         {
-            throw new InvalidOperationException("Workflow・Project・Chat・Maximum Iterationsをすべて設定してください。");
+            const string detail = "Project・Chat・Maximum Iterationsをすべて設定してください。";
+            ChatBindingFailed(session, detail);
+            throw new InvalidOperationException(detail);
         }
         EnsureInitialized(session);
-        // Rebinding Workflow / Project / Chat / iteration context is an
-        // explicit Handoff boundary. Any response issued for the previous
-        // binding must become stale instead of being accepted against the new
-        // context.
-        session.PendingHandoff = null;
-        session.Pipeline.ContextBound = true;
+        InvalidateBindingHandoff(session);
+        session.Pipeline.ChatBound = true;
         session.Pipeline.IterationNumber = session.CurrentIteration;
-        session.Pipeline.MaximumIterationSafetyStop = false;
-        session.Pipeline.SentIdeaSnapshot = null;
-        session.Pipeline.AcceptedCommandAction = null;
-        SetAllFrom(session, CreationStage.Context, CreationStageState.NotReached);
-        Set(session, CreationStage.Context, CreationStageState.Completed, "制作セッションへContextをBinding済み");
+        if (session.Pipeline.CurrentRun is null)
+        {
+            session.Pipeline.CurrentRun = new CreationRunSnapshot
+            {
+                RunId = Guid.NewGuid().ToString("N"),
+                Number = 1,
+                StartIteration = 0,
+                IterationCount = session.CurrentIteration,
+                StartedReason = "initial",
+            };
+        }
+        SetAllFrom(session, CreationStage.Chat, CreationStageState.NotReached);
+        Set(session, CreationStage.Chat, CreationStageState.Completed, "Project / Chat・ChatGPT Contextを制作SessionへBinding済み");
         Set(session, CreationStage.Idea, CreationStageState.Current, "開始指示・補足は任意です · SEND TO CHATGPTで開始");
         session.Status = SessionStatus.Active;
         session.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
+    public static void ChatBindingFailed(CreationSession session, string detail)
+    {
+        EnsureInitialized(session);
+        session.Pipeline.ChatBound = false;
+        InvalidateBindingHandoff(session);
+        Set(session, CreationStage.Chat, CreationStageState.Error, $"ChatGPT ContextのBinding・保存に失敗 · {detail}");
+        ResetAfter(session, CreationStage.Chat);
+    }
+
+    private static void InvalidateBindingHandoff(CreationSession session)
+    {
+        // Rebinding Workflow / Project / Chat / iteration context is an
+        // explicit Handoff boundary. Any response issued for the previous
+        // binding must become stale instead of being accepted against the new
+        // context.
+        session.PendingHandoff = null;
+        // Binding a new context starts a new Review/media boundary. The
+        // Desktop revokes the old process-local registration before this call.
+        session.Pipeline.ReviewMediaAttachment = null;
+        session.Pipeline.MaximumIterationSafetyStop = false;
+        session.Pipeline.SentIdeaSnapshot = null;
+        session.Pipeline.AcceptedCommandAction = null;
+        session.Pipeline.AutomaticResponseExecution = null;
+        session.Pipeline.ReviewHandoff = null;
+        session.Pipeline.AutomaticIteration = null;
+        session.Pipeline.DeferredGenerate = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
+    }
+
     public static void IdeaChanged(CreationSession session, string idea)
     {
         EnsureInitialized(session);
-        if (!session.Pipeline.ContextBound) return;
+        if (!session.Pipeline.IsPreparationBound) return;
         if (session.Pipeline.SentIdeaSnapshot is null)
         {
             if (session.PendingHandoff is not null
@@ -242,6 +392,10 @@ public static class CreationPipelineStateMachine
         session.PendingHandoff = null;
         session.Pipeline.SentIdeaSnapshot = null;
         session.Pipeline.AcceptedCommandAction = null;
+        session.Pipeline.AutomaticResponseExecution = null;
+        session.Pipeline.ReviewHandoff = null;
+        session.Pipeline.AutomaticIteration = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         session.Pipeline.MaximumIterationSafetyStop = false;
         session.UpdatedAt = DateTimeOffset.UtcNow;
     }
@@ -252,18 +406,101 @@ public static class CreationPipelineStateMachine
     /// ChatGPT conversation's existing history.
     /// </summary>
     public static void BootstrapCopied(CreationSession session, string idea)
+        => BootstrapTransported(
+            session,
+            idea,
+            "制作ContextをClipboardへ生成済み",
+            "Clipboardへコピー済み · ChatGPTへ貼り付け待ち",
+            CreationWaitingReason.ChatGptPasteRequired);
+
+    /// <summary>
+    /// Records that the initial Handoff was delivered by the authenticated
+    /// Browser Extension Bridge. This advances exactly the same pipeline
+    /// boundary as the legacy Clipboard path while keeping the transport
+    /// state visible as SENT.
+    /// </summary>
+    public static void BootstrapSent(CreationSession session, string idea)
+        => BootstrapTransported(
+            session,
+            idea,
+            "制作ContextをExtensionへ送信済み",
+            "Handoff送信済み · ChatGPTからの返答待ち",
+            CreationWaitingReason.ChatGptResponseRequired);
+
+    /// <summary>
+    /// Records an automatic Bootstrap delivery failure without destroying the
+    /// issued PendingHandoff. The IDEA stage remains retryable and the
+    /// TO CHATGPT stage carries the error until the user retries or explicitly
+    /// chooses the timeline Clipboard action.
+    /// </summary>
+    public static void BootstrapSendFailed(CreationSession session, string detail)
     {
-        RequireContext(session);
+        EnsureInitialized(session);
+        Set(session, CreationStage.Idea, CreationStageState.Current, "送信エラー · 同じHandoffを再送できます");
+        Set(session, CreationStage.ToChatGpt, CreationStageState.Error, detail);
+        ResetAfter(session, CreationStage.ToChatGpt);
+    }
+
+    /// <summary>
+    /// Records that the assistant response belonging to the current sent
+    /// Handoff was received. The Desktop may then choose the automatic
+    /// strict-validate/apply/generate path or leave the Command waiting for
+    /// the user's manual confirmation controls. This transition itself never
+    /// performs validation or side effects.
+    /// </summary>
+    public static void ConnectorResponseReceived(CreationSession session)
+    {
+        EnsureInitialized(session);
+        var isReviewResponse = IsReviewResponse(session);
+        Set(session, CreationStage.ToChatGpt, CreationStageState.Completed, "ChatGPTのassistant応答を受信済み");
+        Set(session, CreationStage.Command, CreationStageState.WaitingUser, "CHATGPT COMMANDを受信 · 読み込んで確認してください", CreationWaitingReason.UserActionRequired);
+        // A Review response is allowed to decide the next iteration or to
+        // complete the session, so its prior successful Output/Review evidence
+        // must remain available while strict validation and automatic APPLY
+        // begin. Bootstrap responses have no such downstream evidence and keep
+        // the original reset behavior.
+        if (!isReviewResponse) ResetAfter(session, CreationStage.Command);
+    }
+
+    /// <summary>
+    /// Keeps the issued Pending Handoff intact when assistant response
+    /// monitoring or Desktop-side validation fails.  The user can still use
+    /// the existing Command editor or explicitly retry the Handoff boundary.
+    /// </summary>
+    public static void ConnectorResponseFailed(CreationSession session, string detail)
+    {
+        EnsureInitialized(session);
+        var isReviewResponse = IsReviewResponse(session);
+        Set(session, CreationStage.Command, CreationStageState.Error, detail);
+        if (!isReviewResponse) ResetAfter(session, CreationStage.Command);
+    }
+
+    private static void BootstrapTransported(
+        CreationSession session,
+        string idea,
+        string ideaDetail,
+        string handoffDetail,
+        CreationWaitingReason waitingReason)
+    {
+        RequirePreparation(session);
         session.Pipeline.SentIdeaSnapshot = PendingHandoffReuse.NormalizeKickoffInstruction(idea);
         session.Pipeline.AcceptedCommandAction = null;
-        Set(session, CreationStage.Idea, CreationStageState.Completed, "制作ContextをClipboardへ生成済み");
-        Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTからの返答待ち", CreationWaitingReason.ChatGptResponseRequired);
+        // A new transport attempt starts a new assistant-response execution
+        // boundary. Keep the session and PendingHandoff identity intact, but
+        // do not let the previous response's terminal idempotency record make
+        // the next explicit send look already processed.
+        session.Pipeline.AutomaticResponseExecution = null;
+        session.Pipeline.ReviewHandoff = null;
+        session.Pipeline.AutomaticIteration = null;
+        Set(session, CreationStage.Idea, CreationStageState.Completed, ideaDetail);
+        Set(session, CreationStage.ToChatGpt, CreationStageState.WaitingUser, handoffDetail, waitingReason);
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         ResetAfter(session, CreationStage.ToChatGpt);
     }
 
     public static void BeginCommandValidation(CreationSession session)
     {
-        RequireContext(session);
+        RequirePreparation(session);
         var handoff = Get(session, CreationStage.ToChatGpt).State;
         // The pending snapshot is the durable response boundary.  In
         // particular, a Review response must remain identifiable even after
@@ -304,7 +541,7 @@ public static class CreationPipelineStateMachine
 
     public static void CommandValidated(CreationSession session, string action)
     {
-        RequireContext(session);
+        RequirePreparation(session);
         var isReviewResponse = IsReviewResponse(session);
 
         if (action == "complete")
@@ -319,16 +556,19 @@ public static class CreationPipelineStateMachine
             Set(session, CreationStage.ToChatGpt, CreationStageState.Completed, "有効なConnector Commandを受信");
             Set(session, CreationStage.Command, CreationStageState.Completed, "Protocol・Action・Schema・Workflow整合性を確認済み");
             session.Pipeline.AcceptedCommandAction = action;
+            SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
             return;
         }
 
         Set(session, CreationStage.ToChatGpt, CreationStageState.Completed, "有効なConnector Commandを受信");
         Set(session, CreationStage.Command, CreationStageState.Completed, "Protocol・Action・Schema・Workflow整合性を確認済み");
         session.Pipeline.AcceptedCommandAction = action;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         if (isReviewResponse) Set(session, CreationStage.Review, CreationStageState.Completed, "次のIterationへ進みます");
 
-        if (isReviewResponse && session.AtIterationLimit)
+        if (isReviewResponse && session.AtRunIterationLimit)
         {
+            MarkIterationLimitReached(session);
             session.Pipeline.MaximumIterationSafetyStop = true;
             ResetFrom(session, CreationStage.Apply);
             Set(session, CreationStage.Review, CreationStageState.WaitingUser, "最大反復回数に達しました · 続行するか判断してください", CreationWaitingReason.ContinueDecisionRequired);
@@ -349,6 +589,7 @@ public static class CreationPipelineStateMachine
     public static void ApplyCompleted(CreationSession session)
     {
         Set(session, CreationStage.Apply, CreationStageState.Completed, "Backup・slot反映・保存・validate完了");
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         Set(session, CreationStage.Generate, CreationStageState.Current, "生成を開始できます");
         ResetAfter(session, CreationStage.Generate);
     }
@@ -356,13 +597,21 @@ public static class CreationPipelineStateMachine
     public static void ApplyFailed(CreationSession session, string detail)
     {
         Set(session, CreationStage.Apply, CreationStageState.Error, detail);
+        // APPLY did not reach GENERATE. Keep the GENERATE substate retryable
+        // and let the APPLY stage carry the failure itself.
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         ResetAfter(session, CreationStage.Apply);
     }
 
     public static void BeginGenerate(CreationSession session)
     {
         RequireConnection(session);
-        if (session.Pipeline.MaximumIterationSafetyStop) throw new InvalidOperationException("最大反復回数に達しています。続行するか終了するか選択してください。");
+        if (session.Pipeline.MaximumIterationSafetyStop || session.Status == SessionStatus.LimitReached || session.AtRunIterationLimit)
+            throw new InvalidOperationException("このRunの最大反復回数に達しています。RESUMEで次のRunを開始してください。");
+        // A new generation owns a new Primary Output. Do not carry the prior
+        // iteration's temporary attachment state into the next Review stage.
+        session.Pipeline.ReviewMediaAttachment = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.Generating);
         Set(session, CreationStage.Generate, CreationStageState.InProgress, "Jobを投入しています");
         ResetAfter(session, CreationStage.Generate);
     }
@@ -373,17 +622,21 @@ public static class CreationPipelineStateMachine
         {
             case JobStatus.Queued:
             case JobStatus.Running:
+                SetGenerateExecutionState(session, GenerateExecutionState.Generating);
                 Set(session, CreationStage.Generate, CreationStageState.InProgress, detail ?? status.ToString());
                 break;
             case JobStatus.Completed:
+                SetGenerateExecutionState(session, GenerateExecutionState.Generating);
                 Set(session, CreationStage.Generate, CreationStageState.Completed, "ComfyUI Job完了");
                 Set(session, CreationStage.Output, CreationStageState.InProgress, "出力ファイルを取得・確認中");
                 break;
             case JobStatus.Failed:
+                SetGenerateExecutionState(session, GenerateExecutionState.GenerationFailed);
                 Set(session, CreationStage.Generate, CreationStageState.Error, detail ?? "ComfyUI Job失敗");
                 ResetAfter(session, CreationStage.Generate);
                 break;
             case JobStatus.Cancelled:
+                SetGenerateExecutionState(session, GenerateExecutionState.GenerationFailed);
                 Set(session, CreationStage.Generate, CreationStageState.Cancelled, detail ?? "ユーザーが生成をキャンセル");
                 ResetAfter(session, CreationStage.Generate);
                 break;
@@ -398,13 +651,42 @@ public static class CreationPipelineStateMachine
             OutputFailed(session, outputs.Count == 0 ? "出力が0件です" : "取得した出力ファイルが見つかりません");
             return;
         }
+        MarkIterationGenerated(session);
         Set(session, CreationStage.Output, CreationStageState.Completed, $"有効な出力 {valid.Length}件を履歴へ登録済み");
-        Set(session, CreationStage.Review, CreationStageState.Current, "生成結果を確認しChatGPTへ渡してください");
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
+        // A completed iteration owns a new media attachment boundary. Do not
+        // carry the previous iteration's media id into the new Review stage.
+        // When legacy resume logic replays OutputCompleted for the same
+        // iteration, only terminal attachment evidence is retained; an old
+        // Preparing/Attaching state must not leave the Review stage stuck.
+        var existingAttachment = session.Pipeline.ReviewMediaAttachment;
+        if (existingAttachment is null
+            || existingAttachment.Iteration != session.CurrentIteration
+            || existingAttachment.State is ReviewMediaAttachmentState.Preparing or ReviewMediaAttachmentState.Attaching)
+        {
+            session.Pipeline.ReviewMediaAttachment = null;
+        }
+        var reviewDetail = session.Pipeline.ReviewMediaAttachment?.State switch
+        {
+            ReviewMediaAttachmentState.Attached => "生成結果をChatGPTへ添付済み · Review Handoff送信待ち",
+            ReviewMediaAttachmentState.Failed => $"生成結果のChatGPT添付に失敗 · {session.Pipeline.ReviewMediaAttachment.ErrorCode ?? "再試行できます"} · 再試行できます",
+            _ => "生成結果を確認しChatGPTへ渡してください",
+        };
+        var reviewState = session.Pipeline.ReviewMediaAttachment?.State == ReviewMediaAttachmentState.Failed
+            ? CreationStageState.Error
+            : CreationStageState.Current;
+        Set(session, CreationStage.Review, reviewState, reviewDetail);
         session.Pipeline.IterationNumber = session.CurrentIteration;
     }
 
     public static void OutputFailed(CreationSession session, string detail)
     {
+        // Output failure belongs to the current generation boundary. Any
+        // attachment state left by a previous or partially fetched output is
+        // stale; the Desktop revokes its process-local media registration
+        // before starting the next generation.
+        session.Pipeline.ReviewMediaAttachment = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.GenerationFailed);
         Set(session, CreationStage.Output, CreationStageState.Error, detail);
         Set(session, CreationStage.Review, CreationStageState.NotReached, string.Empty);
     }
@@ -412,30 +694,445 @@ public static class CreationPipelineStateMachine
     public static void ReviewCopied(CreationSession session)
         => Set(session, CreationStage.Review, CreationStageState.WaitingUser, "Manual Handoff · ChatGPTの評価待ち", CreationWaitingReason.ReviewResponseRequired);
 
-    public static void ContinueBeyondLimit(CreationSession session)
+    public static void ReviewMediaPreparing(
+        CreationSession session,
+        int iteration,
+        string sessionId,
+        string outputIdentity,
+        string fileName,
+        string mimeType,
+        long size)
     {
-        if (!session.Pipeline.MaximumIterationSafetyStop) return;
-        session.MaximumIterations = Math.Max(session.MaximumIterations + 1, session.CurrentIteration + 1);
-        session.Pipeline.MaximumIterationSafetyStop = false;
-        Set(session, CreationStage.Review, CreationStageState.Completed, "ユーザーが次Iterationへの続行を承認");
-        Set(session, CreationStage.Apply, CreationStageState.Current, "検証済みCommandをWorkflowへ反映できます");
-        ResetAfter(session, CreationStage.Apply);
+        EnsureInitialized(session);
+        session.Pipeline.ReviewMediaAttachment = new ReviewMediaAttachmentSnapshot
+        {
+            State = ReviewMediaAttachmentState.Preparing,
+            SessionId = sessionId,
+            Iteration = iteration,
+            OutputIdentity = outputIdentity,
+            FileName = fileName,
+            MimeType = mimeType,
+            Size = size,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        };
+        Set(session, CreationStage.Review, CreationStageState.InProgress, "生成結果をChatGPTへ添付準備中");
     }
 
-    public static void Complete(CreationSession session, string reason)
+    public static void ReviewMediaAttaching(
+        CreationSession session,
+        string requestId,
+        string mediaId,
+        int? targetTabId = null,
+        string? targetTabUrl = null)
+    {
+        EnsureInitialized(session);
+        var attachment = session.Pipeline.ReviewMediaAttachment
+            ?? throw new InvalidOperationException("Review添付対象が準備されていません。");
+        attachment.State = ReviewMediaAttachmentState.Attaching;
+        attachment.RequestId = requestId;
+        attachment.MediaId = mediaId;
+        attachment.TargetTabId = targetTabId;
+        attachment.TargetTabUrl = targetTabUrl;
+        attachment.ErrorCode = null;
+        attachment.ErrorStage = null;
+        attachment.ErrorMessage = null;
+        attachment.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(session, CreationStage.Review, CreationStageState.InProgress, "生成結果をChatGPTへ添付中");
+    }
+
+    public static void ReviewMediaAttached(CreationSession session, BrowserExtensionMediaAttachResult result)
+    {
+        EnsureInitialized(session);
+        var attachment = session.Pipeline.ReviewMediaAttachment
+            ?? throw new InvalidOperationException("Review添付対象が準備されていません。");
+        attachment.State = ReviewMediaAttachmentState.Attached;
+        attachment.RequestId = result.RequestId;
+        attachment.MediaId = result.MediaId;
+        attachment.ErrorCode = null;
+        attachment.ErrorStage = null;
+        attachment.ErrorMessage = null;
+        attachment.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(session, CreationStage.Review, CreationStageState.Current, "生成結果をChatGPTへ添付済み · Review Handoff送信待ち");
+    }
+
+    public static void ReviewMediaFailed(
+        CreationSession session,
+        string errorCode,
+        string? stage,
+        string? message)
+    {
+        EnsureInitialized(session);
+        var attachment = session.Pipeline.ReviewMediaAttachment
+            ?? throw new InvalidOperationException("Review添付対象が準備されていません。");
+        attachment.State = ReviewMediaAttachmentState.Failed;
+        attachment.ErrorCode = errorCode;
+        attachment.ErrorStage = stage;
+        attachment.ErrorMessage = message;
+        attachment.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(session, CreationStage.Review, CreationStageState.Error, $"生成結果のChatGPT添付に失敗 · {errorCode} · 再試行できます");
+    }
+
+    public static void AutomaticIterationStarted(CreationSession session)
+    {
+        EnsureInitialized(session);
+        var current = session.Pipeline.AutomaticIteration;
+        session.Pipeline.AutomaticIteration = new AutomaticIterationSnapshot
+        {
+            State = AutomaticIterationState.Running,
+            SessionId = session.Id,
+            Iteration = current?.Iteration ?? session.CurrentIteration,
+            ReviewHandoffId = current?.ReviewHandoffId ?? string.Empty,
+            ReviewBoundaryId = current?.ReviewBoundaryId ?? string.Empty,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        };
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    public static void ReviewHandoffPreparing(
+        CreationSession session,
+        PendingHandoffSnapshot pending,
+        int iteration,
+        int? targetTabId,
+        string? targetTabUrl)
+    {
+        EnsureInitialized(session);
+        session.Pipeline.ReviewHandoff = new ReviewHandoffSnapshot
+        {
+            State = ReviewHandoffState.Preparing,
+            SessionId = session.Id,
+            Iteration = iteration,
+            HandoffId = pending.HandoffId,
+            BoundaryId = pending.BoundaryId,
+            TargetTabId = targetTabId,
+            TargetTabUrl = targetTabUrl,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        };
+        Set(session, CreationStage.Review, CreationStageState.InProgress, "Review Handoffを準備中");
+    }
+
+    public static void ReviewHandoffSending(CreationSession session, string requestId)
+    {
+        EnsureInitialized(session);
+        var review = session.Pipeline.ReviewHandoff
+            ?? throw new InvalidOperationException("Review Handoffの送信境界が準備されていません。");
+        review.State = ReviewHandoffState.Sending;
+        review.RequestId = requestId;
+        review.ErrorCode = null;
+        review.ErrorStage = null;
+        review.ErrorMessage = null;
+        review.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(session, CreationStage.Review, CreationStageState.InProgress, "Review HandoffをChatGPTへ送信中");
+    }
+
+    public static void ReviewHandoffSent(CreationSession session, BrowserExtensionHandoffSendResult result)
+    {
+        EnsureInitialized(session);
+        var review = session.Pipeline.ReviewHandoff
+            ?? throw new InvalidOperationException("Review Handoffの送信境界が準備されていません。");
+        review.State = ReviewHandoffState.WaitingResponse;
+        review.RequestId = result.RequestId;
+        review.UpdatedAt = DateTimeOffset.UtcNow;
+        session.Pipeline.AutomaticIteration ??= new AutomaticIterationSnapshot
+        {
+            SessionId = session.Id,
+            Iteration = review.Iteration,
+            ReviewHandoffId = review.HandoffId,
+            ReviewBoundaryId = review.BoundaryId,
+        };
+        session.Pipeline.AutomaticIteration.State = AutomaticIterationState.WaitingForReviewResponse;
+        session.Pipeline.AutomaticIteration.Iteration = review.Iteration;
+        session.Pipeline.AutomaticIteration.ReviewHandoffId = review.HandoffId;
+        session.Pipeline.AutomaticIteration.ReviewBoundaryId = review.BoundaryId;
+        session.Pipeline.AutomaticIteration.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(session, CreationStage.Review, CreationStageState.WaitingUser, "Review Handoff送信済み · ChatGPTのレビュー返答待ち", CreationWaitingReason.ReviewResponseRequired);
+    }
+
+    public static void ReviewHandoffCopied(CreationSession session)
+    {
+        EnsureInitialized(session);
+        if (session.Pipeline.ReviewHandoff is { } review)
+        {
+            review.State = ReviewHandoffState.None;
+            review.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        // Clipboard fallback is an explicit user choice.  If the automatic
+        // loop was waiting for this boundary, close that loop so a late
+        // assistant response cannot resume it after the user may already have
+        // pasted the same Handoff manually.  Keep the session active: the
+        // copied Handoff remains available for a later explicit recovery.
+        if (session.Pipeline.AutomaticIteration is { State: AutomaticIterationState.Running or AutomaticIterationState.WaitingForReviewResponse } automatic)
+        {
+            automatic.State = AutomaticIterationState.Stopped;
+            automatic.ErrorCode = BrowserExtensionHandoffErrorCodes.AutomaticIterationCancelled;
+            automatic.ErrorStage = "manual_clipboard_fallback";
+            automatic.ErrorMessage = "ユーザーがReview HandoffをClipboardへコピーしました。";
+            automatic.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        Set(session, CreationStage.Review, CreationStageState.WaitingUser, "Review HandoffをClipboardへコピー済み · ChatGPTのレビュー待ち", CreationWaitingReason.ReviewResponseRequired);
+    }
+
+    public static void ReviewHandoffFailed(CreationSession session, string errorCode, string? stage, string? message)
+    {
+        EnsureInitialized(session);
+        if (session.Pipeline.ReviewHandoff is { } review)
+        {
+            review.State = ReviewHandoffState.Failed;
+            review.ErrorCode = errorCode;
+            review.ErrorStage = stage;
+            review.ErrorMessage = message;
+            review.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        if (session.Pipeline.AutomaticIteration is { } automatic)
+        {
+            automatic.State = AutomaticIterationState.Failed;
+            automatic.ErrorCode = errorCode;
+            automatic.ErrorStage = stage;
+            automatic.ErrorMessage = message;
+            automatic.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        Set(session, CreationStage.Review, CreationStageState.Error, $"Review Handoff送信に失敗 · {errorCode} · 再試行できます");
+    }
+
+    public static void ReviewHandoffResponseReceived(CreationSession session)
+    {
+        EnsureInitialized(session);
+        if (session.Pipeline.ReviewHandoff is { } review)
+        {
+            review.State = ReviewHandoffState.Received;
+            review.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        if (session.Pipeline.AutomaticIteration is { } automatic)
+        {
+            automatic.State = AutomaticIterationState.Running;
+            automatic.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        Set(session, CreationStage.Review, CreationStageState.InProgress, "Review Responseを受信 · strict validation中");
+    }
+
+    public static void AutomaticIterationFailed(CreationSession session, string errorCode, string? stage, string? message)
+    {
+        EnsureInitialized(session);
+        if (session.Pipeline.AutomaticIteration is { } automatic)
+        {
+            automatic.State = AutomaticIterationState.Failed;
+            automatic.ErrorCode = errorCode;
+            automatic.ErrorStage = stage;
+            automatic.ErrorMessage = message;
+            automatic.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        Set(session, CreationStage.Review, CreationStageState.Error, $"自動Iterationを停止 · {errorCode}");
+    }
+
+    public static void AutomaticIterationStopped(CreationSession session, string message = "ユーザーが自動Iterationを停止しました")
+    {
+        EnsureInitialized(session);
+        if (session.Pipeline.ReviewHandoff is { } review)
+        {
+            review.State = ReviewHandoffState.Stopped;
+            review.ErrorCode = BrowserExtensionHandoffErrorCodes.AutomaticIterationCancelled;
+            review.ErrorStage = "automatic_iteration_cancelled";
+            review.ErrorMessage = message;
+            review.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        session.Pipeline.AutomaticIteration ??= new AutomaticIterationSnapshot { SessionId = session.Id, Iteration = session.CurrentIteration };
+        session.Pipeline.AutomaticIteration.State = AutomaticIterationState.Stopped;
+        session.Pipeline.AutomaticIteration.ErrorCode = BrowserExtensionHandoffErrorCodes.AutomaticIterationCancelled;
+        session.Pipeline.AutomaticIteration.ErrorStage = "automatic_iteration_cancelled";
+        session.Pipeline.AutomaticIteration.ErrorMessage = message;
+        session.Pipeline.AutomaticIteration.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(session, CreationStage.Review, CreationStageState.Error, $"自動Iterationを停止 · {message}");
+        session.Status = SessionStatus.Paused;
+        session.PauseReason = message;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    public static void AutomaticIterationCompleted(CreationSession session)
+    {
+        EnsureInitialized(session);
+        if (session.Pipeline.ReviewHandoff is { } review)
+        {
+            review.State = ReviewHandoffState.Completed;
+            review.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        if (session.Pipeline.AutomaticIteration is { } automatic)
+        {
+            automatic.State = AutomaticIterationState.Completed;
+            automatic.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>
+    /// Records the deliberate stop after a valid <c>generate</c> response at
+    /// the current Run's limit.  The response has already been received and
+    /// validated; it is therefore not a transport or protocol failure.  The
+    /// original Review identity remains visible while the validated command
+    /// is retained in <see cref="CreationPipelineSnapshot.DeferredGenerate"/>.
+    /// </summary>
+    public static void AutomaticIterationLimitReached(
+        CreationSession session,
+        string message,
+        DeferredGenerateSnapshot? deferredGenerate = null)
+    {
+        EnsureInitialized(session);
+        MarkIterationLimitReached(session);
+        session.Status = SessionStatus.LimitReached;
+        session.PauseReason = message;
+        session.LastError = null;
+        session.CompletionReason = null;
+        session.Pipeline.MaximumIterationSafetyStop = true;
+        if (deferredGenerate is not null) session.Pipeline.DeferredGenerate = deferredGenerate;
+
+        // The Review Response itself is valid and received.  Do not turn the
+        // Review transport into COMPLETED/FAILED merely because execution was
+        // deferred to a later Run.
+        if (session.Pipeline.ReviewHandoff is { } review)
+        {
+            review.State = ReviewHandoffState.Received;
+            review.ErrorCode = null;
+            review.ErrorStage = null;
+            review.ErrorMessage = null;
+            review.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+
+        session.Pipeline.AutomaticIteration ??= new AutomaticIterationSnapshot
+        {
+            SessionId = session.Id,
+            Iteration = session.CurrentIteration,
+        };
+        session.Pipeline.AutomaticIteration.State = AutomaticIterationState.LimitReached;
+        session.Pipeline.AutomaticIteration.ErrorCode = null;
+        session.Pipeline.AutomaticIteration.ErrorStage = "maximum_iterations";
+        session.Pipeline.AutomaticIteration.ErrorMessage = message;
+        session.Pipeline.AutomaticIteration.UpdatedAt = DateTimeOffset.UtcNow;
+        Set(
+            session,
+            CreationStage.Review,
+            CreationStageState.WaitingUser,
+            deferredGenerate is null
+                ? "このRunの最大反復回数に達しました · RESUMEまたは終了を選択"
+                : "このRunの最大反復回数に達しました · 次のgenerateを保留中 · RESUMEで続行",
+            CreationWaitingReason.ContinueDecisionRequired);
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>
+    /// Arms the existing validated command for an explicit Resume after a
+    /// limit stop.  The first call creates exactly one recovery Run; later
+    /// calls reuse <see cref="DeferredGenerateSnapshot.RecoveryRunId"/> and
+    /// never create another Run or Handoff.
+    /// </summary>
+    public static DeferredGenerateSnapshot? ResumeFromLimit(CreationSession session)
+    {
+        EnsureInitialized(session);
+        var deferred = session.Pipeline.DeferredGenerate;
+        if (session.Status != SessionStatus.LimitReached
+            && !session.Pipeline.MaximumIterationSafetyStop
+            && deferred is null)
+        {
+            return null;
+        }
+
+        if (deferred is not null && string.IsNullOrWhiteSpace(deferred.RecoveryRunId))
+        {
+            var run = session.StartNewRun("resume_deferred_generate");
+            deferred.RecoveryRunId = run.RunId;
+            deferred.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        else if (deferred is null
+                 && (session.Pipeline.CurrentRun is null || session.Pipeline.CurrentRun.IterationCount > 0))
+        {
+            session.StartNewRun("resume_limit");
+        }
+
+        session.Resume();
+        session.Pipeline.MaximumIterationSafetyStop = false;
+        // The old Review is already received. Keep its Pending Handoff and
+        // response identity for strict parsing/replay protection, but do not
+        // leave the UI waiting for another response on that old boundary.
+        if (session.Pipeline.ReviewHandoff is { } review)
+        {
+            review.State = ReviewHandoffState.Received;
+            review.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        if (session.Pipeline.AutomaticIteration is not { } automatic)
+        {
+            automatic = new AutomaticIterationSnapshot
+            {
+                SessionId = session.Id,
+                Iteration = session.CurrentIteration,
+                ReviewHandoffId = session.PendingHandoff?.HandoffId ?? string.Empty,
+                ReviewBoundaryId = session.PendingHandoff?.BoundaryId ?? string.Empty,
+            };
+            session.Pipeline.AutomaticIteration = automatic;
+        }
+        automatic.State = AutomaticIterationState.Running;
+        automatic.ErrorCode = null;
+        automatic.ErrorStage = null;
+        automatic.ErrorMessage = null;
+        automatic.UpdatedAt = DateTimeOffset.UtcNow;
+        session.Pipeline.IterationNumber = session.CurrentIteration + 1;
+        Set(session, CreationStage.Review, CreationStageState.Completed, "ユーザーがRESUMEを選択 · 保留中のgenerateを実行します");
+        Set(session, CreationStage.Apply, CreationStageState.Current, "保留中のgenerateをWorkflowへ反映できます");
+        ResetAfter(session, CreationStage.Apply);
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+        return deferred;
+    }
+
+    /// <summary>
+    /// Compatibility entry point for the existing safety-stop button. It no
+    /// longer increases MaximumIterations; the limit is per Run and the
+    /// ViewModel performs the actual deferred APPLY/GENERATE operation.
+    /// </summary>
+    public static void ContinueBeyondLimit(CreationSession session)
+        => ResumeFromLimit(session);
+
+    public static void Complete(CreationSession session, string reason, bool chatGptComplete = false)
     {
         if (!HasSuccessfulOutput(session) || Get(session, CreationStage.Review).State is not (CreationStageState.Current or CreationStageState.WaitingUser or CreationStageState.Completed))
         {
             throw new InvalidOperationException("Output成功後のREVIEW工程でのみ制作を完了できます。");
         }
+        var finalIteration = FindLatestSuccessfulIteration(session);
+        if (finalIteration is null)
+        {
+            throw new InvalidOperationException("FINALにできる成功済みIterationがありません。");
+        }
+        if (chatGptComplete) finalIteration.Outcome = IterationOutcome.ChatGptComplete;
+        SetFinalIteration(session, finalIteration);
         Set(session, CreationStage.Review, CreationStageState.Completed, reason);
         session.Complete(reason);
     }
 
     public static void Resume(CreationSession session)
     {
-        var invalidatesConsumedReviewHandoff = session.Status == SessionStatus.Completed
+        EnsureInitialized(session);
+        var wasCompleted = session.Status == SessionStatus.Completed;
+        var resumeBoundaryIsActive = !wasCompleted
+            && PendingHandoffReuse.IsResume(session.PendingHandoff)
+            && session.Pipeline.ReviewHandoff is
+                { State: ReviewHandoffState.Preparing or ReviewHandoffState.Sending or ReviewHandoffState.WaitingResponse or ReviewHandoffState.Received }
+            && session.Pipeline.AutomaticIteration is
+                { State: AutomaticIterationState.Running or AutomaticIterationState.WaitingForReviewResponse };
+        if (resumeBoundaryIsActive)
+        {
+            // RESUME is idempotent while its fresh Handoff is in flight or its
+            // response is being processed. Do not clear the active boundary or
+            // create a second Run when a UI command is delivered twice.
+            session.Resume();
+            return;
+        }
+
+        var invalidatesConsumedReviewHandoff = wasCompleted
             && PendingHandoffReuse.IsReview(session.PendingHandoff);
+        if (wasCompleted)
+        {
+            // COMPLETED is a run terminal state, not a permanent Session
+            // terminal state. Preserve history/current output and move to a
+            // fresh Run before preparing the new Resume Handoff.
+            ClearFinalIterationFlags(session);
+            session.StartNewRun("user_resume_completed");
+        }
         session.Resume();
         session.Pipeline.MaximumIterationSafetyStop = false;
         // A completed response has already crossed its protocol boundary.
@@ -447,9 +1144,29 @@ public static class CreationPipelineStateMachine
         {
             session.PendingHandoff = null;
         }
+        // RESUME starts a new user-directed boundary. Do not leave the old
+        // completed assistant response as the active automation status while
+        // the same session prepares its next Review Handoff.
+        session.Pipeline.AutomaticResponseExecution = null;
+        session.Pipeline.ReviewHandoff = null;
+        session.Pipeline.AutomaticIteration = null;
+        session.Pipeline.DeferredGenerate = null;
+        session.Pipeline.IterationNumber = session.CurrentIteration;
         session.Pipeline.AcceptedCommandAction = null;
+        SetGenerateExecutionState(session, GenerateExecutionState.ReadyToGenerate);
         Set(session, CreationStage.Review, CreationStageState.Current, "制作を再開しました · 次の指示をChatGPTと検討してください");
     }
+
+    public static string GetGenerateExecutionStateLabel(GenerateExecutionState state)
+        => state switch
+        {
+            GenerateExecutionState.ReadyToGenerate => "生成準備完了",
+            GenerateExecutionState.StartingComfyUi => "ComfyUI起動中",
+            GenerateExecutionState.WaitingForComfyUi => "ComfyUI READY待ち",
+            GenerateExecutionState.Generating => "生成中",
+            GenerateExecutionState.GenerationFailed => "生成失敗",
+            _ => "生成準備完了",
+        };
 
     private static void InferLegacyState(CreationSession session)
     {
@@ -457,11 +1174,14 @@ public static class CreationPipelineStateMachine
         var bound = session.BoundWorkflow is not null && session.HasBoundProjectChat && session.MaximumIterations > 0;
         if (!bound)
         {
-            Set(session, CreationStage.Context, CreationStageState.NotReached, string.Empty);
+            Set(session, CreationStage.Workflow, CreationStageState.NotReached, string.Empty);
+            Set(session, CreationStage.Chat, CreationStageState.NotReached, string.Empty);
             return;
         }
-        session.Pipeline.ContextBound = true;
-        Set(session, CreationStage.Context, CreationStageState.Completed, "既存SessionのContextを復元");
+        session.Pipeline.WorkflowBound = true;
+        session.Pipeline.ChatBound = true;
+        Set(session, CreationStage.Workflow, CreationStageState.Completed, "既存SessionのWorkflowを復元");
+        Set(session, CreationStage.Chat, CreationStageState.Completed, "既存SessionのProject / Chatを復元");
         Set(session, CreationStage.Idea, CreationStageState.Current, "開始指示・補足は任意です · SEND TO CHATGPTで開始");
         var latest = session.Iterations.LastOrDefault();
         if (latest is null) return;
@@ -474,11 +1194,11 @@ public static class CreationPipelineStateMachine
         if (session.Status == SessionStatus.Completed) Set(session, CreationStage.Review, CreationStageState.Completed, session.CompletionReason ?? "制作完了");
     }
 
-    private static void RequireContext(CreationSession session)
+    private static void RequirePreparation(CreationSession session)
     {
         RequireConnection(session);
         EnsureInitialized(session);
-        if (!session.Pipeline.ContextBound || Get(session, CreationStage.Context).State != CreationStageState.Completed)
+        if (!IsPreparationComplete(session))
         {
             throw new InvalidOperationException("先に制作ContextをSessionへBindingしてください。");
         }
@@ -486,6 +1206,126 @@ public static class CreationPipelineStateMachine
 
     private static bool HasSuccessfulOutput(CreationSession session)
         => session.Iterations.Any(iteration => iteration.Status == JobStatus.Completed && iteration.Outputs.Any(output => !output.IsMissing));
+
+    /// <summary>
+    /// Records the normal terminal outcome for a successful Output. The
+    /// operation is deliberately idempotent and never overwrites a stronger
+    /// terminal history fact such as a Run limit or ChatGPT completion.
+    /// </summary>
+    public static void MarkIterationGenerated(CreationSession session, int? iterationNumber = null)
+    {
+        var iteration = FindIteration(session, iterationNumber);
+        if (iteration is null || !HasSuccessfulOutput(iteration)) return;
+        if (iteration.Outcome == IterationOutcome.Unknown) iteration.Outcome = IterationOutcome.Generated;
+    }
+
+    public static bool IsPreparationComplete(CreationSession session)
+    {
+        EnsureInitialized(session);
+        return session.Pipeline.IsPreparationBound
+            && session.BoundWorkflow is not null && session.HasBoundProjectChat
+            && Get(session, CreationStage.Workflow).State == CreationStageState.Completed
+            && Get(session, CreationStage.Chat).State == CreationStageState.Completed;
+    }
+
+    private static void RestorePreparationStage(CreationSession session, CreationStage stage, CreationStageStatus? legacy, string detail)
+    {
+        var status = session.Pipeline.Stages.Single(item => item.Stage == stage);
+        status.State = CreationStageState.Completed;
+        status.WaitingReason = CreationWaitingReason.None;
+        status.Detail = detail;
+        status.UpdatedAt = legacy?.UpdatedAt ?? session.CreatedAt;
+    }
+
+    private static void SetIfChanged(CreationSession session, CreationStage stage, CreationStageState state, string detail,
+        CreationWaitingReason reason = CreationWaitingReason.None)
+    {
+        var previous = session.Pipeline.Stages.Single(item => item.Stage == stage);
+        if (previous.State != state || previous.Detail != detail || previous.WaitingReason != reason)
+            Set(session, stage, state, detail, reason);
+    }
+
+    /// <summary>
+    /// Records that the current Run stopped at its limit after this iteration.
+    /// A repeated limit notification must not change the history again.
+    /// </summary>
+    public static void MarkIterationLimitReached(CreationSession session, int? iterationNumber = null)
+    {
+        var iteration = FindIteration(session, iterationNumber);
+        if (iteration is null || !HasSuccessfulOutput(iteration)) return;
+        if (iteration.Outcome is IterationOutcome.Unknown or IterationOutcome.Generated)
+            iteration.Outcome = IterationOutcome.LimitReached;
+    }
+
+    private static SessionIteration? FindIteration(CreationSession session, int? iterationNumber)
+        => iterationNumber is { } number
+            ? session.Iterations.FirstOrDefault(iteration => iteration.Number == number)
+            : session.Iterations.FirstOrDefault(iteration => iteration.Number == session.CurrentIteration)
+                ?? session.Iterations.OrderByDescending(iteration => iteration.Number).FirstOrDefault();
+
+    private static SessionIteration? FindLatestSuccessfulIteration(CreationSession session)
+        => session.Iterations
+            .Where(iteration => HasSuccessfulOutput(iteration))
+            .OrderByDescending(iteration => iteration.Number)
+            .FirstOrDefault();
+
+    private static bool HasSuccessfulOutput(SessionIteration iteration)
+        => iteration.Status == JobStatus.Completed && iteration.Outputs.Any(output => !output.IsMissing);
+
+    private static void SetFinalIteration(CreationSession session, SessionIteration finalIteration)
+    {
+        foreach (var iteration in session.Iterations)
+            iteration.IsFinal = ReferenceEquals(iteration, finalIteration);
+    }
+
+    private static void ClearFinalIterationFlags(CreationSession session)
+    {
+        foreach (var iteration in session.Iterations) iteration.IsFinal = false;
+    }
+
+    private static void EnsureIterationHistoryMetadata(CreationSession session)
+    {
+        foreach (var iteration in session.Iterations)
+        {
+            if (iteration.Outcome == IterationOutcome.Unknown && HasSuccessfulOutput(iteration))
+                iteration.Outcome = IterationOutcome.Generated;
+        }
+
+        var finalIterations = session.Iterations
+            .Where(iteration => iteration.IsFinal)
+            .OrderByDescending(iteration => iteration.Number)
+            .ToArray();
+        if (finalIterations.Length > 1)
+        {
+            foreach (var stale in finalIterations.Skip(1)) stale.IsFinal = false;
+        }
+
+        if (session.Status == SessionStatus.Completed)
+        {
+            var final = finalIterations.FirstOrDefault(HasSuccessfulOutput) ?? FindLatestSuccessfulIteration(session);
+            if (final is not null)
+            {
+                foreach (var stale in session.Iterations.Where(iteration => iteration.IsFinal && !ReferenceEquals(iteration, final)))
+                    stale.IsFinal = false;
+                final.IsFinal = true;
+                if (final.Outcome == IterationOutcome.Unknown)
+                    final.Outcome = IterationOutcome.Generated;
+                if (final.Outcome is IterationOutcome.Unknown or IterationOutcome.Generated
+                    && LooksLikeLegacyChatGptCompletion(session.CompletionReason))
+                    final.Outcome = IterationOutcome.ChatGptComplete;
+            }
+        }
+        else
+        {
+            // FINAL describes the current completed Session, not an old
+            // transient flag left on an active/paused snapshot.
+            ClearFinalIterationFlags(session);
+        }
+    }
+
+    private static bool LooksLikeLegacyChatGptCompletion(string? reason)
+        => !string.IsNullOrWhiteSpace(reason)
+            && reason.Contains("ChatGPT", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsReviewResponse(CreationSession session)
     {
@@ -519,6 +1359,39 @@ public static class CreationPipelineStateMachine
     {
         var index = Array.IndexOf(OrderedStages, stage);
         for (var i = index; i < OrderedStages.Length; i++) Set(session, OrderedStages[i], state, string.Empty);
+    }
+
+    private static void EnsureRunInitialized(CreationSession session)
+    {
+        if (session.Pipeline.CurrentRun is null)
+        {
+            // Snapshots written before Run existed are migrated into one
+            // legacy Run. Its consumed count is the existing history count,
+            // so an old session cannot silently exceed its configured budget
+            // on the first post-upgrade generation.
+            session.Pipeline.CurrentRun = new CreationRunSnapshot
+            {
+                RunId = Guid.NewGuid().ToString("N"),
+                Number = 1,
+                StartIteration = 0,
+                IterationCount = Math.Max(session.CurrentIteration, session.Iterations.Count),
+                StartedReason = "legacy-migration",
+            };
+            return;
+        }
+
+        var run = session.Pipeline.CurrentRun;
+        run.StartIteration = Math.Clamp(run.StartIteration, 0, Math.Max(0, session.CurrentIteration));
+        run.Number = Math.Max(1, run.Number);
+        run.IterationCount = Math.Max(run.IterationCount, Math.Max(0, session.CurrentIteration - run.StartIteration));
+        if (string.IsNullOrWhiteSpace(run.RunId)) run.RunId = Guid.NewGuid().ToString("N");
+    }
+
+    private static void SetGenerateExecutionState(CreationSession session, GenerateExecutionState state)
+    {
+        EnsureInitialized(session);
+        session.Pipeline.GenerateExecutionState = state;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
     private static void Set(CreationSession session, CreationStage stage, CreationStageState state, string detail, CreationWaitingReason waitingReason = CreationWaitingReason.None)

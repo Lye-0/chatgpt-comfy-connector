@@ -4,6 +4,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:guide="clr-namespace:ChatGPTComfyConnector.Desktop.Behaviors"
         mc:Ignorable="d"
         Title="ChatGPT Comfy Connector"
         Width="1680"
@@ -14,9 +15,25 @@
         FontFamily="{StaticResource UiFont}"
         Background="{StaticResource CanvasBrush}"
         Foreground="{StaticResource TextBrush}"
+        guide:GuideHighlight.Current="{Binding GuideTarget}"
+        guide:GuideHighlight.CurrentItemId="{Binding GuideItemId}"
         Loaded="Window_Loaded"
         Closing="Window_Closing">
     <Window.Resources>
+        <DataTemplate x:Key="ContextSelectorItemTemplate">
+            <TextBlock Text="{Binding DisplayName}">
+                <TextBlock.Style>
+                    <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+                        <Style.Triggers>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <!-- Hide the display element while retaining selection and layout. -->
+                                <Setter Property="Visibility" Value="Hidden" />
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </TextBlock.Style>
+            </TextBlock>
+        </DataTemplate>
         <DataTemplate x:Key="SlotEditorTemplate">
             <Border x:Name="SlotChrome"
                     Background="{StaticResource PanelSoftBrush}"
@@ -90,6 +107,7 @@
             <StackPanel Orientation="Horizontal"
                         VerticalAlignment="Center"
                         AutomationProperties.Name="{Binding Label}"
+                        AutomationProperties.ItemStatus="{Binding StateLabel}"
                         ToolTip="{Binding Description}">
                 <StackPanel Width="72"
                             HorizontalAlignment="Center">
@@ -120,7 +138,7 @@
                                HorizontalAlignment="Center"
                                Margin="0,2,0,0" />
                 </StackPanel>
-                <Border Width="26"
+                <Border Width="17"
                         Height="2"
                         Background="{Binding VisualState, Converter={StaticResource StateToBrush}}"
                         Opacity="0.68"
@@ -315,14 +333,22 @@
                                        Visibility="{Binding HasThumbnail, Converter={StaticResource BoolToVisibility}}"
                                        Stretch="UniformToFill"
                                        Opacity="0.94" />
+                                <TextBlock Text="サムネイルを表示できません。▶で確認"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="9"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           TextAlignment="Center"
+                                           Visibility="{Binding ShowThumbnailUnavailable, Converter={StaticResource BoolToVisibility}}" />
                                 <MediaElement Source="{Binding PrimaryOutput.FullPath}"
                                               LoadedBehavior="Manual"
                                               UnloadedBehavior="Stop"
                                               Volume="0"
                                               Stretch="UniformToFill"
                                               ScrubbingEnabled="True"
-                                              Visibility="{Binding HasThumbnail, Converter={StaticResource InverseBoolToVisibility}}"
+                                              Visibility="{Binding ShowThumbnailMedia, Converter={StaticResource BoolToVisibility}}"
                                               IsHitTestVisible="False"
+                                              Loaded="HistoryVideoMediaLoaded"
                                               MediaOpened="HistoryVideoMediaOpened"
                                               MediaFailed="HistoryVideoMediaFailed" />
                                 <Button Style="{StaticResource VideoPlayButtonStyle}"
@@ -373,8 +399,8 @@
                         </Grid>
                     </Border>
                     <Grid Grid.Row="2">
-                        <TextBlock Text="{Binding StatusText}"
-                                   Foreground="{StaticResource MutedTextBrush}"
+                        <TextBlock Text="{Binding OutcomeText}"
+                                   Foreground="{Binding OutcomeText, Converter={StaticResource StateToBrush}}"
                                    FontSize="9"
                                    FontWeight="SemiBold" />
                         <TextBlock Text="{Binding CreatedAtText}"
@@ -476,6 +502,8 @@
                              Margin="0,18,0,0" />
                 </Grid>
                 <Border x:Name="MessageChrome"
+                        guide:GuideHighlight.Target="Handoff"
+                        guide:GuideHighlight.ItemId="{Binding Id}"
                         Grid.Column="1"
                         Background="#0C1726"
                         BorderBrush="{Binding Message.Direction, Converter={StaticResource HandoffDirectionToBrush}}"
@@ -483,7 +511,7 @@
                         CornerRadius="11"
                         Padding="11">
                     <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <StackPanel Orientation="Horizontal">
@@ -520,7 +548,13 @@
                                 </ToolTip>
                             </ToolTipService.ToolTip>
                         </TextBlock>
-                        <Grid Grid.Row="3" Margin="0,6,0,0">
+                        <TextBlock Grid.Row="3"
+                                   Text="{Binding TransportFailureText}"
+                                   Foreground="#FF6B8A"
+                                   FontSize="8"
+                                   Margin="0,5,0,0"
+                                   TextWrapping="Wrap" />
+                        <Grid Grid.Row="4" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <TextBlock Text="{Binding MetadataText}"
                                        Foreground="{StaticResource MutedTextBrush}"
@@ -585,6 +619,11 @@
                                FontSize="24"
                                FontWeight="SemiBold"
                                Margin="0,2,0,0" />
+                    <TextBlock Text="{Binding BuildIdentityText}"
+                               Foreground="{StaticResource MutedTextBrush}"
+                               FontSize="9"
+                               Margin="0,4,0,0"
+                               ToolTip="実行中Desktopのversion / commit" />
                 </StackPanel>
                 <Border Grid.Column="1"
                         Width="700"
@@ -598,6 +637,7 @@
                         AutomationProperties.Name="SYSTEM CONNECTION">
                     <Grid>
                         <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
@@ -617,6 +657,8 @@
                         <Grid Grid.Row="1"
                               Margin="0,5,0,0">
                             <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
@@ -675,6 +717,32 @@
                                     Opacity="0.55" />
                             <StackPanel Grid.Column="4"
                                         Orientation="Horizontal"
+                                        AutomationProperties.Name="Extension"
+                                        guide:GuideHighlight.Target="ExtensionConnection"
+                                        ToolTip="{Binding BrowserExtensionStatusDetail}">
+                                <Ellipse Width="8"
+                                         Height="8"
+                                         Fill="{Binding BrowserExtensionConnectionState, Converter={StaticResource StateToBrush}}"
+                                         VerticalAlignment="Center"
+                                         Margin="0,0,5,0" />
+                                <StackPanel>
+                                    <TextBlock Text="Extension"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding BrowserExtensionSystemState}"
+                                               Foreground="{Binding BrowserExtensionSystemState, Converter={StaticResource StateToBrush}}"
+                                               FontSize="8"
+                                               FontWeight="SemiBold" />
+                                </StackPanel>
+                            </StackPanel>
+                            <Border Grid.Column="5"
+                                    Height="1"
+                                    Margin="9,0"
+                                    VerticalAlignment="Center"
+                                    Background="{StaticResource LineStrongBrush}"
+                                    Opacity="0.55" />
+                            <StackPanel Grid.Column="6"
+                                        Orientation="Horizontal"
                                         AutomationProperties.Name="ComfyUI">
                                 <Ellipse Width="8"
                                          Height="8"
@@ -691,13 +759,13 @@
                                                FontWeight="SemiBold" />
                                 </StackPanel>
                             </StackPanel>
-                            <Border Grid.Column="5"
+                            <Border Grid.Column="7"
                                     Height="1"
                                     Margin="9,0"
                                     VerticalAlignment="Center"
                                     Background="{StaticResource LineStrongBrush}"
                                     Opacity="0.55" />
-                            <StackPanel Grid.Column="6"
+                            <StackPanel Grid.Column="8"
                                         Orientation="Horizontal"
                                         AutomationProperties.Name="GPU">
                                 <Ellipse Width="8"
@@ -723,18 +791,45 @@
                                    TextTrimming="CharacterEllipsis"
                                    HorizontalAlignment="Right"
                                    Margin="0,5,0,0" />
+                        <Grid Grid.Row="3"
+                              Margin="0,3,0,0">
+                            <TextBlock Text="{Binding BrowserExtensionEndpoint}"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="8"
+                                       TextTrimming="CharacterEllipsis"
+                                       ToolTip="{Binding BrowserExtensionStatusDetail}" />
+                            <StackPanel HorizontalAlignment="Right"
+                                        Orientation="Horizontal"
+                                        Visibility="{Binding IsBrowserExtensionPairingCodeVisible, Converter={StaticResource BoolToVisibility}}"
+                                        AutomationProperties.Name="Browser Extension Pairing">
+                                <TextBlock Text="PAIRING CODE  "
+                                           Foreground="{StaticResource WarningBrush}"
+                                           FontSize="8"
+                                           FontWeight="SemiBold"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding BrowserExtensionPairingCode}"
+                                           Foreground="{StaticResource TextBrush}"
+                                           FontFamily="Cascadia Mono"
+                                           FontSize="10"
+                                           FontWeight="SemiBold"
+                                           AutomationProperties.Name="Pairing code" />
+                            </StackPanel>
+                        </Grid>
                     </Grid>
                 </Border>
                 <StackPanel Grid.Column="2"
                             Orientation="Horizontal"
                             VerticalAlignment="Center">
                     <Button Content="SETUP"
+                            guide:GuideHighlight.Target="Setup"
                             ToolTip="接続先とPortableパスを設定"
                             Click="Setup_Click" />
                     <Button Content="CONNECT"
+                            guide:GuideHighlight.Target="Connect"
                             ToolTip="comfy-mcpへ接続"
                             Click="Connect_Click" />
                     <Button Content="START COMFYUI"
+                            guide:GuideHighlight.Target="StartComfyUi"
                             ToolTip="ComfyUIを起動（Connectorは終了させません）"
                             Click="StartComfy_Click"
                             Margin="0" />
@@ -777,6 +872,7 @@
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{StaticResource IconButtonStyle}"
                                     ToolTip="ワークフロー一覧を更新"
+                                    guide:GuideHighlight.Target="WorkflowRefresh"
                                     AutomationProperties.Name="ワークフロー一覧を更新"
                                     Click="Refresh_Click">
                                 <Viewbox Width="16" Height="16" Stretch="Uniform">
@@ -859,6 +955,7 @@
                             </Button>
                             <Button Style="{StaticResource IconButtonStyle}"
                                     ToolTip="選択中ワークフローの設定を開く"
+                                    guide:GuideHighlight.Target="WorkflowSettings"
                                     AutomationProperties.Name="選択中ワークフローの設定を開く"
                                     Click="OpenWorkflowEditor_Click"
                                     IsEnabled="{Binding HasSelectedWorkflow}"
@@ -894,9 +991,14 @@
                                        VerticalAlignment="Center"
                                        Margin="7,0,0,0" />
                         </StackPanel>
+                        <TextBlock Text="{Binding WorkflowReadinessText}"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="9" LineHeight="13" TextWrapping="Wrap"
+                                   Margin="0,8,0,0" ToolTip="WORKFLOWの準備状況" />
                     </StackPanel>
                     <Border Grid.Row="1"
                             Background="#0A101C"
+                            guide:GuideHighlight.Target="WorkflowLibrary"
                             CornerRadius="10"
                             Padding="7"
                             BorderBrush="{StaticResource LineBrush}"
@@ -940,14 +1042,42 @@
                             BorderBrush="{StaticResource LineBrush}"
                             BorderThickness="1">
                         <StackPanel>
-                            <TextBlock Text="CHATGPT CONTEXT" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="SemiBold" />
-                            <TextBlock Text="制作開始前の設定" FontSize="14" FontWeight="SemiBold" Margin="0,3,0,8" />
+                            <DockPanel LastChildFill="False">
+                                <TextBlock Text="CHAT" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                <Button DockPanel.Dock="Right"
+                                        Content="↻"
+                                        Click="RefreshChatGptContext_Click"
+                                        guide:GuideHighlight.Target="ChatReload"
+                                        IsEnabled="{Binding CanRefreshChatGptContext}"
+                                        Padding="5,1"
+                                        Margin="6,0,0,0"
+                                        ToolTip="ChatGPTのProject / Chat履歴を再取得" />
+                            </DockPanel>
+                            <TextBlock Text="ChatGPT Contextの準備" FontSize="14" FontWeight="SemiBold" Margin="0,3,0,8" />
+                            <TextBlock Text="{Binding ChatGptContextLoadStateText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" Margin="0,0,0,6" />
                             <TextBlock Text="Project" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
                             <Grid Margin="0,3,0,5">
-                                <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" DisplayMemberPath="DisplayName" ToolTip="ローカルProjectを選択、または新規作成" />
+                                <ComboBox x:Name="ProjectSelector" ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" ItemTemplate="{StaticResource ContextSelectorItemTemplate}" IsEnabled="{Binding CanSelectProject}" ToolTip="ChatGPTのProjectを選択"
+                                          guide:GuideHighlight.Target="ProjectSelector" DropDownOpened="GuideSelector_Opened" DropDownClosed="ProjectGuideSelector_Closed" />
                                 <TextBlock Text="{Binding ProjectPlaceholderText}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="10,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False" />
+                                <StackPanel Orientation="Horizontal"
+                                            Margin="10,0,30,0"
+                                            VerticalAlignment="Center"
+                                            IsHitTestVisible="False"
+                                            Visibility="{Binding IsChatGptContextLoading, Converter={StaticResource BoolToVisibility}}">
+                                    <ProgressBar Width="52"
+                                                 Height="3"
+                                                 IsIndeterminate="True"
+                                                 Foreground="{StaticResource AccentBrush}"
+                                                 Background="#1A3140"
+                                                 Margin="0,0,8,0" />
+                                    <TextBlock Text="プロジェクトを取得中…"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="11"
+                                               VerticalAlignment="Center" />
+                                </StackPanel>
                             </Grid>
-                            <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsProjectCreateVisible, Converter={StaticResource BoolToVisibility}}">
+                            <Border guide:GuideHighlight.Target="ProjectCreation" Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsProjectCreateVisible, Converter={StaticResource BoolToVisibility}}">
                                 <StackPanel>
                                     <TextBox Text="{Binding NewProjectName, UpdateSourceTrigger=PropertyChanged}" ToolTip="新しいProject名" />
                                     <TextBlock Text="{Binding ProjectValidationMessage}" Foreground="{StaticResource DangerBrush}" FontSize="9" Margin="0,4,0,0" Visibility="{Binding HasProjectValidationMessage, Converter={StaticResource BoolToVisibility}}" />
@@ -959,10 +1089,37 @@
                             </Border>
                             <TextBlock Text="Chat" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
                             <Grid Margin="0,3,0,5">
-                                <ComboBox ItemsSource="{Binding ChatOptions}" SelectedItem="{Binding SelectedChat}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanCreateChat}" ToolTip="選択したProject内のChat" />
+                                <ComboBox x:Name="ChatSelector" ItemsSource="{Binding ChatOptions}" SelectedItem="{Binding SelectedChat}" ItemTemplate="{StaticResource ContextSelectorItemTemplate}" IsEnabled="{Binding CanSelectChat}" ToolTip="選択したProject内のChat"
+                                          guide:GuideHighlight.Target="ChatSelector" DropDownOpened="GuideSelector_Opened" DropDownClosed="ChatGuideSelector_Closed" />
                                 <TextBlock Text="{Binding ChatPlaceholderText}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="10,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False" />
+                                <StackPanel Orientation="Horizontal"
+                                            Margin="10,0,30,0"
+                                            VerticalAlignment="Center"
+                                            IsHitTestVisible="False"
+                                            Visibility="{Binding IsChatSelectorLoading, Converter={StaticResource BoolToVisibility}}">
+                                    <ProgressBar Width="52"
+                                                 Height="3"
+                                                 IsIndeterminate="True"
+                                                 Foreground="{StaticResource AccentBrush}"
+                                                 Background="#1A3140"
+                                                 Margin="0,0,8,0" />
+                                    <TextBlock Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="11"
+                                               VerticalAlignment="Center">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Text" Value="Chatを取得中…" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsChatGptContextLoading}" Value="True">
+                                                        <Setter Property="Text" Value="プロジェクトを取得中…" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </StackPanel>
                             </Grid>
-                            <Border Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsChatCreateVisible, Converter={StaticResource BoolToVisibility}}">
+                            <Border guide:GuideHighlight.Target="ChatCreation" Background="#102033" CornerRadius="7" Padding="7" Margin="0,0,0,6" Visibility="{Binding IsChatCreateVisible, Converter={StaticResource BoolToVisibility}}">
                                 <StackPanel>
                                     <TextBox Text="{Binding NewChatName, UpdateSourceTrigger=PropertyChanged}" ToolTip="新しいChat名" />
                                     <TextBlock Text="{Binding ChatValidationMessage}" Foreground="{StaticResource DangerBrush}" FontSize="9" Margin="0,4,0,0" Visibility="{Binding HasChatValidationMessage, Converter={StaticResource BoolToVisibility}}" />
@@ -975,10 +1132,10 @@
                             <Grid Margin="0,1,0,7">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="72" /></Grid.ColumnDefinitions>
                                 <TextBlock Text="Maximum Iterations" Foreground="{StaticResource MutedTextBrush}" FontSize="9" VerticalAlignment="Center" />
-                                <TextBox Grid.Column="1" Text="{Binding SessionMaximumIterations, UpdateSourceTrigger=PropertyChanged}" HorizontalContentAlignment="Center" Padding="6,4" ToolTip="1〜1000" />
+                                <TextBox guide:GuideHighlight.Target="MaximumIterations" Grid.Column="1" Text="{Binding SessionMaximumIterations, UpdateSourceTrigger=PropertyChanged, NotifyOnValidationError=True}" Validation.Error="MaximumIterations_ValidationError" HorizontalContentAlignment="Center" Padding="6,4" ToolTip="1〜1000" />
                             </Grid>
-                            <TextBlock Text="{Binding ContextReadinessText}" Foreground="{StaticResource MutedTextBrush}" FontSize="8" LineHeight="12" Margin="0,0,0,6" ToolTip="CONTEXTの準備状況" />
-                            <Button Content="新しい制作を開始" Click="NewSession_Click" IsEnabled="{Binding CanStartNewCreation}" Background="{StaticResource AccentBrush}" Foreground="#071117" FontWeight="SemiBold" Margin="0" ToolTip="{Binding ContextReadinessText}" />
+                            <TextBlock Text="{Binding ChatReadinessText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" LineHeight="13" TextWrapping="Wrap" Margin="0,0,0,6" ToolTip="CHATの準備状況" />
+                            <Button guide:GuideHighlight.Target="NewCreation" Content="新しい制作を開始" Click="NewSession_Click" IsEnabled="{Binding CanStartNewCreation}" Background="{StaticResource AccentBrush}" Foreground="#071117" FontWeight="SemiBold" Margin="0" ToolTip="{Binding CreationReadinessText}" />
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -1005,6 +1162,7 @@
                             AutomationProperties.Name="CREATION PIPELINE">
                         <Grid>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
@@ -1047,6 +1205,11 @@
                                     </ItemsControl>
                                 </Viewbox>
                             </Grid>
+                            <TextBlock Grid.Row="2" Text="{Binding GuideText}"
+                                       Foreground="{StaticResource AccentStrongBrush}" FontSize="11"
+                                       TextWrapping="Wrap" Margin="0,8,0,0"
+                                       AutomationProperties.LiveSetting="Polite"
+                                       Visibility="{Binding HasGuidance, Converter={StaticResource BoolToVisibility}}" />
                         </Grid>
                     </Border>
 
@@ -1121,8 +1284,9 @@
                                            Margin="0,5,0,0" />
                             </StackPanel>
                             <Button Grid.Column="1"
-                                    Content="SEND TO CHATGPT"
+                                    Content="{Binding SendToChatGptButtonText}"
                                     Click="CopyBootstrap_Click"
+                                    guide:GuideHighlight.Target="SendToChatGpt"
                                     IsEnabled="{Binding CanSendToChatGpt}"
                                     ToolTip="{Binding SendToChatGptHint}"
                                     ToolTipService.ShowOnDisabled="True"
@@ -1141,7 +1305,7 @@
                             CornerRadius="12"
                             Padding="12"
                             Margin="0,10,0,0"
-                            AutomationProperties.Name="OUTPUT VIEWER">
+                            AutomationProperties.Name="OUTPUT VIEWER" guide:GuideHighlight.Target="Output">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
@@ -1425,13 +1589,37 @@
                                                  Height="7"
                                                  IsIndeterminate="{Binding IsGenerationInProgress}"
                                                  Margin="0,0,10,0" />
-                                    <TextBlock Text="{Binding JobStatusDetailText}"
-                                               Foreground="{StaticResource MutedTextBrush}"
-                                               FontSize="10"
-                                               VerticalAlignment="Center" />
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding GenerateExecutionStateText}"
+                                                   Foreground="{Binding CurrentGenerateExecutionState, Converter={StaticResource StateToBrush}}"
+                                                   FontSize="9"
+                                                   FontWeight="SemiBold" />
+                                        <TextBlock Text="{Binding JobStatusDetailText}"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   FontSize="9"
+                                                   Margin="0,2,0,0" />
+                                        <TextBlock Text="{Binding ReviewMediaAttachmentStateText}"
+                                                   Foreground="{StaticResource AccentBrush}"
+                                                   FontSize="8"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,2,0,0"
+                                                   Visibility="{Binding HasReviewMediaAttachment, Converter={StaticResource BoolToVisibility}}" />
+                                        <TextBlock Text="{Binding AutomaticIterationText}"
+                                                   Foreground="{StaticResource WarmBrush}"
+                                                   FontSize="8"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,2,0,0"
+                                                   Visibility="{Binding HasAutomaticIterationStatus, Converter={StaticResource BoolToVisibility}}" />
+                                    </StackPanel>
                                 </StackPanel>
                                 <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
-                                    <Button Content="GENERATE"
+                                    <Button guide:GuideHighlight.Target="AttachReviewOutput" Content="CHATGPTへ添付"
+                                            ToolTip="失敗した生成結果を、同じSessionのChatGPTタブへ再添付"
+                                            Click="AttachReviewOutput_Click"
+                                            IsEnabled="{Binding CanAttachReviewOutput}"
+                                            Visibility="{Binding IsReviewMediaAttachmentFailed, Converter={StaticResource BoolToVisibility}}"
+                                            Margin="0,0,6,0" />
+                                    <Button guide:GuideHighlight.Target="Generate" Content="GENERATE"
                                             ToolTip="validate後に1件のJobを生成"
                                             Background="{StaticResource WarmBrush}"
                                             Foreground="#21151A"
@@ -1439,21 +1627,26 @@
                                             Click="Generate_Click"
                                             IsEnabled="{Binding CanRunWorkflow}" />
                                     <Button Content="CANCEL"
-                                            ToolTip="実行中のJobへcancelを要求"
+                                            ToolTip="実行中のJobまたは自動Iterationを停止"
                                             Click="CancelJob_Click"
-                                            IsEnabled="{Binding IsJobActive}"
+                                            IsEnabled="{Binding CanCancelOperation}"
                                             Margin="0" />
                                 </WrapPanel>
                             </Grid>
-                            <Border Grid.Row="2" Background="#2A2113" BorderBrush="{StaticResource WarningBrush}" BorderThickness="1" CornerRadius="8" Padding="9" Visibility="{Binding HasIterationSafetyStop, Converter={StaticResource BoolToVisibility}}">
+                            <Border guide:GuideHighlight.Target="IterationDecision" Grid.Row="2" Background="#2A2113" BorderBrush="{StaticResource WarningBrush}" BorderThickness="1" CornerRadius="8" Padding="9" Visibility="{Binding HasIterationSafetyStop, Converter={StaticResource BoolToVisibility}}">
                                 <Grid>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                     <StackPanel>
                                         <TextBlock Text="最大反復回数に達しました" Foreground="{StaticResource WarningBrush}" FontSize="11" FontWeight="SemiBold" />
-                                        <TextBlock Text="自動では次Iterationへ進みません。続行または制作終了を選択してください。" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
+                                        <TextBlock Text="自動では次Iterationへ進みません。RESUMEまたは制作終了を選択してください。" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
+                                        <TextBlock Text="{Binding DeferredGenerateText}"
+                                                   Foreground="{StaticResource WarmBrush}"
+                                                   FontSize="9"
+                                                   TextWrapping="Wrap"
+                                                   Visibility="{Binding HasDeferredGenerate, Converter={StaticResource BoolToVisibility}}" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                        <Button Content="続行" Click="ContinueIteration_Click" Padding="10,5" />
+                                        <Button Content="RESUME" Click="ContinueIteration_Click" Padding="10,5" ToolTip="保留中のgenerateまたは完了済み制作を新しいRunとして再開します。" />
                                         <Button Content="この制作を終了" Click="EndIteration_Click" Padding="10,5" Margin="0" />
                                     </StackPanel>
                                 </Grid>
@@ -1470,7 +1663,11 @@
                     BorderBrush="{StaticResource LineBrush}"
                     BorderThickness="1">
                 <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
                     <Border Background="#0C1726" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="11" Padding="11" Margin="0,0,0,10">
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -1483,7 +1680,7 @@
                                 <Border Background="#162A3A" BorderBrush="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}" BorderThickness="1" CornerRadius="7" Padding="7,4" HorizontalAlignment="Right">
                                     <TextBlock Text="{Binding SessionStatusText}" Foreground="{Binding CurrentCreationStageState, Converter={StaticResource StateToBrush}}" FontSize="9" />
                                 </Border>
-                                <Button Content="RESUME" Click="Resume_Click" IsEnabled="{Binding CanResumeSession}" Padding="7,4" Margin="0,6,0,0" ToolTip="完了・停止した制作を再開" />
+                                <Button guide:GuideHighlight.Target="Resume" Content="RESUME" Click="Resume_Click" IsEnabled="{Binding CanResumeSession}" Padding="7,4" Margin="0,6,0,0" ToolTip="完了・停止した制作を再開" />
                             </StackPanel>
                         </Grid>
                     </Border>
@@ -1495,7 +1692,7 @@
                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{Binding HasHandoffItems, Converter={StaticResource InverseBoolToVisibility}}">
                             <Ellipse Width="36" Height="36" Fill="#102436" Stroke="{StaticResource LineStrongBrush}" StrokeThickness="1" />
                             <TextBlock Text="まだHandoffはありません" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,10,0,0" />
-                            <TextBlock Text="中央のSEND TO CHATGPTから制作コンテキストをコピーすると、ここに記録されます。" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap" Width="270" Margin="0,5,0,0" />
+                            <TextBlock Text="中央のSEND TO CHATGPTから制作コンテキストを送信すると、ここに記録されます。" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap" Width="270" Margin="0,5,0,0" />
                         </StackPanel>
                     </Grid>
 
@@ -1503,13 +1700,13 @@
                         <StackPanel>
                             <Grid Margin="0,0,0,6">
                                 <TextBlock Text="CHATGPT COMMAND" Foreground="{StaticResource AccentStrongBrush}" FontSize="10" FontWeight="SemiBold" />
-                                <TextBlock Text="貼り付け → 確認 → 適用" Foreground="{StaticResource MutedTextBrush}" FontSize="9" HorizontalAlignment="Right" />
+                                <TextBlock Text="{Binding AutomaticResponseExecutionText}" Foreground="{StaticResource MutedTextBrush}" FontSize="9" HorizontalAlignment="Right" />
                             </Grid>
-                            <TextBox x:Name="CommandBox" Text="{Binding CommandText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="108" MaxHeight="180" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono" FontSize="10" ToolTip="ChatGPTから返されたconnector-command + COMFY_PAYLOAD全文を貼り付け" />
+                            <TextBox guide:GuideHighlight.Target="CommandInput" x:Name="CommandBox" Text="{Binding CommandText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="108" MaxHeight="180" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono" FontSize="10" ToolTip="ChatGPTから返されたconnector-command + COMFY_PAYLOAD全文を貼り付け" />
                             <WrapPanel Margin="0,7,0,0">
-                                <Button Content="読み込んで確認" ToolTip="Connector Response、Handoff ID、Payload、slotを検証" Click="ImportCommand_Click" />
+                                <Button guide:GuideHighlight.Target="ImportCommand" Content="読み込んで確認" ToolTip="Connector Response、Handoff ID、Payload、slotを検証" Click="ImportCommand_Click" />
                                 <Button Content="適用" ToolTip="検証済みCommandをslotへ反映" Click="ApplyCommand_Click" IsEnabled="{Binding CanApplyCommand}" />
-                                <Button Content="適用して生成" ToolTip="反映後に1件のJobを生成" Click="ApplyGenerateCommand_Click" IsEnabled="{Binding CanApplyCommand}" Margin="0" />
+                                <Button guide:GuideHighlight.Target="ApplyGenerate" Content="適用して生成" ToolTip="反映後に1件のJobを生成" Click="ApplyGenerateCommand_Click" IsEnabled="{Binding CanApplyCommand}" Margin="0" />
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -1528,7 +1725,7 @@
                 Background="#B6070A12"
                 Visibility="{Binding IsWorkflowEditorVisible, Converter={StaticResource BoolToVisibility}}"
                 Panel.ZIndex="15">
-            <Border Width="640"
+            <Border guide:GuideHighlight.Target="WorkflowEditor" Width="640"
                     MaxHeight="900"
                     Background="{StaticResource PanelBrush}"
                     BorderBrush="{StaticResource AccentBrush}"
@@ -1558,8 +1755,8 @@
                                        FontSize="10"
                                        Margin="0,4,0,0" />
                         </StackPanel>
-                        <Button Content="閉じる"
-                                Click="CloseWorkflowEditor_Click"
+                        <Button guide:GuideHighlight.Target="WorkflowClose" Content="閉じる"
+                                    Click="CloseWorkflowEditor_Click"
                                 HorizontalAlignment="Right"
                                 VerticalAlignment="Top"
                                 Margin="0" />
@@ -1654,7 +1851,7 @@
                                                FontSize="10"
                                                TextWrapping="Wrap"
                                                Margin="0,5,0,9" />
-                                    <Button Content="RETRY"
+                                    <Button guide:GuideHighlight.Target="WorkflowRetry" Content="RETRY"
                                             Click="RetryWorkflow_Click"
                                             HorizontalAlignment="Left" />
                                 </StackPanel>
@@ -1800,7 +1997,7 @@
                 Background="#DE070B14"
                 Visibility="{Binding IsSetupVisible, Converter={StaticResource BoolToVisibility}}"
                 Panel.ZIndex="20">
-            <Border Width="660"
+            <Border guide:GuideHighlight.Target="SetupForm" Width="660"
                     MaxHeight="780"
                     Background="{StaticResource PanelBrush}"
                     BorderBrush="{StaticResource AccentBrush}"
@@ -1809,12 +2006,27 @@
                     Padding="28"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel>
+                <Grid IsEnabled="{Binding CanEditSetup}">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <DockPanel Margin="0,0,0,8">
+                        <Button DockPanel.Dock="Right"
+                                Content="×"
+                                Width="32" Height="32" Padding="0" Margin="12,0,0,0"
+                                FontSize="22"
+                                Click="CloseSetup_Click"
+                                ToolTip="保存せずに設定を閉じる"
+                                AutomationProperties.Name="保存せずに設定を閉じる" />
                         <TextBlock Text="初回設定 / 接続設定"
                                    FontSize="12"
                                    Foreground="{StaticResource AccentBrush}"
-                                   FontWeight="SemiBold" />
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center" />
+                    </DockPanel>
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
                         <TextBlock Text="ローカルの制作環境を接続"
                                    FontSize="28"
                                    FontWeight="SemiBold"
@@ -1942,6 +2154,7 @@
                         </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
+                </Grid>
             </Border>
         </Border>
     </Grid>

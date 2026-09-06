@@ -20,7 +20,10 @@ public sealed record CreationPipelineStage(
     public bool IsComfyUiStarting => State == "INPROGRESS"
         && Description.Contains("ComfyUI起動中", StringComparison.Ordinal);
 
-    public string VisualState => IsComfyUiStarting ? "STARTING" : State;
+    public bool IsComfyUiWaiting => State == "INPROGRESS"
+        && Description.Contains("ComfyUIのREADYを待機中", StringComparison.Ordinal);
+
+    public string VisualState => IsComfyUiStarting || IsComfyUiWaiting ? "STARTING" : State;
 
     public string StateSymbol => State switch
     {

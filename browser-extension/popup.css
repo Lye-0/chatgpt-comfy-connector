@@ -1,0 +1,106 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", "Yu Gothic UI", Meiryo, sans-serif;
+  background: #070a12;
+  color: #edf5ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  width: 340px;
+  min-height: 430px;
+  margin: 0;
+  background: #070a12;
+}
+
+.panel { padding: 18px; }
+
+.eyebrow, .section-label {
+  margin: 0;
+  color: #63e6e2;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+h1 {
+  margin: 5px 0 16px;
+  font-size: 22px;
+  font-weight: 650;
+}
+
+.status-card, .event-card {
+  border: 1px solid #263650;
+  border-radius: 11px;
+  background: #0e1422;
+  padding: 12px;
+}
+
+.pairing-card {
+  margin-top: 12px;
+  border: 1px solid #3b5272;
+  border-radius: 11px;
+  background: #101827;
+  padding: 12px;
+}
+
+.pairing-card[hidden] { display: none; }
+.pairing-card label { display: block; margin: 8px 0 5px; color: #edf5ff; font-size: 11px; font-weight: 650; }
+.pairing-card input {
+  width: 100%;
+  border: 1px solid #3b5272;
+  border-radius: 7px;
+  padding: 9px 10px;
+  background: #0b1220;
+  color: #edf5ff;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+.pairing-card input:focus { outline: 2px solid #a9fffa; outline-offset: 1px; border-color: #63e6e2; }
+.pairing-card button { width: 100%; margin-top: 8px; }
+.pairing-help { margin: 7px 0 0; color: #8fa3bf; font-size: 10px; line-height: 1.45; }
+
+.status-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.status-label { flex: 1; font-size: 13px; font-weight: 650; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #8fa3bf; }
+.status-text { font-size: 10px; font-weight: 700; color: #8fa3bf; }
+.endpoint, .detail { margin: 7px 0 0; color: #8fa3bf; font-size: 10px; overflow-wrap: anywhere; }
+.detail { margin-top: 4px; }
+
+.actions { display: flex; gap: 8px; margin: 12px 0; }
+
+button {
+  flex: 1;
+  border: 1px solid #3b5272;
+  border-radius: 7px;
+  padding: 9px 10px;
+  background: #141d2e;
+  color: #edf5ff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+button:hover:not(:disabled) { border-color: #63e6e2; background: #1b2b42; }
+button:focus-visible { outline: 2px solid #a9fffa; outline-offset: 2px; }
+button:disabled { cursor: default; opacity: .45; }
+
+.event-card { background: #0b1925; }
+.event-text { margin: 7px 0 0; color: #b5fffb; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.error { min-height: 16px; margin: 10px 0 0; color: #ff748f; font-size: 10px; line-height: 1.4; }
+
+.connected .status-dot { background: #7be6a2; }
+.connected .status-text { color: #7be6a2; }
+.connecting .status-dot { background: #f5c96a; }
+.connecting .status-text { color: #f5c96a; }
+.error-state .status-dot { background: #ff748f; }
+.error-state .status-text { color: #ff748f; }

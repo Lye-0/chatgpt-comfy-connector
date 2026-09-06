@@ -22,7 +22,8 @@ public sealed class LocalProjectChatProvider : IProjectChatProvider
 
     public async Task<ProjectChatCatalog> LoadAsync(
         IReadOnlyCollection<ProjectChatBindingSnapshot> existingBindings,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? collectionTrigger = null)
     {
         _catalog = await _store.LoadLocalContextsAsync(cancellationToken) ?? new LocalContextCatalog();
         var changed = false;

@@ -12,6 +12,16 @@
 - files: `README.md`, `docs/architecture.md`, `src/ChatGPTComfyConnector.Core/Models/AppModels.cs` …
 - memory: `agent-knowledge/entries/2026-08-23-portable-mcp-lifecycle-5d8a41.md`
 
+## creation-guidance
+
+### 操作案内の確認状態はSessionの実行条件から独立させる
+- id: `rm-20260906-creation-guidance-boundary`
+- type: `constraint`
+- maturity: `candidate`
+- tags: `guidance`, `pipeline`, `selection`, `confirmation`, `async-race`
+- files: `docs/architecture.md`, `src/ChatGPTComfyConnector.Core/Services/CreationGuidancePolicy.cs`, `src/ChatGPTComfyConnector.Core/Services/ChatGuidanceProgress.cs` …
+- memory: `agent-knowledge/entries/2026-09-06-creation-guidance-boundary-43a9d2.md`
+
 ## creation-session
 
 ### Creation Sessionは履歴を保持する制作単位である
@@ -19,7 +29,7 @@
 - type: `constraint`
 - maturity: `reused`
 - tags: `session`, `pipeline`, `iteration`, `review`, `persistence`, `connection-gate`, `reconnect`, `waiting-reason`
-- files: `docs/architecture.md`, `src/ChatGPTComfyConnector.Core/Models/AppModels.cs`, `src/ChatGPTComfyConnector.Core/Services/CreationPipelineStateMachine.cs` …
+- files: `docs/architecture.md`, `src/ChatGPTComfyConnector.Core/Models/AppModels.cs`, `src/ChatGPTComfyConnector.Core/Services/CreationPreparationPolicy.cs` …
 - memory: `agent-knowledge/entries/2026-08-23-creation-session-pipeline-7c4e2a.md`
 
 ## manual-handoff

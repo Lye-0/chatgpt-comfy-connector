@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ChatGPT Comfy Connector</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="panel">
+      <p class="eyebrow">CHATGPT COMFY CONNECTOR</p>
+      <h1>Desktop Bridge</h1>
+
+      <section class="status-card" aria-live="polite">
+        <div class="status-heading">
+          <span class="status-label">Desktop Connector</span>
+          <span id="statusDot" class="status-dot"></span>
+          <span id="statusText" class="status-text">DISCONNECTED</span>
+        </div>
+        <p id="endpoint" class="endpoint">http://127.0.0.1:43127</p>
+        <p id="detail" class="detail">Desktop Connectorを検出しています。</p>
+      </section>
+
+      <section id="pairingCard" class="pairing-card">
+        <p class="section-label">FIRST CONNECTION</p>
+        <label for="pairingCode">DesktopのPairing code</label>
+        <input id="pairingCode"
+               type="text"
+               inputmode="text"
+               autocomplete="one-time-code"
+               autocapitalize="characters"
+               maxlength="14"
+               placeholder="ABCD-EFGH-IJKL">
+        <button id="pairButton" type="button">PAIR DESKTOP</button>
+        <p class="pairing-help">Desktop ConnectorのBROWSER EXTENSION欄に表示されたコードを入力してください。</p>
+      </section>
+
+      <div class="actions">
+        <button id="connectButton" type="button">CONNECT</button>
+        <button id="pingButton" type="button" disabled>PING</button>
+      </div>
+
+      <section class="event-card">
+        <p class="section-label">LAST DESKTOP EVENT</p>
+        <p id="eventText" class="event-text">まだイベントを受信していません。</p>
+      </section>
+
+      <p id="errorText" class="error" role="alert"></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

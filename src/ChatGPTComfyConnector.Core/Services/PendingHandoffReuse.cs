@@ -53,8 +53,45 @@ public static class PendingHandoffReuse
     public static bool IsBootstrap(PendingHandoffSnapshot? pending)
         => pending is not null
             && !IsReview(pending)
+            && !IsGenerationResult(pending)
             && pending.AllowedActions.Count == 1
             && pending.AllowedActions.Contains("generate", StringComparer.Ordinal);
+
+    public static bool IsGenerationResult(PendingHandoffSnapshot? pending)
+        => pending?.Purpose == PendingHandoffPurpose.GenerationResult;
+
+    public static bool IsResume(PendingHandoffSnapshot? pending)
+        => pending?.Purpose == PendingHandoffPurpose.Resume;
+
+    /// <summary>
+    /// Finds the exact persisted Bootstrap payload that can be retried after a
+    /// Clipboard or Browser Extension delivery attempt. The pending snapshot
+    /// and payload must still belong to the same boundary; this method never
+    /// rebuilds the Handoff or issues a replacement identity.
+    /// </summary>
+    public static bool TryGetResendableBootstrapPayload(
+        CreationSession? session,
+        out string payload)
+    {
+        payload = string.Empty;
+        if (session?.PendingHandoff is not { } pending || !IsBootstrap(pending)) return false;
+
+        var message = session.HandoffMessages
+            .Where(item => item.Direction == HandoffDirection.ConnectorToChatGpt
+                && item.Kind == HandoffMessageKind.CreationRequest
+                && item.IterationNumber is null
+                && item.State is (HandoffTransportState.Copied or HandoffTransportState.Failed))
+            .OrderByDescending(item => item.CreatedAt)
+            .FirstOrDefault();
+        if (!HandoffPayloadReuse.TryGetSavedPayload(message, out var savedPayload)
+            || !MatchesPayload(pending, savedPayload))
+        {
+            return false;
+        }
+
+        payload = savedPayload;
+        return true;
+    }
 
     /// <summary>
     /// Identifies a response to a Review Handoff from the immutable snapshot
@@ -65,7 +102,7 @@ public static class PendingHandoffReuse
     /// </summary>
     public static bool IsReview(PendingHandoffSnapshot? pending)
         => pending is not null
-            && (pending.Purpose == PendingHandoffPurpose.Review
+            && (pending.Purpose is PendingHandoffPurpose.Review or PendingHandoffPurpose.Resume
                 || (pending.Purpose == PendingHandoffPurpose.Unknown
                     && pending.AllowedActions.Contains("complete", StringComparer.Ordinal)));
 

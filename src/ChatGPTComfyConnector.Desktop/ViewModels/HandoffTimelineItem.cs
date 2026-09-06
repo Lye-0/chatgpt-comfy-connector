@@ -24,6 +24,7 @@ public sealed class HandoffTimelineItem : INotifyPropertyChanged
     {
         HandoffMessageKind.CreationRequest => "制作リクエストを送信",
         HandoffMessageKind.GenerationCommand => "生成指示",
+        HandoffMessageKind.GenerationResult when Message.State == HandoffTransportState.Attached => "生成結果を添付",
         HandoffMessageKind.GenerationResult => "生成結果を送信",
         HandoffMessageKind.ReviewRequest => "レビュー用情報を送信",
         HandoffMessageKind.RegenerationCommand => "再生成指示",
@@ -40,6 +41,17 @@ public sealed class HandoffTimelineItem : INotifyPropertyChanged
     public string Summary => Message.Summary;
     public string Payload => Message.Payload;
     public string StateLabel => Message.State.ToString().ToUpperInvariant();
+    public string TransportFailureText
+    {
+        get
+        {
+            if (Message.State != HandoffTransportState.Failed) return string.Empty;
+            var fields = new[] { Message.TransportErrorCode, Message.TransportErrorStage }
+                .Where(value => !string.IsNullOrWhiteSpace(value));
+            var detail = string.Join(" · ", fields);
+            return string.IsNullOrWhiteSpace(detail) ? string.Empty : $"送信エラー: {detail}";
+        }
+    }
     public bool IsCopied => Message.State == HandoffTransportState.Copied;
     public bool IsConnectorToChatGpt => Message.Direction == HandoffDirection.ConnectorToChatGpt;
     public bool IsChatGptToComfy => Message.Direction == HandoffDirection.ChatGptToComfy;
@@ -57,6 +69,7 @@ public sealed class HandoffTimelineItem : INotifyPropertyChanged
         Message.State = HandoffTransportState.Copied;
         PropertyChanged?.Invoke(this, new(nameof(StateLabel)));
         PropertyChanged?.Invoke(this, new(nameof(IsCopied)));
+        PropertyChanged?.Invoke(this, new(nameof(TransportFailureText)));
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

@@ -52,7 +52,7 @@ public sealed class CreationWorkspacePolicyTests
         persisted.Iterations.Add(new SessionIteration { Number = 1 });
 
         var fresh = new CreationSession();
-        CreationPipelineStateMachine.PrepareContext(fresh);
+        CreationPipelineStateMachine.PrepareCreation(fresh);
 
         Assert.Empty(fresh.OriginalIdea);
         Assert.Empty(fresh.HandoffMessages);
@@ -74,9 +74,10 @@ public sealed class CreationWorkspacePolicyTests
             ChatLabel = "Chat",
             MaximumIterations = 10,
         };
-        CreationPipelineStateMachine.PrepareContext(session);
+        CreationPipelineStateMachine.PrepareCreation(session);
         CreationPipelineStateMachine.SynchronizeConnectionGate(session, ConnectionState.Connected);
-        CreationPipelineStateMachine.BindContext(session);
+        CreationPipelineStateMachine.BindWorkflow(session, session.BoundWorkflow!, SlotDiscoveryState.Loaded);
+        CreationPipelineStateMachine.BindChat(session);
         return session;
     }
 }

@@ -159,6 +159,36 @@ Chat, and maximum-iteration prerequisites pass. `ResumeSessionAsync` remains the
 explicit reactivation path for a completed/paused/stopped/error session and is
 not an automatic startup recovery mechanism.
 
+### Next-action guidance
+
+`CreationGuidancePolicy` reads the pipeline, preparation facts and existing action
+guards and returns one target plus a short instruction. Guidance never advances
+stages, changes command eligibility or schedules execution. It prioritizes
+connection/preparation recovery and suppresses action prompts during automatic
+validation, Apply, ComfyUI startup, generation and output retrieval. A completed
+Session has no next-action highlight. Iteration limits highlight the whole
+continue/end decision block rather than choosing one outcome for the user.
+
+`ChatGuidanceProgress` is transient per workspace/preparation. A cached catalog
+does not count as a user refresh. A successful current-generation refresh resets
+Project/Chat acknowledgements; the guide then asks for Project confirmation,
+Chat confirmation and creation start. Confirming an unchanged Project is valid
+and explicitly loads its Chats if that selection has not already loaded them.
+This uses the existing selection provider and stale-result checks. Repeated
+confirmation does not duplicate retrieval. Selection changes invalidate only
+the affected acknowledgements; these flags are never persisted into Session
+binding or used as new execution gates.
+
+`MainViewModel.Guidance` projects these facts without changing the running
+Session's target. `MainWindow.Guidance` records selector confirmation (Escape
+does not confirm), marks UI operations in progress and pauses animation while
+editing text or operating a selector. `GuideHighlight` draws a separate,
+non-interactive adorner with a two-second border-opacity cycle. It leaves the
+control template, content, selection, shared brushes and layout intact. Disabled
+or hidden controls are not highlighted; Handoff cards match the selected message
+ID so only one card is marked. Interaction and Windows ClientAreaAnimation=false
+use a steady frame, and unloading removes animation and system-event handlers.
+
 Connection loss never resets the Session, Workflow selection, Project / Chat, original
 idea, iterations, or outputs. It moves Connect back to `WaitingUser` or `Error` and
 blocks connection-dependent Apply/Generate operations. A successful reconnect completes

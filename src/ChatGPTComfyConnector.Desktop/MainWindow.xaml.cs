@@ -64,6 +64,9 @@ public partial class MainWindow : Window
         IdeaInputBox.LostKeyboardFocus += IdeaInput_LostKeyboardFocus;
         IdeaInputBox.IsEnabledChanged += IdeaInput_IsEnabledChanged;
         _comfyUiStatusTimer.Tick += ComfyUiStatusTimer_Tick;
+        AddHandler(Keyboard.GotKeyboardFocusEvent, new KeyboardFocusChangedEventHandler(GuideFocusChanged), true);
+        AddHandler(Keyboard.LostKeyboardFocusEvent, new KeyboardFocusChangedEventHandler(GuideFocusChanged), true);
+        AddHandler(Keyboard.PreviewKeyDownEvent, new KeyEventHandler(GuidePreviewKeyDown), true);
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
@@ -110,6 +113,7 @@ public partial class MainWindow : Window
 
     private async void SaveSetup_Click(object sender, RoutedEventArgs e) => await Run("設定保存", ViewModel.SaveSetupAsync);
     private void Setup_Click(object sender, RoutedEventArgs e) => ViewModel.ShowSetup();
+    private void CloseSetup_Click(object sender, RoutedEventArgs e) => ViewModel.CloseSetupWithoutSaving();
     private void OpenWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.ShowWorkflowEditor();
     private void CloseWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.HideWorkflowEditor();
     private async void Connect_Click(object sender, RoutedEventArgs e) => await Run("MCP接続", ViewModel.ConnectAsync);
@@ -923,8 +927,10 @@ public partial class MainWindow : Window
 
     private async Task Run(string title, Func<Task> operation)
     {
+        ViewModel.BeginGuidedOperation();
         try { await operation(); }
         catch (Exception ex) { MessageBox.Show(ex.Message, title, MessageBoxButton.OK, MessageBoxImage.Warning); }
+        finally { ViewModel.EndGuidedOperation(); }
     }
 
     private void RunSync(string title, Action operation)

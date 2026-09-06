@@ -14,7 +14,7 @@ using ChatGPTComfyConnector.Infrastructure.Workflows;
 
 namespace ChatGPTComfyConnector.Desktop.ViewModels;
 
-public sealed class MainViewModel : INotifyPropertyChanged
+public sealed partial class MainViewModel : INotifyPropertyChanged
 {
     private static readonly TimeSpan ComfyUiStartupTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan ComfyUiStartupPollInterval = TimeSpan.FromSeconds(1);
@@ -41,6 +41,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private ConnectionState _connectionState = ConnectionState.Disconnected;
     private ComfyUiRuntimeState _comfyUiRuntimeState = ComfyUiRuntimeState.Unknown;
     private bool _isSetupVisible;
+    private AppSettings? _settingsBeforeSetup;
+    private bool _isSavingSetup;
     private bool _isBusy;
     private bool _isSlotLoading;
     private SlotDiscoveryState _slotDiscoveryState = SlotDiscoveryState.NotLoaded;
@@ -163,8 +165,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public JobSnapshot? CurrentJob { get => _currentJob; private set { _currentJob = value; OnPropertyChanged(); OnPropertyChanged(nameof(JobStatusText)); OnPropertyChanged(nameof(JobStatusDetailText)); OnPropertyChanged(nameof(IsJobActive)); OnPropertyChanged(nameof(CanCancelOperation)); OnPropertyChanged(nameof(CanStartNewCreation)); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public ConnectionState ConnectionState { get => _connectionState; private set { _connectionState = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStateText)); OnPropertyChanged(nameof(IsConnected)); NotifyConnectionStateChanged(); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
     public string StatusMessage { get => _statusMessage; set { _statusMessage = value; OnPropertyChanged(); } }
-    public bool IsSetupVisible { get => _isSetupVisible; private set { _isSetupVisible = value; OnPropertyChanged(); } }
-    public bool IsWorkflowEditorVisible { get => _isWorkflowEditorVisible; private set { _isWorkflowEditorVisible = value; OnPropertyChanged(); } }
+    public bool IsSetupVisible
+    {
+        get => _isSetupVisible;
+        private set
+        {
+            if (_isSetupVisible == value) return;
+            _settingsBeforeSetup = value ? Settings.Clone() : null;
+            _isSetupVisible = value;
+            OnPropertyChanged();
+            RefreshGuidance();
+        }
+    }
+    public bool CanEditSetup => !_isSavingSetup;
+    public bool IsWorkflowEditorVisible { get => _isWorkflowEditorVisible; private set { _isWorkflowEditorVisible = value; OnPropertyChanged(); RefreshGuidance(); } }
     public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanRefreshChatGptContext)); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
     public SlotDiscoveryState SlotDiscoveryState { get => _slotDiscoveryState; private set { _slotDiscoveryState = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); OnPropertyChanged(nameof(CanStartNewCreation)); OnPropertyChanged(nameof(CanResendBootstrapHandoff)); OnPropertyChanged(nameof(CanResendReviewHandoff)); OnPropertyChanged(nameof(CanSendToChatGpt)); OnPropertyChanged(nameof(SendToChatGptButtonText)); OnPropertyChanged(nameof(SendToChatGptHint)); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
@@ -813,16 +827,45 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task SaveSetupAsync()
     {
-        ValidateSettings();
-        Settings.ComfyCliPath ??= Path.Combine(Path.GetDirectoryName(Settings.ComfyMcpPath)!, "comfy.exe");
-        await _store.SaveSettingsAsync(Settings);
-        IsSetupVisible = false;
-        RefreshWorkflowTree();
-        await RefreshComfyUiStatusAsync();
-        StatusMessage = "設定をPortable領域へ保存しました。Connectを押してMCPへ接続してください。";
+        if (_isSavingSetup) return;
+        _isSavingSetup = true;
+        OnPropertyChanged(nameof(CanEditSetup));
+        try
+        {
+            ValidateSettings();
+            Settings.ComfyCliPath ??= Path.Combine(Path.GetDirectoryName(Settings.ComfyMcpPath)!, "comfy.exe");
+            await _store.SaveSettingsAsync(Settings.Clone());
+            IsSetupVisible = false;
+            RefreshWorkflowTree();
+            await RefreshComfyUiStatusAsync();
+            StatusMessage = "設定をPortable領域へ保存しました。Connectを押してMCPへ接続してください。";
+        }
+        finally
+        {
+            _isSavingSetup = false;
+            OnPropertyChanged(nameof(CanEditSetup));
+        }
     }
 
     public void ShowSetup() => IsSetupVisible = true;
+
+    public void CloseSetupWithoutSaving()
+    {
+        if (!IsSetupVisible || _isSavingSetup) return;
+        if (_settingsBeforeSetup is { } original)
+        {
+            Settings.PortableRoot = original.PortableRoot;
+            Settings.ComfyMcpPath = original.ComfyMcpPath;
+            Settings.ComfyCliPath = original.ComfyCliPath;
+            Settings.Endpoint = original.Endpoint;
+            Settings.MaximumIterations = original.MaximumIterations;
+        }
+        // Refresh bindings even when an invalid text edit never reached the
+        // model (for example, a non-numeric Maximum Iterations value).
+        OnPropertyChanged(nameof(Settings));
+        IsSetupVisible = false;
+        StatusMessage = "変更を保存せずに設定を閉じました。";
+    }
 
     public void ShowWorkflowEditor() => IsWorkflowEditorVisible = true;
 
@@ -3269,6 +3312,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         string? collectionTrigger = null)
     {
         var loadVersion = Interlocked.Increment(ref _contextLoadVersion);
+        _chatGuidance.Reset();
+        _guideLoadedProjectKey = null;
         if (preserveExistingCatalog && _contextCatalog.Projects.Count > 0)
         {
             _contextCatalog.LoadState = ProjectChatCatalogLoadState.Loading;
@@ -3293,6 +3338,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 collectionTrigger);
             if (Volatile.Read(ref _contextLoadVersion) != loadVersion) return false;
             _contextCatalog = catalog;
+            if (catalog.LoadState is ProjectChatCatalogLoadState.Loaded or ProjectChatCatalogLoadState.Empty)
+                _chatGuidance.Refreshed();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -3437,6 +3484,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 || !ReferenceEquals(_selectedProject, project)) return;
             IsProjectChatListLoading = false;
             project.Chats = chats.ToList();
+            _guideLoadedProjectKey = ProjectGuideKey;
             RefreshChatOptions(project.Key);
             ChatValidationMessage = string.Empty;
             StatusMessage = "選択したChatGPT ProjectのChatを更新しました。";
@@ -3484,6 +3532,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void ResetSessionWorkspace(CreationSession session)
     {
+        _chatGuidance.Reset();
         Idea = session.OriginalIdea;
         CommandText = string.Empty;
         _pendingValidation = null;
@@ -4406,6 +4455,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(CanSendToChatGpt));
             OnPropertyChanged(nameof(SendToChatGptButtonText));
             OnPropertyChanged(nameof(SendToChatGptHint));
+            RefreshGuidance();
         }
 
         if (_notificationContext is null)
@@ -5172,6 +5222,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void NotifyContextSelectionChanged()
     {
+        _chatGuidance.SelectionChanged(ProjectGuideKey, ChatGuideKey);
         _chatBindingError = null;
         OnPropertyChanged(nameof(ProjectPlaceholderText));
         OnPropertyChanged(nameof(ChatPlaceholderText));
@@ -5242,6 +5293,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CanCancelOperation));
         OnPropertyChanged(nameof(HasDeferredGenerate));
         OnPropertyChanged(nameof(DeferredGenerateText));
+        RefreshGuidance();
     }
 
     private void RefreshPipeline()
@@ -5415,6 +5467,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             SetComfyUiRuntimeState(ComfyUiRuntimeState.Unknown);
         }
+        RefreshGuidance();
     }
 
     private void ValidateSettings()

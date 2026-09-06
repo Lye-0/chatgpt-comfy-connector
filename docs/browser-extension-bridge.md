@@ -351,6 +351,31 @@ The session token is held only in Service Worker memory and is not persisted
 or logged. A Desktop restart creates a new process token; the saved pairing
 credential is used to bootstrap it again.
 
+### Re-pairing from Desktop SETUP
+
+Changing unpacked-extension folders or browser profiles, or reinstalling the extension,
+can lose its saved credential while Desktop still retains the pairing
+verifier. Desktop SETUP provides an explicit `拡張機能を再ペアリング` action
+and displays the fresh code with a copy button. The action is disabled during
+creation, automatic response handling, context collection, and Handoff/media
+transfers. It is applied immediately and is independent of saving or cancelling
+the editable SETUP fields.
+
+`IBrowserExtensionBridge.ResetPairingAsync` is a Desktop-only capability, not
+an HTTP/WebSocket command. It serializes with pairing and bootstrap, clears
+only the persisted pairing verifier, revokes the old session token, aborts the
+authenticated socket, fails outstanding transport requests, and clears media
+registrations. It then exposes a fresh one-time code with a ten-minute lifetime
+and a new attempt budget. Settings, sessions, workflow files, and output files
+are retained. If clearing the verifier fails, the existing pairing and live
+connection remain usable.
+
+WebSocket admission validates the token under the same client lock used by
+revocation. A hello already in flight cannot restore the revoked client, and
+its rejection cannot overwrite a newer client's connected status. Ordinary
+Desktop restarts continue to preserve paired state without generating another
+code; resetting trust always requires the explicit SETUP action.
+
 ### `GET /bridge` (WebSocket)
 
 The WebSocket request must have an explicit extension Origin such as
@@ -743,6 +768,13 @@ browser-extension/
 ```
 
 ## Development loading
+
+Distribution uses separate GitHub Releases: `desktop-v<SemVer>` builds the
+Windows Desktop package, and `collector-v<SemVer>` builds the standalone
+Collector ZIP. Users extract the Collector into a persistent folder, enable
+Developer mode, and load the folder containing `manifest.json`. For updates,
+they overwrite that same folder and reload the extension to preserve its
+identity and pairing storage. See the [Collector installation guide](../browser-extension/README.md).
 
 1. Build and start the current Desktop Connector executable. If an older
    instance is already running, close it first; rebuilding source files does

@@ -26,6 +26,7 @@ public interface IBrowserExtensionPairingStore
 {
     Task<BrowserExtensionPairingRecord?> LoadBrowserExtensionPairingAsync(CancellationToken cancellationToken = default);
     Task SaveBrowserExtensionPairingAsync(BrowserExtensionPairingRecord pairing, CancellationToken cancellationToken = default);
+    Task ClearBrowserExtensionPairingAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -112,6 +113,8 @@ public interface IBrowserExtensionBridge : IAsyncDisposable
     event EventHandler<BrowserExtensionChatGptContextChangedEventArgs>? ChatGptContextChanged;
     Task StartAsync(CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
+    /// <summary>Revokes the existing pairing and issues a fresh code after an explicit Desktop user action.</summary>
+    Task ResetPairingAsync(CancellationToken cancellationToken = default);
     Task<bool> SendEventAsync(BrowserExtensionBridgeEvent bridgeEvent, CancellationToken cancellationToken = default);
     Task<BrowserExtensionHandoffSendResult> SendHandoffAsync(
         BrowserExtensionHandoffSendRequest request,

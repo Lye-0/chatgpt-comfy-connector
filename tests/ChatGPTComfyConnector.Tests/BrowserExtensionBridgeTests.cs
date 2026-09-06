@@ -11,7 +11,7 @@ using ChatGPTComfyConnector.Infrastructure.Storage;
 
 namespace ChatGPTComfyConnector.Tests;
 
-public sealed class BrowserExtensionBridgeTests
+public sealed partial class BrowserExtensionBridgeTests
 {
     private const string ExtensionOrigin = "chrome-extension://abcdefghijklmnop";
     private const string EdgeExtensionOrigin = "extension://abcdefghijklmnop";
@@ -1095,6 +1095,7 @@ public sealed class BrowserExtensionBridgeTests
     private sealed class InMemoryPairingStore : IBrowserExtensionPairingStore
     {
         public BrowserExtensionPairingRecord? Record { get; private set; }
+        public Exception? ClearFailure { get; set; }
 
         public Task<BrowserExtensionPairingRecord?> LoadBrowserExtensionPairingAsync(CancellationToken cancellationToken = default)
             => Task.FromResult(Record);
@@ -1104,6 +1105,14 @@ public sealed class BrowserExtensionBridgeTests
             CancellationToken cancellationToken = default)
         {
             Record = pairing;
+            return Task.CompletedTask;
+        }
+
+        public Task ClearBrowserExtensionPairingAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (ClearFailure is not null) throw ClearFailure;
+            Record = null;
             return Task.CompletedTask;
         }
     }

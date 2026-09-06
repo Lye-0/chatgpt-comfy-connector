@@ -528,6 +528,7 @@ public sealed class ChatGptContextProviderTests
 
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task ResetPairingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<bool> SendEventAsync(BrowserExtensionBridgeEvent bridgeEvent, CancellationToken cancellationToken = default)
             => Task.FromResult(false);
         public Task<BrowserExtensionHandoffSendResult> SendHandoffAsync(BrowserExtensionHandoffSendRequest request, CancellationToken cancellationToken = default)

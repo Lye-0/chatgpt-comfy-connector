@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const source = (await readFile(join(repositoryRoot, "browser-extension", "background.js"), "utf8"))
+  .replace(/\r\n/g, "\n")
   .replace("ensureReconnectAlarm();\nconnect().catch(() => {});", "")
   .replace("const HANDOFF_ACCEPTANCE_RETRY_DELAY_MS = 500;", "const HANDOFF_ACCEPTANCE_RETRY_DELAY_MS = 5;");
 

@@ -2152,6 +2152,54 @@
                                     Click="OpenLogs_Click"
                                     Margin="0" />
                         </StackPanel>
+                        <Border Background="{StaticResource PanelSoftBrush}"
+                                BorderBrush="{StaticResource LineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="9"
+                                Padding="12"
+                                Margin="0,18,0,0">
+                            <StackPanel>
+                                <TextBlock Text="拡張機能の接続"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontSize="12"
+                                           FontWeight="SemiBold" />
+                                <TextBlock Text="現在の接続を解除して、新しいペアリングコードを発行します。この操作は、設定の保存前でもすぐに反映されます。"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="12"
+                                           Margin="0,6,0,10"
+                                           TextWrapping="Wrap" />
+                                <Button x:Name="ResetBrowserExtensionPairingButton"
+                                        Content="拡張機能を再ペアリング"
+                                        IsEnabled="{Binding CanResetBrowserExtensionPairing}"
+                                        HorizontalAlignment="Left"
+                                        Margin="0"
+                                        Click="ResetBrowserExtensionPairing_Click"
+                                        AutomationProperties.HelpText="現在の拡張機能との接続を解除し、新しいペアリングコードを発行します" />
+                                <StackPanel Margin="0,12,0,0"
+                                            Visibility="{Binding IsBrowserExtensionPairingCodeVisible, Converter={StaticResource BoolToVisibility}}">
+                                    <Label Content="ペアリングコード" Target="{Binding ElementName=SetupPairingCodeBox}" />
+                                    <DockPanel Margin="0,4,0,0">
+                                        <Button DockPanel.Dock="Right"
+                                                Content="コピー"
+                                                Margin="8,0,0,0"
+                                                Click="CopyBrowserExtensionPairingCode_Click"
+                                                AutomationProperties.Name="ペアリングコードをコピー" />
+                                        <TextBox x:Name="SetupPairingCodeBox"
+                                                 Text="{Binding BrowserExtensionPairingCode, Mode=OneWay}"
+                                                 IsReadOnly="True"
+                                                 FontFamily="Consolas"
+                                                 FontSize="18"
+                                                 AutomationProperties.Name="ペアリングコード" />
+                                    </DockPanel>
+                                </StackPanel>
+                                <TextBlock Text="{Binding BrowserExtensionPairingHelpText}"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="12"
+                                           Margin="0,10,0,0"
+                                           TextWrapping="Wrap"
+                                           AutomationProperties.LiveSetting="Polite" />
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </ScrollViewer>
                 </Grid>

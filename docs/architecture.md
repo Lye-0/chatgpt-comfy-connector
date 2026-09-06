@@ -610,6 +610,16 @@ and never emits wildcard CORS. The Service Worker path also uses an explicit
 `X-Connector-Client` header so it does not depend on Origin being present on
 extension Fetch.
 
+Desktop SETUP also exposes explicit re-pairing for extension reinstalls and
+unpacked-folder/profile migrations. This immediately revokes only the pairing verifier,
+session token, active socket, and registered transport state, then displays a
+fresh one-time code. It is independent of saving/cancelling SETUP fields and
+preserves the creation workspace and generated files. The UI blocks it during
+active creation and communication. Pairing/bootstrap and reset share a gate;
+token validation and socket admission share the revocation lock. Persistence
+failure leaves the old pairing intact. No network endpoint can request this
+reset. See the re-pairing section in [Browser Extension Bridge](browser-extension-bridge.md).
+
 The Extension indicator is displayed as a fifth fact in the existing
 `SYSTEM CONNECTION` header; pairing details are shown only while pairing is
 required. The existing Connector, MCP, ComfyUI, and GPU indicators and the

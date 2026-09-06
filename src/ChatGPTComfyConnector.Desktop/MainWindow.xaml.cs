@@ -114,6 +114,15 @@ public partial class MainWindow : Window
     private async void SaveSetup_Click(object sender, RoutedEventArgs e) => await Run("設定保存", ViewModel.SaveSetupAsync);
     private void Setup_Click(object sender, RoutedEventArgs e) => ViewModel.ShowSetup();
     private void CloseSetup_Click(object sender, RoutedEventArgs e) => ViewModel.CloseSetupWithoutSaving();
+    private async void ResetBrowserExtensionPairing_Click(object sender, RoutedEventArgs e)
+        => await Run("拡張機能の再ペアリング", ViewModel.ResetBrowserExtensionPairingAsync);
+    private void CopyBrowserExtensionPairingCode_Click(object sender, RoutedEventArgs e)
+        => RunSync("ペアリングコードのコピー", () =>
+        {
+            if (!ViewModel.IsBrowserExtensionPairingCodeVisible) return;
+            Clipboard.SetText(ViewModel.BrowserExtensionPairingCode);
+            ViewModel.StatusMessage = "ペアリングコードをコピーしました。拡張機能でPAIR DESKTOPを押してください。";
+        });
     private void OpenWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.ShowWorkflowEditor();
     private void CloseWorkflowEditor_Click(object sender, RoutedEventArgs e) => ViewModel.HideWorkflowEditor();
     private async void Connect_Click(object sender, RoutedEventArgs e) => await Run("MCP接続", ViewModel.ConnectAsync);

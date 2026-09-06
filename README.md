@@ -55,13 +55,18 @@
 - 使用するモデル・Custom Nodeを導入し、Workflowを実行できる状態のComfyUI Portable。
 - `comfy-mcp.exe`。設定時に保存場所を指定します。
 - ChromeまたはEdgeと、ログイン済みのChatGPT。
-- Connector本体と、付属の`browser-extension`フォルダー。
+- Connector本体と、コレクタ（ブラウザー拡張機能）の配布ZIP。
 
-Connectorの配布ZIPには、アプリの実行に必要な.NETランタイムと拡張機能が含まれます。ComfyUI本体、モデル、Custom Node、comfy-mcpは別途用意してください。
+本体とコレクタは、それぞれ[GitHub Releases](https://github.com/Lye-0/chatgpt-comfy-connector/releases)から取得します。本体ZIPには、アプリの実行に必要な.NETランタイムが含まれます。ComfyUI本体、モデル、Custom Node、comfy-mcpは別途用意してください。
+
+| ダウンロードするもの | リリースのタグ | Assetsから選ぶファイル |
+|---|---|---|
+| Connector本体 | `desktop-v`で始まるタグ | `ChatGPT-Comfy-Connector-v…-win-x64.zip` |
+| コレクタ | `collector-v`で始まるタグ | `ChatGPT-Comfy-Collector-v….zip` |
 
 ### アプリを起動する
 
-1. [リリース一覧](https://github.com/Lye-0/chatgpt-comfy-connector/releases)から、使用する版の`win-x64.zip`を取得します。
+1. [リリース一覧](https://github.com/Lye-0/chatgpt-comfy-connector/releases)で`desktop-v`から始まるリリースを開き、Assetsの`ChatGPT-Comfy-Connector-v…-win-x64.zip`を取得します。
 2. ZIPを、書き込み可能なフォルダーへ**すべて展開**します。
 3. 展開先の`ChatGPTComfyConnector.Desktop.exe`を起動します。
 
@@ -91,14 +96,17 @@ Connectorの配布ZIPには、アプリの実行に必要な.NETランタイム�
 
 </details>
 
-### ブラウザー拡張機能を接続する
+### コレクタを導入・接続する
 
-1. Connectorを起動したままにします。
-2. ブラウザーのアドレス欄に、Chromeなら`chrome://extensions`、Edgeなら`edge://extensions`を入力します。
-3. **デベロッパーモード／開発者モード**を有効にします。
-4. **パッケージ化されていない拡張機能を読み込む**から、展開先の`browser-extension`フォルダーを選びます。
-5. 拡張機能のポップアップを開き、Connector上部に表示された **PAIRING CODE** を入力して **PAIR DESKTOP** を押します。
-6. 拡張機能の表示と、Connector上部の **Extension** が **CONNECTED** になることを確認します。
+1. [リリース一覧](https://github.com/Lye-0/chatgpt-comfy-connector/releases)で`collector-v`から始まるリリースを開き、Assetsの`ChatGPT-Comfy-Collector-v….zip`を取得します。
+2. ZIPの中身を、継続して使うフォルダー（例：`C:\AI\ChatGPT-Comfy-Collector`）へ**すべて展開**します。
+3. Connectorを起動したまま、Edgeなら`edge://extensions`、Chromeなら`chrome://extensions`を開きます。
+4. **開発者モード／デベロッパーモード**をオンにします。
+5. Edgeの **展開して読み込み**、またはChromeの **パッケージ化されていない拡張機能を読み込む** を押し、展開先の **`manifest.json`が入っているフォルダー** を選びます。
+6. **ChatGPT Comfy Collector** のポップアップを開き、Connector上部の **PAIRING CODE**、または **SETUP → 拡張機能の接続** に表示されたコードを入力して **PAIR DESKTOP** を押します。
+7. コレクタの表示と、Connector上部の **Extension** が **CONNECTED** になることを確認します。
+
+**利用中は開発者モードをオンにし、読み込んだフォルダーをその場所に保持してください。** 更新時も同じフォルダーを使います。詳しい導入・更新手順は[コレクタのREADME](browser-extension/README.md)を参照してください。
 
 初回のペアリング後は接続情報が保存されます。次回起動時に接続が戻らない場合は、拡張機能のポップアップにある **CONNECT** を押してください。**PING** は通信確認に使えます。
 
@@ -110,6 +118,27 @@ Connectorの配布ZIPには、アプリの実行に必要な.NETランタイム�
 |---|---|
 | Connector本体の上部 | comfy-mcpとの接続 |
 | 拡張機能のポップアップ | ブラウザー拡張機能とConnectorの接続 |
+
+<details>
+<summary>コレクタの更新・再インストール後に接続し直す</summary>
+
+通常の更新では、制作を停止して新しいZIPの中身を**同じフォルダーへ上書き**し、拡張機能管理画面で **再読み込み** を押します。保存済みのペアリング情報を使って接続します。
+
+再インストールやフォルダー変更などで接続情報を引き継げなかった場合は、次の手順で接続し直します。
+
+1. 使用しない古い拡張機能を無効にし、接続したい拡張機能を有効にします。
+2. Connectorの **SETUP** を開き、下へスクロールして **拡張機能を再ペアリング** を押します。
+3. 同じ画面に表示された **ペアリングコード** を **コピー** します。
+4. 接続したい拡張機能のポップアップへコードを貼り付け、**PAIR DESKTOP** を押します。
+5. Connectorと拡張機能が **CONNECTED** になったことを確認します。
+
+コードの有効期限は発行から10分です。期限が切れた場合も、同じボタンで新しいコードを発行できます。
+
+**再ペアリングはボタンを押すとすぐに反映されます。** 古い接続情報は無効になり、「設定を保存」や右上の×では取り消せません。制作履歴、Workflow、生成ファイル、接続先の設定は保持されます。
+
+制作や送受信の処理中はボタンを押せません。制作を止める場合は、SETUPを閉じて **CANCEL** で停止してください。Project / Chatの取得中は、取得処理が終わるまで待ちます。
+
+</details>
 
 <details>
 <summary>ChatGPTの専用ウィンドウが開いたとき</summary>
@@ -473,15 +502,64 @@ dotnet run --project src/ChatGPTComfyConnector.Desktop/ChatGPTComfyConnector.Des
 </details>
 
 <details>
-<summary>配布用ZIPを作る</summary>
+<summary>本体とコレクタの配布ZIPを作る</summary>
+
+PowerShell 7で、必要なコンポーネントのコマンドを実行します。本体の作成には.NET 10 SDKを使用します。
 
 ```powershell
 .\scripts\publish-win-x64.ps1 -Version '0.2.0-alpha'
+.\scripts\publish-collector.ps1 -Version '0.2.0'
 ```
 
-`artifacts`にWindows x64向けの実行フォルダーとZIPを作成します。`-Version`はZIP名に使われ、アプリのバージョンはプロジェクト設定に従います。出力先は再実行時に作り直されるため、実運用する場合は別のフォルダーへ展開してください。
+| 作成対象 | 出力先 |
+|---|---|
+| 本体 | `artifacts/desktop/ChatGPT-Comfy-Connector-v…-win-x64.zip` |
+| コレクタ | `artifacts/collector/ChatGPT-Comfy-Collector-v….zip` |
 
-このスクリプトはGitHubへ公開しません。GitHub Releaseの作成は、`v*`タグを対象とする[Releaseワークフロー](.github/workflows/release.yml)で行います。
+それぞれZIP、`.zip.sha256`、公開文の`.release-notes.md`を作成します。`-OutputDirectory`で出力先を変更できます。同じバージョンの成果物は再作成時に更新されます。
+
+`-Version`は配布物のバージョンにも反映します。本体は.NETのバージョン、コレクタはZIP内の`manifest.json`の`version`と`version_name`に設定します。例えば`0.2.0-alpha`は、manifestでは`version: 0.2.0`、`version_name: 0.2.0-alpha`になります。ソースファイルは書き換えません。
+
+ローカルでの確認コマンド：
+
+```powershell
+.\tests\distribution\release-scripts.tests.ps1
+node --test tests/browser-extension/background.test.mjs tests/browser-extension/content-script.test.mjs tests/browser-extension/chatgpt-context.test.mjs
+```
+
+コレクタのテストにはNode.js 24を使用します。ZIP作成スクリプトはローカルの成果物を作成します。
+
+</details>
+
+<details>
+<summary>GitHub Releasesへ公開する</summary>
+
+公開する変更をコミット・pushした後、対象コンポーネントのタグを作成してpushします。本体とコレクタのバージョンは個別に進められます。
+
+| 対象 | タグの例 | 起動するワークフロー |
+|---|---|---|
+| 本体 | `desktop-v0.2.0-alpha` | [Release Desktop](.github/workflows/release-desktop.yml) |
+| コレクタ | `collector-v0.2.0` | [Release Collector](.github/workflows/release-collector.yml) |
+
+本体の公開例：
+
+```powershell
+git tag desktop-v0.2.0-alpha
+git push origin desktop-v0.2.0-alpha
+```
+
+コレクタの公開例：
+
+```powershell
+git tag collector-v0.2.0
+git push origin collector-v0.2.0
+```
+
+タグは`desktop-v`または`collector-v`にSemVerを続けます。`-alpha`、`-beta`、`-rc.1`などのプレリリース識別子がある場合は、GitHubでもPre-releaseになります。
+
+各ワークフローは対象のテストを実行し、ZIPとSHA-256を作成します。新しいリリースは下書きで作成し、両ファイルの添付が完了してから公開します。コレクタの公開では、リポジトリのLatest表示を変更しません。
+
+同じタグのワークフローを再実行すると、そのリリースの配布ファイルを更新します。公開にはGitHub Actionsの`GITHUB_TOKEN`を使い、ワークフローの`contents: write`権限で処理します。
 
 </details>
 
@@ -491,6 +569,7 @@ dotnet run --project src/ChatGPTComfyConnector.Desktop/ChatGPTComfyConnector.Des
 - [アーキテクチャ](docs/architecture.md)：制作状態、保存、実行手順、操作案内の設計。
 - [Connector Protocol v1](docs/connector-protocol-v1.md)：HandoffとResponseの形式。
 - [Browser Extension Bridge](docs/browser-extension-bridge.md)：拡張機能の接続・通信仕様。
+- [リリース設計](docs/releases.md)：タグ、配布物のバージョン、パッケージ作成・公開の流れ。
 - [拡張機能README](browser-extension/README.md)：ブラウザー側の構成。
 
 </details>

@@ -252,6 +252,73 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         }
     }
 
+    public async Task ResetPairingAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        await _lifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            ThrowIfDisposed();
+            if (_listener?.IsListening != true)
+                throw new InvalidOperationException("拡張機能の接続サービスが起動していません。Connectorを再起動してください。");
+
+            await _pairingGate.WaitAsync(cancellationToken);
+            try
+            {
+                var nextCode = CreatePairingCode();
+                // Commit persistence first. A failed delete must leave the
+                // current pairing, credential, and live connection usable.
+                if (_pairingStore is not null)
+                    await _pairingStore.ClearBrowserExtensionPairingAsync(cancellationToken);
+
+                WebSocket? previous;
+                lock (_clientGate)
+                {
+                    _pairingId = null;
+                    _pairingCredentialHash = null;
+                    _accessToken = null;
+                    _accessTokenExpiresAt = null;
+                    _pairingCode = nextCode;
+                    _pairingCodeExpiresAt = DateTimeOffset.UtcNow.Add(PairingCodeLifetime);
+                    _pairingAttempts = 0;
+                    previous = _clientSocket;
+                    _clientSocket = null;
+                    _clientGeneration++;
+                }
+
+                // Revocation must not wait for the old extension to cooperate
+                // with a close handshake or retain its reconnect grace period.
+                try { previous?.Abort(); }
+                catch (ObjectDisposedException) { }
+                previous?.Dispose();
+                const string message = "拡張機能のペアリングを解除しました。新しいコードで接続してください。";
+                FailPendingHandoffs(BrowserExtensionHandoffErrorCodes.BridgeDisconnected, message);
+                FailPendingMediaAttachments(BrowserExtensionReviewMediaErrorCodes.BridgeDisconnected, message);
+                FailPendingChatGptContextRequests(message);
+                _registeredMedia.Clear();
+                PublishStatus(CreateStatus(
+                    isRunning: true,
+                    BrowserExtensionConnectionState.Disconnected,
+                    _port,
+                    clientOrigin: null,
+                    connectedAt: null,
+                    lastError: null,
+                    pairingState: BrowserExtensionPairingState.Required,
+                    pairingCode: _pairingCode,
+                    pairingCodeExpiresAt: _pairingCodeExpiresAt));
+                PublishDiagnostic("pairing reset", status: Status.PairingStateText);
+            }
+            finally
+            {
+                _pairingGate.Release();
+            }
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
     public async Task<bool> SendEventAsync(
         BrowserExtensionBridgeEvent bridgeEvent,
         CancellationToken cancellationToken = default)
@@ -1064,24 +1131,34 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             return;
         }
 
-        if (!IsPairingCredentialValid(GetBearerToken(context.Request)))
+        // Serialize credential validation and token issuance with re-pairing:
+        // an old credential must never obtain a token from the new pairing.
+        await _pairingGate.WaitAsync(cancellationToken);
+        try
         {
-            context.Response.Headers["WWW-Authenticate"] = "Bearer";
-            await WriteJsonAsync(context.Response, 401, new { ok = false, error = "invalid_pairing_credential" }, origin, cancellationToken);
-            return;
-        }
+            if (!IsPairingCredentialValid(GetBearerToken(context.Request)))
+            {
+                context.Response.Headers["WWW-Authenticate"] = "Bearer";
+                await WriteJsonAsync(context.Response, 401, new { ok = false, error = "invalid_pairing_credential" }, origin, cancellationToken);
+                return;
+            }
 
-        EnsureSessionToken();
-        await WriteJsonAsync(context.Response, 200, new
+            EnsureSessionToken();
+            await WriteJsonAsync(context.Response, 200, new
+            {
+                ok = true,
+                pairing_id = _pairingId,
+                protocol = BrowserExtensionBridgeProtocol.ProtocolVersion,
+                bridge_version = BrowserExtensionBridgeProtocol.BridgeVersion,
+                session_token = _accessToken,
+                session_expires_at = _accessTokenExpiresAt,
+                websocket_path = BrowserExtensionBridgeProtocol.WebSocketPath,
+            }, origin, cancellationToken);
+        }
+        finally
         {
-            ok = true,
-            pairing_id = _pairingId,
-            protocol = BrowserExtensionBridgeProtocol.ProtocolVersion,
-            bridge_version = BrowserExtensionBridgeProtocol.BridgeVersion,
-            session_token = _accessToken,
-            session_expires_at = _accessTokenExpiresAt,
-            websocket_path = BrowserExtensionBridgeProtocol.WebSocketPath,
-        }, origin, cancellationToken);
+            _pairingGate.Release();
+        }
     }
 
     private async Task HandleHttpPingAsync(HttpListenerContext context, CancellationToken cancellationToken)
@@ -1251,39 +1328,50 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         var socket = websocketContext.WebSocket;
         try
         {
-            PublishStatus(CreateStatus(
-                isRunning: true,
-                BrowserExtensionConnectionState.Connecting,
-                _port,
-                clientOrigin: origin,
-                connectedAt: null,
-                lastError: null,
-                pairingState: GetPairingState(),
-                pairingCode: _pairingCode,
-                pairingCodeExpiresAt: _pairingCodeExpiresAt));
+            long handshakeGeneration;
+            lock (_clientGate)
+            {
+                handshakeGeneration = _clientGeneration;
+                if (_clientSocket is null && !Status.IsPairingRequired)
+                    PublishStatus(CreateStatus(
+                        isRunning: true,
+                        BrowserExtensionConnectionState.Connecting,
+                        _port,
+                        clientOrigin: origin,
+                        connectedAt: null,
+                        lastError: null,
+                        pairingState: GetPairingState(),
+                        pairingCode: _pairingCode,
+                        pairingCodeExpiresAt: _pairingCodeExpiresAt));
+            }
 
             using var helloCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             helloCts.CancelAfter(HelloTimeout);
             var helloText = await ReceiveTextMessageAsync(socket, helloCts.Token);
             if (!TryParseHello(helloText, out var suppliedToken, out var helloError)
-                || !IsAccessTokenValid(suppliedToken))
+                || !await TryReplaceClientAsync(socket, origin!, suppliedToken, cancellationToken))
             {
                 await SendErrorAndCloseAsync(socket, helloError ?? "invalid_session_token");
+                // A delayed hello from the revoked extension must not replace
+                // the new pairing/code or a newer client's connected status.
+                lock (_clientGate)
+                {
+                    if (_clientSocket is null && _clientGeneration == handshakeGeneration && !Status.IsPairingRequired)
+                        PublishStatus(CreateStatus(
+                            isRunning: true,
+                            BrowserExtensionConnectionState.Error,
+                            _port,
+                            clientOrigin: null,
+                            connectedAt: null,
+                            lastError: helloError ?? "invalid_session_token",
+                            pairingState: GetPairingState(),
+                            pairingCode: _pairingCode,
+                            pairingCodeExpiresAt: _pairingCodeExpiresAt));
+                }
                 PublishDiagnostic("hello rejected", status: "ERROR", errorCode: helloError ?? "invalid_session_token");
-                PublishStatus(CreateStatus(
-                    isRunning: true,
-                    BrowserExtensionConnectionState.Error,
-                    _port,
-                    clientOrigin: null,
-                    connectedAt: null,
-                    lastError: helloError ?? "invalid_session_token",
-                    pairingState: GetPairingState(),
-                    pairingCode: _pairingCode,
-                    pairingCodeExpiresAt: _pairingCodeExpiresAt));
                 return true;
             }
 
-            await ReplaceClientAsync(socket, origin!, cancellationToken);
             await SendJsonAsync(socket, new
             {
                 type = "hello.ack",
@@ -1337,14 +1425,27 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         }
     }
 
-    private async Task ReplaceClientAsync(WebSocket socket, string origin, CancellationToken cancellationToken)
+    private async Task<bool> TryReplaceClientAsync(WebSocket socket, string origin, string? suppliedToken, CancellationToken cancellationToken)
     {
         WebSocket? previous;
         lock (_clientGate)
         {
+            // Validate and admit under the same lock used for revocation, so
+            // a hello already in flight cannot reinstall a revoked client.
+            if (!IsAccessTokenValid(suppliedToken)) return false;
             previous = _clientSocket;
             _clientSocket = socket;
             _clientGeneration++;
+            PublishStatus(CreateStatus(
+                isRunning: true,
+                BrowserExtensionConnectionState.Connected,
+                _port,
+                clientOrigin: origin,
+                connectedAt: DateTimeOffset.UtcNow,
+                lastError: null,
+                pairingState: GetPairingState(),
+                pairingCode: _pairingCode,
+                pairingCodeExpiresAt: _pairingCodeExpiresAt));
         }
 
         if (previous is not null && !ReferenceEquals(previous, socket))
@@ -1355,17 +1456,8 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
             await CloseSocketAsync(previous, WebSocketCloseStatus.PolicyViolation, "replaced by a newer extension connection", cancellationToken);
         }
 
-        PublishStatus(CreateStatus(
-            isRunning: true,
-            BrowserExtensionConnectionState.Connected,
-            _port,
-            clientOrigin: origin,
-            connectedAt: DateTimeOffset.UtcNow,
-            lastError: null,
-            pairingState: GetPairingState(),
-            pairingCode: _pairingCode,
-            pairingCodeExpiresAt: _pairingCodeExpiresAt));
         PublishDiagnostic("bridge connected", status: Status.ConnectionStateText);
+        return true;
     }
 
     private async Task ReceiveClientMessagesAsync(WebSocket socket, CancellationToken cancellationToken)
@@ -1373,7 +1465,7 @@ public sealed class BrowserExtensionBridge : IBrowserExtensionBridge
         while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
         {
             var text = await ReceiveTextMessageAsync(socket, cancellationToken);
-            if (text is null) return;
+            if (text is null || !IsCurrentClient(socket)) return;
 
             try
             {

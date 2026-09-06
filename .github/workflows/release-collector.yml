@@ -1,0 +1,73 @@
+name: Release Collector
+
+on:
+  push:
+    tags:
+      - 'collector-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Collector ${{ github.ref_name }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Validate Collector tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          . ./scripts/release-common.ps1
+          $release = Get-ComponentRelease -Component collector -Tag $env:RELEASE_TAG
+          "version=$($release.Version)" >> $env:GITHUB_OUTPUT
+
+      - name: Verify packaging and release scripts
+        run: ./tests/distribution/release-scripts.tests.ps1
+
+      - name: Check JavaScript syntax
+        run: |
+          Get-ChildItem browser-extension -Filter '*.js' | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $($_.Name)" }
+          }
+
+      - name: Test Collector
+        run: node --test tests/browser-extension/background.test.mjs tests/browser-extension/content-script.test.mjs tests/browser-extension/chatgpt-context.test.mjs
+
+      - name: Package Collector
+        id: package
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $package = ./scripts/publish-collector.ps1 -Version $env:RELEASE_VERSION
+          "zip_path=$($package.ZipPath)" >> $env:GITHUB_OUTPUT
+          "checksum_path=$($package.ChecksumPath)" >> $env:GITHUB_OUTPUT
+          "notes_path=$($package.NotesPath)" >> $env:GITHUB_OUTPUT
+
+      - name: Publish Collector release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ZIP_PATH: ${{ steps.package.outputs.zip_path }}
+          CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
+          NOTES_PATH: ${{ steps.package.outputs.notes_path }}
+        run: |
+          ./scripts/publish-github-release.ps1 -Component collector -Tag $env:RELEASE_TAG -Repository $env:GITHUB_REPOSITORY -ZipPath $env:ZIP_PATH -ChecksumPath $env:CHECKSUM_PATH -NotesPath $env:NOTES_PATH

@@ -1,7 +1,54 @@
-# ChatGPT Comfy Connector Browser Extension
+# ChatGPT Comfy Collector
 
-This is the Chromium Manifest V3 Extension for v0.2 Phase 1–5.2. Load this folder
-as an unpacked extension in Chrome or Edge. On first use, enter the one-time
+**ChatGPTと、Windows版ChatGPT Comfy Connectorを接続するブラウザー拡張機能です。** Project / Chatの一覧取得、制作指示の送信、回答の受信、生成結果の添付を担当します。
+
+## 用意するもの
+
+- Windows版ChatGPT Comfy Connector本体。
+- EdgeまたはChrome（Chromium 116以降）と、ログイン済みのChatGPT。
+- [GitHub Releases](https://github.com/Lye-0/chatgpt-comfy-connector/releases)の`collector-v`から始まるリリースにある、`ChatGPT-Comfy-Collector-v….zip`。
+
+本体は`desktop-v`から始まるリリースで配布します。[本体の操作手順](https://github.com/Lye-0/chatgpt-comfy-connector/blob/main/README.md)に従って制作環境を準備してください。
+
+## 導入する
+
+1. ZIPの中身を、継続して使うフォルダー（例：`C:\AI\ChatGPT-Comfy-Collector`）へすべて展開します。
+2. Edgeで`edge://extensions`を開き、**開発者モード**をオンにします。
+3. **展開して読み込み**を押し、`manifest.json`が入っているフォルダーを選びます。
+4. Connector本体を起動します。
+5. **ChatGPT Comfy Collector** のポップアップを開き、本体上部または **SETUP → 拡張機能の接続** に表示されたコードを入力して **PAIR DESKTOP** を押します。
+6. ポップアップと、本体上部のExtensionが **CONNECTED** になったことを確認します。
+
+Chromeでは`chrome://extensions`を開き、**デベロッパーモード → パッケージ化されていない拡張機能を読み込む**から同じフォルダーを選びます。
+
+**利用中は開発者モードをオンにし、読み込んだフォルダーをその場所に保持してください。** 本体の起動後、接続が戻らない場合はポップアップの **CONNECT**、通信確認には **PING** を使います。
+
+## 更新する
+
+1. 本体で制作を停止します。
+2. 新しいコレクタのZIPをダウンロードし、その中身を**現在読み込んでいるフォルダーへ上書き**します。
+3. 拡張機能管理画面で **ChatGPT Comfy Collector → 再読み込み** を押します。
+4. 本体との接続を確認します。
+
+同じフォルダーを使うことで、拡張機能の識別と保存済みペアリング情報を維持できます。フォルダーを変更した場合や再インストールで接続情報を失った場合は、本体の **SETUP → 拡張機能を再ペアリング** で新しいコードを発行し、再度 **PAIR DESKTOP** を押してください。コードの有効期限は10分です。
+
+## 開発・配布
+
+ソースから試す場合は、このリポジトリの`browser-extension`フォルダーを直接読み込みます。
+
+PowerShell 7で、リポジトリのルートから実行します。
+
+```powershell
+node --test tests/browser-extension/background.test.mjs tests/browser-extension/content-script.test.mjs tests/browser-extension/chatgpt-context.test.mjs
+.\scripts\publish-collector.ps1 -Version '0.2.0'
+```
+
+`artifacts/collector`に、単体ZIP・SHA-256・リリース公開文を作成します。テストにはNode.js 24を使用します。`collector-v0.2.0`のようなタグをpushすると、Collectorワークフローがテスト・パッケージ作成・GitHub Releaseの公開を行います。
+
+<details>
+<summary>開発者向け：接続とタブの管理</summary>
+
+The extension uses Chromium Manifest V3. On first use, enter the one-time
 Pairing code shown by the Desktop and choose `PAIR DESKTOP`; later starts use
 the saved pairing credential to bootstrap a fresh Desktop session token. The
 Background service worker owns all local Bridge access and one connector-owned
@@ -22,7 +69,7 @@ verifies the attachment. The Extension receives no local path. Textarea and
 contenteditable composers use separate editor-aware input paths, and a
 composer-only clear is never treated as a successful send.
 
-See [`docs/browser-extension-bridge.md`](../docs/browser-extension-bridge.md)
+See [Browser Extension Bridge](https://github.com/Lye-0/chatgpt-comfy-connector/blob/main/docs/browser-extension-bridge.md)
 for the protocol, security boundary, and loading steps.
 
 ## Managed Execution Window and ChatGPT Tab
@@ -73,3 +120,5 @@ After the Root Project catalog is resolved, Project-page collection uses only
 the current Project's Chat containers and its own bounded scroll-completion
 state. It does not require the Root Project sidebar to remain complete; a
 failed Project Chat scan is reported as `context_project_chats_incomplete`.
+
+</details>

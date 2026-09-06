@@ -1,0 +1,71 @@
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Desktop ${{ github.ref_name }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Validate Desktop tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          . ./scripts/release-common.ps1
+          $release = Get-ComponentRelease -Component desktop -Tag $env:RELEASE_TAG
+          "version=$($release.Version)" >> $env:GITHUB_OUTPUT
+
+      - name: Verify packaging and release scripts
+        run: ./tests/distribution/release-scripts.tests.ps1
+
+      - name: Restore
+        run: dotnet restore ChatGPTComfyConnector.slnx --runtime win-x64
+
+      - name: Build
+        run: dotnet build ChatGPTComfyConnector.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test ChatGPTComfyConnector.slnx --configuration Release --no-build --no-restore --verbosity normal
+
+      - name: Package Desktop
+        id: package
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $package = ./scripts/publish-win-x64.ps1 -Version $env:RELEASE_VERSION -SourceRevisionId $env:GITHUB_SHA -NoRestore
+          "zip_path=$($package.ZipPath)" >> $env:GITHUB_OUTPUT
+          "checksum_path=$($package.ChecksumPath)" >> $env:GITHUB_OUTPUT
+          "notes_path=$($package.NotesPath)" >> $env:GITHUB_OUTPUT
+
+      - name: Publish Desktop release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ZIP_PATH: ${{ steps.package.outputs.zip_path }}
+          CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
+          NOTES_PATH: ${{ steps.package.outputs.notes_path }}
+        run: |
+          ./scripts/publish-github-release.ps1 -Component desktop -Tag $env:RELEASE_TAG -Repository $env:GITHUB_REPOSITORY -ZipPath $env:ZIP_PATH -ChecksumPath $env:CHECKSUM_PATH -NotesPath $env:NOTES_PATH

@@ -44,7 +44,7 @@ public sealed class Phase4BoundaryTests
     {
         var xaml = ReadRepoFile("src", "ChatGPTComfyConnector.Desktop", "MainWindow.xaml");
         var viewModel = ReadRepoFile("src", "ChatGPTComfyConnector.Desktop", "ViewModels", "MainViewModel.cs");
-        var releaseWorkflow = ReadRepoFile(".github", "workflows", "release.yml");
+        var releaseWorkflow = ReadRepoFile(".github", "workflows", "release-desktop.yml");
 
         var connector = xaml.IndexOf("AutomationProperties.Name=\"Connector\"", StringComparison.Ordinal);
         var mcp = xaml.IndexOf("AutomationProperties.Name=\"MCP\"", StringComparison.Ordinal);
@@ -61,7 +61,7 @@ public sealed class Phase4BoundaryTests
         Assert.Contains("読み込んで確認", xaml, StringComparison.Ordinal);
         Assert.Contains("適用して生成", xaml, StringComparison.Ordinal);
         Assert.Contains("HandoffTransportState.Completed", viewModel, StringComparison.Ordinal);
-        Assert.Contains("SourceRevisionId=$env:GITHUB_SHA", releaseWorkflow, StringComparison.Ordinal);
+        Assert.Contains("-SourceRevisionId $env:GITHUB_SHA", releaseWorkflow, StringComparison.Ordinal);
     }
 
     [Fact]

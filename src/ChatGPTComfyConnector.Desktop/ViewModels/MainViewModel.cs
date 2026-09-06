@@ -124,8 +124,8 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         Settings = new AppSettings
         {
             PortableRoot = Directory.Exists("C:\\AI\\ComfyUI_windows_portable") ? "C:\\AI\\ComfyUI_windows_portable" : string.Empty,
-            ComfyMcpPath = File.Exists("C:\\AI\\comfy-mcp-runtime\\.venv\\Scripts\\comfy-mcp.exe") ? "C:\\AI\\comfy-mcp-runtime\\.venv\\Scripts\\comfy-mcp.exe" : string.Empty,
-            ComfyCliPath = File.Exists("C:\\AI\\comfy-mcp-runtime\\.venv\\Scripts\\comfy.exe") ? "C:\\AI\\comfy-mcp-runtime\\.venv\\Scripts\\comfy.exe" : null,
+            ComfyMcpPath = File.Exists("C:\\AI\\MCP\\comfy-mcp-runtime\\.venv\\Scripts\\comfy-mcp.exe") ? "C:\\AI\\MCP\\comfy-mcp-runtime\\.venv\\Scripts\\comfy-mcp.exe" : string.Empty,
+            ComfyCliPath = File.Exists("C:\\AI\\MCP\\comfy-mcp-runtime\\.venv\\Scripts\\comfy.exe") ? "C:\\AI\\MCP\\comfy-mcp-runtime\\.venv\\Scripts\\comfy.exe" : null,
         };
         Sessions = [];
         TreeNodes = [];
@@ -174,10 +174,11 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
             _settingsBeforeSetup = value ? Settings.Clone() : null;
             _isSetupVisible = value;
             OnPropertyChanged();
+            NotifyBrowserExtensionPairingControls();
             RefreshGuidance();
         }
     }
-    public bool CanEditSetup => !_isSavingSetup;
+    public bool CanEditSetup => !_isSavingSetup && !_isResettingBrowserExtensionPairing;
     public bool IsWorkflowEditorVisible { get => _isWorkflowEditorVisible; private set { _isWorkflowEditorVisible = value; OnPropertyChanged(); RefreshGuidance(); } }
     public bool IsBusy { get => _isBusy; private set { _isBusy = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanRefreshChatGptContext)); NotifyGenerationDisplayChanged(); NotifyConnectionStateChanged(); NotifyPipelineStateChanged(); } }
     public bool IsSlotLoading { get => _isSlotLoading; private set { _isSlotLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(WorkflowSlotSummaryText)); NotifyViewStateChanged(); NotifyPipelineStateChanged(); } }
@@ -827,9 +828,10 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
 
     public async Task SaveSetupAsync()
     {
-        if (_isSavingSetup) return;
+        if (!CanEditSetup) return;
         _isSavingSetup = true;
         OnPropertyChanged(nameof(CanEditSetup));
+        NotifyBrowserExtensionPairingControls();
         try
         {
             ValidateSettings();
@@ -844,6 +846,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         {
             _isSavingSetup = false;
             OnPropertyChanged(nameof(CanEditSetup));
+            NotifyBrowserExtensionPairingControls();
         }
     }
 
@@ -851,7 +854,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
 
     public void CloseSetupWithoutSaving()
     {
-        if (!IsSetupVisible || _isSavingSetup) return;
+        if (!IsSetupVisible || !CanEditSetup) return;
         if (_settingsBeforeSetup is { } original)
         {
             Settings.PortableRoot = original.PortableRoot;
@@ -1838,6 +1841,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
             pending.LastBrowserExtensionRequestId = request.RequestId;
             sendRequestId = request.RequestId;
             lock (_browserExtensionResponseGate) _browserExtensionSendRequests.Add(request.RequestId);
+            NotifyBrowserExtensionPairingControls();
 
             // Persist the transport attempt before crossing the process
             // boundary. A restart during the send therefore retains the same
@@ -1905,6 +1909,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
             {
                 RemoveQueuedBrowserExtensionResponse(sendRequestId);
                 lock (_browserExtensionResponseGate) _browserExtensionSendRequests.Remove(sendRequestId);
+                NotifyBrowserExtensionPairingControls();
             }
             _bootstrapHandoffGate.Release();
         }
@@ -2299,6 +2304,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
             $"review handoff ready request_id={request.RequestId} session_id={request.SessionId} handoff_id={request.HandoffId} boundary_id={request.BoundaryId} target_tab_id={request.TargetTabId?.ToString() ?? "none"} stage=review_handoff_ready");
         pending.LastBrowserExtensionRequestId = request.RequestId;
         lock (_browserExtensionResponseGate) _browserExtensionSendRequests.Add(request.RequestId);
+        NotifyBrowserExtensionPairingControls();
         try
         {
             CreationPipelineStateMachine.ReviewHandoffSending(session, request.RequestId);
@@ -2350,6 +2356,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         finally
         {
             lock (_browserExtensionResponseGate) _browserExtensionSendRequests.Remove(request.RequestId);
+            NotifyBrowserExtensionPairingControls();
         }
     }
 
@@ -2723,6 +2730,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
 
         _isResumeInProgress = true;
         OnPropertyChanged(nameof(CanResumeSession));
+        NotifyBrowserExtensionPairingControls();
         try
         {
             var session = CurrentSession;
@@ -2793,6 +2801,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
             _isResumeInProgress = false;
             _resumeGate.Release();
             OnPropertyChanged(nameof(CanResumeSession));
+            NotifyBrowserExtensionPairingControls();
         }
     }
 
@@ -4439,6 +4448,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(BrowserExtensionPairingCode));
             OnPropertyChanged(nameof(IsBrowserExtensionConnected));
             OnPropertyChanged(nameof(IsBrowserExtensionBridgeRunning));
+            NotifyBrowserExtensionPairingControls();
             OnPropertyChanged(nameof(BrowserExtensionEndpoint));
             OnPropertyChanged(nameof(BrowserExtensionStatusDetail));
             OnPropertyChanged(nameof(ChatGptContextLoadState));
@@ -5293,6 +5303,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CanCancelOperation));
         OnPropertyChanged(nameof(HasDeferredGenerate));
         OnPropertyChanged(nameof(DeferredGenerateText));
+        NotifyBrowserExtensionPairingControls();
         RefreshGuidance();
     }
 

@@ -36,6 +36,13 @@ public sealed class PortableStore : IPortableStore, IBrowserExtensionPairingStor
         CancellationToken cancellationToken = default)
         => AtomicWriteAsync(_layout.BrowserExtensionPairingFile, pairing, cancellationToken);
 
+    public Task ClearBrowserExtensionPairingAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        File.Delete(_layout.BrowserExtensionPairingFile);
+        return Task.CompletedTask;
+    }
+
     public async Task<IReadOnlyList<CreationSession>> LoadSessionsAsync(CancellationToken cancellationToken = default)
     {
         var sessions = new List<CreationSession>();

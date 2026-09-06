@@ -352,6 +352,17 @@ their source of truth.
 
 ## Process lifecycle
 
+SETUP accepts either the MCP executable path or its runtime directory. Explicit save
+and CONNECT resolve a directory to `.venv/Scripts/comfy-mcp.exe`, require that file
+and all other settings to be valid, then replace the input with the resolved path.
+Directory selection also derives `ComfyCliPath` from the same Scripts directory.
+An invalid candidate keeps the original input and stored settings intact and reaches
+the existing warning dialog. `ValidateSettings` itself only checks and returns the
+candidate: guidance calls it on property changes, so normalization belongs exclusively
+to `ValidateAndNormalizeSettings` at the save/CONNECT boundary. SETUP's Workflow,
+Output and Video paths derive from the current `Settings.PortableRoot`; both their
+display bindings and Open targets follow edits to that value.
+
 `ComfyMcpClient` starts the configured `comfy-mcp.exe` using `StdioClientTransport` with a minimal environment plus `COMFY_BIN`, `COMFY_PROJECT`, and `COMFYUI_URL`. The current runtime's initialize-capable MCP revision (`2025-06-18`) is requested explicitly. Standard error is captured into the Portable log; if the transport closes unexpectedly, the SDK's process ID, exit code, and stderr tail are recorded as one diagnostic entry. Connector shutdown disposes the MCP client and child process; it never stops ComfyUI.
 
 The app does not call ComfyUI management tools such as model download, node installation, update, or version switching.

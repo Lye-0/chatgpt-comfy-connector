@@ -32,6 +32,14 @@
 - files: `README.md`, `docs/architecture.md`, `src/ChatGPTComfyConnector.Core/Models/AppModels.cs` …
 - memory: `agent-knowledge/entries/2026-08-23-portable-mcp-lifecycle-5d8a41.md`
 
+### MCP接続時のCLIバナーエラーは実行ファイルの指定を先に確認する
+- id: `rm-20260906-mcp-cli-entrypoint`
+- type: `case`
+- maturity: `candidate`
+- tags: `comfy-mcp`, `setup`, `entrypoint`, `cp932`, `diagnostics`
+- files: `src/ChatGPTComfyConnector.Infrastructure/Mcp/ComfyMcpClient.cs`, `src/ChatGPTComfyConnector.Desktop/ViewModels/MainViewModel.cs`, `tests/ChatGPTComfyConnector.Tests/LiveMcpSmokeTests.cs`
+- memory: `agent-knowledge/entries/2026-09-06-mcp-cli-entrypoint-28ec49.md`
+
 ## component-releases
 
 ### 本体とコレクタのリリース所有範囲をタグとZIPで分離する
@@ -91,6 +99,16 @@
 - tags: `provider`, `project`, `chat`, `context-binding`, `compatibility`
 - files: `docs/architecture.md`, `src/ChatGPTComfyConnector.Core/Services/Contracts.cs`, `src/ChatGPTComfyConnector.Core/Models/AppModels.cs` …
 - memory: `agent-knowledge/entries/2026-08-23-provider-neutral-context-9b2d1f.md`
+
+## setup-validation
+
+### SETUPの検証は案内更新からも呼ばれるため入力を書き換えない
+- id: `rm-20260906-setup-validation-guidance`
+- type: `constraint`
+- maturity: `candidate`
+- tags: `setup`, `validation`, `guidance`, `normalization`, `property-changed`
+- files: `docs/architecture.md`, `src/ChatGPTComfyConnector.Desktop/ViewModels/MainViewModel.cs`, `src/ChatGPTComfyConnector.Desktop/ViewModels/MainViewModel.Guidance.cs` …
+- memory: `agent-knowledge/entries/2026-09-06-setup-validation-guidance-a289f7.md`
 
 ## workflow-safety
 

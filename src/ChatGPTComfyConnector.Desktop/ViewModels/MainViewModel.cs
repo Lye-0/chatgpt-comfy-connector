@@ -834,7 +834,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         NotifyBrowserExtensionPairingControls();
         try
         {
-            ValidateSettings();
+            ValidateAndNormalizeSettings();
             Settings.ComfyCliPath ??= Path.Combine(Path.GetDirectoryName(Settings.ComfyMcpPath)!, "comfy.exe");
             await _store.SaveSettingsAsync(Settings.Clone());
             IsSetupVisible = false;
@@ -898,7 +898,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
 
     public async Task ConnectAsync()
     {
-        ValidateSettings();
+        ValidateAndNormalizeSettings();
         IsBusy = true;
         _serverInfo = null;
         ConnectionState = ConnectionState.Connecting;
@@ -5481,13 +5481,30 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         RefreshGuidance();
     }
 
-    private void ValidateSettings()
+    private string ValidateSettings()
     {
         if (!Directory.Exists(Settings.PortableRoot)) throw new InvalidOperationException("ComfyUI Portable rootが存在しません。");
         if (!Directory.Exists(Path.Combine(Settings.PortableRoot, "ComfyUI"))) throw new InvalidOperationException("Portable root内にComfyUIがありません。");
-        if (!File.Exists(Settings.ComfyMcpPath)) throw new InvalidOperationException("comfy-mcp.exeが存在しません。");
+        var isRuntimeDirectory = Directory.Exists(Settings.ComfyMcpPath);
+        var comfyMcpPath = isRuntimeDirectory
+            ? Path.Combine(Settings.ComfyMcpPath, ".venv", "Scripts", "comfy-mcp.exe")
+            : Settings.ComfyMcpPath;
+        if (!File.Exists(comfyMcpPath)) throw new InvalidOperationException("comfy-mcp.exeが存在しません。");
         if (!Uri.TryCreate(Settings.Endpoint, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) throw new InvalidOperationException("Endpoint URLが不正です。");
         if (Settings.MaximumIterations is < 1 or > 1000) throw new InvalidOperationException("Maximum Iterationsは1〜1000で指定してください。");
+
+        return comfyMcpPath;
+    }
+
+    private void ValidateAndNormalizeSettings()
+    {
+        var comfyMcpPath = ValidateSettings();
+        if (Settings.ComfyMcpPath == comfyMcpPath) return;
+
+        // Guidance also validates while the user types; normalize only for
+        // an explicit save/connect, after every setting passes validation.
+        Settings.ComfyMcpPath = comfyMcpPath;
+        Settings.ComfyCliPath = Path.Combine(Path.GetDirectoryName(comfyMcpPath)!, "comfy.exe");
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

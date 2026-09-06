@@ -79,9 +79,11 @@
 | 項目 | 入力する内容 | 入力例 |
 |---|---|---|
 | ComfyUI Portableの場所 | `ComfyUI`フォルダーが入っているPortableの親フォルダー | `C:\AI\ComfyUI_windows_portable` |
-| comfy-mcpの実行ファイル | `comfy-mcp.exe`のフルパス | `C:\AI\comfy-mcp-runtime\.venv\Scripts\comfy-mcp.exe` |
+| comfy-mcpの実行ファイル | `comfy-mcp.exe`のフルパス、またはruntimeフォルダー | `C:\AI\comfy-mcp-runtime` |
 | 接続先Endpoint | ComfyUIの接続先URL | `http://127.0.0.1:8188` |
 | 最大反復回数 | 新しい制作に使う既定の上限。1〜1000で指定 | `10` |
+
+runtimeフォルダーを指定した場合は、保存・接続時にその下の `.venv\Scripts\comfy-mcp.exe` を補います。実行ファイルが存在しなければ警告を表示し、保存・接続を行いません。
 
 「主要パス」に表示されたWorkflow・Output・Videoの保存先を確認して、**設定を保存**を押します。変更を取り消す場合は、右上の **×** を押してください。保存せずに閉じ、設定画面を開く前の値へ戻ります。
 

@@ -40,6 +40,14 @@
 - files: `src/ChatGPTComfyConnector.Infrastructure/Mcp/ComfyMcpClient.cs`, `src/ChatGPTComfyConnector.Desktop/ViewModels/MainViewModel.cs`, `tests/ChatGPTComfyConnector.Tests/LiveMcpSmokeTests.cs`
 - memory: `agent-knowledge/entries/2026-09-06-mcp-cli-entrypoint-28ec49.md`
 
+### MCPとCLIは同じ選択runtimeから解決し古い保存値を引き継がない
+- id: `rm-20260907-mcp-runtime-cli-affinity`
+- type: `failure`
+- maturity: `candidate`
+- tags: `comfy-mcp`, `comfy-cli`, `migration`, `persisted-settings`, `COMFY_BIN`
+- files: `docs/architecture.md`, `src/ChatGPTComfyConnector.Core/Services/ComfyMcpRuntimePaths.cs`, `src/ChatGPTComfyConnector.Desktop/ViewModels/MainViewModel.cs` …
+- memory: `agent-knowledge/entries/2026-09-07-mcp-runtime-cli-affinity-6b193e.md`
+
 ## component-releases
 
 ### 本体とコレクタのリリース所有範囲をタグとZIPで分離する
@@ -105,7 +113,7 @@
 ### SETUPの検証は案内更新からも呼ばれるため入力を書き換えない
 - id: `rm-20260906-setup-validation-guidance`
 - type: `constraint`
-- maturity: `candidate`
+- maturity: `reused`
 - tags: `setup`, `validation`, `guidance`, `normalization`, `property-changed`
 - files: `docs/architecture.md`, `src/ChatGPTComfyConnector.Desktop/ViewModels/MainViewModel.cs`, `src/ChatGPTComfyConnector.Desktop/ViewModels/MainViewModel.Guidance.cs` …
 - memory: `agent-knowledge/entries/2026-09-06-setup-validation-guidance-a289f7.md`

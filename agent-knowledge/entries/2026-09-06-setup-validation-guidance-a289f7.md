@@ -3,10 +3,10 @@ id: rm-20260906-setup-validation-guidance
 topic: setup-validation
 type: constraint
 status: active
-maturity: candidate
+maturity: reused
 created: 2026-09-06
-last_verified: 2026-09-06
-source_commit: "0bf0ec0"
+last_verified: 2026-09-07
+source_commit: "d95fc27"
 related_files:
   - docs/architecture.md
   - src/ChatGPTComfyConnector.Desktop/ViewModels/MainViewModel.cs
@@ -43,6 +43,7 @@ Do not apply:
 - runtimeディレクトリ補完を検証関数内で行った試作では、保存前に `ComfyMcpPath` が実行ファイルへ変わることを一時WPFハーネスで確認。正規化を明示操作の関数へ分離した。
 - 一時WPFハーネスの25項目で、入力中のディレクトリ保持、保存時の補完と永続化、関連CLIの追従、欠落時の保存・CONNECT拒否、他項目が無効な場合の入力保持、キャンセル、実コンパイル済み主要パス表示とOpen対象の追従を検証した。
 - Releaseソリューションのビルドは警告・エラー0件、既存.NETテスト241件成功。実MCP・ComfyUIプロセスの起動は不要だった。
+- 2026-09-07のCLI移行修正でも検証と正規化の分離を維持し、一時WPFハーネス26項目で入力保持・拒否・保存とcompiled bindingを再確認した。直接実行ファイル入力でもCLIは同じruntimeへ更新する。候補を返す型は `ComfyMcpRuntimePaths` になったが、案内経路は読み取りのみである。
 
 ## Verification
 

@@ -85,6 +85,8 @@
 
 runtimeフォルダーを指定した場合は、保存・接続時にその下の `.venv\Scripts\comfy-mcp.exe` を補います。実行ファイルが存在しなければ警告を表示し、保存・接続を行いません。
 
+`comfy.exe` は、指定した `comfy-mcp.exe` と同じフォルダーから使用します。runtimeの移動後も保存・接続時に追従し、同じフォルダーに存在しない場合は警告を表示します。
+
 「主要パス」に表示されたWorkflow・Output・Videoの保存先を確認して、**設定を保存**を押します。変更を取り消す場合は、右上の **×** を押してください。保存せずに閉じ、設定画面を開く前の値へ戻ります。
 
 <a href="docs/images/manual/connection-settings.png"><img src="docs/images/manual/connection-settings.png" alt="初回設定・接続設定。Portable、comfy-mcp、Endpoint、最大反復回数と主要パス、設定を保存、右上の×" width="640"></a>

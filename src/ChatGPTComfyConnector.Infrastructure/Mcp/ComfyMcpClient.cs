@@ -25,29 +25,31 @@ public sealed class ComfyMcpClient : IComfyMcpClient
     {
         await DisconnectAsync(cancellationToken);
         State = ConnectionState.Connecting;
-        if (!File.Exists(settings.ComfyMcpPath)) throw new FileNotFoundException("comfy-mcp executableが見つかりません。", settings.ComfyMcpPath);
-
-        var comfyRoot = Path.Combine(settings.PortableRoot, "ComfyUI");
-        var env = StdioClientTransportOptions.GetDefaultEnvironmentVariables();
-        env["COMFY_BIN"] = settings.ComfyCliPath ?? Path.Combine(Path.GetDirectoryName(settings.ComfyMcpPath)!, "comfy.exe");
-        env["COMFY_PROJECT"] = comfyRoot;
-        env["COMFYUI_URL"] = settings.Endpoint;
-        env["COMFYUI_HOST"] = new Uri(settings.Endpoint).Host;
-
-        _transport = new StdioClientTransport(new StdioClientTransportOptions
-        {
-            Command = settings.ComfyMcpPath,
-            Arguments = [],
-            WorkingDirectory = Path.GetDirectoryName(settings.ComfyMcpPath),
-            EnvironmentVariables = env,
-            InheritEnvironmentVariables = false,
-            ShutdownTimeout = TimeSpan.FromSeconds(10),
-            Name = "chatgpt-comfy-connector",
-            StandardErrorLines = line => _ = _store.LogAsync("mcp.stderr", line),
-        });
 
         try
         {
+            // The selected MCP runtime owns both executables. Never pass a
+            // cached CLI path from a previous installation to the child.
+            var runtimePaths = ComfyMcpRuntimePaths.Resolve(settings.ComfyMcpPath);
+            var comfyRoot = Path.Combine(settings.PortableRoot, "ComfyUI");
+            var env = StdioClientTransportOptions.GetDefaultEnvironmentVariables();
+            env["COMFY_BIN"] = runtimePaths.CliExecutablePath;
+            env["COMFY_PROJECT"] = comfyRoot;
+            env["COMFYUI_URL"] = settings.Endpoint;
+            env["COMFYUI_HOST"] = new Uri(settings.Endpoint).Host;
+
+            _transport = new StdioClientTransport(new StdioClientTransportOptions
+            {
+                Command = runtimePaths.McpExecutablePath,
+                Arguments = [],
+                WorkingDirectory = Path.GetDirectoryName(runtimePaths.McpExecutablePath),
+                EnvironmentVariables = env,
+                InheritEnvironmentVariables = false,
+                ShutdownTimeout = TimeSpan.FromSeconds(10),
+                Name = "chatgpt-comfy-connector",
+                StandardErrorLines = line => _ = _store.LogAsync("mcp.stderr", line),
+            });
+
             _client = await McpClient.CreateAsync(
                 _transport,
                 new McpClientOptions { ProtocolVersion = ComfyMcpProtocolVersion },

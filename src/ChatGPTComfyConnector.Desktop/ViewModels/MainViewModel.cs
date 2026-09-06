@@ -125,7 +125,6 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         {
             PortableRoot = Directory.Exists("C:\\AI\\ComfyUI_windows_portable") ? "C:\\AI\\ComfyUI_windows_portable" : string.Empty,
             ComfyMcpPath = File.Exists("C:\\AI\\MCP\\comfy-mcp-runtime\\.venv\\Scripts\\comfy-mcp.exe") ? "C:\\AI\\MCP\\comfy-mcp-runtime\\.venv\\Scripts\\comfy-mcp.exe" : string.Empty,
-            ComfyCliPath = File.Exists("C:\\AI\\MCP\\comfy-mcp-runtime\\.venv\\Scripts\\comfy.exe") ? "C:\\AI\\MCP\\comfy-mcp-runtime\\.venv\\Scripts\\comfy.exe" : null,
         };
         Sessions = [];
         TreeNodes = [];
@@ -835,7 +834,6 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         try
         {
             ValidateAndNormalizeSettings();
-            Settings.ComfyCliPath ??= Path.Combine(Path.GetDirectoryName(Settings.ComfyMcpPath)!, "comfy.exe");
             await _store.SaveSettingsAsync(Settings.Clone());
             IsSetupVisible = false;
             RefreshWorkflowTree();
@@ -5481,30 +5479,26 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         RefreshGuidance();
     }
 
-    private string ValidateSettings()
+    private ComfyMcpRuntimePaths ValidateSettings()
     {
         if (!Directory.Exists(Settings.PortableRoot)) throw new InvalidOperationException("ComfyUI Portable rootが存在しません。");
         if (!Directory.Exists(Path.Combine(Settings.PortableRoot, "ComfyUI"))) throw new InvalidOperationException("Portable root内にComfyUIがありません。");
-        var isRuntimeDirectory = Directory.Exists(Settings.ComfyMcpPath);
-        var comfyMcpPath = isRuntimeDirectory
-            ? Path.Combine(Settings.ComfyMcpPath, ".venv", "Scripts", "comfy-mcp.exe")
-            : Settings.ComfyMcpPath;
-        if (!File.Exists(comfyMcpPath)) throw new InvalidOperationException("comfy-mcp.exeが存在しません。");
+        var runtimePaths = ComfyMcpRuntimePaths.Resolve(Settings.ComfyMcpPath);
         if (!Uri.TryCreate(Settings.Endpoint, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) throw new InvalidOperationException("Endpoint URLが不正です。");
         if (Settings.MaximumIterations is < 1 or > 1000) throw new InvalidOperationException("Maximum Iterationsは1〜1000で指定してください。");
 
-        return comfyMcpPath;
+        return runtimePaths;
     }
 
     private void ValidateAndNormalizeSettings()
     {
-        var comfyMcpPath = ValidateSettings();
-        if (Settings.ComfyMcpPath == comfyMcpPath) return;
+        var runtimePaths = ValidateSettings();
 
         // Guidance also validates while the user types; normalize only for
         // an explicit save/connect, after every setting passes validation.
-        Settings.ComfyMcpPath = comfyMcpPath;
-        Settings.ComfyCliPath = Path.Combine(Path.GetDirectoryName(comfyMcpPath)!, "comfy.exe");
+        Settings.ComfyMcpPath = runtimePaths.McpExecutablePath;
+        // Older settings may retain the CLI path of a different runtime.
+        Settings.ComfyCliPath = runtimePaths.CliExecutablePath;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
